@@ -65,6 +65,35 @@ fn explain(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
     anyhow::anyhow!("clone {} -> {}: {e}{hint}", src.display(), dst.display())
 }
 
+/// What a placed file's modification time should be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Mtime {
+    /// Keep the store's time (the moment the package was first extracted).
+    Keep,
+    /// Set every file and directory to the install time, as `npm ci` leaves them
+    /// (pacote extracts with `noMtime`). Matters to mtime-keyed caches.
+    Now,
+}
+
+/// Set atime/mtime of every entry under `dir` (not following symlinks) to now.
+pub fn touch_tree(dir: &Path) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let ts = [
+        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+    ];
+    for ent in walkdir::WalkDir::new(dir).follow_links(false).contents_first(true) {
+        let ent = ent?;
+        let c = CString::new(ent.path().as_os_str().as_bytes())?;
+        let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+        if r != 0 {
+            bail!("utimensat {}: {}", ent.path().display(), std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 pub fn clone_tree(src: &Path, dst: &Path, mode: Mode) -> Result<()> {
     if mode == Mode::Dir {
         if !sys::DIR_SUPPORTED {

@@ -205,6 +205,7 @@ impl PostInstall for NpmRebuild {
                 specs.push(format!("{}@*", e.name));
             }
         }
+        let t = std::time::Instant::now();
         if !specs.is_empty() {
             let mut cmd = Command::new("npm");
             cmd.arg("rebuild").current_dir(root);
@@ -217,11 +218,13 @@ impl PostInstall for NpmRebuild {
                 bail!("npm rebuild failed: {st}");
             }
         }
+        eprintln!("[lockclone]   npm rebuild (deps): {:.2}s", t.elapsed().as_secs_f64());
         // 2. Hidden lockfile.
         let hidden = self.hidden_lockfile(plan);
         let text = serde_json::to_string_pretty(&hidden)? + "\n";
         std::fs::write(root.join("node_modules/.package-lock.json"), text)?;
         // 3. Root lifecycle scripts, as ci.js runs them.
+        let t = std::time::Instant::now();
         if !self.ignore_scripts {
             let out = Command::new("npm").args(["root", "-g"]).output().context("npm root -g")?;
             let npm_dir = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("npm");
@@ -240,6 +243,7 @@ impl PostInstall for NpmRebuild {
                 bail!("root lifecycle script failed: {st}");
             }
         }
+        eprintln!("[lockclone]   root lifecycle scripts: {:.2}s", t.elapsed().as_secs_f64());
         Ok(())
     }
 }

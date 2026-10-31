@@ -36,6 +36,9 @@ enum Cmd {
         npm_cache: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "dir")]
         clone_mode: clone::Mode,
+        /// Modification times of placed files.
+        #[arg(long, value_enum, default_value = "keep")]
+        mtime: clone::Mtime,
         /// Pass --ignore-scripts to npm rebuild.
         #[arg(long)]
         ignore_scripts: bool,
@@ -97,6 +100,7 @@ fn install(
     root: &Path,
     store: &Store,
     mode: clone::Mode,
+    mtime: clone::Mtime,
     post: Option<&dyn PostInstall>,
     plan: &plan::Plan,
 ) -> Result<()> {
@@ -172,7 +176,11 @@ fn install(
                 match &e.kind {
                     Kind::Package { integrity, .. } => {
                         let src = store.dir_for(&Integrity::parse(integrity)?);
-                        clone::clone_tree(&src, &dst, mode)
+                        clone::clone_tree(&src, &dst, mode)?;
+                        if mtime == clone::Mtime::Now {
+                            clone::touch_tree(&dst)?;
+                        }
+                        Ok(())
                     }
                     Kind::Link { target } => {
                         let rel = relative(&root.join(target), dst.parent().unwrap());
@@ -210,11 +218,14 @@ fn relative(to: &Path, from: &Path) -> PathBuf {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Install { dir, store, npm_cache, clone_mode, ignore_scripts, no_rebuild } => {
+        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild } => {
             let t0 = Instant::now();
             let root = std::fs::canonicalize(&dir)?;
-            let lf = lock::Lockfile::load(&root)?;
-            let plan = npm::build_plan(&lf)?;
+            let (lf, plan) = timed("plan", || {
+                let lf = lock::Lockfile::load(&root)?;
+                let plan = npm::build_plan(&lf)?;
+                Ok((lf, plan))
+            })?;
             eprintln!("[lockclone] {} lockfile entries skipped on this platform (LOCKCLONE_VERBOSE=1 lists them)", plan.skipped.len());
             if std::env::var_os("LOCKCLONE_VERBOSE").is_some() {
                 for (p, why) in &plan.skipped {
@@ -223,7 +234,7 @@ fn main() -> Result<()> {
             }
             let store = Store::new(default_store(store), npm_cache.unwrap_or_else(|| home().join(".npm/_cacache")))?;
             let post = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts, extra_args: vec![] };
-            install(&root, &store, clone_mode, if no_rebuild { None } else { Some(&post) }, &plan)?;
+            install(&root, &store, clone_mode, mtime, if no_rebuild { None } else { Some(&post) }, &plan)?;
             eprintln!(
                 "[lockclone] placed {} entries in {:.2}s",
                 plan.entries.len(),
