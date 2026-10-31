@@ -12,12 +12,16 @@ use std::path::Path;
 pub enum Source {
     /// A registry or remote tarball, identified by its URL (also the npm cache key).
     Tarball { url: String },
+    /// Only name@version is known (npm lockfile entries without `resolved`):
+    /// the registry's packument supplies the tarball URL and integrity.
+    Registry { name: String, version: String },
 }
 
 #[derive(Debug, Clone)]
 pub enum Kind {
-    /// Content cloned from the store, keyed by `integrity`.
-    Package { integrity: String, source: Source },
+    /// Content cloned from the store, keyed by `integrity` (filled in by
+    /// `resolve` when the reader did not know it).
+    Package { integrity: Option<String>, source: Source },
     /// A symlink (workspace or `file:` dependency) to `target`, relative to the project root.
     Link { target: String },
 }

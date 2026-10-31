@@ -58,6 +58,26 @@ impl Integrity {
     }
 }
 
+/// Read the newest cacache entry for `key` (npm's content cache): the content
+/// bytes, located through the index.
+pub fn cacache_read(cacache: &Path, key: &str) -> Option<Vec<u8>> {
+    let kh = hex::encode(sha2::Sha256::digest(key.as_bytes()));
+    let idx = cacache.join("index-v5").join(&kh[0..2]).join(&kh[2..4]).join(&kh[4..]);
+    let text = fs::read_to_string(idx).ok()?;
+    let mut found = None;
+    for line in text.lines() {
+        let Some((_, json)) = line.split_once('\t') else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { continue };
+        if v.get("key").and_then(|k| k.as_str()) != Some(key) {
+            continue;
+        }
+        // A null integrity is a deletion record.
+        found = v.get("integrity").and_then(|x| x.as_str()).map(String::from);
+    }
+    let ci = Integrity::parse(&found?).ok()?;
+    fs::read(ci.split_path(&cacache.join("content-v2"))).ok()
+}
+
 pub struct Store {
     pub root: PathBuf,
     pub cacache: PathBuf,

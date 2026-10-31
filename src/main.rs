@@ -4,6 +4,7 @@ mod lock;
 mod npm;
 mod plan;
 mod platform;
+mod resolve;
 mod store;
 
 use anyhow::{bail, Context, Result};
@@ -108,7 +109,7 @@ fn install(
     let pkgs: Vec<(Integrity, String)> = {
         let mut seen = HashMap::new();
         for e in &plan.entries {
-            if let Kind::Package { integrity, source: Source::Tarball { url } } = &e.kind {
+            if let Kind::Package { integrity: Some(integrity), source: Source::Tarball { url } } = &e.kind {
                 let i = Integrity::parse(integrity)?;
                 seen.entry(i).or_insert_with(|| url.clone());
             }
@@ -175,6 +176,7 @@ fn install(
                 std::fs::create_dir_all(dst.parent().unwrap())?;
                 match &e.kind {
                     Kind::Package { integrity, .. } => {
+                        let integrity = integrity.as_deref().context("unresolved package in plan")?;
                         let src = store.dir_for(&Integrity::parse(integrity)?);
                         clone::clone_tree(&src, &dst, mode)?;
                         if mtime == clone::Mtime::Now {
@@ -221,7 +223,7 @@ fn main() -> Result<()> {
         Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild } => {
             let t0 = Instant::now();
             let root = std::fs::canonicalize(&dir)?;
-            let (lf, plan) = timed("plan", || {
+            let (lf, mut plan) = timed("plan", || {
                 let lf = lock::Lockfile::load(&root)?;
                 let plan = npm::build_plan(&lf)?;
                 Ok((lf, plan))
@@ -232,7 +234,12 @@ fn main() -> Result<()> {
                     eprintln!("[lockclone] skip {p}: {why}");
                 }
             }
-            let store = Store::new(default_store(store), npm_cache.unwrap_or_else(|| home().join(".npm/_cacache")))?;
+            let cacache = npm_cache.unwrap_or_else(|| home().join(".npm/_cacache"));
+            let n = timed("resolve name@version entries", || resolve::resolve(&mut plan, &root, &cacache))?;
+            if n > 0 {
+                eprintln!("[lockclone] resolved {n} lockfile entries without `resolved` from packuments");
+            }
+            let store = Store::new(default_store(store), cacache)?;
             let post = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts, extra_args: vec![] };
             install(&root, &store, clone_mode, mtime, if no_rebuild { None } else { Some(&post) }, &plan)?;
             eprintln!(

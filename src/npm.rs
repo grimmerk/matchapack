@@ -126,8 +126,14 @@ pub fn build_plan(lf: &Lockfile) -> Result<Plan> {
         } else {
             match (&e.resolved, &e.integrity) {
                 (Some(r), Some(i)) if r.starts_with("https://") || r.starts_with("http://") => {
-                    Kind::Package { integrity: i.clone(), source: Source::Tarball { url: r.clone() } }
+                    Kind::Package { integrity: Some(i.clone()), source: Source::Tarball { url: r.clone() } }
                 }
+                // npm sometimes writes entries with only a version; npm ci then
+                // resolves name@version against the registry.
+                (None, _) if e.version.is_some() => Kind::Package {
+                    integrity: e.integrity.clone(),
+                    source: Source::Registry { name: name.clone(), version: e.version.clone().unwrap() },
+                },
                 _ => {
                     unsupported.push(format!("{} (resolved {:?})", e.path, e.resolved));
                     continue;
