@@ -95,6 +95,18 @@ impl Store {
     pub fn new(root: PathBuf, cacache: PathBuf) -> Result<Store> {
         fs::create_dir_all(root.join(LAYOUT))?;
         fs::create_dir_all(root.join("tmp"))?;
+        // Remove extraction leftovers of processes that died mid-way. A tmp
+        // directory is named `<pid>-<seq>-<hash>`; only a dead pid's are removed,
+        // so a concurrent lockclone keeps its own.
+        for ent in fs::read_dir(root.join("tmp"))?.flatten() {
+            let name = ent.file_name().to_string_lossy().into_owned();
+            let Some(pid) = name.split('-').next().and_then(|p| p.parse::<i32>().ok()) else { continue };
+            let alive = unsafe { libc::kill(pid, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+            if !alive {
+                let _ = fs::remove_dir_all(ent.path());
+            }
+        }
         Ok(Store { root, cacache, tmp_seq: AtomicU64::new(0) })
     }
 
