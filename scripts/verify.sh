@@ -29,7 +29,17 @@ python3 -c "print(f'npm ci: {$t1-$t0:.2f}s   lockclone: {$t2-$t1:.2f}s')" 2>/dev
 
 echo "== diff A B"
 rc=0
-"$bin" diff "$work/A" "$work/B" || rc=1
-echo "== npm ls --all (B)"
-if (cd "$work/B" && npm ls --all > "$work/B.ls" 2>&1); then echo "npm ls: OK"; else echo "npm ls: FAILED"; tail -20 "$work/B.ls"; rc=1; fi
+ign=()
+for i in ${LOCKCLONE_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
+"$bin" diff "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} || rc=1
+echo "== npm ls --all (A vs B)"
+ea=0; (cd "$work/A" && npm ls --all > "$work/A.ls" 2>&1) || ea=$?
+eb=0; (cd "$work/B" && npm ls --all > "$work/B.ls" 2>&1) || eb=$?
+sed -e "s#/$(basename "$work")/A#/<root>#g" -e 's#/[^ ]*_logs/[^ ]*#<log>#' "$work/A.ls" > "$work/A.ls.n"
+sed -e "s#/$(basename "$work")/B#/<root>#g" -e 's#/[^ ]*_logs/[^ ]*#<log>#' "$work/B.ls" > "$work/B.ls.n"
+if [ $ea -eq $eb ] && cmp -s "$work/A.ls.n" "$work/B.ls.n"; then
+  echo "npm ls: same result as npm ci (exit $ea)"
+else
+  echo "npm ls: DIFFERS (A exit $ea, B exit $eb)"; diff "$work/A.ls.n" "$work/B.ls.n" | head -20; rc=1
+fi
 exit $rc

@@ -215,8 +215,11 @@ fn main() -> Result<()> {
             let root = std::fs::canonicalize(&dir)?;
             let lf = lock::Lockfile::load(&root)?;
             let plan = npm::build_plan(&lf)?;
-            for (p, why) in &plan.skipped {
-                eprintln!("[lockclone] skip {p}: {why}");
+            eprintln!("[lockclone] {} lockfile entries skipped on this platform (LOCKCLONE_VERBOSE=1 lists them)", plan.skipped.len());
+            if std::env::var_os("LOCKCLONE_VERBOSE").is_some() {
+                for (p, why) in &plan.skipped {
+                    eprintln!("[lockclone] skip {p}: {why}");
+                }
             }
             let store = Store::new(default_store(store), npm_cache.unwrap_or_else(|| home().join(".npm/_cacache")))?;
             let post = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts, extra_args: vec![] };

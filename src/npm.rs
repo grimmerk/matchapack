@@ -187,20 +187,59 @@ impl NpmRebuild {
 }
 
 impl PostInstall for NpmRebuild {
+    /// Mirrors `npm ci` (npm/lib/commands/ci.js): reify = dependency scripts +
+    /// bin links + hidden lockfile, THEN the root project's seven lifecycle
+    /// events. The order matters: root scripts that touch the tree (monorepo-A
+    /// builds a workspace in `postinstall`) leave npm's hidden lockfile stale,
+    /// and later npm commands then read the tree from disk instead.
     fn run(&self, root: &Path, plan: &Plan) -> Result<()> {
-        let mut cmd = Command::new("npm");
-        cmd.arg("rebuild").current_dir(root);
-        if self.ignore_scripts {
-            cmd.arg("--ignore-scripts");
+        // 1. Dependencies only: select every installed node by name; the root
+        //    is excluded unless a dependency shares its name (then by directory).
+        let root_name = self.lock_raw.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let mut specs: Vec<String> = vec![];
+        let mut seen = HashSet::new();
+        for e in &plan.entries {
+            if e.name == root_name {
+                specs.push(root.join(&e.install_path).to_string_lossy().into_owned());
+            } else if seen.insert(e.name.clone()) {
+                specs.push(format!("{}@*", e.name));
+            }
         }
-        cmd.args(&self.extra_args);
-        let st = cmd.status().context("running npm rebuild")?;
-        if !st.success() {
-            bail!("npm rebuild failed: {st}");
+        if !specs.is_empty() {
+            let mut cmd = Command::new("npm");
+            cmd.arg("rebuild").current_dir(root);
+            if self.ignore_scripts {
+                cmd.arg("--ignore-scripts");
+            }
+            cmd.args(&self.extra_args).args(&specs);
+            let st = cmd.status().context("running npm rebuild")?;
+            if !st.success() {
+                bail!("npm rebuild failed: {st}");
+            }
         }
+        // 2. Hidden lockfile.
         let hidden = self.hidden_lockfile(plan);
         let text = serde_json::to_string_pretty(&hidden)? + "\n";
         std::fs::write(root.join("node_modules/.package-lock.json"), text)?;
+        // 3. Root lifecycle scripts, as ci.js runs them.
+        if !self.ignore_scripts {
+            let out = Command::new("npm").args(["root", "-g"]).output().context("npm root -g")?;
+            let npm_dir = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("npm");
+            let helper = std::env::temp_dir().join(format!("lockclone-root-scripts-{}.js", std::process::id()));
+            std::fs::write(&helper, include_str!("root-scripts.js"))?;
+            let st = Command::new("npm")
+                .args(["exec", "--no", "--", "node"])
+                .arg(&helper)
+                .arg(&npm_dir)
+                .arg(root)
+                .current_dir(root)
+                .status()
+                .context("running root lifecycle scripts")?;
+            let _ = std::fs::remove_file(&helper);
+            if !st.success() {
+                bail!("root lifecycle script failed: {st}");
+            }
+        }
         Ok(())
     }
 }
