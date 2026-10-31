@@ -47,6 +47,11 @@ enum Cmd {
         #[arg(long)]
         no_rebuild: bool,
     },
+    /// Print the install plan (counts and every skipped entry with its reason); installs nothing.
+    Plan {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
     /// Compare two project trees; exit 1 when they differ.
     Diff {
         a: PathBuf,
@@ -248,6 +253,24 @@ fn main() -> Result<()> {
                 plan.entries.len(),
                 t0.elapsed().as_secs_f64()
             );
+        }
+        Cmd::Plan { dir } => {
+            let root = std::fs::canonicalize(&dir)?;
+            let lf = lock::Lockfile::load(&root)?;
+            npm::check_in_sync(&root, &lf)?;
+            let plan = npm::build_plan(&lf)?;
+            let (mut pkgs, mut links, mut registry) = (0, 0, 0);
+            for e in &plan.entries {
+                match &e.kind {
+                    Kind::Link { .. } => links += 1,
+                    Kind::Package { source: Source::Registry { .. }, .. } => registry += 1,
+                    Kind::Package { .. } => pkgs += 1,
+                }
+            }
+            println!("entries {} ({pkgs} tarball, {registry} name@version, {links} links), skipped {}", plan.entries.len(), plan.skipped.len());
+            for (p, why) in &plan.skipped {
+                println!("skip {p}: {why}");
+            }
         }
         Cmd::Diff { a, b, ignore, limit } => {
             let r = diff::diff(&a, &b, &ignore)?;
