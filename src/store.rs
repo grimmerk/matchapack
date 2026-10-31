@@ -93,13 +93,13 @@ pub enum Ensure {
 
 impl Store {
     pub fn new(root: PathBuf, cacache: PathBuf) -> Result<Store> {
-        fs::create_dir_all(root.join("v1"))?;
+        fs::create_dir_all(root.join(LAYOUT))?;
         fs::create_dir_all(root.join("tmp"))?;
         Ok(Store { root, cacache, tmp_seq: AtomicU64::new(0) })
     }
 
     pub fn dir_for(&self, i: &Integrity) -> PathBuf {
-        self.root.join("v1").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
+        self.root.join(LAYOUT).join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
     }
 
     /// Locate the tarball in npm's cache: first by content address, then via the
@@ -159,10 +159,20 @@ impl Store {
 
 const UMASK: u32 = 0o022;
 
-/// Extract like pacote: strip the first path component, drop symlinks and
-/// hardlinks, refuse `..` and absolute paths, files get
-/// `((mode | 0o666) & ~umask) | 0o600`, directories 0o755. Executable bits for
-/// declared bins are added later by npm's bin linking, as in `npm ci`.
+/// Store layout / extraction-rules version. Bump whenever `extract` changes what
+/// lands on disk, so entries made under old rules are never reused.
+/// v1 → v2: drop directory entries (pacote only creates parents of files) and
+/// the `.gitignore` → `.npmignore` rename.
+pub const LAYOUT: &str = "v2";
+
+/// Extract like pacote (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`):
+/// strip the first path component; keep FILE entries only (links and directory
+/// entries are filtered out, so empty directories never appear; directories
+/// exist only as parents of files, mode 0o755); refuse `..`; a `.gitignore` is
+/// renamed to `.npmignore` unless a `.npmignore` at that path was seen earlier in
+/// the archive, in which case it is dropped; files get
+/// `((mode | 0o666) & ~umask) | 0o600`. Executable bits for declared bins are
+/// added later by npm's bin linking, as in `npm ci`.
 pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
     let reader: Box<dyn Read> = if data.starts_with(&[0x1f, 0x8b]) {
         Box::new(flate2::read::GzDecoder::new(data))
@@ -170,6 +180,7 @@ pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
         Box::new(data)
     };
     let mut ar = tar::Archive::new(reader);
+    let mut saw_npmignore: std::collections::HashSet<PathBuf> = Default::default();
     for ent in ar.entries()? {
         let mut ent = ent?;
         let et = ent.header().entry_type();
@@ -194,14 +205,23 @@ pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
         if bad || rel.as_os_str().is_empty() {
             continue;
         }
-        let out = dest.join(&rel);
-        if et.is_dir() {
-            fs::create_dir_all(&out)?;
-            continue;
-        }
         if !(et.is_file() || et == tar::EntryType::Continuous) {
-            continue; // symlinks, hardlinks, devices: pacote filters these out
+            continue; // directories, links, devices: pacote's filter drops them
         }
+        match rel.file_name().and_then(|n| n.to_str()) {
+            Some(".npmignore") => {
+                saw_npmignore.insert(rel.clone());
+            }
+            Some(".gitignore") => {
+                let ni = rel.with_file_name(".npmignore");
+                if saw_npmignore.contains(&ni) {
+                    continue;
+                }
+                rel = ni;
+            }
+            _ => {}
+        }
+        let out = dest.join(&rel);
         if let Some(p) = out.parent() {
             fs::create_dir_all(p)?;
         }

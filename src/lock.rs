@@ -17,11 +17,15 @@ pub struct Entry {
     pub optional: bool,
     pub dev_optional: bool,
     pub in_bundle: bool,
+    pub extraneous: bool,
     pub os: Vec<String>,
     pub cpu: Vec<String>,
     pub libc: Vec<String>,
     /// Names of dependencies (deps + optional + peer), used for the optional-skip closure.
     pub deps: Vec<String>,
+    /// The subset of `deps` that are optional edges (optionalDependencies, or a
+    /// peer marked optional in peerDependenciesMeta).
+    pub opt_deps: Vec<String>,
 }
 
 pub struct Lockfile {
@@ -42,6 +46,21 @@ fn dep_names(v: &Map<String, Value>) -> Vec<String> {
     for k in ["dependencies", "optionalDependencies", "peerDependencies"] {
         if let Some(Value::Object(m)) = v.get(k) {
             out.extend(m.keys().cloned());
+        }
+    }
+    out
+}
+
+fn opt_dep_names(v: &Map<String, Value>) -> Vec<String> {
+    let mut out: Vec<String> = match v.get("optionalDependencies") {
+        Some(Value::Object(m)) => m.keys().cloned().collect(),
+        _ => vec![],
+    };
+    if let Some(Value::Object(meta)) = v.get("peerDependenciesMeta") {
+        for (k, m) in meta {
+            if m.get("optional").and_then(|x| x.as_bool()) == Some(true) {
+                out.push(k.clone());
+            }
         }
     }
     out
@@ -75,10 +94,12 @@ impl Lockfile {
                 optional: b("optional"),
                 dev_optional: b("devOptional"),
                 in_bundle: b("inBundle"),
+                extraneous: b("extraneous"),
                 os: str_list(o.get("os")),
                 cpu: str_list(o.get("cpu")),
                 libc: str_list(o.get("libc")),
                 deps: dep_names(o),
+                opt_deps: opt_dep_names(o),
             });
         }
         Ok(Lockfile { raw, entries })

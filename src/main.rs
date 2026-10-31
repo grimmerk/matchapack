@@ -225,6 +225,7 @@ fn main() -> Result<()> {
             let root = std::fs::canonicalize(&dir)?;
             let (lf, mut plan) = timed("plan", || {
                 let lf = lock::Lockfile::load(&root)?;
+                npm::check_in_sync(&root, &lf)?;
                 let plan = npm::build_plan(&lf)?;
                 Ok((lf, plan))
             })?;
@@ -257,7 +258,7 @@ fn main() -> Result<()> {
         }
         Cmd::Store { store } => {
             let s = default_store(store);
-            let n = walkdir::WalkDir::new(s.join("v1")).min_depth(3).max_depth(3).into_iter().count();
+            let n = walkdir::WalkDir::new(s.join(store::LAYOUT)).min_depth(3).max_depth(3).into_iter().count();
             println!("{} ({n} packages)", s.display());
         }
     }

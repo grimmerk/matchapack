@@ -41,6 +41,8 @@ fn platform_skips(lf: &Lockfile) -> Result<Vec<(String, String)>> {
     let keys: HashSet<&str> = by_path.keys().copied().collect();
     // Edges: from → to, including link → target.
     let mut edges_in: HashMap<&str, Vec<&str>> = HashMap::new();
+    // Non-optional edges only, to → from: the upward walk of optional-set.js.
+    let mut required_in: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut edges_out: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in &lf.entries {
         let mut outs = vec![];
@@ -52,6 +54,9 @@ fn platform_skips(lf: &Lockfile) -> Result<Vec<(String, String)>> {
         for d in &e.deps {
             if let Some(t) = resolve(&keys, &e.path, d) {
                 outs.push(t);
+                if !e.opt_deps.contains(d) {
+                    required_in.entry(t).or_default().push(e.path.as_str());
+                }
             }
         }
         for t in &outs {
@@ -75,6 +80,21 @@ fn platform_skips(lf: &Lockfile) -> Result<Vec<(String, String)>> {
     }
     if !bad_required.is_empty() {
         bail!("EBADPLATFORM: non-optional packages unsupported on this platform: {bad_required:?}");
+    }
+    // Upward: whatever requires a skipped package through a NON-optional edge
+    // cannot work without it and is removed too (arborist optional-set.js),
+    // stopping at optional edges. The root is never removed.
+    let mut frontier: Vec<&str> = set.iter().copied().collect();
+    while let Some(n) = frontier.pop() {
+        for f in required_in.get(n).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if f.is_empty() {
+                bail!("a package required by the root project is unsupported on this platform: {n}");
+            }
+            if set.insert(f) {
+                skipped.push((f.to_string(), format!("requires skipped optional package {n}")));
+                frontier.push(f);
+            }
+        }
     }
     // Downward closure: a node all of whose dependents are in the set goes too.
     loop {
@@ -102,9 +122,124 @@ fn platform_skips(lf: &Lockfile) -> Result<Vec<(String, String)>> {
     Ok(skipped)
 }
 
+/// Stand-in for npm ci's "package.json and package-lock.json are in sync" check.
+/// For the root and each workspace, every declared dependency must either equal
+/// the lockfile's record, or be a semver range (or `npm:name@range` alias) that
+/// the locked version still satisfies -- judged by npm's own bundled `semver`,
+/// so range semantics are npm's. Added or removed dependencies and non-registry
+/// specs that changed are refused (npm ci would resolve or prune them).
+/// Not covered: a change to `overrides`.
+pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<()> {
+    const FIELDS: [&str; 4] = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+    let pkgs = lf.raw.get("packages").and_then(|v| v.as_object()).context("no packages")?;
+    let keys: HashSet<&str> = pkgs.keys().map(|k| k.as_str()).collect();
+    let mut dirs = vec![String::new()];
+    for e in &lf.entries {
+        if e.link {
+            if let Some(t) = &e.resolved {
+                if !t.starts_with("..") && !t.contains("node_modules/") && !dirs.contains(t) {
+                    dirs.push(t.clone());
+                }
+            }
+        }
+    }
+    let mut problems = vec![];
+    // (label, locked version, range) to check with npm's semver.
+    let mut checks: Vec<(String, String, String)> = vec![];
+    for d in dirs {
+        let label = if d.is_empty() { "<root>".to_string() } else { d.clone() };
+        let pj = root.join(&d).join("package.json");
+        let text = std::fs::read_to_string(&pj).with_context(|| format!("reading {}", pj.display()))?;
+        let pj: Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", pj.display()))?;
+        let Some(lock) = pkgs.get(&d) else {
+            problems.push(format!("{label}: no lockfile entry"));
+            continue;
+        };
+        for f in FIELDS {
+            let empty = Map::new();
+            let a = pj.get(f).and_then(|v| v.as_object()).unwrap_or(&empty);
+            let b = lock.get(f).and_then(|v| v.as_object()).unwrap_or(&empty);
+            for name in a.keys().chain(b.keys().filter(|k| !a.contains_key(*k))) {
+                let (want, had) = (a.get(name).and_then(|v| v.as_str()), b.get(name).and_then(|v| v.as_str()));
+                if want == had {
+                    continue;
+                }
+                let (Some(want), Some(_)) = (want, had) else {
+                    problems.push(format!("{label}: `{f}.{name}` was added or removed"));
+                    continue;
+                };
+                // Peer dependencies are not necessarily installed; npm ci does
+                // not fail on a changed peer range alone.
+                let Some(target) = resolve(&keys, &d, name) else {
+                    if f != "peerDependencies" {
+                        problems.push(format!("{label}: `{f}.{name}` is not installed in the lockfile"));
+                    }
+                    continue;
+                };
+                let entry = &pkgs[target];
+                let version = entry.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let pkg_name = entry.get("name").and_then(|v| v.as_str()).unwrap_or(name);
+                let range = match want.strip_prefix("npm:") {
+                    Some(alias) => match alias.rsplit_once('@').filter(|(n, _)| !n.is_empty()) {
+                        Some((n, r)) if n == pkg_name => r.to_string(),
+                        Some(_) => {
+                            problems.push(format!("{label}: `{f}.{name}` alias now points at another package"));
+                            continue;
+                        }
+                        None => "*".to_string(),
+                    },
+                    None if want.contains(':') || want.contains('/') => {
+                        problems.push(format!("{label}: `{f}.{name}` changed to a non-registry spec {want:?}"));
+                        continue;
+                    }
+                    None => want.to_string(),
+                };
+                checks.push((format!("{label}: `{f}.{name}` {want:?} vs locked {version}"), version, range));
+            }
+        }
+    }
+    if !checks.is_empty() && problems.is_empty() {
+        let out = Command::new("npm").args(["root", "-g"]).output().context("npm root -g")?;
+        let semver = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("npm/node_modules/semver");
+        let pairs: Vec<(&str, &str)> = checks.iter().map(|(_, v, r)| (v.as_str(), r.as_str())).collect();
+        let js = "const s=require(process.argv[1]);const p=JSON.parse(process.argv[2]);\
+                  console.log(JSON.stringify(p.map(([v,r])=>s.satisfies(v,r,{includePrerelease:false}))))";
+        let out = Command::new("node")
+            .args(["-e", js])
+            .arg(&semver)
+            .arg(serde_json::to_string(&pairs)?)
+            .output()
+            .context("running node semver check")?;
+        if !out.status.success() {
+            bail!("semver check failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let ok: Vec<bool> = serde_json::from_slice(&out.stdout).context("parsing semver check output")?;
+        for ((label, _, _), good) in checks.iter().zip(ok) {
+            if !good {
+                problems.push(format!("{label}: locked version no longer satisfies the range"));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        bail!(
+            "package.json and package-lock.json are not in sync (run `npm install` to update the lockfile, or plain `npm ci`):\n  {}",
+            problems.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+const EXTRANEOUS: &str = "extraneous";
+
 pub fn build_plan(lf: &Lockfile) -> Result<Plan> {
     let mut plan = Plan { owned_roots: vec![String::new()], ..Default::default() };
     plan.skipped = platform_skips(lf)?;
+    // npm ci does not install entries the lockfile marks extraneous.
+    for e in &lf.entries {
+        if e.extraneous && !plan.skipped.iter().any(|(p, _)| p == &e.path) {
+            plan.skipped.push((e.path.clone(), format!("{EXTRANEOUS} in the lockfile")));
+        }
+    }
     let skipped: HashSet<&str> = plan.skipped.iter().map(|(p, _)| p.as_str()).collect();
     let under_skipped = |p: &str| {
         skipped.contains(p) || skipped.iter().any(|s| p.starts_with(s) && p[s.len()..].starts_with("/node_modules/"))
@@ -164,7 +299,24 @@ impl NpmRebuild {
     /// npm's hidden lockfile: the lockfile's packages minus the root and minus
     /// what was not installed, in lockfile order.
     fn hidden_lockfile(&self, plan: &Plan) -> Value {
-        let skipped: HashSet<&str> = plan.skipped.iter().map(|(p, _)| p.as_str()).collect();
+        // Measured on compass (2026-10-31): npm's hidden lockfile KEEPS
+        // extraneous node_modules entries even though they are not installed,
+        // and drops entries outside node_modules that no link points at.
+        let skipped: HashSet<&str> = plan
+            .skipped
+            .iter()
+            .filter(|(_, why)| !why.starts_with(EXTRANEOUS))
+            .map(|(p, _)| p.as_str())
+            .collect();
+        let pkgs = self.lock_raw.get("packages").and_then(|v| v.as_object());
+        let link_targets: HashSet<&str> = pkgs
+            .map(|p| {
+                p.values()
+                    .filter(|v| v.get("link").and_then(|x| x.as_bool()) == Some(true))
+                    .filter_map(|v| v.get("resolved").and_then(|x| x.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut out = Map::new();
         for k in ["name", "version"] {
             if let Some(v) = self.lock_raw.get(k) {
@@ -179,6 +331,9 @@ impl NpmRebuild {
         if let Some(Value::Object(p)) = self.lock_raw.get("packages") {
             for (k, v) in p {
                 if k.is_empty() || skipped.contains(k.as_str()) {
+                    continue;
+                }
+                if !k.contains("node_modules/") && !link_targets.contains(k.as_str()) {
                     continue;
                 }
                 if skipped.iter().any(|s| k.starts_with(s) && k[s.len()..].starts_with("/node_modules/")) {
@@ -205,10 +360,13 @@ impl PostInstall for NpmRebuild {
         let mut specs: Vec<String> = vec![];
         let mut seen = HashSet::new();
         for e in &plan.entries {
-            if e.name == root_name {
+            // npm rebuild matches the NODE name, i.e. the folder name: for an
+            // alias (`"typescript7": "npm:typescript@7"`) that is not the package name.
+            let node_name = lock::name_from_path(&e.install_path);
+            if node_name == root_name {
                 specs.push(root.join(&e.install_path).to_string_lossy().into_owned());
-            } else if seen.insert(e.name.clone()) {
-                specs.push(format!("{}@*", e.name));
+            } else if seen.insert(node_name.to_string()) {
+                specs.push(format!("{node_name}@*"));
             }
         }
         let t = std::time::Instant::now();
