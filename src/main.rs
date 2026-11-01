@@ -249,8 +249,8 @@ fn main() -> Result<()> {
             let root = std::fs::canonicalize(&dir)?;
             let (lf, mut plan) = timed("plan", || {
                 let lf = lock::Lockfile::load(&root)?;
-                npm::check_in_sync(&root, &lf)?;
-                let plan = npm::build_plan(&lf)?;
+                let ideal = npm::check_in_sync(&root, &lf)?;
+                let plan = npm::build_plan(&lf, ideal.as_ref())?;
                 Ok((lf, plan))
             })?;
             eprintln!("[lockclone] {} lockfile entries skipped on this platform (LOCKCLONE_VERBOSE=1 lists them)", plan.skipped.len());
@@ -277,8 +277,8 @@ fn main() -> Result<()> {
         Cmd::Plan { dir } => {
             let root = std::fs::canonicalize(&dir)?;
             let lf = lock::Lockfile::load(&root)?;
-            npm::check_in_sync(&root, &lf)?;
-            let plan = npm::build_plan(&lf)?;
+            let ideal = npm::check_in_sync(&root, &lf)?;
+            let plan = npm::build_plan(&lf, ideal.as_ref())?;
             let (mut pkgs, mut links, mut registry) = (0, 0, 0);
             for e in &plan.entries {
                 match &e.kind {

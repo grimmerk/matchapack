@@ -129,7 +129,7 @@ fn platform_skips(lf: &Lockfile) -> Result<Vec<(String, String)>> {
 /// so range semantics are npm's. Added or removed dependencies and non-registry
 /// specs that changed are refused (npm ci would resolve or prune them).
 /// Not covered: a change to `overrides`.
-pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<()> {
+pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String>>> {
     const FIELDS: [&str; 4] = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
     let pkgs = lf.raw.get("packages").and_then(|v| v.as_object()).context("no packages")?;
     let keys: HashSet<&str> = pkgs.keys().map(|k| k.as_str()).collect();
@@ -235,11 +235,41 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<()> {
     let root_pj: Value = serde_json::from_str(&std::fs::read_to_string(root.join("package.json"))?)?;
     let has_overrides = root_pj.get("overrides").and_then(|o| o.as_object()).is_some_and(|o| !o.is_empty());
     if has_overrides {
+        // The dry-run's `add` list is a DIFF against the node_modules on disk, so
+        // run it in a scratch copy that has none: package.json, lockfile, .npmrc
+        // and each workspace's package.json. Then `add` is the whole ideal tree.
+        let scratch = std::env::temp_dir().join(format!("lockclone-dryrun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch)?;
+        let scratch = std::fs::canonicalize(&scratch)?;
+        let result = dry_run_ideal(root, &scratch, lf);
+        let _ = std::fs::remove_dir_all(&scratch);
+        return result.map(Some);
+    }
+    Ok(None)
+}
+
+fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<String>> {
+    for f in ["package.json", "package-lock.json", ".npmrc"] {
+        if root.join(f).is_file() {
+            std::fs::copy(root.join(f), scratch.join(f))?;
+        }
+    }
+    for e in &lf.entries {
+        if let (true, Some(t)) = (e.link, &e.resolved) {
+            if !t.starts_with("..") && !t.contains("node_modules/") && root.join(t).join("package.json").is_file() {
+                std::fs::create_dir_all(scratch.join(t))?;
+                std::fs::copy(root.join(t).join("package.json"), scratch.join(t).join("package.json"))?;
+            }
+        }
+    }
+    let root = scratch;
+    {
         let out = Command::new("npm")
             // --ignore-scripts: ci.js runs the root lifecycle scripts even under
             // --dry-run (measured: `husky` exit 127, app's workspace build
             // failing, with no node_modules yet); validation does not need them.
-            .args(["ci", "--dry-run", "--ignore-scripts", "--no-audit", "--no-fund"])
+            .args(["ci", "--dry-run", "--json", "--ignore-scripts", "--no-audit", "--no-fund"])
             .current_dir(root)
             .output()
             .context("running npm ci --dry-run")?;
@@ -249,19 +279,65 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<()> {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
+        // npm ci installs its IDEAL tree, not the lockfile text, and its sync
+        // check only asks that every ideal node be in the lockfile, not the
+        // reverse. With overrides the lockfile npm itself writes can hold
+        // redundant nested copies that the ideal tree dedupes (measured: three
+        // nested ms@2.1.2 identical to the root one; npm ci installed 344 of 347
+        // entries). The dry-run's JSON summary (printed after the "add x y"
+        // lines) lists every ideal node's path: use it as the authority.
+        let text = String::from_utf8_lossy(&out.stdout);
+        let start = text
+            .find("\n{")
+            .map(|i| i + 1)
+            .or_else(|| text.starts_with('{').then_some(0))
+            .context("no JSON summary in `npm ci --dry-run --json` output")?;
+        let summary: Value = serde_json::from_str(&text[start..]).context("parsing npm ci --dry-run --json summary")?;
+        let prefix = format!("{}/", root.display());
+        let mut ideal = HashSet::new();
+        for a in summary.get("add").and_then(|v| v.as_array()).context("dry-run summary has no `add` list")? {
+            let p = a.get("path").and_then(|v| v.as_str()).context("dry-run `add` entry without path")?;
+            match p.strip_prefix(&prefix) {
+                Some(rel) => {
+                    ideal.insert(rel.to_string());
+                }
+                None if p == root.display().to_string() => {}
+                None => bail!("npm's ideal tree has a node outside the project: {p}"),
+            }
+        }
+        let in_lock: HashSet<&str> = lf.entries.iter().map(|e| e.path.as_str()).collect();
+        let moved: Vec<&String> = ideal.iter().filter(|p| !in_lock.contains(p.as_str())).collect();
+        if !moved.is_empty() {
+            bail!("npm's ideal tree places packages at paths the lockfile does not record (use `npm ci`): {moved:?}");
+        }
+        Ok(ideal)
     }
-    Ok(())
 }
 
 const EXTRANEOUS: &str = "extraneous";
 
-pub fn build_plan(lf: &Lockfile) -> Result<Plan> {
+/// `ideal`: when npm's ideal tree is known (see `check_in_sync`), lockfile
+/// entries outside it are not installed, as npm ci does.
+pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan> {
     let mut plan = Plan { owned_roots: vec![String::new()], ..Default::default() };
     plan.skipped = platform_skips(lf)?;
-    // npm ci does not install entries the lockfile marks extraneous.
+    // npm ci does not install entries the lockfile marks extraneous. Decided
+    // before the ideal-tree filter: the reason matters, since npm's hidden
+    // lockfile keeps extraneous entries but not deduplicated ones.
     for e in &lf.entries {
         if e.extraneous && !plan.skipped.iter().any(|(p, _)| p == &e.path) {
             plan.skipped.push((e.path.clone(), format!("{EXTRANEOUS} in the lockfile")));
+        }
+    }
+    if let Some(ideal) = ideal {
+        for e in &lf.entries {
+            if lock::depth(&e.path) > 0
+                && !e.in_bundle
+                && !ideal.contains(&e.path)
+                && !plan.skipped.iter().any(|(p, _)| p == &e.path)
+            {
+                plan.skipped.push((e.path.clone(), "not in npm's ideal tree (deduplicated by npm ci)".into()));
+            }
         }
     }
     let skipped: HashSet<&str> = plan.skipped.iter().map(|(p, _)| p.as_str()).collect();
