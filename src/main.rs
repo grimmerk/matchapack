@@ -160,6 +160,11 @@ fn install(
         }
     }
 
+    // 1b. Refuse before deleting anything if this filesystem cannot clone.
+    if let Some((i, _)) = pkgs.first() {
+        clone::probe(&store.dir_for(i), root)?;
+    }
+
     // 2. Wipe what npm ci would wipe.
     timed("remove old node_modules", || {
         for r in &plan.owned_roots {

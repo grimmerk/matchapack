@@ -128,6 +128,25 @@ pub fn touch_trees(dirs: &[std::path::PathBuf]) -> Result<usize> {
     Ok(all.len())
 }
 
+/// Clone one regular file found under `store_entry` into `dir` and delete the
+/// copy: proves the filesystem pair supports reflinks BEFORE anything in the
+/// project is removed. Errors carry the same EXDEV / ENOTSUP hints as placement.
+pub fn probe(store_entry: &Path, dir: &Path) -> Result<()> {
+    let Some(file) = walkdir::WalkDir::new(store_entry)
+        .into_iter()
+        .flatten()
+        .find(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+    else {
+        return Ok(());
+    };
+    let dst = dir.join(format!(".lockclone-probe-{}", std::process::id()));
+    let _ = std::fs::remove_file(&dst);
+    let r = sys::clone(&file, &dst).map_err(|e| explain(e, &file, &dst));
+    let _ = std::fs::remove_file(&dst);
+    r
+}
+
 pub fn clone_tree(src: &Path, dst: &Path, mode: Mode) -> Result<()> {
     if mode == Mode::Dir {
         if !sys::DIR_SUPPORTED {
