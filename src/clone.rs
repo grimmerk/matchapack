@@ -75,23 +75,57 @@ pub enum Mtime {
     Now,
 }
 
-/// Set atime/mtime of every entry under `dir` (not following symlinks) to now.
-pub fn touch_tree(dir: &Path) -> Result<()> {
+/// Set atime/mtime of every entry under each of `dirs` (not following
+/// symlinks) to the current time. Paths are collected per directory in
+/// parallel, then touched in one flat parallel pass, so one huge package does
+/// not serialize the tail.
+pub fn touch_trees(dirs: &[std::path::PathBuf]) -> Result<usize> {
+    use rayon::prelude::*;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
+    // Walk in parallel from each directory's children (and grandchildren for
+    // scope directories), so one root does not serialize the walk.
+    let mut starts: Vec<std::path::PathBuf> = vec![];
+    let mut heads: Vec<CString> = vec![];
+    for d in dirs {
+        heads.push(CString::new(d.as_os_str().as_bytes())?);
+        for e in std::fs::read_dir(d)? {
+            let e = e?;
+            let p = e.path();
+            if e.file_type()?.is_dir() && e.file_name().to_string_lossy().starts_with('@') {
+                heads.push(CString::new(p.as_os_str().as_bytes())?);
+                for s in std::fs::read_dir(&p)? {
+                    starts.push(s?.path());
+                }
+            } else {
+                starts.push(p);
+            }
+        }
+    }
+    let mut lists: Vec<Vec<CString>> = starts
+        .par_iter()
+        .map(|d| -> Result<Vec<CString>> {
+            let mut v = vec![];
+            for ent in walkdir::WalkDir::new(d).follow_links(false) {
+                v.push(CString::new(ent?.path().as_os_str().as_bytes())?);
+            }
+            Ok(v)
+        })
+        .collect::<Result<_>>()?;
+    lists.push(heads);
+    let all: Vec<CString> = lists.into_iter().flatten().collect();
     let ts = [
         libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
         libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
     ];
-    for ent in walkdir::WalkDir::new(dir).follow_links(false).contents_first(true) {
-        let ent = ent?;
-        let c = CString::new(ent.path().as_os_str().as_bytes())?;
+    all.par_iter().try_for_each(|c| -> Result<()> {
         let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
         if r != 0 {
-            bail!("utimensat {}: {}", ent.path().display(), std::io::Error::last_os_error());
+            bail!("utimensat {:?}: {}", c, std::io::Error::last_os_error());
         }
-    }
-    Ok(())
+        Ok(())
+    })?;
+    Ok(all.len())
 }
 
 pub fn clone_tree(src: &Path, dst: &Path, mode: Mode) -> Result<()> {

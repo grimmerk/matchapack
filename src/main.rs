@@ -37,8 +37,9 @@ enum Cmd {
         npm_cache: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "dir")]
         clone_mode: clone::Mode,
-        /// Modification times of placed files.
-        #[arg(long, value_enum, default_value = "keep")]
+        /// Modification times of placed files: `now` (default) matches npm ci;
+        /// `keep` is faster and keeps each content's store time (see NOTES.md).
+        #[arg(long, value_enum, default_value = "now")]
         mtime: clone::Mtime,
         /// Pass --ignore-scripts to npm rebuild.
         #[arg(long)]
@@ -183,11 +184,7 @@ fn install(
                     Kind::Package { integrity, .. } => {
                         let integrity = integrity.as_deref().context("unresolved package in plan")?;
                         let src = store.dir_for(&Integrity::parse(integrity)?);
-                        clone::clone_tree(&src, &dst, mode)?;
-                        if mtime == clone::Mtime::Now {
-                            clone::touch_tree(&dst)?;
-                        }
-                        Ok(())
+                        clone::clone_tree(&src, &dst, mode)
                     }
                     Kind::Link { target } => {
                         let rel = relative(&root.join(target), dst.parent().unwrap());
@@ -199,6 +196,22 @@ fn install(
         }
         Ok(())
     })?;
+
+    // 3b. npm ci leaves every extracted file with the install time; a clone
+    //     carries the store entry's time. Bring them in line when asked.
+    if mtime == clone::Mtime::Now {
+        // One walk per owned node_modules covers every placed file exactly once
+        // (walking per package would revisit nested packages). Symlinks are not
+        // followed, so workspace links are not entered.
+        let dirs: Vec<PathBuf> = plan
+            .owned_roots
+            .iter()
+            .map(|r| root.join(r).join("node_modules"))
+            .filter(|p| p.is_dir())
+            .collect();
+        let n = timed("touch (mtime now)", || clone::touch_trees(&dirs))?;
+        eprintln!("[lockclone] touched {n} paths");
+    }
 
     // 4. Scripts, bins, package-manager metadata.
     if let Some(p) = post {

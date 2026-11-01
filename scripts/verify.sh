@@ -17,6 +17,7 @@ mkdir -p "$work"
 cp -c -R "$src" "$work/A"
 cp -c -R "$src" "$work/B"
 
+marker="$work/.install-start"; touch "$marker"; sleep 1
 echo "== npm ci (A)"
 t0=$(date +%s.%N 2>/dev/null || python3 -c 'import time;print(time.time())')
 (cd "$work/A" && npm ci --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
@@ -32,6 +33,14 @@ rc=0
 ign=()
 for i in ${LOCKCLONE_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
 "$bin" diff "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} || rc=1
+# npm ci leaves every extracted file and directory with the install time; any
+# path under node_modules not newer than the marker is a stale mtime.
+echo "== mtime (paths under node_modules not newer than install start; symlinks excluded)"
+for t in A B; do
+  n=$(find "$work/$t/node_modules" ! -type l ! -newer "$marker" | wc -l | tr -d ' ')
+  echo "$t: $n"
+  [ "$t" = B ] && [ "$n" -ne 0 ] && [ "${LOCKCLONE_VERIFY_MTIME:-1}" = 1 ] && rc=1
+done
 echo "== npm ls --all (A vs B)"
 ea=0; (cd "$work/A" && npm ls --all > "$work/A.ls" 2>&1) || ea=$?
 eb=0; (cd "$work/B" && npm ls --all > "$work/B.ls" 2>&1) || eb=$?
