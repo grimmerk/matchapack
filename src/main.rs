@@ -35,8 +35,9 @@ enum Cmd {
         /// npm content cache (default ~/.npm/_cacache).
         #[arg(long)]
         npm_cache: Option<PathBuf>,
-        #[arg(long, value_enum, default_value = "dir")]
-        clone_mode: clone::Mode,
+        /// Default: `dir` on macOS, `file` elsewhere (Linux has no directory reflink).
+        #[arg(long, value_enum)]
+        clone_mode: Option<clone::Mode>,
         /// Modification times of placed files: `now` (default) matches npm ci;
         /// `keep` is faster and keeps each content's store time (see NOTES.md).
         #[arg(long, value_enum, default_value = "now")]
@@ -260,6 +261,7 @@ fn main() -> Result<()> {
             }
             let store = Store::new(default_store(store), cacache)?;
             let post = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts, extra_args: vec![] };
+            let clone_mode = clone_mode.unwrap_or(if cfg!(target_os = "macos") { clone::Mode::Dir } else { clone::Mode::File });
             install(&root, &store, clone_mode, mtime, if no_rebuild { None } else { Some(&post) }, &plan)?;
             eprintln!(
                 "[lockclone] placed {} entries in {:.2}s",

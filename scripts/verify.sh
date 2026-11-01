@@ -14,12 +14,14 @@ bin=$here/target/release/lockclone
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 rm -rf "${work:?}/A" "${work:?}/B"
 mkdir -p "$work"
-cp -c -R "$src" "$work/A"
-cp -c -R "$src" "$work/B"
+# Copy-on-write copies of the source (macOS: cp -c; Linux: --reflink=auto).
+if [ "$(uname)" = Darwin ]; then cpcow() { cp -c -R "$1" "$2"; }; else cpcow() { cp -a --reflink=auto "$1" "$2"; }; fi
+cpcow "$src" "$work/A"
+cpcow "$src" "$work/B"
 
 marker="$work/.install-start"; touch "$marker"; sleep 1
 echo "== npm ci (A)"
-t0=$(date +%s.%N 2>/dev/null || python3 -c 'import time;print(time.time())')
+t0=$(python3 -c 'import time;print(time.time())')
 (cd "$work/A" && npm ci --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
 t1=$(python3 -c 'import time;print(time.time())')
 echo "== lockclone install (B)"
