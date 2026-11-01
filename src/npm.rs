@@ -226,6 +226,27 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<()> {
             problems.join("\n  ")
         );
     }
+    // `overrides` are not recorded in the lockfile, so an edit to them is
+    // invisible to the comparison above, yet npm ci refuses such a tree
+    // (verified: overriding `ms` without updating the lockfile → EUSAGE "not in
+    // sync"). Override semantics (nested selectors, `$ref`) belong to npm, so ask
+    // npm itself: `npm ci --dry-run` loads the lockfile, builds the ideal tree,
+    // validates, and writes nothing (~1 s small, ~2.5 s monorepo-A).
+    let root_pj: Value = serde_json::from_str(&std::fs::read_to_string(root.join("package.json"))?)?;
+    let has_overrides = root_pj.get("overrides").and_then(|o| o.as_object()).is_some_and(|o| !o.is_empty());
+    if has_overrides {
+        let out = Command::new("npm")
+            .args(["ci", "--dry-run", "--no-audit", "--no-fund"])
+            .current_dir(root)
+            .output()
+            .context("running npm ci --dry-run")?;
+        if !out.status.success() {
+            bail!(
+                "`npm ci --dry-run` rejected this lockfile (package.json has `overrides`):\n{}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
     Ok(())
 }
 
