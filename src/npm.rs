@@ -236,7 +236,10 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<()> {
     let has_overrides = root_pj.get("overrides").and_then(|o| o.as_object()).is_some_and(|o| !o.is_empty());
     if has_overrides {
         let out = Command::new("npm")
-            .args(["ci", "--dry-run", "--no-audit", "--no-fund"])
+            // --ignore-scripts: ci.js runs the root lifecycle scripts even under
+            // --dry-run (measured: `husky` exit 127, app's workspace build
+            // failing, with no node_modules yet); validation does not need them.
+            .args(["ci", "--dry-run", "--ignore-scripts", "--no-audit", "--no-fund"])
             .current_dir(root)
             .output()
             .context("running npm ci --dry-run")?;

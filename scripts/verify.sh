@@ -35,14 +35,20 @@ rc=0
 ign=()
 for i in ${LOCKCLONE_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
 "$bin" diff "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} || rc=1
-# npm ci leaves every extracted file and directory with the install time; any
-# path under node_modules not newer than the marker is a stale mtime.
+# npm ci leaves every extracted file and directory with the install time; a
+# path under node_modules not newer than the marker is a stale mtime. Install
+# scripts can legitimately leave old mtimes (bcrypt unpacks a prebuilt binary
+# with its archive time), so only paths stale in B but NOT in A fail.
 echo "== mtime (paths under node_modules not newer than install start; symlinks excluded)"
 for t in A B; do
-  n=$(find "$work/$t/node_modules" ! -type l ! -newer "$marker" | wc -l | tr -d ' ')
-  echo "$t: $n"
-  [ "$t" = B ] && [ "$n" -ne 0 ] && [ "${LOCKCLONE_VERIFY_MTIME:-1}" = 1 ] && rc=1
+  (cd "$work/$t" && find node_modules ! -type l ! -newer "$marker" | LC_ALL=C sort) > "$work/$t.stale"
+  echo "$t: $(wc -l < "$work/$t.stale" | tr -d ' ')"
 done
+extra=$(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | wc -l | tr -d ' ')
+echo "stale in B only: $extra"
+if [ "$extra" -ne 0 ] && [ "${LOCKCLONE_VERIFY_MTIME:-1}" = 1 ]; then
+  LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | head -5; rc=1
+fi
 echo "== npm ls --all (A vs B)"
 ea=0; (cd "$work/A" && npm ls --all > "$work/A.ls" 2>&1) || ea=$?
 eb=0; (cd "$work/B" && npm ls --all > "$work/B.ls" 2>&1) || eb=$?
