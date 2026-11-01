@@ -20,9 +20,15 @@ cpcow "$src" "$work/A"
 cpcow "$src" "$work/B"
 
 marker="$work/.install-start"; touch "$marker"; sleep 1
-echo "== npm ci (A)"
+# Baseline command for A (default `npm ci`); e.g. LOCKCLONE_VERIFY_BASELINE=install
+# compares against a fresh `npm install`.
+base=${LOCKCLONE_VERIFY_BASELINE:-ci}
+echo "== npm $base (A)"
 t0=$(python3 -c 'import time;print(time.time())')
-(cd "$work/A" && npm ci --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
+(cd "$work/A" && npm "$base" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
+if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.json"; then
+  echo "NOTE: npm $base rewrote package-lock.json"
+fi
 t1=$(python3 -c 'import time;print(time.time())')
 echo "== lockclone install (B)"
 (cd "$work/B" && "$bin" install . "$@" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
