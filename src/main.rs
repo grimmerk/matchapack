@@ -161,6 +161,14 @@ type Prepared = (PathBuf, lock::Lockfile, plan::Plan, Store);
 /// reflink probe (writes only inside node_modules).
 fn prepare(o: &InstallOpts) -> Result<Prepared> {
     let root = std::fs::canonicalize(&o.dir)?;
+    // npm's own modules run the root scripts and judge semver ranges; check now,
+    // not after node_modules has been wiped.
+    let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
+    for m in ["node_modules/@npmcli/run-script", "node_modules/semver"] {
+        if !npm_dir.join(m).is_dir() {
+            bail!("npm installation {} has no {m}", npm_dir.display());
+        }
+    }
     let (lf, mut plan) = timed("plan", || {
         let lf = lock::Lockfile::load(&root)?;
         let ideal = npm::check_in_sync(&root, &lf)?;

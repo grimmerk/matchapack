@@ -46,3 +46,35 @@ impl std::fmt::Display for ScriptFailure {
 }
 
 impl std::error::Error for ScriptFailure {}
+
+/// The npm installation the `npm` on PATH runs: bin/npm resolves to
+/// <dir>/bin/npm-cli.js. Used for npm's own modules (@npmcli/run-script,
+/// semver) and its version, so they always match the npm that runs, whatever
+/// manages it (nvm, Homebrew, Volta). `npm root -g` can point elsewhere.
+pub fn npm_dir() -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let bin = std::env::split_paths(&path).map(|d| d.join("npm")).find(|p| is_executable(p))?;
+    let cli = std::fs::canonicalize(&bin).ok()?;
+    let dir = cli.parent()?.parent()?.to_path_buf();
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()?;
+    (v.get("name").and_then(|n| n.as_str()) == Some("npm")).then_some(dir)
+}
+
+pub fn npm_version() -> Option<String> {
+    let dir = npm_dir()?;
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(String::from)
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+/// A path from the lockfile is used under the project root only if it is
+/// relative and made of plain names: no `..`, no root, no `.`. Path::join with
+/// an absolute path would REPLACE the root, so this guards every delete, clone
+/// and symlink lockclone does inside the project.
+pub fn safe_relative(p: &str) -> bool {
+    !p.is_empty() && std::path::Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}

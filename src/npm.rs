@@ -137,7 +137,7 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
     for e in &lf.entries {
         if e.link {
             if let Some(t) = &e.resolved {
-                if !t.starts_with("..") && !t.contains("node_modules/") && !dirs.contains(t) {
+                if crate::util::safe_relative(t) && !t.contains("node_modules/") && !dirs.contains(t) {
                     dirs.push(t.clone());
                 }
             }
@@ -199,8 +199,7 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
         }
     }
     if !checks.is_empty() && problems.is_empty() {
-        let out = crate::util::npm_cmd().args(["root", "-g"]).output().context("npm root -g")?;
-        let semver = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("npm/node_modules/semver");
+        let semver = crate::util::npm_dir().context("cannot locate npm's installation")?.join("node_modules/semver");
         let pairs: Vec<(&str, &str)> = checks.iter().map(|(_, v, r)| (v.as_str(), r.as_str())).collect();
         let js = "const s=require(process.argv[1]);const p=JSON.parse(process.argv[2]);\
                   console.log(JSON.stringify(p.map(([v,r])=>s.satisfies(v,r,{includePrerelease:false}))))";
@@ -257,7 +256,7 @@ fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<S
     }
     for e in &lf.entries {
         if let (true, Some(t)) = (e.link, &e.resolved) {
-            if !t.starts_with("..") && !t.contains("node_modules/") && root.join(t).join("package.json").is_file() {
+            if crate::util::safe_relative(t) && !t.contains("node_modules/") && root.join(t).join("package.json").is_file() {
                 std::fs::create_dir_all(scratch.join(t))?;
                 std::fs::copy(root.join(t).join("package.json"), scratch.join(t).join("package.json"))?;
             }
@@ -345,10 +344,22 @@ pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan
         skipped.contains(p) || skipped.iter().any(|s| p.starts_with(s) && p[s.len()..].starts_with("/node_modules/"))
     };
     let mut unsupported = vec![];
+    // Every path that becomes a delete, clone or symlink under the root must be
+    // plain and relative (see util::safe_relative). Link TARGETS may leave the
+    // project (`file:../shared`): they only become a symlink's text.
+    let unsafe_paths: Vec<&str> = lf
+        .entries
+        .iter()
+        .filter(|e| !e.path.is_empty() && !crate::util::safe_relative(&e.path))
+        .map(|e| e.path.as_str())
+        .collect();
+    if !unsafe_paths.is_empty() {
+        bail!("lockfile paths that are not plain relative paths: {unsafe_paths:?}");
+    }
     for e in &lf.entries {
         if e.link {
             let target = e.resolved.clone().context("link entry without resolved")?;
-            if !target.starts_with("..") && !target.contains("node_modules/") && !plan.owned_roots.contains(&target) {
+            if crate::util::safe_relative(&target) && !target.contains("node_modules/") && !plan.owned_roots.contains(&target) {
                 plan.owned_roots.push(target.clone());
             }
         }
@@ -489,12 +500,12 @@ impl PostInstall for NpmRebuild {
         // 2. Hidden lockfile.
         let hidden = self.hidden_lockfile(plan);
         let text = serde_json::to_string_pretty(&hidden)? + "\n";
+        std::fs::create_dir_all(root.join("node_modules"))?;
         std::fs::write(root.join("node_modules/.package-lock.json"), text)?;
         // 3. Root lifecycle scripts, as ci.js runs them.
         let t = std::time::Instant::now();
         if !self.ignore_scripts {
-            let out = crate::util::npm_cmd().args(["root", "-g"]).output().context("npm root -g")?;
-            let npm_dir = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("npm");
+            let npm_dir = crate::util::npm_dir().context("cannot locate npm's installation")?;
             let helper = std::env::temp_dir().join(format!("lockclone-root-scripts-{}.js", std::process::id()));
             std::fs::write(&helper, include_str!("root-scripts.js"))?;
             let st = crate::util::npm_cmd()

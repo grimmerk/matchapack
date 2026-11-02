@@ -16,7 +16,7 @@
 use crate::{clone, util, InstallError, InstallOpts};
 use serde_json::Value;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "isntall-clean"];
@@ -122,7 +122,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         return Err("npm-shrinkwrap.json is not handled".into());
     }
 
-    let version = npm_version().ok_or("could not determine the npm version")?;
+    let version = util::npm_version().ok_or("could not determine the npm version")?;
     let allowed = std::env::var("LOCKCLONE_NPM_VERSIONS").ok();
     let ok = match allowed.as_deref() {
         Some("any") => true,
@@ -148,7 +148,8 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     if get("install-strategy").as_str().is_some_and(|s| s != "hoisted") {
         return Err(format!("install-strategy={}", get("install-strategy")));
     }
-    for k in ["global-style", "legacy-bundling", "legacy-peer-deps", "strict-peer-deps", "force", "dry-run", "global", "install-links"] {
+    // engine-strict: npm ci fails when a package's `engines` excludes this Node.
+    for k in ["global-style", "legacy-bundling", "legacy-peer-deps", "strict-peer-deps", "force", "dry-run", "global", "install-links", "engine-strict"] {
         if is_true(k) {
             return Err(format!("npm config {k}=true"));
         }
@@ -185,23 +186,4 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
 /// "11.19" matches 11.19.x; "11" matches 11.x; an exact version matches itself.
 fn version_matches(version: &str, pattern: &str) -> bool {
     version == pattern || version.starts_with(&format!("{pattern}."))
-}
-
-/// The version of the npm that `npm` on PATH resolves to, read from its own
-/// package.json (bin/npm → ../lib/node_modules/npm/bin/npm-cli.js).
-fn npm_version() -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    let bin = std::env::split_paths(&path).map(|d| d.join("npm")).find(|p| is_executable(p))?;
-    let cli = std::fs::canonicalize(&bin).ok()?;
-    let pkg = cli.parent()?.parent()?.join("package.json");
-    let v: Value = serde_json::from_slice(&std::fs::read(pkg).ok()?).ok()?;
-    if v.get("name").and_then(|n| n.as_str()) != Some("npm") {
-        return None;
-    }
-    v.get("version").and_then(|x| x.as_str()).map(String::from)
-}
-
-fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
