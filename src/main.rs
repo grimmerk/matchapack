@@ -6,6 +6,8 @@ mod plan;
 mod platform;
 mod resolve;
 mod store;
+mod util;
+mod wrapper;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -49,6 +51,13 @@ enum Cmd {
         #[arg(long)]
         no_rebuild: bool,
     },
+    /// Stand in for `npm <args>`: handle a bare `npm ci` from the store when it
+    /// is safe to, otherwise run the real npm with the same arguments. Meant to
+    /// be called by the shell wrapper (shell/lockclone.sh).
+    Npm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print the install plan (counts and every skipped entry with its reason); installs nothing.
     Plan {
         #[arg(default_value = ".")]
@@ -80,16 +89,24 @@ fn default_store(s: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| home().join(".cache/lockclone/store"))
 }
 
+fn default_clone_mode() -> clone::Mode {
+    if cfg!(target_os = "macos") {
+        clone::Mode::Dir
+    } else {
+        clone::Mode::File
+    }
+}
+
 fn timed<T>(label: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let t = Instant::now();
     let r = f();
-    eprintln!("[lockclone] {label}: {:.2}s", t.elapsed().as_secs_f64());
+    info!("{label}: {:.2}s", t.elapsed().as_secs_f64());
     r
 }
 
 fn npm_cache_add(root: &Path, urls: &[String]) -> Result<()> {
     for chunk in urls.chunks(200) {
-        let st = std::process::Command::new("npm")
+        let st = util::npm_cmd()
             .arg("cache")
             .arg("add")
             .args(chunk)
@@ -104,15 +121,65 @@ fn npm_cache_add(root: &Path, urls: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn install(
-    root: &Path,
-    store: &Store,
-    mode: clone::Mode,
-    mtime: clone::Mtime,
-    post: Option<&dyn PostInstall>,
-    plan: &plan::Plan,
-) -> Result<()> {
-    // 1. Make sure every package is in the store.
+pub struct InstallOpts {
+    pub dir: PathBuf,
+    pub store: PathBuf,
+    pub cacache: PathBuf,
+    pub clone_mode: clone::Mode,
+    pub mtime: clone::Mtime,
+    pub ignore_scripts: bool,
+    pub no_rebuild: bool,
+}
+
+pub struct Summary {
+    pub placed: usize,
+    pub secs: f64,
+}
+
+/// How an install ended when it did not succeed.
+pub enum InstallError {
+    /// Refused before anything in the project changed: npm can take over as is.
+    Declined(anyhow::Error),
+    /// A lifecycle script failed; `npm ci` would have failed the same way.
+    Scripts(anyhow::Error),
+    /// lockclone itself failed after node_modules was changed.
+    Broke(anyhow::Error),
+}
+
+impl InstallError {
+    pub fn into_inner(self) -> anyhow::Error {
+        match self {
+            InstallError::Declined(e) | InstallError::Scripts(e) | InstallError::Broke(e) => e,
+        }
+    }
+}
+
+type Prepared = (PathBuf, lock::Lockfile, plan::Plan, Store);
+
+/// Everything that can fail without touching the project: plan, packument
+/// resolution, store fill (writes only the store and npm's cache), and the
+/// reflink probe (writes only inside node_modules).
+fn prepare(o: &InstallOpts) -> Result<Prepared> {
+    let root = std::fs::canonicalize(&o.dir)?;
+    let (lf, mut plan) = timed("plan", || {
+        let lf = lock::Lockfile::load(&root)?;
+        let ideal = npm::check_in_sync(&root, &lf)?;
+        let plan = npm::build_plan(&lf, ideal.as_ref())?;
+        Ok((lf, plan))
+    })?;
+    info!("{} lockfile entries skipped on this platform (LOCKCLONE_VERBOSE=1 lists them)", plan.skipped.len());
+    if std::env::var_os("LOCKCLONE_VERBOSE").is_some() {
+        for (p, why) in &plan.skipped {
+            eprintln!("[lockclone] skip {p}: {why}");
+        }
+    }
+    let n = timed("resolve name@version entries", || resolve::resolve(&mut plan, &root, &o.cacache))?;
+    if n > 0 {
+        info!("resolved {n} lockfile entries without `resolved` from packuments");
+    }
+    let store = Store::new(o.store.clone(), o.cacache.clone())?;
+
+    // Make sure every package is in the store.
     let pkgs: Vec<(Integrity, String)> = {
         let mut seen = HashMap::new();
         for e in &plan.entries {
@@ -143,29 +210,34 @@ fn install(
         }
         Ok((missing, extracted))
     })?;
-    eprintln!(
-        "[lockclone] {} distinct packages: {} extracted now, {} not in npm cache",
-        pkgs.len(),
-        extracted,
-        missing.len()
-    );
+    info!("{} distinct packages: {} extracted now, {} not in npm cache", pkgs.len(), extracted, missing.len());
     if !missing.is_empty() {
-        timed("npm cache add", || npm_cache_add(root, &missing))?;
+        timed("npm cache add", || npm_cache_add(&root, &missing))?;
         let by_url: HashMap<&String, &Integrity> = pkgs.iter().map(|(i, u)| (u, i)).collect();
         for u in &missing {
-            match store.ensure(by_url[u], u)? {
-                Ensure::Missing => bail!("still not in npm cache after `npm cache add`: {u}"),
-                _ => {}
+            if let Ensure::Missing = store.ensure(by_url[u], u)? {
+                bail!("still not in npm cache after `npm cache add`: {u}");
             }
         }
     }
 
-    // 1b. Refuse before deleting anything if this filesystem cannot clone.
+    // Refuse before deleting anything if this filesystem cannot clone.
     if let Some((i, _)) = pkgs.first() {
-        clone::probe(&store.dir_for(i), root)?;
+        clone::probe(&store.dir_for(i), &root)?;
     }
+    Ok((root, lf, plan, store))
+}
 
-    // 2. Wipe what npm ci would wipe.
+/// The part that changes the project: wipe, clone, mtime, scripts.
+fn place(
+    root: &Path,
+    store: &Store,
+    mode: clone::Mode,
+    mtime: clone::Mtime,
+    post: Option<&dyn PostInstall>,
+    plan: &plan::Plan,
+) -> Result<()> {
+    // Wipe what npm ci would wipe.
     timed("remove old node_modules", || {
         for r in &plan.owned_roots {
             let nm = root.join(r).join("node_modules");
@@ -176,7 +248,7 @@ fn install(
         Ok(())
     })?;
 
-    // 3. Place packages, parents before children; one depth level at a time.
+    // Place packages, parents before children; one depth level at a time.
     timed("clone", || {
         let mut levels: BTreeMap<usize, Vec<&plan::PlanEntry>> = BTreeMap::new();
         for e in &plan.entries {
@@ -203,12 +275,10 @@ fn install(
         Ok(())
     })?;
 
-    // 3b. npm ci leaves every extracted file with the install time; a clone
-    //     carries the store entry's time. Bring them in line when asked.
+    // npm ci leaves every extracted file with the install time; a clone carries
+    // the store entry's time. One walk per owned node_modules covers every
+    // placed file exactly once; symlinks (workspace links) are not followed.
     if mtime == clone::Mtime::Now {
-        // One walk per owned node_modules covers every placed file exactly once
-        // (walking per package would revisit nested packages). Symlinks are not
-        // followed, so workspace links are not entered.
         let dirs: Vec<PathBuf> = plan
             .owned_roots
             .iter()
@@ -216,14 +286,30 @@ fn install(
             .filter(|p| p.is_dir())
             .collect();
         let n = timed("touch (mtime now)", || clone::touch_trees(&dirs))?;
-        eprintln!("[lockclone] touched {n} paths");
+        info!("touched {n} paths");
     }
 
-    // 4. Scripts, bins, package-manager metadata.
+    // Scripts, bins, package-manager metadata.
     if let Some(p) = post {
         timed("post-install", || p.run(root, plan))?;
     }
     Ok(())
+}
+
+pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError> {
+    let t0 = Instant::now();
+    let (root, lf, plan, store) = prepare(o).map_err(InstallError::Declined)?;
+    let rebuild = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: o.ignore_scripts, extra_args: vec![] };
+    let post: Option<&dyn PostInstall> = if o.no_rebuild { None } else { Some(&rebuild) };
+    match place(&root, &store, o.clone_mode, o.mtime, post, &plan) {
+        Ok(()) => {
+            let secs = t0.elapsed().as_secs_f64();
+            info!("placed {} entries in {secs:.2}s", plan.entries.len());
+            Ok(Summary { placed: plan.entries.len(), secs })
+        }
+        Err(e) if e.downcast_ref::<util::ScriptFailure>().is_some() => Err(InstallError::Scripts(e)),
+        Err(e) => Err(InstallError::Broke(e)),
+    }
 }
 
 /// Relative path from directory `from` to `to` (both absolute, no symlinks resolved).
@@ -245,34 +331,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild } => {
-            let t0 = Instant::now();
-            let root = std::fs::canonicalize(&dir)?;
-            let (lf, mut plan) = timed("plan", || {
-                let lf = lock::Lockfile::load(&root)?;
-                let ideal = npm::check_in_sync(&root, &lf)?;
-                let plan = npm::build_plan(&lf, ideal.as_ref())?;
-                Ok((lf, plan))
-            })?;
-            eprintln!("[lockclone] {} lockfile entries skipped on this platform (LOCKCLONE_VERBOSE=1 lists them)", plan.skipped.len());
-            if std::env::var_os("LOCKCLONE_VERBOSE").is_some() {
-                for (p, why) in &plan.skipped {
-                    eprintln!("[lockclone] skip {p}: {why}");
-                }
-            }
-            let cacache = npm_cache.unwrap_or_else(|| home().join(".npm/_cacache"));
-            let n = timed("resolve name@version entries", || resolve::resolve(&mut plan, &root, &cacache))?;
-            if n > 0 {
-                eprintln!("[lockclone] resolved {n} lockfile entries without `resolved` from packuments");
-            }
-            let store = Store::new(default_store(store), cacache)?;
-            let post = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts, extra_args: vec![] };
-            let clone_mode = clone_mode.unwrap_or(if cfg!(target_os = "macos") { clone::Mode::Dir } else { clone::Mode::File });
-            install(&root, &store, clone_mode, mtime, if no_rebuild { None } else { Some(&post) }, &plan)?;
-            eprintln!(
-                "[lockclone] placed {} entries in {:.2}s",
-                plan.entries.len(),
-                t0.elapsed().as_secs_f64()
-            );
+            let o = InstallOpts {
+                dir,
+                store: default_store(store),
+                cacache: npm_cache.unwrap_or_else(|| home().join(".npm/_cacache")),
+                clone_mode: clone_mode.unwrap_or_else(default_clone_mode),
+                mtime,
+                ignore_scripts,
+                no_rebuild,
+            };
+            run_install(&o).map_err(InstallError::into_inner)?;
+        }
+        Cmd::Npm { args } => {
+            let code = wrapper::run(args);
+            std::process::exit(code);
         }
         Cmd::Plan { dir } => {
             let root = std::fs::canonicalize(&dir)?;

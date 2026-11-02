@@ -26,6 +26,9 @@ pub enum Kind {
     Link { target: String },
 }
 
+// name / version / has_install_script are part of the package-manager-neutral
+// plan (the Yarn 1 seam); the npm path does not read them yet.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PlanEntry {
     /// Install path relative to the project root, e.g. `node_modules/a/node_modules/b`.

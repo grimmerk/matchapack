@@ -10,7 +10,6 @@ use base64::Engine;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 struct Registries {
     default: String,
@@ -19,7 +18,7 @@ struct Registries {
 
 impl Registries {
     fn load(root: &Path) -> Result<Registries> {
-        let out = Command::new("npm").args(["config", "list", "--json"]).current_dir(root).output().context("npm config list")?;
+        let out = crate::util::npm_cmd().args(["config", "list", "--json"]).current_dir(root).output().context("npm config list")?;
         let v: Value = serde_json::from_slice(&out.stdout).context("parsing npm config list --json")?;
         let mut scoped = HashMap::new();
         if let Value::Object(m) = &v {
@@ -95,9 +94,9 @@ pub fn resolve(plan: &mut Plan, root: &Path, cacache: &Path) -> Result<usize> {
     if !missing.is_empty() {
         missing.sort();
         missing.dedup();
-        eprintln!("[lockclone] fetching {} packuments with npm cache add", missing.len());
+        crate::info!("fetching {} packuments with npm cache add", missing.len());
         for chunk in missing.chunks(200) {
-            let st = Command::new("npm").args(["cache", "add"]).args(chunk).current_dir(root).status()?;
+            let st = crate::util::npm_cmd().args(["cache", "add"]).args(chunk).current_dir(root).status()?;
             if !st.success() {
                 bail!("npm cache add failed for registry specs ({st})");
             }

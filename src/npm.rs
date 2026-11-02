@@ -199,7 +199,7 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
         }
     }
     if !checks.is_empty() && problems.is_empty() {
-        let out = Command::new("npm").args(["root", "-g"]).output().context("npm root -g")?;
+        let out = crate::util::npm_cmd().args(["root", "-g"]).output().context("npm root -g")?;
         let semver = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("npm/node_modules/semver");
         let pairs: Vec<(&str, &str)> = checks.iter().map(|(_, v, r)| (v.as_str(), r.as_str())).collect();
         let js = "const s=require(process.argv[1]);const p=JSON.parse(process.argv[2]);\
@@ -265,7 +265,7 @@ fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<S
     }
     let root = scratch;
     {
-        let out = Command::new("npm")
+        let out = crate::util::npm_cmd()
             // --ignore-scripts: ci.js runs the root lifecycle scripts even under
             // --dry-run (measured: `husky` exit 127, app's workspace build
             // failing, with no node_modules yet); validation does not need them.
@@ -471,18 +471,21 @@ impl PostInstall for NpmRebuild {
         }
         let t = std::time::Instant::now();
         if !specs.is_empty() {
-            let mut cmd = Command::new("npm");
+            let mut cmd = crate::util::npm_cmd();
             cmd.arg("rebuild").current_dir(root);
             if self.ignore_scripts {
                 cmd.arg("--ignore-scripts");
             }
             cmd.args(&self.extra_args).args(&specs);
+            if crate::util::quiet() {
+                cmd.stdout(std::process::Stdio::null());
+            }
             let st = cmd.status().context("running npm rebuild")?;
             if !st.success() {
-                bail!("npm rebuild failed: {st}");
+                return Err(crate::util::ScriptFailure(format!("npm rebuild failed: {st}")).into());
             }
         }
-        eprintln!("[lockclone]   npm rebuild (deps): {:.2}s", t.elapsed().as_secs_f64());
+        crate::info!("  npm rebuild (deps): {:.2}s", t.elapsed().as_secs_f64());
         // 2. Hidden lockfile.
         let hidden = self.hidden_lockfile(plan);
         let text = serde_json::to_string_pretty(&hidden)? + "\n";
@@ -490,11 +493,11 @@ impl PostInstall for NpmRebuild {
         // 3. Root lifecycle scripts, as ci.js runs them.
         let t = std::time::Instant::now();
         if !self.ignore_scripts {
-            let out = Command::new("npm").args(["root", "-g"]).output().context("npm root -g")?;
+            let out = crate::util::npm_cmd().args(["root", "-g"]).output().context("npm root -g")?;
             let npm_dir = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("npm");
             let helper = std::env::temp_dir().join(format!("lockclone-root-scripts-{}.js", std::process::id()));
             std::fs::write(&helper, include_str!("root-scripts.js"))?;
-            let st = Command::new("npm")
+            let st = crate::util::npm_cmd()
                 .args(["exec", "--no", "--", "node"])
                 .arg(&helper)
                 .arg(&npm_dir)
@@ -504,10 +507,10 @@ impl PostInstall for NpmRebuild {
                 .context("running root lifecycle scripts")?;
             let _ = std::fs::remove_file(&helper);
             if !st.success() {
-                bail!("root lifecycle script failed: {st}");
+                return Err(crate::util::ScriptFailure(format!("root lifecycle script failed: {st}")).into());
             }
         }
-        eprintln!("[lockclone]   root lifecycle scripts: {:.2}s", t.elapsed().as_secs_f64());
+        crate::info!("  root lifecycle scripts: {:.2}s", t.elapsed().as_secs_f64());
         Ok(())
     }
 }

@@ -128,7 +128,7 @@ pub fn touch_trees(dirs: &[std::path::PathBuf]) -> Result<usize> {
     Ok(all.len())
 }
 
-/// Clone one regular file found under `store_entry` into `dir` and delete the
+/// Clone one regular file found under `store_entry` into `dir/node_modules` and delete the
 /// copy: proves the filesystem pair supports reflinks BEFORE anything in the
 /// project is removed. Errors carry the same EXDEV / ENOTSUP hints as placement.
 pub fn probe(store_entry: &Path, dir: &Path) -> Result<()> {
@@ -140,7 +140,11 @@ pub fn probe(store_entry: &Path, dir: &Path) -> Result<()> {
     else {
         return Ok(());
     };
-    let dst = dir.join(format!(".lockclone-probe-{}", std::process::id()));
+    // Inside node_modules (created if needed): a probe left behind by a killed
+    // process must never be a stray file the repository could commit.
+    let nm = dir.join("node_modules");
+    std::fs::create_dir_all(&nm)?;
+    let dst = nm.join(format!(".lockclone-probe-{}", std::process::id()));
     let _ = std::fs::remove_file(&dst);
     let r = sys::clone(&file, &dst).map_err(|e| explain(e, &file, &dst));
     let _ = std::fs::remove_file(&dst);
