@@ -33,8 +33,10 @@ t1=$(python3 -c 'import time;print(time.time())')
 echo "== lockclone install (B)"
 if [ "${LOCKCLONE_VERIFY_VIA:-install}" = wrapper ]; then
   # The path a user takes: plain `npm ci` in a shell that sourced the wrapper.
+  # Not anchored: a script may leave the line unterminated (husky prints
+  # ".git can't be found" without a newline).
   (cd "$work/B" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/lockclone.sh'; npm ci --no-audit --no-fund" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
-  grep -q '^lockclone: added' "$work/B.log" || { echo "wrapper did NOT install from the store:"; grep '^lockclone' "$work/B.log"; exit 1; }
+  grep -q 'lockclone: added' "$work/B.log" || { echo "wrapper did NOT install from the store:"; grep '^lockclone' "$work/B.log"; exit 1; }
 else
   (cd "$work/B" && "$bin" install . "$@" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
 fi

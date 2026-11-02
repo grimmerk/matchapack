@@ -50,10 +50,7 @@ pub fn run(args: Vec<String>) -> i32 {
     }
     let opts = match decide(&args) {
         Ok(o) => o,
-        Err(reason) => {
-            eprintln!("lockclone: running plain npm ({reason})");
-            return exec_npm(&args);
-        }
+        Err(reason) => return decline(&args, &reason),
     };
     util::set_quiet(true);
     eprintln!("lockclone: npm ci from the store (LOCKCLONE=0 npm ci for plain npm)");
@@ -62,10 +59,7 @@ pub fn run(args: Vec<String>) -> i32 {
             eprintln!("lockclone: added {} packages from the store in {:.1}s", s.placed, s.secs);
             0
         }
-        Err(InstallError::Declined(e)) => {
-            eprintln!("lockclone: running plain npm instead ({})", one_line(&e));
-            exec_npm(&args)
-        }
+        Err(InstallError::Declined(e)) => decline(&args, &one_line(&e)),
         Err(InstallError::Scripts(e)) => {
             eprintln!("lockclone: {e:#}");
             1
@@ -75,6 +69,18 @@ pub fn run(args: Vec<String>) -> i32 {
             exec_npm(&args)
         }
     }
+}
+
+/// lockclone will not handle this install and nothing has been changed. Run
+/// plain npm, unless LOCKCLONE_NO_FALLBACK=1 (scripts/convert-existing.sh):
+/// then report and exit 3, leaving the existing node_modules as it is.
+fn decline(args: &[String], reason: &str) -> i32 {
+    if std::env::var("LOCKCLONE_NO_FALLBACK").as_deref() == Ok("1") {
+        eprintln!("lockclone: not handled, left unchanged ({reason})");
+        return 3;
+    }
+    eprintln!("lockclone: running plain npm instead ({reason})");
+    exec_npm(args)
 }
 
 fn one_line(e: &anyhow::Error) -> String {

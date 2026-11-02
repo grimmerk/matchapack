@@ -370,7 +370,7 @@ pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan
                     source: Source::Registry { name: name.clone(), version: e.version.clone().unwrap() },
                 },
                 _ => {
-                    unsupported.push(format!("{} (resolved {:?})", e.path, e.resolved));
+                    unsupported.push(format!("{} ({})", e.path, e.resolved.as_deref().unwrap_or("no resolved, no version")));
                     continue;
                 }
             }

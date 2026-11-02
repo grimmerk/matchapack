@@ -24,8 +24,8 @@ run() { # dir env-assignments command...
 check() { # name condition-description test-result
   if [ "$3" = ok ]; then pass=$((pass+1)); echo "PASS $1: $2"; else fail=$((fail+1)); echo "FAIL $1: $2"; sed 's/^/    /' "$4.out" | grep -E 'lockclone|npm error|ERR' | head -5; fi
 }
-by_lockclone() { grep -q '^lockclone: added' "$1.out"; }
-by_npm() { ! grep -q '^lockclone: added' "$1.out" && [ -d "$1/node_modules" ]; }
+by_lockclone() { grep -q 'lockclone: added' "$1.out"; }
+by_npm() { ! grep -q 'lockclone: added' "$1.out" && [ -d "$1/node_modules" ]; }
 
 # 1. bare npm ci → lockclone
 d=$(new_project ci); CMD="npm ci"; rc=$(run "$d")
