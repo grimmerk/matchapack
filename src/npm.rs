@@ -237,7 +237,11 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
         // The dry-run's `add` list is a DIFF against the node_modules on disk, so
         // run it in a scratch copy that has none: package.json, lockfile, .npmrc
         // and each workspace's package.json. Then `add` is the whole ideal tree.
-        let scratch = std::env::temp_dir().join(format!("lockclone-dryrun-{}", std::process::id()));
+        // Under the store's tmp/ (named `<pid>-dryrun`, so Store::new removes it
+        // if this process dies), not $TMPDIR: npm redacts path segments that look
+        // like secrets (a UUID becomes `***`) in what it prints, so the paths it
+        // reports are matched by this unique segment, not by the full prefix.
+        let scratch = crate::default_store(None).join("tmp").join(format!("{}-dryrun", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch)?;
         let scratch = std::fs::canonicalize(&scratch)?;
@@ -292,15 +296,15 @@ fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<S
             .or_else(|| text.starts_with('{').then_some(0))
             .context("no JSON summary in `npm ci --dry-run --json` output")?;
         let summary: Value = serde_json::from_str(&text[start..]).context("parsing npm ci --dry-run --json summary")?;
-        let prefix = format!("{}/", root.display());
+        let marker = format!("/{}/", root.file_name().and_then(|n| n.to_str()).context("scratch dir name")?);
         let mut ideal = HashSet::new();
         for a in summary.get("add").and_then(|v| v.as_array()).context("dry-run summary has no `add` list")? {
             let p = a.get("path").and_then(|v| v.as_str()).context("dry-run `add` entry without path")?;
-            match p.strip_prefix(&prefix) {
-                Some(rel) => {
-                    ideal.insert(rel.to_string());
+            match p.find(&marker) {
+                Some(i) => {
+                    ideal.insert(p[i + marker.len()..].to_string());
                 }
-                None if p == root.display().to_string() => {}
+                None if p.ends_with(marker.trim_end_matches('/')) => {}
                 None => bail!("npm's ideal tree has a node outside the project: {p}"),
             }
         }
@@ -498,10 +502,15 @@ impl PostInstall for NpmRebuild {
         }
         crate::info!("  npm rebuild (deps): {:.2}s", t.elapsed().as_secs_f64());
         // 2. Hidden lockfile.
+        // npm writes the hidden lockfile whenever node_modules exists, even with
+        // no packages in it, but never creates node_modules just for it
+        // (measured on a project without dependencies, with and without an
+        // existing empty node_modules).
         let hidden = self.hidden_lockfile(plan);
-        let text = serde_json::to_string_pretty(&hidden)? + "\n";
-        std::fs::create_dir_all(root.join("node_modules"))?;
-        std::fs::write(root.join("node_modules/.package-lock.json"), text)?;
+        if root.join("node_modules").is_dir() {
+            let text = serde_json::to_string_pretty(&hidden)? + "\n";
+            std::fs::write(root.join("node_modules/.package-lock.json"), text)?;
+        }
         // 3. Root lifecycle scripts, as ci.js runs them.
         let t = std::time::Instant::now();
         if !self.ignore_scripts {

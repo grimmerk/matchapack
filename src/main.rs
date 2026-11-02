@@ -6,6 +6,7 @@ mod plan;
 mod platform;
 mod resolve;
 mod store;
+mod trial;
 mod util;
 mod wrapper;
 
@@ -72,6 +73,15 @@ enum Cmd {
         ignore: Vec<String>,
         #[arg(long, default_value_t = 30)]
         limit: usize,
+        /// Print only the differing paths, one per line (for scripts).
+        #[arg(long)]
+        paths: bool,
+    },
+    /// Summarise the trial logs: outcomes, reasons, time, space, verification samples.
+    Report {
+        /// Only the last N days.
+        #[arg(long)]
+        days: Option<f64>,
     },
     /// Print the store location and size in entries.
     Store {
@@ -134,6 +144,12 @@ pub struct InstallOpts {
 pub struct Summary {
     pub placed: usize,
     pub secs: f64,
+    /// Store entries extracted during this install.
+    pub store_new: usize,
+    /// File bytes this install placed as clones (what npm would have written).
+    pub bytes_logical: u64,
+    /// File bytes newly added to the store by this install.
+    pub bytes_store_new: u64,
 }
 
 /// How an install ended when it did not succeed.
@@ -154,7 +170,7 @@ impl InstallError {
     }
 }
 
-type Prepared = (PathBuf, lock::Lockfile, plan::Plan, Store);
+type Prepared = (PathBuf, lock::Lockfile, plan::Plan, Store, Vec<Integrity>);
 
 /// Everything that can fail without touching the project: plan, packument
 /// resolution, store fill (writes only the store and npm's cache), and the
@@ -198,6 +214,7 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
         }
         seen.into_iter().collect()
     };
+    let mut extracted_now: Vec<Integrity> = vec![];
     let (missing, extracted) = timed("store", || {
         let res: Vec<Result<(Option<String>, bool)>> = pkgs
             .par_iter()
@@ -209,12 +226,15 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
             .collect();
         let mut missing = vec![];
         let mut extracted = 0;
-        for r in res {
+        for (r, (i, _)) in res.into_iter().zip(&pkgs) {
             let (m, x) = r?;
             if let Some(u) = m {
                 missing.push(u);
             }
-            extracted += x as usize;
+            if x {
+                extracted += 1;
+                extracted_now.push(i.clone());
+            }
         }
         Ok((missing, extracted))
     })?;
@@ -223,8 +243,10 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
         timed("npm cache add", || npm_cache_add(&root, &missing))?;
         let by_url: HashMap<&String, &Integrity> = pkgs.iter().map(|(i, u)| (u, i)).collect();
         for u in &missing {
-            if let Ensure::Missing = store.ensure(by_url[u], u)? {
-                bail!("still not in npm cache after `npm cache add`: {u}");
+            match store.ensure(by_url[u], u)? {
+                Ensure::Missing => bail!("still not in npm cache after `npm cache add`: {u}"),
+                Ensure::Extracted => extracted_now.push(by_url[u].clone()),
+                Ensure::Present => {}
             }
         }
     }
@@ -233,7 +255,7 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
     if let Some((i, _)) = pkgs.first() {
         clone::probe(&store.dir_for(i), &root)?;
     }
-    Ok((root, lf, plan, store))
+    Ok((root, lf, plan, store, extracted_now))
 }
 
 /// The part that changes the project: wipe, clone, mtime, scripts.
@@ -245,12 +267,18 @@ fn place(
     post: Option<&dyn PostInstall>,
     plan: &plan::Plan,
 ) -> Result<()> {
-    // Wipe what npm ci would wipe.
+    // Wipe what npm ci wipes, the way ci.js does: every entry INSIDE each
+    // node_modules goes, the directory itself stays (it matters when nothing is
+    // installed: npm leaves an empty node_modules, or none if there was none).
     timed("remove old node_modules", || {
         for r in &plan.owned_roots {
             let nm = root.join(r).join("node_modules");
-            if nm.symlink_metadata().is_ok() {
-                std::fs::remove_dir_all(&nm).with_context(|| format!("removing {}", nm.display()))?;
+            let Ok(entries) = std::fs::read_dir(&nm) else { continue };
+            for ent in entries {
+                let ent = ent?;
+                let p = ent.path();
+                let r = if ent.file_type()?.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+                r.with_context(|| format!("removing {}", p.display()))?;
             }
         }
         Ok(())
@@ -306,14 +334,24 @@ fn place(
 
 pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
-    let (root, lf, plan, store) = prepare(o).map_err(InstallError::Declined)?;
+    let (root, lf, plan, store, extracted_now) = prepare(o).map_err(InstallError::Declined)?;
     let rebuild = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: o.ignore_scripts, extra_args: vec![] };
     let post: Option<&dyn PostInstall> = if o.no_rebuild { None } else { Some(&rebuild) };
     match place(&root, &store, o.clone_mode, o.mtime, post, &plan) {
         Ok(()) => {
             let secs = t0.elapsed().as_secs_f64();
             info!("placed {} entries in {secs:.2}s", plan.entries.len());
-            Ok(Summary { placed: plan.entries.len(), secs })
+            let bytes_logical = plan
+                .entries
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    Kind::Package { integrity: Some(i), .. } => Integrity::parse(i).ok(),
+                    _ => None,
+                })
+                .map(|i| store.entry_size(&i))
+                .sum();
+            let bytes_store_new = extracted_now.iter().map(|i| store.entry_size(i)).sum();
+            Ok(Summary { placed: plan.entries.len(), secs, store_new: extracted_now.len(), bytes_logical, bytes_store_new })
         }
         Err(e) if e.downcast_ref::<util::ScriptFailure>().is_some() => Err(InstallError::Scripts(e)),
         Err(e) => Err(InstallError::Broke(e)),
@@ -372,12 +410,20 @@ fn main() -> Result<()> {
                 println!("skip {p}: {why}");
             }
         }
-        Cmd::Diff { a, b, ignore, limit } => {
+        Cmd::Diff { a, b, ignore, limit, paths } => {
             let r = diff::diff(&a, &b, &ignore)?;
-            r.print(limit);
+            if paths {
+                r.print_paths();
+            } else {
+                r.print(limit);
+            }
             if !r.ok() {
                 std::process::exit(1);
             }
+        }
+        Cmd::Report { days } => {
+            let store = Store::new(default_store(None), home().join(".npm/_cacache"))?;
+            trial::report(days, &store)?;
         }
         Cmd::Store { store } => {
             let s = default_store(store);

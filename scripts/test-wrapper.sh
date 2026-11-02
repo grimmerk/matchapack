@@ -8,6 +8,8 @@ set -uo pipefail
 work=$1
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin_dir=$here/target/release
+# Test runs log to the work dir, never to the real trial log.
+export LOCKCLONE_LOG_DIR=$work/logs
 fx=$here/fixtures/small
 pass=0; fail=0
 
@@ -94,6 +96,22 @@ check ignore-scripts "npm ci --ignore-scripts → lockclone, bins linked, root p
 # 13. the root postinstall runs on a normal install (control for 12)
 [ -f "$work/ci/root-postinstall.txt" ] && r=ok || r=bad
 check root-script "bare npm ci ran the root postinstall (control for case 12)" $r "$work/ci"
+
+# 14. trial scope: a project outside LOCKCLONE_PATHS → plain npm with the reason
+d=$(new_project outscope); CMD="npm ci"; rc=$(run "$d" LOCKCLONE_PATHS=/nonexistent-prefix)
+[ "$rc" = 0 ] && by_npm "$d" && grep -q 'outside the trial scope' "$d.out" && r=ok || r=bad
+check scope-out "project outside the trial scope → plain npm with the reason" $r "$d"
+
+# 15. inside the scope → lockclone
+d=$(new_project inscope); CMD="npm ci"; rc=$(run "$d" LOCKCLONE_PATHS="/nonexistent-prefix:$work")
+[ "$rc" = 0 ] && by_lockclone "$d" && r=ok || r=bad
+check scope-in "project inside the trial scope → lockclone" $r "$d"
+
+# 16. the run log records installs and declines (in the test's own log dir)
+n_inst=$(grep -c '"outcome":"installed"' "$LOCKCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
+n_decl=$(grep -c '"outcome":"declined"' "$LOCKCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
+[ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && r=ok || r=bad
+check log "log.jsonl records installs ($n_inst) and declines ($n_decl)" $r "$work/logs"
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -114,6 +114,34 @@ impl Store {
         self.root.join(LAYOUT).join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
     }
 
+    /// Sum of the file sizes in a store entry, cached in `<store>/sizes/` (never
+    /// inside the entry, which is cloned into projects as a whole).
+    pub fn entry_size(&self, i: &Integrity) -> u64 {
+        let p = self.root.join("sizes").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]);
+        if let Some(n) = fs::read_to_string(&p).ok().and_then(|s| s.trim().parse().ok()) {
+            return n;
+        }
+        let n = dir_bytes(&self.dir_for(i));
+        let _ = fs::create_dir_all(p.parent().unwrap());
+        let _ = fs::write(&p, n.to_string());
+        n
+    }
+
+    /// (entries, bytes) of the whole store, from the size cache.
+    pub fn totals(&self) -> (usize, u64) {
+        let mut n = 0;
+        let mut bytes = 0;
+        for e in walkdir::WalkDir::new(self.root.join(LAYOUT)).min_depth(3).max_depth(3).into_iter().flatten() {
+            let rel = e.path().strip_prefix(self.root.join(LAYOUT)).unwrap();
+            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            if let [algo, a, b] = parts.as_slice() {
+                n += 1;
+                bytes += self.entry_size(&Integrity { algo: algo.clone(), hex: format!("{a}{b}") });
+            }
+        }
+        (n, bytes)
+    }
+
     /// Locate the tarball in npm's cache: first by content address, then via the
     /// index entry for the request URL (needed when the lockfile only has sha1:
     /// cacache stores content under the sha512 it computed itself).
@@ -167,6 +195,16 @@ impl Store {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+fn dir_bytes(d: &Path) -> u64 {
+    walkdir::WalkDir::new(d)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 const UMASK: u32 = 0o022;

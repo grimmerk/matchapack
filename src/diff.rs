@@ -95,6 +95,12 @@ impl Report {
         self.only_a.is_empty() && self.only_b.is_empty() && self.differ.is_empty()
     }
 
+    pub fn print_paths(&self) {
+        for p in self.only_a.iter().chain(&self.only_b).chain(self.differ.iter().map(|(p, _)| p)) {
+            println!("{p}");
+        }
+    }
+
     pub fn print(&self, limit: usize) {
         println!("scanned {} paths in A", self.files);
         let show = |title: &str, v: &Vec<String>| {

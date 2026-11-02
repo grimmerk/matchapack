@@ -13,8 +13,8 @@
 //! as npm would report it; any other lockclone failure hands over to npm, whose
 //! `npm ci` wipes and rebuilds node_modules.
 
-use crate::{clone, util, InstallError, InstallOpts};
-use serde_json::Value;
+use crate::{clone, trial, util, InstallError, InstallOpts};
+use serde_json::{json, Value};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -24,7 +24,7 @@ const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "is
 /// npm major.minor versions the harness was run against. Another version runs
 /// plain npm until the harness has been re-run (override: LOCKCLONE_NPM_VERSIONS
 /// = comma list, or `any`).
-const VERIFIED_NPM: &[&str] = &["11.19"];
+const VERIFIED_NPM: &[&str] = &["11.19", "11.17"];
 
 /// Flags that change only npm's output or network policy, never the tree.
 const PASSIVE_FLAGS: [&str; 11] = [
@@ -48,23 +48,45 @@ pub fn run(args: Vec<String>) -> i32 {
     if !args.first().is_some_and(|a| CI_ALIASES.contains(&a.as_str())) {
         return exec_npm(&args);
     }
+    let dir = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    let npm_version = util::npm_version().unwrap_or_default();
+    let log = |outcome: &str, extra: Value| {
+        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args });
+        if let (Value::Object(m), Value::Object(x)) = (&mut rec, extra) {
+            m.extend(x);
+        }
+        trial::append(rec);
+    };
     let opts = match decide(&args) {
         Ok(o) => o,
-        Err(reason) => return decline(&args, &reason),
+        Err(reason) => {
+            log("declined", json!({ "reason": reason }));
+            return decline(&args, &reason);
+        }
     };
     util::set_quiet(true);
     eprintln!("lockclone: npm ci from the store (LOCKCLONE=0 npm ci for plain npm)");
     match crate::run_install(&opts) {
         Ok(s) => {
             eprintln!("lockclone: added {} packages from the store in {:.1}s", s.placed, s.secs);
+            log(
+                "installed",
+                json!({ "secs": s.secs, "packages": s.placed, "store_new": s.store_new,
+                        "bytes_logical": s.bytes_logical, "bytes_store_new": s.bytes_store_new }),
+            );
             0
         }
-        Err(InstallError::Declined(e)) => decline(&args, &one_line(&e)),
+        Err(InstallError::Declined(e)) => {
+            log("declined", json!({ "reason": one_line(&e) }));
+            decline(&args, &one_line(&e))
+        }
         Err(InstallError::Scripts(e)) => {
+            log("script_failed", json!({ "reason": one_line(&e) }));
             eprintln!("lockclone: {e:#}");
             1
         }
         Err(InstallError::Broke(e)) => {
+            log("broke", json!({ "reason": one_line(&e) }));
             eprintln!("lockclone: failed after changing node_modules ({}); running npm ci to rebuild it", one_line(&e));
             exec_npm(&args)
         }
@@ -121,6 +143,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     if cwd.join("npm-shrinkwrap.json").exists() {
         return Err("npm-shrinkwrap.json is not handled".into());
     }
+    trial::in_scope(&cwd)?;
 
     let version = util::npm_version().ok_or("could not determine the npm version")?;
     let allowed = std::env::var("LOCKCLONE_NPM_VERSIONS").ok();

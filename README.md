@@ -40,8 +40,9 @@ line was added use it.
 lockclone runs plain npm instead, and prints why, when:
 - a flag or npm setting changes the tree (`--omit=dev`, `NODE_ENV=production`,
   `install-strategy`, `--workspace`, …);
-- npm is a version the harness has not been run against (currently 11.19.x;
-  `LOCKCLONE_NPM_VERSIONS=any` overrides);
+- npm is a version the harness has not been run against (currently 11.19.x
+  and 11.17.x; `LOCKCLONE_NPM_VERSIONS=any` overrides);
+- the project is outside the trial scope (`~/.config/lockclone/paths`);
 - the lockfile has entries it does not support (git dependencies, `file:`
   tarballs), or is out of sync with package.json;
 - the filesystem cannot clone.
@@ -51,6 +52,22 @@ install script is reported like npm would report it, not retried.
 Bypass for one command: `LOCKCLONE=0 npm ci`, or `command npm ci`.
 Remove: delete the line. Installed node_modules keep working without the store
 (clones are independent files); the store is `~/.cache/lockclone/store`.
+
+## Trial: logs, checks, scope
+
+- `lockclone report [--days N]`: what happened (installed / handed to npm and
+  why / failed), install times, space not written, store size, free space.
+  Every `npm ci` that reaches lockclone appends one line to
+  `~/.cache/lockclone/log.jsonl` (`LOCKCLONE_LOG=0` turns it off).
+- `scripts/verify-sample.sh [N]`: re-checks the N most recent lockclone
+  installs against a real `npm ci` on copies (npm ci runs twice so build noise
+  is told apart); results show up in `lockclone report`.
+- Limit the trial to some projects: list path prefixes, one per line, in
+  `~/.config/lockclone/paths` (e.g. `~/git/app` also covers `~/git/app-<topic>`
+  worktrees). Elsewhere npm ci runs as usual.
+
+Known differences from `npm ci` that do not change the tree: the `npm audit`
+summary is not run; the output lines differ.
 
 ## Existing node_modules
 
