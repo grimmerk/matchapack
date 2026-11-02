@@ -9,7 +9,10 @@
 #     [ -f "$HOME/git/lockclone/shell/lockclone.sh" ] && . "$HOME/git/lockclone/shell/lockclone.sh"
 # Bypass for one command:  LOCKCLONE=0 npm ci     or     command npm ci
 # Remove: delete that line; already installed node_modules keep working.
-npm() {
+# `function name {` rather than `name() {`: zsh would expand an existing
+# `alias npm=…` inside `npm() {` and fail. An alias still wins over this
+# function when both exist, so remove such an alias to use lockclone.
+function npm {
   case "${1-}" in
     ci | clean-install | ic | install-clean | isntall-clean)
       if [ "${LOCKCLONE-1}" != 0 ] && command -v lockclone >/dev/null 2>&1; then

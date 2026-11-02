@@ -86,5 +86,14 @@ CMD="npm ci"; rc=$(run "$d")
 [ "$rc" = 0 ] && by_npm "$d" && [ -f "$d/node_modules/lc-q/index.js" ] && grep -q 'unsupported lockfile entries' "$d.out" && r=ok || r=bad
 check file-dep "file: tarball dependency → plain npm installs it" $r "$d"
 
+# 12. --ignore-scripts → lockclone; bins linked, no root postinstall output
+d=$(new_project ignorescripts); CMD="npm ci --ignore-scripts"; rc=$(run "$d")
+[ "$rc" = 0 ] && by_lockclone "$d" && [ -x "$d/node_modules/.bin/tsc" ] && [ ! -f "$d/root-postinstall.txt" ] && r=ok || r=bad
+check ignore-scripts "npm ci --ignore-scripts → lockclone, bins linked, root postinstall not run" $r "$d"
+
+# 13. the root postinstall runs on a normal install (control for 12)
+[ -f "$work/ci/root-postinstall.txt" ] && r=ok || r=bad
+check root-script "bare npm ci ran the root postinstall (control for case 12)" $r "$work/ci"
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]
