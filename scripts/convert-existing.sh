@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-time conversion of EXISTING node_modules into store clones.
-#   convert-existing.sh [--apply] [--max-depth N] <root>...
+#   convert-existing.sh [--apply] [--max-depth N] <root>...   (default depth 6:
+#   reaches Claude Code worktrees at <repo>/.claude/worktrees/<name>/)
 # Finds npm projects (package.json + package-lock.json + node_modules, not
 # inside node_modules) under each root and re-installs each one with
 # `lockclone npm ci`, i.e. npm ci semantics: node_modules is rebuilt and its
@@ -13,7 +14,7 @@
 #     project (a dev server, a watcher, a shell), so nothing in use is replaced.
 # Prints the volume's free space before and after.
 set -uo pipefail
-apply=0; depth=4; roots=()
+apply=0; depth=6; roots=()
 while [ $# -gt 0 ]; do
   case $1 in
     --apply) apply=1 ;;
@@ -47,7 +48,9 @@ while IFS= read -r lock; do
     3) echo "SKIP not handled $dir  ($(printf '%s\n' "$out" | grep '^lockclone: not handled' | sed 's/^lockclone: not handled, left unchanged //'))"; n_skip=$((n_skip+1)) ;;
     *) echo "FAILED (rc=$rc)  $dir"; printf '%s\n' "$out" | grep -E '^lockclone|npm error' | head -3 | sed 's/^/    /'; n_fail=$((n_fail+1)) ;;
   esac
-done < <(for r in "${roots[@]}"; do find "$r" -maxdepth "$depth" -name package-lock.json -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null; done | sort)
+# -prune: never descend into node_modules or .git (a -not -path filter would
+# still walk millions of files and take minutes).
+done < <(for r in "${roots[@]}"; do find "$r" -maxdepth "$depth" \( -name node_modules -o -name .git \) -prune -o -name package-lock.json -print 2>/dev/null; done | sort)
 
 if [ $apply = 1 ]; then
   sync; sleep 2
