@@ -110,6 +110,7 @@ fn default_clone_mode() -> clone::Mode {
 fn timed<T>(label: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let t = Instant::now();
     let r = f();
+    util::record(label, t.elapsed().as_secs_f64());
     info!("{label}: {:.2}s", t.elapsed().as_secs_f64());
     r
 }

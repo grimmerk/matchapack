@@ -5,6 +5,26 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUIET: AtomicBool = AtomicBool::new(false);
+static PHASES: std::sync::Mutex<Vec<(String, f64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Record how long a step took; the wrapper writes them into log.jsonl.
+pub fn record(label: &str, secs: f64) {
+    if let Ok(mut p) = PHASES.lock() {
+        p.push((label.to_string(), (secs * 100.0).round() / 100.0));
+    }
+}
+
+/// Steps recorded so far, as a JSON object (label → seconds; repeats summed).
+pub fn phases() -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    if let Ok(p) = PHASES.lock() {
+        for (k, v) in p.iter() {
+            let prev = m.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+            m.insert(k.clone(), serde_json::json!(((prev + v) * 100.0).round() / 100.0));
+        }
+    }
+    serde_json::Value::Object(m)
+}
 
 /// Quiet mode (used when thinclone stands in for `npm ci`): per-step timings
 /// and counts are hidden unless THINCLONE_VERBOSE is set.

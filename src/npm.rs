@@ -274,7 +274,9 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch)?;
         let scratch = std::fs::canonicalize(&scratch)?;
+        let t = std::time::Instant::now();
         let result = dry_run_ideal(root, &scratch, lf);
+        crate::util::record("npm ci --dry-run", t.elapsed().as_secs_f64());
         let _ = std::fs::remove_dir_all(&scratch);
         result.map(Some)
     }
@@ -562,6 +564,7 @@ impl PostInstall for NpmRebuild {
                 bail!("npm rebuild failed: {st}");
             }
         }
+        crate::util::record("npm rebuild", t.elapsed().as_secs_f64());
         crate::info!("  npm rebuild (deps): {:.2}s", t.elapsed().as_secs_f64());
         // 2. Hidden lockfile.
         // npm writes the hidden lockfile whenever node_modules exists, even with
@@ -599,6 +602,7 @@ impl PostInstall for NpmRebuild {
                 return Err(crate::util::ScriptFailure(format!("root lifecycle script failed: {st}")).into());
             }
         }
+        crate::util::record("root scripts", t.elapsed().as_secs_f64());
         crate::info!("  root lifecycle scripts: {:.2}s", t.elapsed().as_secs_f64());
         Ok(())
     }

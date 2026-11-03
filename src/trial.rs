@@ -142,7 +142,16 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     println!("recent:");
     for r in runs.iter().rev().take(6) {
         let extra = match r["outcome"].as_str() {
-            Some("installed") => format!("{:.1} s, {} packages", r["secs"].as_f64().unwrap_or(0.0), r["packages"]),
+            Some("installed") => {
+                let mut s = format!("{:.1} s, {} packages", r["secs"].as_f64().unwrap_or(0.0), r["packages"]);
+                if let Some(p) = r["phases"].as_object() {
+                    let mut v: Vec<(&String, f64)> = p.iter().filter_map(|(k, x)| x.as_f64().map(|f| (k, f))).collect();
+                    v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    let top: Vec<String> = v.iter().take(3).map(|(k, f)| format!("{k} {f:.1}")).collect();
+                    s += &format!("; slowest: {}", top.join(", "));
+                }
+                s
+            }
             _ => r["reason"].as_str().unwrap_or("").chars().take(70).collect(),
         };
         println!("  {}  {:<13} {}  ({extra})", when(r["ts"].as_f64().unwrap_or(0.0)), r["outcome"].as_str().unwrap_or("?"), r["dir"].as_str().unwrap_or("?"));
