@@ -54,7 +54,14 @@ m = re.search(r"RESULT: (\w+)", out)
 t = re.search(r"npm ci: ([\d.]+)s\s+thinclone: ([\d.]+)s", out)
 n = re.search(r"noise .*?: (\d+) paths", out)
 ls = re.search(r"npm ls: (.*)", out)
-rec = {"ts": time.time(), "dir": d, "result": m.group(1) if m else "ERROR",
+result = m.group(1) if m else "ERROR"
+# Differences only OUTSIDE node_modules come from the project's own build
+# scripts (e.g. tsdown output that varies run to run, which two npm ci runs may
+# happen to agree on): reported, but kept apart from a node_modules mismatch.
+paths = re.findall(r"^  ([^ :]+)(?::|$)", out.split("== diff A B")[-1].split("== mtime")[0], re.M)
+if result == "DIFFERENT" and paths and all(not (p.startswith("node_modules/") or "/node_modules/" in p) for p in paths):
+    result = "BUILD-OUTPUT-ONLY"
+rec = {"ts": time.time(), "dir": d, "result": result, "differing": paths[:20],
        "npm_ci_secs": float(t.group(1)) if t else None, "thinclone_secs": float(t.group(2)) if t else None,
        "noise_paths": int(n.group(1)) if n else None, "npm_ls": ls.group(1).strip() if ls else None}
 open(log, "a").write(json.dumps(rec) + "\n")
