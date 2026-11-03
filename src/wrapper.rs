@@ -178,8 +178,10 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     if get("install-strategy").as_str().is_some_and(|s| s != "hoisted") {
         return Err(format!("install-strategy={}", get("install-strategy")));
     }
-    // engine-strict: npm ci fails when a package's `engines` excludes this Node.
-    for k in ["global-style", "legacy-bundling", "legacy-peer-deps", "strict-peer-deps", "force", "dry-run", "global", "install-links", "engine-strict"] {
+    // engine-strict is NOT refused here: the `npm ci --dry-run` every install
+    // runs applies it (measured: an engines mismatch fails it with EBADENGINE,
+    // which hands over to npm; a project whose engines match is installed).
+    for k in ["global-style", "legacy-bundling", "legacy-peer-deps", "strict-peer-deps", "force", "dry-run", "global", "install-links"] {
         if is_true(k) {
             return Err(format!("npm config {k}=true"));
         }

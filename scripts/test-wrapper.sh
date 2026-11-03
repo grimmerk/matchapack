@@ -23,8 +23,8 @@ run() { # dir env-assignments command...
   local d=$1; shift
   (cd "$d" && env PATH="$bin_dir:$PATH" "$@" zsh -c ". '$here/shell/thinclone.sh'; $CMD" > "$d.out" 2>&1); echo $?
 }
-check() { # name condition-description test-result
-  if [ "$3" = ok ]; then pass=$((pass+1)); echo "PASS $1: $2"; else fail=$((fail+1)); echo "FAIL $1: $2"; sed 's/^/    /' "$4.out" | grep -E 'thinclone|npm error|ERR' | head -5; fi
+check() { # name condition-description test-result dir
+  if [ "$3" = ok ]; then pass=$((pass+1)); echo "PASS $1: $2"; else fail=$((fail+1)); echo "FAIL $1: $2 (rc=${rc-?})"; sed 's/^/    /' "$4.out" 2>/dev/null | grep -E 'thinclone|npm error|ERR' | head -5; fi
 }
 by_thinclone() { grep -q 'thinclone: added' "$1.out"; }
 by_npm() { ! grep -q 'thinclone: added' "$1.out" && [ -d "$1/node_modules" ]; }
@@ -115,14 +115,24 @@ check log "log.jsonl records installs ($n_inst) and declines ($n_decl)" $r "$wor
 
 # 17–19. settings npm applies and thinclone does not → plain npm with the reason
 d=$(new_project strict); CMD="npm ci"; rc=$(run "$d" npm_config_strict_allow_scripts=true)
-grep -q 'strict-allow-scripts' "$d.out" && ! by_lockclone "$d" && r=ok || r=bad
+grep -q 'strict-allow-scripts' "$d.out" && ! by_thinclone "$d" && r=ok || r=bad
 check strict-scripts "strict-allow-scripts=true → plain npm (npm refuses before wiping)" $r "$d"
 d=$(new_project umask); CMD="umask 077; npm ci"; rc=$(run "$d")
 grep -q 'umask is 077' "$d.out" && by_npm "$d" && r=ok || r=bad
 check umask "umask 077 → plain npm" $r "$d"
 d=$(new_project allowremote); CMD="npm ci"; rc=$(run "$d" npm_config_allow_remote=none)
-grep -q 'allow-remote' "$d.out" && ! by_lockclone "$d" && r=ok || r=bad
+grep -q 'allow-remote' "$d.out" && ! by_thinclone "$d" && r=ok || r=bad
 check allow-remote "allow-remote=none → plain npm" $r "$d"
+
+# 20–21. engine-strict: matching engines → thinclone; a mismatch → npm (EBADENGINE)
+d=$(new_project esok); echo 'engine-strict=true' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
+[ "$rc" = 0 ] && by_thinclone "$d" && r=ok || r=bad
+check engine-ok "engine-strict with matching engines → thinclone" $r "$d"
+d=$(new_project esbad); echo 'engine-strict=true' > "$d/.npmrc"
+python3 -c "import json;p='$d/package-lock.json';l=json.load(open(p));l['packages']['node_modules/lodash']['engines']={'node':'>=99'};json.dump(l,open(p,'w'),indent=2)"
+mkdir -p "$d/node_modules/keepme"; CMD="npm ci"; rc=$(run "$d")
+[ "$rc" != 0 ] && grep -q 'EBADENGINE' "$d.out" && [ -d "$d/node_modules/keepme" ] && r=ok || r=bad
+check engine-bad "engine-strict with an engines mismatch → npm's EBADENGINE, node_modules untouched" $r "$d"
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

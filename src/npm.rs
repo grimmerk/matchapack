@@ -413,7 +413,7 @@ pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan
     // npm ci empties node_modules only in the root and in the DECLARED
     // workspaces (ci.js: getWorkspaces). Other in-project link targets
     // (`file:./lib`) keep their node_modules; if one has anything in it, the
-    // tree npm ci leaves is not one lockclone reproduces, so hand over.
+    // tree npm ci leaves is not one thinclone reproduces, so hand over.
     let ws_globs = workspace_globs(lf);
     for e in &lf.entries {
         if e.link {
