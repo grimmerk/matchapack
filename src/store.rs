@@ -35,6 +35,10 @@ impl Integrity {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(b64)
                 .with_context(|| format!("bad base64 in integrity {part}"))?;
+            let want = match algo { "sha512" => 64, "sha384" => 48, "sha256" => 32, _ => 20 };
+            if bytes.len() != want {
+                bail!("integrity {part} has a {}-byte digest, {algo} needs {want}", bytes.len());
+            }
             let i = Integrity { algo: algo.to_string(), hex: hex::encode(bytes) };
             if best.as_ref().map_or(true, |(r, _)| rank < *r) {
                 best = Some((rank, i));
@@ -103,7 +107,14 @@ impl Store {
             let Some(pid) = name.split('-').next().and_then(|p| p.parse::<i32>().ok()) else { continue };
             let alive = unsafe { libc::kill(pid, 0) } == 0
                 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-            if !alive {
+            // Also require an hour of age: a pid is only meaningful in this
+            // PID namespace / host, and a store can be shared (bind mount, NFS).
+            let old = ent
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().map(|d| d.as_secs() > 3600).unwrap_or(false))
+                .unwrap_or(false);
+            if !alive && old {
                 let _ = fs::remove_dir_all(ent.path());
             }
         }

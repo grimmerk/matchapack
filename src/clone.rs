@@ -92,10 +92,21 @@ pub fn touch_trees(dirs: &[std::path::PathBuf]) -> Result<usize> {
         for e in std::fs::read_dir(d)? {
             let e = e?;
             let p = e.path();
-            if e.file_type()?.is_dir() && e.file_name().to_string_lossy().starts_with('@') {
+            let ft = e.file_type()?;
+            // A symlink here is a workspace or `file:` link: its target is
+            // source code npm ci never touches. Only the link itself is touched
+            // (lutimes), never what it points to.
+            if ft.is_symlink() {
+                heads.push(CString::new(p.as_os_str().as_bytes())?);
+            } else if ft.is_dir() && e.file_name().to_string_lossy().starts_with('@') {
                 heads.push(CString::new(p.as_os_str().as_bytes())?);
                 for s in std::fs::read_dir(&p)? {
-                    starts.push(s?.path());
+                    let s = s?;
+                    if s.file_type()?.is_symlink() {
+                        heads.push(CString::new(s.path().as_os_str().as_bytes())?);
+                    } else {
+                        starts.push(s.path());
+                    }
                 }
             } else {
                 starts.push(p);
@@ -106,7 +117,8 @@ pub fn touch_trees(dirs: &[std::path::PathBuf]) -> Result<usize> {
         .par_iter()
         .map(|d| -> Result<Vec<CString>> {
             let mut v = vec![];
-            for ent in walkdir::WalkDir::new(d).follow_links(false) {
+            // follow_root_links(false): walkdir would otherwise follow a root that is a symlink.
+            for ent in walkdir::WalkDir::new(d).follow_links(false).follow_root_links(false) {
                 v.push(CString::new(ent?.path().as_os_str().as_bytes())?);
             }
             Ok(v)

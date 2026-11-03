@@ -113,5 +113,16 @@ n_decl=$(grep -c '"outcome":"declined"' "$THINCLONE_LOG_DIR/log.jsonl" 2>/dev/nu
 [ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && r=ok || r=bad
 check log "log.jsonl records installs ($n_inst) and declines ($n_decl)" $r "$work/logs"
 
+# 17–19. settings npm applies and thinclone does not → plain npm with the reason
+d=$(new_project strict); CMD="npm ci"; rc=$(run "$d" npm_config_strict_allow_scripts=true)
+grep -q 'strict-allow-scripts' "$d.out" && ! by_lockclone "$d" && r=ok || r=bad
+check strict-scripts "strict-allow-scripts=true → plain npm (npm refuses before wiping)" $r "$d"
+d=$(new_project umask); CMD="umask 077; npm ci"; rc=$(run "$d")
+grep -q 'umask is 077' "$d.out" && by_npm "$d" && r=ok || r=bad
+check umask "umask 077 → plain npm" $r "$d"
+d=$(new_project allowremote); CMD="npm ci"; rc=$(run "$d" npm_config_allow_remote=none)
+grep -q 'allow-remote' "$d.out" && ! by_lockclone "$d" && r=ok || r=bad
+check allow-remote "allow-remote=none → plain npm" $r "$d"
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

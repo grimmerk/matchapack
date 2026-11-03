@@ -122,6 +122,32 @@ fn platform_skips(lf: &Lockfile) -> Result<Vec<(String, String)>> {
     Ok(skipped)
 }
 
+/// Structural checks on lockfile paths, before anything reads a path from the
+/// lockfile (sync check, dry-run copies, placement).
+pub fn validate_paths(lf: &Lockfile) -> Result<()> {
+    // Every path that becomes a delete, clone or symlink under the root must be
+    // plain and relative (see util::safe_relative). A `file:../shared` target
+    // also gets a `../shared` key in the lockfile, which this refuses, so such
+    // projects go to npm.
+    let unsafe_paths: Vec<&str> = lf
+        .entries
+        .iter()
+        .filter(|e| !e.path.is_empty() && !crate::util::safe_relative(&e.path))
+        .map(|e| e.path.as_str())
+        .collect();
+    if !unsafe_paths.is_empty() {
+        bail!("lockfile paths that are not plain relative paths: {unsafe_paths:?}");
+    }
+    // An entry nested under a link entry would be placed through the symlink,
+    // i.e. inside the link's target (possibly outside the project). npm never
+    // writes such keys.
+    let link_paths: Vec<&str> = lf.entries.iter().filter(|e| e.link).map(|e| e.path.as_str()).collect();
+    if let Some(e) = lf.entries.iter().find(|e| link_paths.iter().any(|l| e.path.starts_with(&format!("{l}/")))) {
+        bail!("lockfile entry {} lies under a link", e.path);
+    }
+    Ok(())
+}
+
 /// Stand-in for npm ci's "package.json and package-lock.json are in sync" check.
 /// For the root and each workspace, every declared dependency must either equal
 /// the lockfile's record, or be a semver range (or `npm:name@range` alias) that
@@ -130,6 +156,7 @@ fn platform_skips(lf: &Lockfile) -> Result<Vec<(String, String)>> {
 /// specs that changed are refused (npm ci would resolve or prune them).
 /// Not covered: a change to `overrides`.
 pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String>>> {
+    validate_paths(lf)?;
     const FIELDS: [&str; 4] = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
     let pkgs = lf.raw.get("packages").and_then(|v| v.as_object()).context("no packages")?;
     let keys: HashSet<&str> = pkgs.keys().map(|k| k.as_str()).collect();
@@ -231,9 +258,11 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
     // sync"). Override semantics (nested selectors, `$ref`) belong to npm, so ask
     // npm itself: `npm ci --dry-run` loads the lockfile, builds the ideal tree,
     // validates, and writes nothing (~1 s small, ~2.5 s on a large workspaces monorepo).
-    let root_pj: Value = serde_json::from_str(&std::fs::read_to_string(root.join("package.json"))?)?;
-    let has_overrides = root_pj.get("overrides").and_then(|o| o.as_object()).is_some_and(|o| !o.is_empty());
-    if has_overrides {
+    // Run it for EVERY project, not only those with overrides: without it a
+    // lockfile missing a transitive entry (a hand-merged lockfile) installs a
+    // broken tree where npm ci refuses (EUSAGE "Missing: … from lock file"),
+    // and an unreferenced extra entry would be placed (found in review).
+    {
         // The dry-run's `add` list is a DIFF against the node_modules on disk, so
         // run it in a scratch copy that has none: package.json, lockfile, .npmrc
         // and each workspace's package.json. Then `add` is the whole ideal tree.
@@ -247,9 +276,8 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
         let scratch = std::fs::canonicalize(&scratch)?;
         let result = dry_run_ideal(root, &scratch, lf);
         let _ = std::fs::remove_dir_all(&scratch);
-        return result.map(Some);
+        result.map(Some)
     }
-    Ok(None)
 }
 
 fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<String>> {
@@ -319,6 +347,39 @@ fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<S
 
 const EXTRANEOUS: &str = "extraneous";
 
+/// Workspace patterns from the lockfile's root entry (`workspaces`, as an array
+/// or `{ "packages": [...] }`), which npm copies from package.json.
+fn workspace_globs(lf: &Lockfile) -> Vec<String> {
+    let root = lf.raw.get("packages").and_then(|p| p.get("")).and_then(|r| r.get("workspaces"));
+    let list = match root {
+        Some(Value::Array(a)) => a.clone(),
+        Some(Value::Object(o)) => o.get("packages").and_then(|p| p.as_array()).cloned().unwrap_or_default(),
+        _ => vec![],
+    };
+    list.iter().filter_map(|v| v.as_str()).map(|s| s.trim_start_matches("./").trim_end_matches('/').to_string()).collect()
+}
+
+/// Minimal glob for workspace patterns: `*` matches one path segment, `**` any
+/// number of segments; other segments match literally.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    fn rec(p: &[&str], s: &[&str]) -> bool {
+        match p.first() {
+            None => s.is_empty(),
+            Some(&"**") => (0..=s.len()).any(|i| rec(&p[1..], &s[i..])),
+            Some(seg) => !s.is_empty() && seg_match(seg, s[0]) && rec(&p[1..], &s[1..]),
+        }
+    }
+    fn seg_match(p: &str, s: &str) -> bool {
+        match p.split_once('*') {
+            None => p == s,
+            Some((pre, post)) => s.len() >= pre.len() + post.len() && s.starts_with(pre) && s.ends_with(post),
+        }
+    }
+    let p: Vec<&str> = pattern.split('/').filter(|x| !x.is_empty()).collect();
+    let s: Vec<&str> = path.split('/').filter(|x| !x.is_empty()).collect();
+    rec(&p, &s)
+}
+
 /// `ideal`: when npm's ideal tree is known (see `check_in_sync`), lockfile
 /// entries outside it are not installed, as npm ci does.
 pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan> {
@@ -348,23 +409,21 @@ pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan
         skipped.contains(p) || skipped.iter().any(|s| p.starts_with(s) && p[s.len()..].starts_with("/node_modules/"))
     };
     let mut unsupported = vec![];
-    // Every path that becomes a delete, clone or symlink under the root must be
-    // plain and relative (see util::safe_relative). Link TARGETS may leave the
-    // project (`file:../shared`): they only become a symlink's text.
-    let unsafe_paths: Vec<&str> = lf
-        .entries
-        .iter()
-        .filter(|e| !e.path.is_empty() && !crate::util::safe_relative(&e.path))
-        .map(|e| e.path.as_str())
-        .collect();
-    if !unsafe_paths.is_empty() {
-        bail!("lockfile paths that are not plain relative paths: {unsafe_paths:?}");
-    }
+    validate_paths(lf)?;
+    // npm ci empties node_modules only in the root and in the DECLARED
+    // workspaces (ci.js: getWorkspaces). Other in-project link targets
+    // (`file:./lib`) keep their node_modules; if one has anything in it, the
+    // tree npm ci leaves is not one lockclone reproduces, so hand over.
+    let ws_globs = workspace_globs(lf);
     for e in &lf.entries {
         if e.link {
             let target = e.resolved.clone().context("link entry without resolved")?;
-            if crate::util::safe_relative(&target) && !target.contains("node_modules/") && !plan.owned_roots.contains(&target) {
+            if !crate::util::safe_relative(&target) || target.contains("node_modules/") || plan.owned_roots.contains(&target) {
+                // not an in-project directory we could own
+            } else if ws_globs.iter().any(|g| glob_match(g, &target)) {
                 plan.owned_roots.push(target.clone());
+            } else if std::fs::read_dir(lf.root.join(&target).join("node_modules")).map(|mut d| d.next().is_some()).unwrap_or(false) {
+                bail!("`file:` dependency directory {target} has its own node_modules, which npm ci leaves in place");
             }
         }
         if lock::depth(&e.path) == 0 || e.in_bundle || under_skipped(&e.path) {
@@ -497,7 +556,10 @@ impl PostInstall for NpmRebuild {
             }
             let st = cmd.status().context("running npm rebuild")?;
             if !st.success() {
-                return Err(crate::util::ScriptFailure(format!("npm rebuild failed: {st}")).into());
+                // Not reported as a script failure: npm ci drops an OPTIONAL
+                // dependency whose install script fails and carries on, which
+                // only npm ci itself reproduces. The wrapper hands over to it.
+                bail!("npm rebuild failed: {st}");
             }
         }
         crate::info!("  npm rebuild (deps): {:.2}s", t.elapsed().as_secs_f64());
@@ -515,8 +577,15 @@ impl PostInstall for NpmRebuild {
         let t = std::time::Instant::now();
         if !self.ignore_scripts {
             let npm_dir = crate::util::npm_dir().context("cannot locate npm's installation")?;
-            let helper = std::env::temp_dir().join(format!("thinclone-root-scripts-{}.js", std::process::id()));
-            std::fs::write(&helper, include_str!("root-scripts.js"))?;
+            // Under the store's tmp dir (user-owned), created fresh: never through
+            // a pre-existing path in a shared /tmp.
+            let helper = crate::default_store(None).join("tmp").join(format!("{}-root-scripts.js", std::process::id()));
+            let _ = std::fs::remove_file(&helper);
+            {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&helper)?;
+                f.write_all(include_str!("root-scripts.js").as_bytes())?;
+            }
             let st = crate::util::npm_cmd()
                 .args(["exec", "--no", "--", "node"])
                 .arg(&helper)

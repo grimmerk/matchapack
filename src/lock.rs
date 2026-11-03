@@ -29,6 +29,8 @@ pub struct Entry {
 }
 
 pub struct Lockfile {
+    /// The project directory the lockfile belongs to.
+    pub root: std::path::PathBuf,
     pub raw: Map<String, Value>,
     pub entries: Vec<Entry>,
 }
@@ -43,7 +45,7 @@ fn str_list(v: Option<&Value>) -> Vec<String> {
 
 fn dep_names(v: &Map<String, Value>) -> Vec<String> {
     let mut out = vec![];
-    for k in ["dependencies", "optionalDependencies", "peerDependencies"] {
+    for k in ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
         if let Some(Value::Object(m)) = v.get(k) {
             out.extend(m.keys().cloned());
         }
@@ -102,7 +104,7 @@ impl Lockfile {
                 opt_deps: opt_dep_names(o),
             });
         }
-        Ok(Lockfile { raw, entries })
+        Ok(Lockfile { root: root.to_path_buf(), raw, entries })
     }
 }
 

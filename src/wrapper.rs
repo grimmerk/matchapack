@@ -66,7 +66,14 @@ pub fn run(args: Vec<String>) -> i32 {
     };
     util::set_quiet(true);
     eprintln!("thinclone: npm ci from the store (THINCLONE=0 npm ci for plain npm)");
-    match crate::run_install(&opts) {
+    // A panic must not skip the fallback: npm ci rebuilds node_modules from
+    // whatever state it is in.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::run_install(&opts)));
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(_) => Err(InstallError::Broke(anyhow::anyhow!("internal error (panic)"))),
+    };
+    match outcome {
         Ok(s) => {
             eprintln!("thinclone: added {} packages from the store in {:.1}s", s.placed, s.secs);
             log(
@@ -192,6 +199,34 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     }
     if is_true("ignore-scripts") {
         ignore_scripts = true;
+    }
+    // strict-allow-scripts: npm ci refuses BEFORE wiping when a dependency has
+    // unreviewed install scripts; npm rebuild would only fail after the wipe.
+    if is_true("strict-allow-scripts") && !ignore_scripts && !is_true("dangerously-allow-all-scripts") {
+        return Err("npm config strict-allow-scripts=true".into());
+    }
+    // Source policies: npm refuses (or leaves out) packages from these sources
+    // when restricted; thinclone does not apply them.
+    for k in ["allow-remote", "allow-directory", "allow-file", "allow-git"] {
+        if get(k).as_str().is_some_and(|v| v != "all") {
+            return Err(format!("npm config {k}={}", get(k)));
+        }
+    }
+    if !get("before").is_null() {
+        return Err("npm config before is set".into());
+    }
+    // File modes: npm (pacote) applies the process umask and npm's `umask`
+    // config; the store is extracted with 022.
+    let process_umask = unsafe {
+        let m = libc::umask(0o022);
+        libc::umask(m);
+        m as u32
+    };
+    if process_umask != 0o022 {
+        return Err(format!("umask is {process_umask:03o}, the store assumes 022"));
+    }
+    if get("umask").as_u64().is_some_and(|u| u != 0) || get("umask").as_str().is_some_and(|u| u != "0") {
+        return Err(format!("npm config umask={}", get("umask")));
     }
     let cache = get("cache").as_str().map(PathBuf::from).unwrap_or_else(|| crate::home().join(".npm"));
 
