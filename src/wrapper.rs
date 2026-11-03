@@ -1,4 +1,4 @@
-//! `lockclone npm <args>`: what the shell wrapper calls instead of npm.
+//! `thinclone npm <args>`: what the shell wrapper calls instead of npm.
 //!
 //! Only a bare `npm ci` (or one of its aliases, with output-only flags) is a
 //! candidate. Everything else, and every candidate that fails a check, runs the
@@ -7,10 +7,10 @@
 //!   - npm's version is one the harness was run against (VERIFIED_NPM);
 //!   - no npm setting changes the shape of the tree (omit, install-strategy, …);
 //!   - the project has package.json + package-lock.json and no shrinkwrap;
-//!   - lockclone's own prepare step succeeds (lockfile support, sync, store,
+//!   - thinclone's own prepare step succeeds (lockfile support, sync, store,
 //!     reflink probe).
 //! After node_modules has been changed: a failing lifecycle script is reported
-//! as npm would report it; any other lockclone failure hands over to npm, whose
+//! as npm would report it; any other thinclone failure hands over to npm, whose
 //! `npm ci` wipes and rebuilds node_modules.
 
 use crate::{clone, trial, util, InstallError, InstallOpts};
@@ -22,7 +22,7 @@ use std::process::Command;
 const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "isntall-clean"];
 
 /// npm major.minor versions the harness was run against. Another version runs
-/// plain npm until the harness has been re-run (override: LOCKCLONE_NPM_VERSIONS
+/// plain npm until the harness has been re-run (override: THINCLONE_NPM_VERSIONS
 /// = comma list, or `any`).
 const VERIFIED_NPM: &[&str] = &["11.19", "11.17"];
 
@@ -42,7 +42,7 @@ const PASSIVE_FLAGS: [&str; 11] = [
 ];
 
 pub fn run(args: Vec<String>) -> i32 {
-    if std::env::var("LOCKCLONE").as_deref() == Ok("0") {
+    if std::env::var("THINCLONE").as_deref() == Ok("0") {
         return exec_npm(&args);
     }
     if !args.first().is_some_and(|a| CI_ALIASES.contains(&a.as_str())) {
@@ -65,10 +65,10 @@ pub fn run(args: Vec<String>) -> i32 {
         }
     };
     util::set_quiet(true);
-    eprintln!("lockclone: npm ci from the store (LOCKCLONE=0 npm ci for plain npm)");
+    eprintln!("thinclone: npm ci from the store (THINCLONE=0 npm ci for plain npm)");
     match crate::run_install(&opts) {
         Ok(s) => {
-            eprintln!("lockclone: added {} packages from the store in {:.1}s", s.placed, s.secs);
+            eprintln!("thinclone: added {} packages from the store in {:.1}s", s.placed, s.secs);
             log(
                 "installed",
                 json!({ "secs": s.secs, "packages": s.placed, "store_new": s.store_new,
@@ -82,26 +82,26 @@ pub fn run(args: Vec<String>) -> i32 {
         }
         Err(InstallError::Scripts(e)) => {
             log("script_failed", json!({ "reason": one_line(&e) }));
-            eprintln!("lockclone: {e:#}");
+            eprintln!("thinclone: {e:#}");
             1
         }
         Err(InstallError::Broke(e)) => {
             log("broke", json!({ "reason": one_line(&e) }));
-            eprintln!("lockclone: failed after changing node_modules ({}); running npm ci to rebuild it", one_line(&e));
+            eprintln!("thinclone: failed after changing node_modules ({}); running npm ci to rebuild it", one_line(&e));
             exec_npm(&args)
         }
     }
 }
 
-/// lockclone will not handle this install and nothing has been changed. Run
-/// plain npm, unless LOCKCLONE_NO_FALLBACK=1 (scripts/convert-existing.sh):
+/// thinclone will not handle this install and nothing has been changed. Run
+/// plain npm, unless THINCLONE_NO_FALLBACK=1 (scripts/convert-existing.sh):
 /// then report and exit 3, leaving the existing node_modules as it is.
 fn decline(args: &[String], reason: &str) -> i32 {
-    if std::env::var("LOCKCLONE_NO_FALLBACK").as_deref() == Ok("1") {
-        eprintln!("lockclone: not handled, left unchanged ({reason})");
+    if std::env::var("THINCLONE_NO_FALLBACK").as_deref() == Ok("1") {
+        eprintln!("thinclone: not handled, left unchanged ({reason})");
         return 3;
     }
-    eprintln!("lockclone: running plain npm instead ({reason})");
+    eprintln!("thinclone: running plain npm instead ({reason})");
     exec_npm(args)
 }
 
@@ -115,11 +115,11 @@ fn one_line(e: &anyhow::Error) -> String {
     }
 }
 
-/// Replace this process with the real npm. `LOCKCLONE=0` keeps any wrapper
+/// Replace this process with the real npm. `THINCLONE=0` keeps any wrapper
 /// from routing back here.
 fn exec_npm(args: &[String]) -> i32 {
-    let err = Command::new("npm").args(args).env("LOCKCLONE", "0").exec();
-    eprintln!("lockclone: could not start npm: {err}");
+    let err = Command::new("npm").args(args).env("THINCLONE", "0").exec();
+    eprintln!("thinclone: could not start npm: {err}");
     127
 }
 
@@ -146,7 +146,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     trial::in_scope(&cwd)?;
 
     let version = util::npm_version().ok_or("could not determine the npm version")?;
-    let allowed = std::env::var("LOCKCLONE_NPM_VERSIONS").ok();
+    let allowed = std::env::var("THINCLONE_NPM_VERSIONS").ok();
     let ok = match allowed.as_deref() {
         Some("any") => true,
         Some(list) => list.split(',').any(|v| version_matches(&version, v.trim())),

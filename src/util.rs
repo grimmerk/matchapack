@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUIET: AtomicBool = AtomicBool::new(false);
 
-/// Quiet mode (used when lockclone stands in for `npm ci`): per-step timings
-/// and counts are hidden unless LOCKCLONE_VERBOSE is set.
+/// Quiet mode (used when thinclone stands in for `npm ci`): per-step timings
+/// and counts are hidden unless THINCLONE_VERBOSE is set.
 pub fn set_quiet(q: bool) {
-    QUIET.store(q && std::env::var_os("LOCKCLONE_VERBOSE").is_none(), Ordering::Relaxed);
+    QUIET.store(q && std::env::var_os("THINCLONE_VERBOSE").is_none(), Ordering::Relaxed);
 }
 
 pub fn quiet() -> bool {
@@ -20,17 +20,17 @@ pub fn quiet() -> bool {
 macro_rules! info {
     ($($arg:tt)*) => {
         if !$crate::util::quiet() {
-            eprintln!("[lockclone] {}", format!($($arg)*));
+            eprintln!("[thinclone] {}", format!($($arg)*));
         }
     };
 }
 
-/// Every npm that lockclone starts goes through here. `LOCKCLONE=0` tells any
+/// Every npm that thinclone starts goes through here. `THINCLONE=0` tells any
 /// npm wrapper (shell function, PATH shim) to pass straight through, so a
-/// wrapper can never recurse into lockclone.
+/// wrapper can never recurse into thinclone.
 pub fn npm_cmd() -> Command {
     let mut c = Command::new("npm");
-    c.env("LOCKCLONE", "0");
+    c.env("THINCLONE", "0");
     c
 }
 
@@ -74,7 +74,7 @@ fn is_executable(p: &std::path::Path) -> bool {
 /// A path from the lockfile is used under the project root only if it is
 /// relative and made of plain names: no `..`, no root, no `.`. Path::join with
 /// an absolute path would REPLACE the root, so this guards every delete, clone
-/// and symlink lockclone does inside the project.
+/// and symlink thinclone does inside the project.
 pub fn safe_relative(p: &str) -> bool {
     !p.is_empty() && std::path::Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }

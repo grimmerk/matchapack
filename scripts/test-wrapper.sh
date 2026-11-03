@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Routing tests for the shell wrapper + `lockclone npm`.
+# Routing tests for the shell wrapper + `thinclone npm`.
 #   test-wrapper.sh <work-dir>
-# Each case runs a command in `zsh -c` after sourcing shell/lockclone.sh, the
-# way a user's shell would, and asserts WHO installed (lockclone or plain npm),
+# Each case runs a command in `zsh -c` after sourcing shell/thinclone.sh, the
+# way a user's shell would, and asserts WHO installed (thinclone or plain npm),
 # the exit code, and a property of the result.
 set -uo pipefail
 work=$1
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin_dir=$here/target/release
 # Test runs log to the work dir, never to the real trial log.
-export LOCKCLONE_LOG_DIR=$work/logs
+export THINCLONE_LOG_DIR=$work/logs
 fx=$here/fixtures/small
 pass=0; fail=0
 
@@ -21,23 +21,23 @@ new_project() { # name [package.json patch (python expression on d)]
 }
 run() { # dir env-assignments command...
   local d=$1; shift
-  (cd "$d" && env PATH="$bin_dir:$PATH" "$@" zsh -c ". '$here/shell/lockclone.sh'; $CMD" > "$d.out" 2>&1); echo $?
+  (cd "$d" && env PATH="$bin_dir:$PATH" "$@" zsh -c ". '$here/shell/thinclone.sh'; $CMD" > "$d.out" 2>&1); echo $?
 }
 check() { # name condition-description test-result
-  if [ "$3" = ok ]; then pass=$((pass+1)); echo "PASS $1: $2"; else fail=$((fail+1)); echo "FAIL $1: $2"; sed 's/^/    /' "$4.out" | grep -E 'lockclone|npm error|ERR' | head -5; fi
+  if [ "$3" = ok ]; then pass=$((pass+1)); echo "PASS $1: $2"; else fail=$((fail+1)); echo "FAIL $1: $2"; sed 's/^/    /' "$4.out" | grep -E 'thinclone|npm error|ERR' | head -5; fi
 }
-by_lockclone() { grep -q 'lockclone: added' "$1.out"; }
-by_npm() { ! grep -q 'lockclone: added' "$1.out" && [ -d "$1/node_modules" ]; }
+by_thinclone() { grep -q 'thinclone: added' "$1.out"; }
+by_npm() { ! grep -q 'thinclone: added' "$1.out" && [ -d "$1/node_modules" ]; }
 
-# 1. bare npm ci → lockclone
+# 1. bare npm ci → thinclone
 d=$(new_project ci); CMD="npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_lockclone "$d" && [ -x "$d/node_modules/.bin/tsc" ] && r=ok || r=bad
+[ "$rc" = 0 ] && by_thinclone "$d" && [ -x "$d/node_modules/.bin/tsc" ] && r=ok || r=bad
 check ci "bare npm ci installs from the store, bins linked" $r "$d"
 
-# 2. alias npm clean-install → lockclone
+# 2. alias npm clean-install → thinclone
 d=$(new_project alias); CMD="npm clean-install --no-audit --no-fund"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_lockclone "$d" && r=ok || r=bad
-check alias "npm clean-install with passive flags → lockclone" $r "$d"
+[ "$rc" = 0 ] && by_thinclone "$d" && r=ok || r=bad
+check alias "npm clean-install with passive flags → thinclone" $r "$d"
 
 # 3. a tree-shaping flag → plain npm, and npm's semantics apply (no dev deps)
 d=$(new_project omit); CMD="npm ci --omit=dev"; rc=$(run "$d")
@@ -49,23 +49,23 @@ d=$(new_project nodeenv); CMD="npm ci"; rc=$(run "$d" NODE_ENV=production)
 [ "$rc" = 0 ] && by_npm "$d" && [ ! -d "$d/node_modules/jest" ] && r=ok || r=bad
 check node-env "NODE_ENV=production → plain npm, dev deps omitted" $r "$d"
 
-# 5. LOCKCLONE=0 → plain npm, silently
-d=$(new_project optout); CMD="npm ci"; rc=$(run "$d" LOCKCLONE=0)
-[ "$rc" = 0 ] && by_npm "$d" && ! grep -q '^lockclone' "$d.out" && r=ok || r=bad
-check opt-out "LOCKCLONE=0 npm ci → plain npm, no lockclone output" $r "$d"
+# 5. THINCLONE=0 → plain npm, silently
+d=$(new_project optout); CMD="npm ci"; rc=$(run "$d" THINCLONE=0)
+[ "$rc" = 0 ] && by_npm "$d" && ! grep -q '^thinclone' "$d.out" && r=ok || r=bad
+check opt-out "THINCLONE=0 npm ci → plain npm, no thinclone output" $r "$d"
 
 # 6. command npm ci → plain npm
 d=$(new_project command); CMD="command npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_npm "$d" && ! grep -q '^lockclone' "$d.out" && r=ok || r=bad
+[ "$rc" = 0 ] && by_npm "$d" && ! grep -q '^thinclone' "$d.out" && r=ok || r=bad
 check command "command npm ci bypasses the function" $r "$d"
 
-# 7. other npm commands never reach lockclone; exit codes pass through
+# 7. other npm commands never reach thinclone; exit codes pass through
 d=$(new_project other); CMD="npm run nope"; rc=$(run "$d")
-[ "$rc" != 0 ] && ! grep -q '^lockclone' "$d.out" && grep -q 'Missing script' "$d.out" && r=ok || r=bad
+[ "$rc" != 0 ] && ! grep -q '^thinclone' "$d.out" && grep -q 'Missing script' "$d.out" && r=ok || r=bad
 check passthrough "npm run <missing> → npm's own error and non-zero exit" $r "$d"
 
 # 8. npm version not verified → plain npm
-d=$(new_project version); CMD="npm ci"; rc=$(run "$d" LOCKCLONE_NPM_VERSIONS=10.9)
+d=$(new_project version); CMD="npm ci"; rc=$(run "$d" THINCLONE_NPM_VERSIONS=10.9)
 [ "$rc" = 0 ] && by_npm "$d" && grep -q 'has not been verified' "$d.out" && r=ok || r=bad
 check version-gate "unverified npm version → plain npm with the reason" $r "$d"
 
@@ -88,28 +88,28 @@ CMD="npm ci"; rc=$(run "$d")
 [ "$rc" = 0 ] && by_npm "$d" && [ -f "$d/node_modules/lc-q/index.js" ] && grep -q 'unsupported lockfile entries' "$d.out" && r=ok || r=bad
 check file-dep "file: tarball dependency → plain npm installs it" $r "$d"
 
-# 12. --ignore-scripts → lockclone; bins linked, no root postinstall output
+# 12. --ignore-scripts → thinclone; bins linked, no root postinstall output
 d=$(new_project ignorescripts); CMD="npm ci --ignore-scripts"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_lockclone "$d" && [ -x "$d/node_modules/.bin/tsc" ] && [ ! -f "$d/root-postinstall.txt" ] && r=ok || r=bad
-check ignore-scripts "npm ci --ignore-scripts → lockclone, bins linked, root postinstall not run" $r "$d"
+[ "$rc" = 0 ] && by_thinclone "$d" && [ -x "$d/node_modules/.bin/tsc" ] && [ ! -f "$d/root-postinstall.txt" ] && r=ok || r=bad
+check ignore-scripts "npm ci --ignore-scripts → thinclone, bins linked, root postinstall not run" $r "$d"
 
 # 13. the root postinstall runs on a normal install (control for 12)
 [ -f "$work/ci/root-postinstall.txt" ] && r=ok || r=bad
 check root-script "bare npm ci ran the root postinstall (control for case 12)" $r "$work/ci"
 
-# 14. trial scope: a project outside LOCKCLONE_PATHS → plain npm with the reason
-d=$(new_project outscope); CMD="npm ci"; rc=$(run "$d" LOCKCLONE_PATHS=/nonexistent-prefix)
+# 14. trial scope: a project outside THINCLONE_PATHS → plain npm with the reason
+d=$(new_project outscope); CMD="npm ci"; rc=$(run "$d" THINCLONE_PATHS=/nonexistent-prefix)
 [ "$rc" = 0 ] && by_npm "$d" && grep -q 'outside the trial scope' "$d.out" && r=ok || r=bad
 check scope-out "project outside the trial scope → plain npm with the reason" $r "$d"
 
-# 15. inside the scope → lockclone
-d=$(new_project inscope); CMD="npm ci"; rc=$(run "$d" LOCKCLONE_PATHS="/nonexistent-prefix:$work")
-[ "$rc" = 0 ] && by_lockclone "$d" && r=ok || r=bad
-check scope-in "project inside the trial scope → lockclone" $r "$d"
+# 15. inside the scope → thinclone
+d=$(new_project inscope); CMD="npm ci"; rc=$(run "$d" THINCLONE_PATHS="/nonexistent-prefix:$work")
+[ "$rc" = 0 ] && by_thinclone "$d" && r=ok || r=bad
+check scope-in "project inside the trial scope → thinclone" $r "$d"
 
 # 16. the run log records installs and declines (in the test's own log dir)
-n_inst=$(grep -c '"outcome":"installed"' "$LOCKCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
-n_decl=$(grep -c '"outcome":"declined"' "$LOCKCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
+n_inst=$(grep -c '"outcome":"installed"' "$THINCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
+n_decl=$(grep -c '"outcome":"declined"' "$THINCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
 [ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && r=ok || r=bad
 check log "log.jsonl records installs ($n_inst) and declines ($n_decl)" $r "$work/logs"
 

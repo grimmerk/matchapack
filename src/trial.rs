@@ -1,9 +1,9 @@
 //! Trial-period bookkeeping, all outside any repository:
-//!   ~/.cache/lockclone/log.jsonl     one line per `lockclone npm ci` decision
-//!   ~/.cache/lockclone/verify.jsonl  one line per sampled verification
+//!   ~/.cache/thinclone/log.jsonl     one line per `thinclone npm ci` decision
+//!   ~/.cache/thinclone/verify.jsonl  one line per sampled verification
 //!                                    (scripts/verify-sample.sh)
-//!   ~/.config/lockclone/paths        optional trial scope: path prefixes
-//! `lockclone report` summarises the two logs.
+//!   ~/.config/thinclone/paths        optional trial scope: path prefixes
+//! `thinclone report` summarises the two logs.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn cache_dir() -> PathBuf {
-    std::env::var_os("LOCKCLONE_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::home().join(".cache/lockclone"))
+    std::env::var_os("THINCLONE_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::home().join(".cache/thinclone"))
 }
 
 pub fn log_path() -> PathBuf {
@@ -26,14 +26,14 @@ pub fn now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// Append one record; never fails the install (LOCKCLONE_LOG=0 disables).
+/// Append one record; never fails the install (THINCLONE_LOG=0 disables).
 pub fn append(mut rec: Value) {
-    if std::env::var("LOCKCLONE_LOG").as_deref() == Ok("0") {
+    if std::env::var("THINCLONE_LOG").as_deref() == Ok("0") {
         return;
     }
     if let Value::Object(m) = &mut rec {
         m.insert("ts".into(), json!(now()));
-        m.insert("lockclone".into(), json!(env!("CARGO_PKG_VERSION")));
+        m.insert("thinclone".into(), json!(env!("CARGO_PKG_VERSION")));
     }
     let p = log_path();
     let _ = std::fs::create_dir_all(p.parent().unwrap());
@@ -42,13 +42,13 @@ pub fn append(mut rec: Value) {
     }
 }
 
-/// Trial scope: if ~/.config/lockclone/paths (or LOCKCLONE_PATHS, `:`-separated)
-/// lists path prefixes, lockclone only handles projects under one of them.
+/// Trial scope: if ~/.config/thinclone/paths (or THINCLONE_PATHS, `:`-separated)
+/// lists path prefixes, thinclone only handles projects under one of them.
 pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
-    let list: Vec<String> = match std::env::var("LOCKCLONE_PATHS") {
+    let list: Vec<String> = match std::env::var("THINCLONE_PATHS") {
         Ok(v) => v.split(':').map(String::from).collect(),
         Err(_) => {
-            let f = crate::home().join(".config/lockclone/paths");
+            let f = crate::home().join(".config/thinclone/paths");
             match std::fs::read_to_string(&f) {
                 Ok(t) => t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect(),
                 Err(_) => return Ok(()),
@@ -66,7 +66,7 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
             return Ok(());
         }
     }
-    Err("outside the trial scope (~/.config/lockclone/paths or LOCKCLONE_PATHS)".into())
+    Err("outside the trial scope (~/.config/thinclone/paths or THINCLONE_PATHS)".into())
 }
 
 fn read_jsonl(p: &Path, since: f64) -> Vec<Value> {
@@ -91,7 +91,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     let since = days.map(|d| now() - d * 86400.0).unwrap_or(0.0);
     let runs = read_jsonl(&log_path(), since);
     let window = days.map(|d| format!("last {d} days")).unwrap_or_else(|| "all time".into());
-    println!("lockclone report ({window}; {})", log_path().display());
+    println!("thinclone report ({window}; {})", log_path().display());
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
     println!(
         "runs {}: installed {}, plain npm {}, script failed {}, failed then npm {}",
@@ -155,12 +155,12 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         println!("verification samples: {} run, {ok} identical", ver.len());
         for v in ver.iter().rev().take(5) {
             println!(
-                "  {}  {:<10} {}  (npm ci {} s, lockclone {} s)",
+                "  {}  {:<10} {}  (npm ci {} s, thinclone {} s)",
                 when(v["ts"].as_f64().unwrap_or(0.0)),
                 v["result"].as_str().unwrap_or("?"),
                 v["dir"].as_str().unwrap_or("?"),
                 v["npm_ci_secs"],
-                v["lockclone_secs"]
+                v["thinclone_secs"]
             );
         }
     }

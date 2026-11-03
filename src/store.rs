@@ -97,7 +97,7 @@ impl Store {
         fs::create_dir_all(root.join("tmp"))?;
         // Remove extraction leftovers of processes that died mid-way. A tmp
         // directory is named `<pid>-<seq>-<hash>`; only a dead pid's are removed,
-        // so a concurrent lockclone keeps its own.
+        // so a concurrent thinclone keeps its own.
         for ent in fs::read_dir(root.join("tmp"))?.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
             let Some(pid) = name.split('-').next().and_then(|p| p.parse::<i32>().ok()) else { continue };

@@ -230,7 +230,7 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
     // (verified: overriding `ms` without updating the lockfile → EUSAGE "not in
     // sync"). Override semantics (nested selectors, `$ref`) belong to npm, so ask
     // npm itself: `npm ci --dry-run` loads the lockfile, builds the ideal tree,
-    // validates, and writes nothing (~1 s small, ~2.5 s monorepo-A).
+    // validates, and writes nothing (~1 s small, ~2.5 s on a large workspaces monorepo).
     let root_pj: Value = serde_json::from_str(&std::fs::read_to_string(root.join("package.json"))?)?;
     let has_overrides = root_pj.get("overrides").and_then(|o| o.as_object()).is_some_and(|o| !o.is_empty());
     if has_overrides {
@@ -270,7 +270,7 @@ fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<S
     {
         let out = crate::util::npm_cmd()
             // --ignore-scripts: ci.js runs the root lifecycle scripts even under
-            // --dry-run (measured: `husky` exit 127, app's workspace build
+            // --dry-run (measured: `husky` exit 127, a root script building a workspace
             // failing, with no node_modules yet); validation does not need them.
             .args(["ci", "--dry-run", "--json", "--ignore-scripts", "--no-audit", "--no-fund"])
             .current_dir(root)
@@ -465,8 +465,8 @@ impl NpmRebuild {
 impl PostInstall for NpmRebuild {
     /// Mirrors `npm ci` (npm/lib/commands/ci.js): reify = dependency scripts +
     /// bin links + hidden lockfile, THEN the root project's seven lifecycle
-    /// events. The order matters: root scripts that touch the tree (monorepo-A
-    /// builds a workspace in `postinstall`) leave npm's hidden lockfile stale,
+    /// events. The order matters: root scripts that touch the tree (e.g. a
+    /// `postinstall` that builds a workspace) leave npm's hidden lockfile stale,
     /// and later npm commands then read the tree from disk instead.
     fn run(&self, root: &Path, plan: &Plan) -> Result<()> {
         // 1. Dependencies only: select every installed node by name; the root
@@ -515,7 +515,7 @@ impl PostInstall for NpmRebuild {
         let t = std::time::Instant::now();
         if !self.ignore_scripts {
             let npm_dir = crate::util::npm_dir().context("cannot locate npm's installation")?;
-            let helper = std::env::temp_dir().join(format!("lockclone-root-scripts-{}.js", std::process::id()));
+            let helper = std::env::temp_dir().join(format!("thinclone-root-scripts-{}.js", std::process::id()));
             std::fs::write(&helper, include_str!("root-scripts.js"))?;
             let st = crate::util::npm_cmd()
                 .args(["exec", "--no", "--", "node"])

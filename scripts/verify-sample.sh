@@ -2,15 +2,15 @@
 # Sampled verification during the trial.
 #   verify-sample.sh [N] [project-dir...]
 # With no directories: takes the N (default 2) most recent distinct projects
-# that lockclone installed (from ~/.cache/lockclone/log.jsonl). For each, on
-# copy-on-write copies of the project: npm ci twice (A, A2) and lockclone once
+# that thinclone installed (from ~/.cache/thinclone/log.jsonl). For each, on
+# copy-on-write copies of the project: npm ci twice (A, A2) and thinclone once
 # (B); paths that differ between A and A2 are build noise and ignored; then the
 # harness compares A with B. One JSON line per project goes to
-# ~/.cache/lockclone/verify.jsonl, shown by `lockclone report`.
+# ~/.cache/thinclone/verify.jsonl, shown by `thinclone report`.
 # Costs a real npm ci twice per project, so run it now and then, not per install.
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
-logdir=${LOCKCLONE_LOG_DIR_REAL:-$HOME/.cache/lockclone}
+logdir=${THINCLONE_LOG_DIR_REAL:-$HOME/.cache/thinclone}
 n=2
 if [[ "${1-}" =~ ^[0-9]+$ ]]; then n=$1; shift; fi
 dirs=("$@")
@@ -37,13 +37,13 @@ print("\n".join(out))
 EOF
 )
 fi
-[ ${#dirs[@]} -gt 0 ] || { echo "nothing to verify: no lockclone installs in $logdir/log.jsonl yet"; exit 0; }
+[ ${#dirs[@]} -gt 0 ] || { echo "nothing to verify: no thinclone installs in $logdir/log.jsonl yet"; exit 0; }
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/lockclone-verify.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/thinclone-verify.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 for d in "${dirs[@]}"; do
   echo "######## $d"
-  out=$(LOCKCLONE_VERIFY_NOISE=1 LOCKCLONE_LOG_DIR="$work/logs" "$here/scripts/verify.sh" "$d" "$work/v" 2>&1)
+  out=$(THINCLONE_VERIFY_NOISE=1 THINCLONE_LOG_DIR="$work/logs" "$here/scripts/verify.sh" "$d" "$work/v" 2>&1)
   printf '%s\n' "$out" | grep -E 'RESULT|npm ci:|noise|npm ls:|stale in B|^  ' | head -20
   printf '%s\n' "$out" > "$work/out.txt"
   python3 -I - "$logdir/verify.jsonl" "$d" "$work/out.txt" <<'EOF'
@@ -51,11 +51,11 @@ import json, re, sys, time
 log, d, outfile = sys.argv[1:4]
 out = open(outfile, errors="replace").read()
 m = re.search(r"RESULT: (\w+)", out)
-t = re.search(r"npm ci: ([\d.]+)s\s+lockclone: ([\d.]+)s", out)
+t = re.search(r"npm ci: ([\d.]+)s\s+thinclone: ([\d.]+)s", out)
 n = re.search(r"noise .*?: (\d+) paths", out)
 ls = re.search(r"npm ls: (.*)", out)
 rec = {"ts": time.time(), "dir": d, "result": m.group(1) if m else "ERROR",
-       "npm_ci_secs": float(t.group(1)) if t else None, "lockclone_secs": float(t.group(2)) if t else None,
+       "npm_ci_secs": float(t.group(1)) if t else None, "thinclone_secs": float(t.group(2)) if t else None,
        "noise_paths": int(n.group(1)) if n else None, "npm_ls": ls.group(1).strip() if ls else None}
 open(log, "a").write(json.dumps(rec) + "\n")
 print("recorded:", rec["result"])

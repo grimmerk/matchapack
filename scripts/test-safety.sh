@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Safety tests: a tampered lockfile must never make lockclone delete, clone or
+# Safety tests: a tampered lockfile must never make thinclone delete, clone or
 # write outside the project.   test-safety.sh <work-dir>
 set -uo pipefail
-work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/lockclone
+work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/thinclone
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; }

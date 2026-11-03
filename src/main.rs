@@ -32,7 +32,7 @@ enum Cmd {
     Install {
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// Store root (default $LOCKCLONE_STORE or ~/.cache/lockclone/store).
+        /// Store root (default $THINCLONE_STORE or ~/.cache/thinclone/store).
         #[arg(long)]
         store: Option<PathBuf>,
         /// npm content cache (default ~/.npm/_cacache).
@@ -54,7 +54,7 @@ enum Cmd {
     },
     /// Stand in for `npm <args>`: handle a bare `npm ci` from the store when it
     /// is safe to, otherwise run the real npm with the same arguments. Meant to
-    /// be called by the shell wrapper (shell/lockclone.sh).
+    /// be called by the shell wrapper (shell/thinclone.sh).
     Npm {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -95,8 +95,8 @@ fn home() -> PathBuf {
 }
 
 fn default_store(s: Option<PathBuf>) -> PathBuf {
-    s.or_else(|| std::env::var_os("LOCKCLONE_STORE").map(PathBuf::from))
-        .unwrap_or_else(|| home().join(".cache/lockclone/store"))
+    s.or_else(|| std::env::var_os("THINCLONE_STORE").map(PathBuf::from))
+        .unwrap_or_else(|| home().join(".cache/thinclone/store"))
 }
 
 fn default_clone_mode() -> clone::Mode {
@@ -158,7 +158,7 @@ pub enum InstallError {
     Declined(anyhow::Error),
     /// A lifecycle script failed; `npm ci` would have failed the same way.
     Scripts(anyhow::Error),
-    /// lockclone itself failed after node_modules was changed.
+    /// thinclone itself failed after node_modules was changed.
     Broke(anyhow::Error),
 }
 
@@ -191,10 +191,10 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
         let plan = npm::build_plan(&lf, ideal.as_ref())?;
         Ok((lf, plan))
     })?;
-    info!("{} lockfile entries skipped on this platform (LOCKCLONE_VERBOSE=1 lists them)", plan.skipped.len());
-    if std::env::var_os("LOCKCLONE_VERBOSE").is_some() {
+    info!("{} lockfile entries skipped on this platform (THINCLONE_VERBOSE=1 lists them)", plan.skipped.len());
+    if std::env::var_os("THINCLONE_VERBOSE").is_some() {
         for (p, why) in &plan.skipped {
-            eprintln!("[lockclone] skip {p}: {why}");
+            eprintln!("[thinclone] skip {p}: {why}");
         }
     }
     let n = timed("resolve name@version entries", || resolve::resolve(&mut plan, &root, &o.cacache))?;

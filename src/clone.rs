@@ -144,7 +144,7 @@ pub fn probe(store_entry: &Path, dir: &Path) -> Result<()> {
     // process must never be a stray file the repository could commit.
     let nm = dir.join("node_modules");
     std::fs::create_dir_all(&nm)?;
-    let dst = nm.join(format!(".lockclone-probe-{}", std::process::id()));
+    let dst = nm.join(format!(".thinclone-probe-{}", std::process::id()));
     let _ = std::fs::remove_file(&dst);
     let r = sys::clone(&file, &dst).map_err(|e| explain(e, &file, &dst));
     let _ = std::fs::remove_file(&dst);

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Verification harness.
-#   verify.sh <source-project-dir> <work-dir> [lockclone install args...]
+#   verify.sh <source-project-dir> <work-dir> [thinclone install args...]
 # Copies <source> (which must hold package.json + package-lock.json and any
 # workspace sources, but no node_modules) to <work>/A and <work>/B, runs
-# `npm ci` in A and `lockclone install` in B, then:
-#   1. lockclone diff A B  (paths, types, modes, content hashes, symlink targets,
+# `npm ci` in A and `thinclone install` in B, then:
+#   1. thinclone diff A B  (paths, types, modes, content hashes, symlink targets,
 #      hidden lockfile as JSON)
 #   2. npm ls --all in B must exit 0
 set -euo pipefail
 src=$1; work=$2; shift 2
 here=$(cd "$(dirname "$0")/.." && pwd)
-bin=$here/target/release/lockclone
+bin=$here/target/release/thinclone
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 rm -rf "${work:?}/A" "${work:?}/A2" "${work:?}/B"
 mkdir -p "$work"
@@ -20,11 +20,11 @@ cpcow "$src" "$work/A"
 cpcow "$src" "$work/B"
 
 marker="$work/.install-start"; touch "$marker"; sleep 1
-# Baseline command for A (default `npm ci`); e.g. LOCKCLONE_VERIFY_BASELINE=install
+# Baseline command for A (default `npm ci`); e.g. THINCLONE_VERIFY_BASELINE=install
 # compares against a fresh `npm install`.
-base=${LOCKCLONE_VERIFY_BASELINE:-ci}
+base=${THINCLONE_VERIFY_BASELINE:-ci}
 # Harness runs log to the work dir unless the caller chose a log dir.
-export LOCKCLONE_LOG_DIR=${LOCKCLONE_LOG_DIR:-$work/logs}
+export THINCLONE_LOG_DIR=${THINCLONE_LOG_DIR:-$work/logs}
 echo "== npm $base (A)"
 t0=$(python3 -c 'import time;print(time.time())')
 (cd "$work/A" && npm "$base" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
@@ -32,26 +32,26 @@ if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.
   echo "NOTE: npm $base rewrote package-lock.json"
 fi
 t1=$(python3 -c 'import time;print(time.time())')
-echo "== lockclone install (B)"
-if [ "${LOCKCLONE_VERIFY_VIA:-install}" = wrapper ]; then
+echo "== thinclone install (B)"
+if [ "${THINCLONE_VERIFY_VIA:-install}" = wrapper ]; then
   # The path a user takes: plain `npm ci` in a shell that sourced the wrapper.
   # Not anchored: a script may leave the line unterminated (husky prints
   # ".git can't be found" without a newline).
-  (cd "$work/B" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/lockclone.sh'; npm ci --no-audit --no-fund" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
-  grep -q 'lockclone: added' "$work/B.log" || { echo "wrapper did NOT install from the store:"; grep '^lockclone' "$work/B.log"; exit 1; }
+  (cd "$work/B" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/thinclone.sh'; npm ci --no-audit --no-fund" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
+  grep -q 'thinclone: added' "$work/B.log" || { echo "wrapper did NOT install from the store:"; grep '^thinclone' "$work/B.log"; exit 1; }
 else
   (cd "$work/B" && "$bin" install . "$@" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
 fi
 t2=$(python3 -c 'import time;print(time.time())')
-grep '^\[lockclone\]\|^lockclone:' "$work/B.log" | grep -v '\] skip ' || true
-python3 -c "print(f'npm ci: {$t1-$t0:.2f}s   lockclone: {$t2-$t1:.2f}s')" 2>/dev/null || true
+grep '^\[thinclone\]\|^thinclone:' "$work/B.log" | grep -v '\] skip ' || true
+python3 -c "print(f'npm ci: {$t1-$t0:.2f}s   thinclone: {$t2-$t1:.2f}s')" 2>/dev/null || true
 
 rc=0
 ign=()
-for i in ${LOCKCLONE_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
-# LOCKCLONE_VERIFY_NOISE=1: run npm ci a second time (A2); paths that differ
+for i in ${THINCLONE_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
+# THINCLONE_VERIFY_NOISE=1: run npm ci a second time (A2); paths that differ
 # between two npm ci runs (non-deterministic build output) are ignored in A vs B.
-if [ "${LOCKCLONE_VERIFY_NOISE:-0}" = 1 ]; then
+if [ "${THINCLONE_VERIFY_NOISE:-0}" = 1 ]; then
   cpcow "$src" "$work/A2"
   (cd "$work/A2" && npm "$base" --no-audit --no-fund > "$work/A2.log" 2>&1) || { tail -30 "$work/A2.log"; exit 1; }
   "$bin" diff "$work/A" "$work/A2" --paths > "$work/noise.txt" || true
@@ -75,7 +75,7 @@ for t in A B; do
 done
 extra=$(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | wc -l | tr -d ' ')
 echo "stale in B only: $extra"
-if [ "$extra" -ne 0 ] && [ "${LOCKCLONE_VERIFY_MTIME:-1}" = 1 ]; then
+if [ "$extra" -ne 0 ] && [ "${THINCLONE_VERIFY_MTIME:-1}" = 1 ]; then
   LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | head -5; rc=1
 fi
 echo "== npm ls --all (A vs B)"
