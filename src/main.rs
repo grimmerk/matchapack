@@ -180,6 +180,9 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
     let root = std::fs::canonicalize(&o.dir)?;
     // npm's own modules run the root scripts and judge semver ranges; check now,
     // not after node_modules has been wiped.
+    // The version gate holds for every install, not only the `npm ci` wrapper:
+    // the ideal tree and flags come from npm's internals (ideal-tree.js).
+    wrapper::npm_version_gate().map_err(|e| anyhow::anyhow!(e))?;
     let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
     for m in ["node_modules/@npmcli/run-script", "node_modules/semver", "node_modules/@npmcli/arborist", "lib"] {
         if !npm_dir.join(m).is_dir() {

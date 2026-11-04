@@ -156,16 +156,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     }
     trial::in_scope(&cwd)?;
 
-    let version = util::npm_version().ok_or("could not determine the npm version")?;
-    let allowed = std::env::var("THINCLONE_NPM_VERSIONS").ok();
-    let ok = match allowed.as_deref() {
-        Some("any") => true,
-        Some(list) => list.split(',').any(|v| version_matches(&version, v.trim())),
-        None => VERIFIED_NPM.iter().any(|v| version_matches(&version, v)),
-    };
-    if !ok {
-        return Err(format!("npm {version} has not been verified against npm ci"));
-    }
+    npm_version_gate()?;
 
     let out = util::npm_cmd()
         .args(["config", "list", "--json"])
@@ -248,6 +239,23 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         ignore_scripts,
         no_rebuild: false,
     })
+}
+
+/// The npm on PATH must be a version the harness was run against. Checked
+/// here first (before reading npm's config) and again in `prepare`, so a
+/// direct `thinclone install` is held to the same rule.
+pub fn npm_version_gate() -> Result<(), String> {
+    let version = util::npm_version().ok_or("could not determine the npm version")?;
+    let allowed = std::env::var("THINCLONE_NPM_VERSIONS").ok();
+    let ok = match allowed.as_deref() {
+        Some("any") => true,
+        Some(list) => list.split(',').any(|v| version_matches(&version, v.trim())),
+        None => VERIFIED_NPM.iter().any(|v| version_matches(&version, v)),
+    };
+    if !ok {
+        return Err(format!("npm {version} has not been verified against npm ci"));
+    }
+    Ok(())
 }
 
 /// "11.19" matches 11.19.x; "11" matches 11.x; an exact version matches itself.
