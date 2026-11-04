@@ -148,18 +148,18 @@ if [ "$(npm -v | cut -d. -f1)" -ge 11 ]; then want_react=no; else want_react=yes
 [ "$rc" = 0 ] && by_thinclone "$d" && [ "$has_react" = "$want_react" ] && r=ok || r=bad
 check legacy-peer "npm ci --legacy-peer-deps → thinclone, react installed: $has_react (npm $(npm -v) installs it: $want_react)" $r "$d"
 
-# 23–24. The rc one-liner `eval "$(thinclone init <shell>)"` loads the same
-# function from the binary (no checkout of this repository needed).
+# 23–24. The rc one-liner from the README, `eval "$(thinclone init)"`, detects
+# the shell and loads the same function from the binary (no checkout needed).
 for sh in zsh bash; do
   d=$(new_project "init-$sh")
   # Loading prints nothing of its own: the first line of output is `type npm`
   # saying it is a function (bash: "a function", zsh: "a shell function"), so
   # any diagnostic from init or the eval would come first and fail this.
-  load=$(env PATH="$bin_dir:$PATH" "$sh" -c 'eval "$(thinclone init '"$sh"')" && type npm' 2>&1 | head -1)
-  (cd "$d" && env PATH="$bin_dir:$PATH" "$sh" -c 'eval "$(thinclone init '"$sh"')"; npm ci --no-audit --no-fund' > "$d.out" 2>&1); rc=$?
+  load=$(env PATH="$bin_dir:$PATH" "$sh" -c 'eval "$(thinclone init)" && type npm' 2>&1 | head -1)
+  (cd "$d" && env PATH="$bin_dir:$PATH" "$sh" -c 'eval "$(thinclone init)"; npm ci --no-audit --no-fund' > "$d.out" 2>&1); rc=$?
   case $load in "npm is a function" | "npm is a shell function"*) loaded=yes ;; *) loaded=no ;; esac
   [ "$rc" = 0 ] && [ "$loaded" = yes ] && by_thinclone "$d" && r=ok || r=bad
-  check "init-$sh" "eval \"\$(thinclone init $sh)\" in $sh, then npm ci → thinclone" $r "$d"
+  check "init-$sh" "eval \"\$(thinclone init)\" in $sh (detected), then npm ci → thinclone" $r "$d"
 done
 
 echo "== $pass passed, $fail failed"

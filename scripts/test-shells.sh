@@ -5,9 +5,10 @@
 # `thinclone` and `npm` are stubs: `thinclone init <shell>` prints
 # shell/thinclone.sh or shell/thinclone.fish, as the real binary does (it
 # embeds those files), and both record the arguments they receive. Each case
-# loads the function with the rc line the README gives, runs one command, and
-# checks which of the two received it. The install itself is covered by
-# test-wrapper.sh (zsh and bash, with the real binary).
+# loads the function with the README's rc line, with the shell named (shell
+# detection is the real binary's job, tested by test-wrapper.sh), runs one
+# command, and checks which of the two received it. The install itself is
+# covered by test-wrapper.sh (zsh and bash, with the real binary).
 set -uo pipefail
 apt-get update -qq >/dev/null && apt-get install -y -qq fish zsh >/dev/null
 # A failed install would turn every zsh/fish case into "command not found".

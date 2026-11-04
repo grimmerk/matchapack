@@ -16,19 +16,22 @@ with `reflink=1`. Elsewhere it hands over to npm.
 cargo install --path .          # puts thinclone in ~/.cargo/bin
 ```
 
-Then add one line to `~/.zshrc` or `~/.bashrc` (use `bash` in the second),
-after the line that puts `~/.cargo/bin` on PATH (rustup usually does that in
-`~/.zshenv` or `~/.profile`; if it comes later, the line does nothing):
+Then add one line to your shell's startup file. Not sure which shell you use?
+Run `echo $0` (macOS has used zsh by default since 10.15).
 
-```sh
-command -v thinclone >/dev/null && eval "$(thinclone init zsh)"
-```
+| shell | file | line |
+|---|---|---|
+| zsh | `~/.zshrc` | `command -v thinclone >/dev/null && eval "$(thinclone init)"` |
+| bash | `~/.bashrc` | `command -v thinclone >/dev/null && eval "$(thinclone init)"` |
+| fish | `~/.config/fish/config.fish` | `type -q thinclone; and thinclone init \| source` |
 
-fish (`~/.config/fish/config.fish`): `type -q thinclone; and thinclone init fish | source`.
-The line prints and loads `shell/thinclone.sh` from the binary, so no checkout
-of this repository is needed and the function updates with `cargo install`.
-Sourcing `shell/thinclone.sh` from a checkout still works. From then on, type
-`npm ci` as usual:
+Put it after the line that puts `~/.cargo/bin` on PATH (rustup usually does
+that in `~/.zshenv` or `~/.profile`); if it comes earlier, it does nothing.
+`thinclone init` detects the shell that runs it; `thinclone init zsh` (or
+`bash`, `fish`) names it explicitly. The function comes from the binary, so no
+checkout of this repository is needed and it updates with `cargo install`.
+Sourcing `shell/thinclone.sh` from a checkout still works. Open a new terminal,
+then type `npm ci` as usual:
 
 ```
 $ npm ci
