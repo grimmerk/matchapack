@@ -28,6 +28,9 @@ export THINCLONE_LOG_DIR=${THINCLONE_LOG_DIR:-$work/logs}
 # The harness is how a new npm version gets verified, so B installs on any npm
 # unless the caller narrows it (`thinclone install` applies the version gate).
 export THINCLONE_NPM_VERSIONS=${THINCLONE_NPM_VERSIONS:-any}
+# The copies live under the work dir: keep the user's trial scope file
+# (~/.config/thinclone/paths) from deciding a wrapper run.
+export THINCLONE_PATHS=${THINCLONE_PATHS:-$(cd "$work" && pwd -P)}
 echo "== npm $base (A)"
 t0=$(python3 -c 'import time;print(time.time())')
 (cd "$work/A" && npm "$base" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
