@@ -112,6 +112,22 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     for (why, n) in reasons.iter().take(8) {
         println!("  {n}× {why}");
     }
+    // An npm upgrade turns every install into plain npm without an error:
+    // call it out on its own line, with the versions seen.
+    let mut gated: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in runs.iter().filter(|r| r["outcome"] == "declined") {
+        if r["reason"].as_str().is_some_and(|w| w.ends_with("has not been verified against npm ci")) {
+            *gated.entry(r["npm"].as_str().unwrap_or("?").to_string()).or_default() += 1;
+        }
+    }
+    if !gated.is_empty() {
+        let list: Vec<String> = gated.iter().map(|(v, n)| format!("npm {v}: {n}")).collect();
+        println!(
+            "npm version gate: {} runs went to plain npm ({}); run the harness on that npm, then add it to VERIFIED_NPM",
+            gated.values().sum::<usize>(),
+            list.join(", ")
+        );
+    }
     let inst: Vec<&Value> = runs.iter().filter(|r| r["outcome"] == "installed").collect();
     if !inst.is_empty() {
         let mut secs: Vec<f64> = inst.iter().filter_map(|r| r["secs"].as_f64()).collect();

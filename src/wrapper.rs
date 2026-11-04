@@ -136,6 +136,10 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     while let Some(a) = it.next() {
         if a == "--ignore-scripts" {
             ignore_scripts = true;
+        } else if a == "--legacy-peer-deps" {
+            // Changes npm's ideal tree (peer dependencies are not installed);
+            // every npm thinclone starts gets it, so the dry-run follows it.
+            util::set_npm_config("legacy-peer-deps", "true");
         } else if a == "--loglevel" {
             it.next();
         } else if PASSIVE_FLAGS.contains(&a.as_str()) || a.starts_with("--loglevel=") {
@@ -181,7 +185,10 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     // engine-strict is NOT refused here: the `npm ci --dry-run` every install
     // runs applies it (measured: an engines mismatch fails it with EBADENGINE,
     // which hands over to npm; a project whose engines match is installed).
-    for k in ["global-style", "legacy-bundling", "legacy-peer-deps", "strict-peer-deps", "force", "dry-run", "global", "install-links"] {
+    // legacy-peer-deps is not refused: npm's own dry-run builds the ideal tree
+    // with it (from .npmrc, the environment or the flag above), and thinclone
+    // installs that tree.
+    for k in ["global-style", "legacy-bundling", "strict-peer-deps", "force", "dry-run", "global", "install-links"] {
         if is_true(k) {
             return Err(format!("npm config {k}=true"));
         }
