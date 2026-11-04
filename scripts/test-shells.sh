@@ -22,13 +22,13 @@ case "$1" in
           fish) exec cat /src/shell/thinclone.fish ;;
           zsh | bash) exec cat /src/shell/thinclone.sh ;;
         esac ;;
-  npm) shift; echo "THINCLONE $*"; exit "${STUB_RC:-0}" ;;
+  npm) shift; printf 'THINCLONE'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; exit "${STUB_RC:-0}" ;;
 esac
 exit 2
 STUB
 cat > "$np/npm" <<'STUB'
 #!/bin/sh
-echo "NPM $*"
+printf 'NPM'; for a in "$@"; do printf ' [%s]' "$a"; done; echo
 STUB
 chmod +x "$tc/thinclone" "$np/npm"
 
@@ -45,20 +45,23 @@ for sh in bash zsh fish; do
     if [ "$out" = "$2" ]; then pass=$((pass+1)); echo "PASS $sh $1"
     else fail=$((fail+1)); echo "FAIL $sh $1: got [$out], want [$2]"; fi
   }
-  check ci        "THINCLONE ci --no-audit --no-fund" "npm ci --no-audit --no-fund"
-  check aliases   "THINCLONE clean-install
-THINCLONE ic
-THINCLONE install-clean
-THINCLONE isntall-clean" "npm clean-install; npm ic; npm install-clean; npm isntall-clean"
-  check other     "NPM install lodash"  "npm install lodash"
-  check run       "NPM run ci"          "npm run ci"
-  check bare      "NPM "                "npm"
-  check opt-out   "NPM ci"              "THINCLONE=0 npm ci"
-  check command   "NPM ci"              "command npm ci"
-  check status    "THINCLONE ci
+  check ci        "THINCLONE [ci] [--no-audit] [--no-fund]" "npm ci --no-audit --no-fund"
+  check aliases   "THINCLONE [clean-install]
+THINCLONE [ic]
+THINCLONE [install-clean]
+THINCLONE [isntall-clean]" "npm clean-install; npm ic; npm install-clean; npm isntall-clean"
+  # Arguments arrive unchanged: spaces, an empty one, a glob character.
+  check args      "THINCLONE [ci] [--loglevel] [a b] [] [*]" "npm ci --loglevel 'a b' '' '*'"
+  check args-npm  "NPM [run] [x y] [] [*]" "npm run 'x y' '' '*'"
+  check other     "NPM [install] [lodash]"  "npm install lodash"
+  check run       "NPM [run] [ci]"          "npm run ci"
+  check bare      "NPM"                     "npm"
+  check opt-out   "NPM [ci]"                "THINCLONE=0 npm ci"
+  check command   "NPM [ci]"                "command npm ci"
+  check status    "THINCLONE [ci]
 7"   "STUB_RC=7 npm ci; echo $st"
   # Without thinclone on PATH the rc line does nothing and npm is plain npm.
-  check no-binary "NPM ci" "npm ci" "$np:$PATH"
+  check no-binary "NPM [ci]" "npm ci" "$np:$PATH"
 done
 
 echo "== $pass passed, $fail failed"

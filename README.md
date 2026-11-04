@@ -98,3 +98,6 @@ its working directory in.
   runs on any npm version and ignores the trial scope file, since it is how a
   new npm version gets verified.
 - `scripts/test-wrapper.sh <work>`: routing tests for the shell integration.
+- `scripts/test-shells.sh`: the same routing in bash, zsh and fish with stubs,
+  in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash
+  /src/scripts/test-shells.sh`).
