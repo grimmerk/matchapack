@@ -40,8 +40,9 @@ line was added use it.
 thinclone runs plain npm instead, and prints why, when:
 - a flag or npm setting changes the tree (`--omit=dev`, `NODE_ENV=production`,
   `install-strategy`, `--workspace`, …);
-- npm is a version the harness has not been run against (currently 11.19.x
-  and 11.17.x; `THINCLONE_NPM_VERSIONS=any` overrides);
+- npm is a version the harness has not been run against (currently 11.19.x,
+  11.17.x and 10.9.x; `THINCLONE_NPM_VERSIONS=any` overrides; `thinclone
+  report` counts these runs);
 - the project is outside the trial scope (`~/.config/thinclone/paths`);
 - the lockfile has entries it does not support (git dependencies, `file:`
   tarballs), or is out of sync with package.json;
