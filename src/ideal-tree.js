@@ -49,31 +49,13 @@ process.on('exit', (code) => {
     process.exitCode = 1
     return
   }
-  // Optional packages npm skips because their engines or platform do not
-  // match, together with what only they need (optionalSet). npm 11 marks them
-  // inert while building the tree and the dry-run reify removes them; npm 10.9
-  // checks only in reify's per-node step, which a dry run never reaches, so
-  // the tree here still holds them. Repeat npm's own check, with its options
-  // and ignoring --force / --engine-strict as it does (reify.js _reifyNode in
-  // 10.9, build-ideal-tree.js #checkEngineAndPlatform in 11.19).
-  const { checkEngine, checkPlatform } = require(path.join(npmDir, 'node_modules', 'npm-install-checks'))
-  const optionalSet = require(path.join(arborist, 'lib', 'optional-set.js'))
-  const { npmVersion, nodeVersion, cpu, os, libc } = reifying.options
-  const skip = new Set()
-  for (const node of tree.inventory.values()) {
-    if (node.inert) {
-      skip.add(node)
-    } else if (node.optional && !skip.has(node)) {
-      try {
-        checkEngine(node.package, npmVersion, nodeVersion, false)
-        checkPlatform(node.package, false, { cpu, os, libc })
-      } catch {
-        for (const n of optionalSet(node)) {
-          skip.add(n)
-        }
-      }
-    }
-  }
+  // Optional packages npm leaves out because their engines or platform do not
+  // match (with what only they need) are marked inert while npm 11 builds the
+  // tree, and the dry-run reify removes them; skip any still marked. npm 10.9
+  // decides this only while extracting, which a dry run never reaches, so its
+  // tree here would still hold them: npm 10 is not in VERIFIED_NPM (see NOTES
+  // "npm 10").
+  const skip = new Set([...tree.inventory.values()].filter(n => n.inert))
   const nodes = {}
   for (const [location, node] of tree.inventory.entries()) {
     if (!location || skip.has(node)) {
