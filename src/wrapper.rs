@@ -24,7 +24,7 @@ const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "is
 /// npm major.minor versions the harness was run against. Another version runs
 /// plain npm until the harness has been re-run (override: THINCLONE_NPM_VERSIONS
 /// = comma list, or `any`).
-const VERIFIED_NPM: &[&str] = &["11.19", "11.17"];
+const VERIFIED_NPM: &[&str] = &["11.19", "11.17", "10.9"];
 
 /// Flags that change only npm's output or network policy, never the tree.
 const PASSIVE_FLAGS: [&str; 11] = [

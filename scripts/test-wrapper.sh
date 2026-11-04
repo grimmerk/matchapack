@@ -10,6 +10,10 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 bin_dir=$here/target/release
 # Test runs log to the work dir, never to the real trial log.
 export THINCLONE_LOG_DIR=$work/logs
+mkdir -p "$work"
+# Every case runs inside the trial scope unless it sets its own (cases 14-15):
+# the user's ~/.config/thinclone/paths must not decide the outcome.
+export THINCLONE_PATHS=$(cd "$work" && pwd -P)
 fx=$here/fixtures/small
 pass=0; fail=0
 
@@ -65,7 +69,7 @@ d=$(new_project other); CMD="npm run nope"; rc=$(run "$d")
 check passthrough "npm run <missing> → npm's own error and non-zero exit" $r "$d"
 
 # 8. npm version not verified → plain npm
-d=$(new_project version); CMD="npm ci"; rc=$(run "$d" THINCLONE_NPM_VERSIONS=10.9)
+d=$(new_project version); CMD="npm ci"; rc=$(run "$d" THINCLONE_NPM_VERSIONS=0.1)
 [ "$rc" = 0 ] && by_npm "$d" && grep -q 'has not been verified' "$d.out" && r=ok || r=bad
 check version-gate "unverified npm version → plain npm with the reason" $r "$d"
 
@@ -133,6 +137,16 @@ python3 -c "import json;p='$d/package-lock.json';l=json.load(open(p));l['package
 mkdir -p "$d/node_modules/keepme"; CMD="npm ci"; rc=$(run "$d")
 [ "$rc" != 0 ] && grep -q 'EBADENGINE' "$d.out" && [ -d "$d/node_modules/keepme" ] && r=ok || r=bad
 check engine-bad "engine-strict with an engines mismatch → npm's EBADENGINE, node_modules untouched" $r "$d"
+
+# 22. --legacy-peer-deps → thinclone follows npm's ideal tree for it: npm 11
+# leaves out react (only a peer of react-dom), npm 10 still installs it.
+d=$work/legacypeer; rm -rf "${d:?}"; mkdir -p "$d"
+cp "$here/fixtures/legacy-peer/package.json" "$here/fixtures/legacy-peer/package-lock.json" "$d/"
+CMD="npm ci --legacy-peer-deps"; rc=$(run "$d")
+if [ "$(npm -v | cut -d. -f1)" -ge 11 ]; then want_react=no; else want_react=yes; fi
+[ -d "$d/node_modules/react" ] && has_react=yes || has_react=no
+[ "$rc" = 0 ] && by_thinclone "$d" && [ "$has_react" = "$want_react" ] && r=ok || r=bad
+check legacy-peer "npm ci --legacy-peer-deps → thinclone, react installed: $has_react (npm $(npm -v) installs it: $want_react)" $r "$d"
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]
