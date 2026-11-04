@@ -148,5 +148,14 @@ if [ "$(npm -v | cut -d. -f1)" -ge 11 ]; then want_react=no; else want_react=yes
 [ "$rc" = 0 ] && by_thinclone "$d" && [ "$has_react" = "$want_react" ] && r=ok || r=bad
 check legacy-peer "npm ci --legacy-peer-deps → thinclone, react installed: $has_react (npm $(npm -v) installs it: $want_react)" $r "$d"
 
+# 23–24. The rc one-liner `eval "$(thinclone init <shell>)"` loads the same
+# function from the binary (no checkout of this repository needed).
+for sh in zsh bash; do
+  d=$(new_project "init-$sh")
+  (cd "$d" && env PATH="$bin_dir:$PATH" "$sh" -c 'eval "$(thinclone init '"$sh"')"; npm ci --no-audit --no-fund' > "$d.out" 2>&1); rc=$?
+  [ "$rc" = 0 ] && by_thinclone "$d" && r=ok || r=bad
+  check "init-$sh" "eval \"\$(thinclone init $sh)\" in $sh, then npm ci → thinclone" $r "$d"
+done
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

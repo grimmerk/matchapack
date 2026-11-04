@@ -16,13 +16,17 @@ with `reflink=1`. Elsewhere it hands over to npm.
 cargo install --path .          # puts thinclone in ~/.cargo/bin
 ```
 
-Then add one line to `~/.zshrc` or `~/.bashrc`:
+Then add one line to `~/.zshrc` or `~/.bashrc` (use `bash` in the second):
 
 ```sh
-[ -f "$HOME/git/thinclone/shell/thinclone.sh" ] && . "$HOME/git/thinclone/shell/thinclone.sh"
+command -v thinclone >/dev/null && eval "$(thinclone init zsh)"
 ```
 
-(fish: `shell/thinclone.fish`.) From then on, type `npm ci` as usual:
+fish (`~/.config/fish/config.fish`): `type -q thinclone; and thinclone init fish | source`.
+The line prints and loads `shell/thinclone.sh` from the binary, so no checkout
+of this repository is needed and the function updates with `cargo install`.
+Sourcing `shell/thinclone.sh` from a checkout still works. From then on, type
+`npm ci` as usual:
 
 ```
 $ npm ci

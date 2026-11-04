@@ -59,6 +59,15 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Print the shell integration (the `npm` function that routes a bare
+    /// `npm ci` through `thinclone npm`). Add to ~/.zshrc or ~/.bashrc:
+    ///   command -v thinclone >/dev/null && eval "$(thinclone init zsh)"
+    /// fish (~/.config/fish/config.fish):
+    ///   type -q thinclone; and thinclone init fish | source
+    Init {
+        #[arg(value_parser = ["zsh", "bash", "fish"])]
+        shell: String,
+    },
     /// Print the install plan (counts and every skipped entry with its reason); installs nothing.
     Plan {
         #[arg(default_value = ".")]
@@ -398,6 +407,11 @@ fn main() -> Result<()> {
         Cmd::Npm { args } => {
             let code = wrapper::run(args);
             std::process::exit(code);
+        }
+        Cmd::Init { shell } => {
+            // The files in shell/ are the one definition; the binary carries
+            // them so the rc line needs no checkout of this repository.
+            print!("{}", if shell == "fish" { include_str!("../shell/thinclone.fish") } else { include_str!("../shell/thinclone.sh") });
         }
         Cmd::Plan { dir } => {
             let root = std::fs::canonicalize(&dir)?;
