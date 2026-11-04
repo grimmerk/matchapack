@@ -10,6 +10,8 @@
 # test-wrapper.sh (zsh and bash, with the real binary).
 set -uo pipefail
 apt-get update -qq >/dev/null && apt-get install -y -qq fish zsh >/dev/null
+# A failed install would turn every zsh/fish case into "command not found".
+for s in zsh fish; do command -v "$s" >/dev/null || { echo "setup failed: no $s" >&2; exit 2; }; done
 bash --version | head -1; zsh --version; fish --version
 
 tc=/tmp/stub-thinclone; np=/tmp/stub-npm; mkdir -p "$tc" "$np"
