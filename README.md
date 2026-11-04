@@ -16,7 +16,9 @@ with `reflink=1`. Elsewhere it hands over to npm.
 cargo install --path .          # puts thinclone in ~/.cargo/bin
 ```
 
-Then add one line to `~/.zshrc` or `~/.bashrc` (use `bash` in the second):
+Then add one line to `~/.zshrc` or `~/.bashrc` (use `bash` in the second),
+after the line that puts `~/.cargo/bin` on PATH (rustup usually does that in
+`~/.zshenv` or `~/.profile`; if it comes later, the line does nothing):
 
 ```sh
 command -v thinclone >/dev/null && eval "$(thinclone init zsh)"
@@ -86,6 +88,7 @@ its working directory in.
 
 ## Other commands
 
+- `thinclone init zsh|bash|fish`: print the shell integration (see "Use").
 - `thinclone install [dir]`: the install itself, with per-step timings (same
   npm version gate as `npm ci`).
 - `thinclone plan [dir]`: what would be placed and what is skipped, and why.

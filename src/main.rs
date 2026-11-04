@@ -59,11 +59,17 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Print the shell integration (the `npm` function that routes a bare
-    /// `npm ci` through `thinclone npm`). Add to ~/.zshrc or ~/.bashrc:
-    ///   command -v thinclone >/dev/null && eval "$(thinclone init zsh)"
-    /// fish (~/.config/fish/config.fish):
-    ///   type -q thinclone; and thinclone init fish | source
+    /// Print the shell integration for an rc file (routes a bare `npm ci` through thinclone)
+    ///
+    /// zsh or bash: add to ~/.zshrc or ~/.bashrc, AFTER the line that puts
+    /// thinclone on PATH (otherwise the guard skips it silently):
+    ///
+    ///     command -v thinclone >/dev/null && eval "$(thinclone init zsh)"
+    ///
+    /// fish: add to ~/.config/fish/config.fish:
+    ///
+    ///     type -q thinclone; and thinclone init fish | source
+    #[command(verbatim_doc_comment)]
     Init {
         #[arg(value_parser = ["zsh", "bash", "fish"])]
         shell: String,
