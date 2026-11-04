@@ -50,8 +50,31 @@ macro_rules! info {
 /// wrapper can never recurse into thinclone.
 pub fn npm_cmd() -> Command {
     let mut c = Command::new("npm");
-    c.env("THINCLONE", "0");
+    c.env("THINCLONE", "0").envs(npm_env());
     c
+}
+
+/// `node` for thinclone's helpers that load npm's own modules, with the same
+/// environment as `npm_cmd`.
+pub fn node_cmd() -> Command {
+    let mut c = Command::new("node");
+    c.env("THINCLONE", "0").envs(npm_env());
+    c
+}
+
+static NPM_ENV: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// npm settings given on the command line (`--legacy-peer-deps`), passed to
+/// every npm thinclone starts as npm_config_* variables, the way npm itself
+/// hands its config to the scripts it runs.
+pub fn set_npm_config(key: &str, value: &str) {
+    if let Ok(mut e) = NPM_ENV.lock() {
+        e.push((format!("npm_config_{}", key.replace('-', "_")), value.to_string()));
+    }
+}
+
+fn npm_env() -> Vec<(String, String)> {
+    NPM_ENV.lock().map(|e| e.clone()).unwrap_or_default()
 }
 
 /// A dependency or root lifecycle script failed. `npm ci` would have failed the

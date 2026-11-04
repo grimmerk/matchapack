@@ -1,0 +1,1 @@
+{"name":"lc-eng","version":"1.0.0","engines":{"node":">=99"},"dependencies":{"lc-q":"http://127.0.0.1:48321/lc-q-1.0.0.tgz","lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}

@@ -41,7 +41,8 @@ thinclone runs plain npm instead, and prints why, when:
 - a flag or npm setting changes the tree (`--omit=dev`, `NODE_ENV=production`,
   `install-strategy`, `--workspace`, …);
 - npm is a version the harness has not been run against (currently 11.19.x
-  and 11.17.x; `THINCLONE_NPM_VERSIONS=any` overrides);
+  and 11.17.x, so not npm 10 / Node 22; `THINCLONE_NPM_VERSIONS=any`
+  overrides; `thinclone report` counts these runs);
 - the project is outside the trial scope (`~/.config/thinclone/paths`);
 - the lockfile has entries it does not support (git dependencies, `file:`
   tarballs), or is out of sync with package.json;
@@ -81,9 +82,12 @@ its working directory in.
 
 ## Other commands
 
-- `thinclone install [dir]`: the install itself, with per-step timings.
+- `thinclone install [dir]`: the install itself, with per-step timings (same
+  npm version gate as `npm ci`).
 - `thinclone plan [dir]`: what would be placed and what is skipped, and why.
 - `thinclone diff A B`: the harness's tree comparison.
 - `scripts/verify.sh <project> <work>`: `npm ci` vs thinclone on copies of a
-  project (`THINCLONE_VERIFY_VIA=wrapper` goes through the shell function).
+  project (`THINCLONE_VERIFY_VIA=wrapper` goes through the shell function). It
+  runs on any npm version and ignores the trial scope file, since it is how a
+  new npm version gets verified.
 - `scripts/test-wrapper.sh <work>`: routing tests for the shell integration.

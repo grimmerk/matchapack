@@ -180,16 +180,22 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
     let root = std::fs::canonicalize(&o.dir)?;
     // npm's own modules run the root scripts and judge semver ranges; check now,
     // not after node_modules has been wiped.
+    // The version gate holds for every install, not only the `npm ci` wrapper:
+    // the ideal tree and flags come from npm's internals (ideal-tree.js).
+    wrapper::npm_version_gate().map_err(|e| anyhow::anyhow!(e))?;
     let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
-    for m in ["node_modules/@npmcli/run-script", "node_modules/semver"] {
+    for m in ["node_modules/@npmcli/run-script", "node_modules/semver", "node_modules/@npmcli/arborist", "lib"] {
         if !npm_dir.join(m).is_dir() {
             bail!("npm installation {} has no {m}", npm_dir.display());
         }
     }
     let (lf, mut plan) = timed("plan", || {
-        let lf = lock::Lockfile::load(&root)?;
+        let mut lf = lock::Lockfile::load(&root)?;
         let ideal = npm::check_in_sync(&root, &lf)?;
-        let plan = npm::build_plan(&lf, ideal.as_ref())?;
+        if let Some(i) = &ideal {
+            npm::apply_flags(&mut lf, i);
+        }
+        let plan = npm::build_plan(&lf, ideal.as_ref().map(|i| &i.paths))?;
         Ok((lf, plan))
     })?;
     info!("{} lockfile entries skipped on this platform (THINCLONE_VERBOSE=1 lists them)", plan.skipped.len());
@@ -395,9 +401,12 @@ fn main() -> Result<()> {
         }
         Cmd::Plan { dir } => {
             let root = std::fs::canonicalize(&dir)?;
-            let lf = lock::Lockfile::load(&root)?;
+            let mut lf = lock::Lockfile::load(&root)?;
             let ideal = npm::check_in_sync(&root, &lf)?;
-            let plan = npm::build_plan(&lf, ideal.as_ref())?;
+            if let Some(i) = &ideal {
+                npm::apply_flags(&mut lf, i);
+            }
+            let plan = npm::build_plan(&lf, ideal.as_ref().map(|i| &i.paths))?;
             let (mut pkgs, mut links, mut registry) = (0, 0, 0);
             for e in &plan.entries {
                 match &e.kind {

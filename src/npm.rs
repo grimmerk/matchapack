@@ -155,7 +155,7 @@ pub fn validate_paths(lf: &Lockfile) -> Result<()> {
 /// so range semantics are npm's. Added or removed dependencies and non-registry
 /// specs that changed are refused (npm ci would resolve or prune them).
 /// Not covered: a change to `overrides`.
-pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String>>> {
+pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<Ideal>> {
     validate_paths(lf)?;
     const FIELDS: [&str; 4] = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
     let pkgs = lf.raw.get("packages").and_then(|v| v.as_object()).context("no packages")?;
@@ -263,13 +263,10 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
     // broken tree where npm ci refuses (EUSAGE "Missing: … from lock file"),
     // and an unreferenced extra entry would be placed (found in review).
     {
-        // The dry-run's `add` list is a DIFF against the node_modules on disk, so
-        // run it in a scratch copy that has none: package.json, lockfile, .npmrc
-        // and each workspace's package.json. Then `add` is the whole ideal tree.
-        // Under the store's tmp/ (named `<pid>-dryrun`, so Store::new removes it
-        // if this process dies), not $TMPDIR: npm redacts path segments that look
-        // like secrets (a UUID becomes `***`) in what it prints, so the paths it
-        // reports are matched by this unique segment, not by the full prefix.
+        // Run it in a scratch copy without node_modules (package.json, lockfile,
+        // .npmrc and each workspace's package.json): with a node_modules on disk
+        // npm would diff against it. Under the store's tmp/ (named `<pid>-dryrun`,
+        // so Store::new removes it if this process dies).
         let scratch = crate::default_store(None).join("tmp").join(format!("{}-dryrun", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch)?;
@@ -282,7 +279,18 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<HashSet<String
     }
 }
 
-fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<String>> {
+/// npm ci's ideal tree: the location of every node npm would install, and the
+/// dep flags (dev / optional / devOptional / peer) npm computed for it.
+#[derive(Debug, Default)]
+pub struct Ideal {
+    pub paths: HashSet<String>,
+    pub flags: HashMap<String, Map<String, Value>>,
+}
+
+/// The four flags npm recomputes for every node (arborist calc-dep-flags.js).
+const DEP_FLAGS: [&str; 4] = ["dev", "optional", "devOptional", "peer"];
+
+fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<Ideal> {
     for f in ["package.json", "package-lock.json", ".npmrc"] {
         if root.join(f).is_file() {
             std::fs::copy(root.join(f), scratch.join(f))?;
@@ -296,55 +304,116 @@ fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<HashSet<S
             }
         }
     }
-    let root = scratch;
+    // npm's own CLI runs `ci --dry-run --ignore-scripts` inside the helper, which
+    // keeps the ideal tree arborist built and writes each node's location and
+    // flags (see ideal-tree.js). --ignore-scripts: ci.js runs the root lifecycle
+    // scripts even under --dry-run (measured: `husky` exit 127, a root script
+    // building a workspace failing, with no node_modules yet).
+    let npm_dir = crate::util::npm_dir().context("cannot locate npm's installation")?;
+    let helper = scratch.with_file_name(format!("{}-ideal-tree.js", std::process::id()));
+    let out_file = scratch.with_file_name(format!("{}-ideal.json", std::process::id()));
+    let _ = std::fs::remove_file(&helper);
+    let _ = std::fs::remove_file(&out_file);
     {
-        let out = crate::util::npm_cmd()
-            // --ignore-scripts: ci.js runs the root lifecycle scripts even under
-            // --dry-run (measured: `husky` exit 127, a root script building a workspace
-            // failing, with no node_modules yet); validation does not need them.
-            .args(["ci", "--dry-run", "--json", "--ignore-scripts", "--no-audit", "--no-fund"])
-            .current_dir(root)
-            .output()
-            .context("running npm ci --dry-run")?;
-        if !out.status.success() {
-            bail!(
-                "`npm ci --dry-run` rejected this lockfile (package.json has `overrides`):\n{}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&helper)?;
+        f.write_all(include_str!("ideal-tree.js").as_bytes())?;
+    }
+    let out = crate::util::node_cmd()
+        .arg(&helper)
+        .arg(&npm_dir)
+        .arg(&out_file)
+        .current_dir(scratch)
+        .output();
+    let _ = std::fs::remove_file(&helper);
+    let out = out.context("running npm ci --dry-run")?;
+    let text = std::fs::read_to_string(&out_file);
+    let _ = std::fs::remove_file(&out_file);
+    if !out.status.success() {
+        bail!("`npm ci --dry-run` rejected this lockfile:\n{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let text = text.context("npm ci --dry-run reported no ideal tree")?;
+    let json: Value = serde_json::from_str(&text).context("parsing the ideal tree")?;
+    parse_ideal(&json, lf)
+}
+
+/// The helper's output: `{"nodes": {"<location>": {"dev": true, ...}}}`.
+/// npm ci installs its IDEAL tree, not the lockfile text, and its sync check
+/// only asks that every ideal node be in the lockfile, not the reverse. With
+/// overrides the lockfile npm itself writes can hold redundant nested copies
+/// that the ideal tree dedupes (measured: three nested ms@2.1.2 identical to the
+/// root one; npm ci installed 344 of 347 entries).
+fn parse_ideal(json: &Value, lf: &Lockfile) -> Result<Ideal> {
+    let nodes = json.get("nodes").and_then(|v| v.as_object()).context("ideal tree without `nodes`")?;
+    let in_lock: HashSet<&str> = lf.entries.iter().map(|e| e.path.as_str()).collect();
+    let mut ideal = Ideal::default();
+    let mut moved = vec![];
+    for (loc, f) in nodes {
+        if !in_lock.contains(loc.as_str()) {
+            moved.push(loc.clone());
+            continue;
         }
-        // npm ci installs its IDEAL tree, not the lockfile text, and its sync
-        // check only asks that every ideal node be in the lockfile, not the
-        // reverse. With overrides the lockfile npm itself writes can hold
-        // redundant nested copies that the ideal tree dedupes (measured: three
-        // nested ms@2.1.2 identical to the root one; npm ci installed 344 of 347
-        // entries). The dry-run's JSON summary (printed after the "add x y"
-        // lines) lists every ideal node's path: use it as the authority.
-        let text = String::from_utf8_lossy(&out.stdout);
-        let start = text
-            .find("\n{")
-            .map(|i| i + 1)
-            .or_else(|| text.starts_with('{').then_some(0))
-            .context("no JSON summary in `npm ci --dry-run --json` output")?;
-        let summary: Value = serde_json::from_str(&text[start..]).context("parsing npm ci --dry-run --json summary")?;
-        let marker = format!("/{}/", root.file_name().and_then(|n| n.to_str()).context("scratch dir name")?);
-        let mut ideal = HashSet::new();
-        for a in summary.get("add").and_then(|v| v.as_array()).context("dry-run summary has no `add` list")? {
-            let p = a.get("path").and_then(|v| v.as_str()).context("dry-run `add` entry without path")?;
-            match p.find(&marker) {
-                Some(i) => {
-                    ideal.insert(p[i + marker.len()..].to_string());
-                }
-                None if p.ends_with(marker.trim_end_matches('/')) => {}
-                None => bail!("npm's ideal tree has a node outside the project: {p}"),
+        let f = f.as_object().context("ideal tree node is not an object")?;
+        let mut flags = Map::new();
+        for k in DEP_FLAGS {
+            if f.get(k).and_then(|v| v.as_bool()) == Some(true) {
+                flags.insert(k.to_string(), Value::Bool(true));
             }
         }
-        let in_lock: HashSet<&str> = lf.entries.iter().map(|e| e.path.as_str()).collect();
-        let moved: Vec<&String> = ideal.iter().filter(|p| !in_lock.contains(p.as_str())).collect();
-        if !moved.is_empty() {
-            bail!("npm's ideal tree places packages at paths the lockfile does not record (use `npm ci`): {moved:?}");
-        }
-        Ok(ideal)
+        ideal.flags.insert(loc.clone(), flags);
+        ideal.paths.insert(loc.clone());
     }
+    if !moved.is_empty() {
+        moved.sort();
+        bail!("npm's ideal tree places packages at paths the lockfile does not record (use `npm ci`): {moved:?}");
+    }
+    Ok(ideal)
+}
+
+/// Replace the lockfile's dep flags with the ones npm computed, for every node
+/// of the ideal tree: npm writes its own (calcDepFlags) to the hidden lockfile
+/// and uses them to decide which optional packages it may leave out, so a
+/// lockfile with stale flags (measured: 11 `"peer": true` that npm ci does not
+/// write) must not be copied. Entries outside the ideal tree keep theirs.
+pub fn apply_flags(lf: &mut Lockfile, ideal: &Ideal) {
+    if let Some(Value::Object(pkgs)) = lf.raw.get_mut("packages") {
+        for (loc, flags) in &ideal.flags {
+            if let Some(Value::Object(entry)) = pkgs.get_mut(loc) {
+                for k in DEP_FLAGS {
+                    entry.shift_remove(k);
+                }
+                // Key order is restored when the hidden lockfile is written.
+                for (k, v) in flags {
+                    entry.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    for e in &mut lf.entries {
+        if let Some(f) = ideal.flags.get(&e.path) {
+            e.optional = f.contains_key("optional");
+            e.dev_optional = f.contains_key("devOptional");
+        }
+    }
+}
+
+/// Reorder one lockfile entry's keys the way npm writes them
+/// (json-stringify-nice with Shrinkwrap's key order, npm 10.9 and 11.19):
+/// values that are not objects first, then objects; within each group the
+/// keys in `PREFERRED` in that order, then the rest by `localeCompare('en')`.
+/// Lockfile field names are ASCII letters, where that collation is
+/// case-insensitive with lowercase first, which is what this compares. Only
+/// the entry's own keys are ordered: nested objects (dependency names, where
+/// `@` and `-` collate differently) keep the order npm wrote in the lockfile.
+fn npm_key_order(entry: &mut Map<String, Value>) {
+    const PREFERRED: [&str; 8] = ["name", "version", "lockfileVersion", "resolved", "integrity", "requires", "packages", "dependencies"];
+    let rank = |(k, v): (&String, &Value)| {
+        let pref = PREFERRED.iter().position(|p| p == k).unwrap_or(PREFERRED.len());
+        (v.is_object(), pref, k.to_lowercase(), k.chars().map(|c| c.is_uppercase()).collect::<Vec<_>>())
+    };
+    let mut items: Vec<(String, Value)> = std::mem::take(entry).into_iter().collect();
+    items.sort_by_cached_key(|(k, v)| rank((k, v)));
+    entry.extend(items);
 }
 
 const EXTRANEOUS: &str = "extraneous";
@@ -515,7 +584,13 @@ impl NpmRebuild {
                 if skipped.iter().any(|s| k.starts_with(s) && k[s.len()..].starts_with("/node_modules/")) {
                     continue;
                 }
-                pk.insert(k.clone(), v.clone());
+                let mut v = v.clone();
+                if let Value::Object(entry) = &mut v {
+                    // npm re-serializes every entry (it does not keep the
+                    // lockfile's key order), so neither may thinclone.
+                    npm_key_order(entry);
+                }
+                pk.insert(k.clone(), v);
             }
         }
         out.insert("packages".into(), Value::Object(pk));
@@ -605,5 +680,189 @@ impl PostInstall for NpmRebuild {
         crate::util::record("root scripts", t.elapsed().as_secs_f64());
         crate::info!("  root lifecycle scripts: {:.2}s", t.elapsed().as_secs_f64());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn lockfile(packages: Value) -> Lockfile {
+        let raw = json!({ "name": "p", "version": "1.0.0", "lockfileVersion": 3, "requires": true, "packages": packages });
+        let Value::Object(raw) = raw else { unreachable!() };
+        Lockfile::from_raw(Path::new("/nonexistent"), raw).unwrap()
+    }
+
+    fn pkg(extra: Value) -> Value {
+        let mut v = json!({ "version": "1.0.0", "resolved": "https://registry.npmjs.org/x/-/x-1.0.0.tgz",
+                            "integrity": "sha512-AAAA" });
+        if let (Value::Object(m), Value::Object(x)) = (&mut v, extra) {
+            m.extend(x);
+        }
+        v
+    }
+
+    fn hidden(lf: &Lockfile, plan: &Plan) -> Value {
+        NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: true, extra_args: vec![] }.hidden_lockfile(plan)
+    }
+
+    #[test]
+    fn npm_flags_replace_stale_lockfile_flags_in_the_hidden_lockfile() {
+        // R9: the lockfile says peer, npm computes dev; another entry gains optional.
+        let mut lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/a": pkg(json!({ "peer": true, "license": "MIT" })),
+            "node_modules/b": pkg(json!({})),
+            "node_modules/c": pkg(json!({ "dev": true })),
+        }));
+        let ideal = parse_ideal(
+            &json!({ "nodes": { "node_modules/a": { "dev": true }, "node_modules/b": { "optional": true },
+                                "node_modules/c": { "dev": true, "peer": false } } }),
+            &lf,
+        )
+        .unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        let h = hidden(&lf, &plan);
+        let p = &h["packages"];
+        assert_eq!(p["node_modules/a"]["dev"], json!(true));
+        assert!(p["node_modules/a"].get("peer").is_none(), "stale peer flag copied: {}", p["node_modules/a"]);
+        assert_eq!(p["node_modules/a"]["license"], json!("MIT"), "other fields kept");
+        assert_eq!(p["node_modules/b"]["optional"], json!(true));
+        assert!(p["node_modules/c"].get("peer").is_none(), "a false flag is not written");
+        // The parsed entries follow npm too (they drive the optional-package skip).
+        let b = lf.entries.iter().find(|e| e.path == "node_modules/b").unwrap();
+        assert!(b.optional && !b.dev_optional);
+    }
+
+    #[test]
+    fn entries_outside_the_ideal_tree_keep_their_flags() {
+        let mut lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/a": pkg(json!({ "peer": true })),
+            "node_modules/x": pkg(json!({ "extraneous": true, "dev": true })),
+        }));
+        let ideal = parse_ideal(&json!({ "nodes": { "node_modules/a": {} } }), &lf).unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        let h = hidden(&lf, &plan);
+        assert!(h["packages"]["node_modules/a"].get("peer").is_none());
+        // npm's hidden lockfile keeps extraneous entries, as the lockfile has them.
+        assert_eq!(h["packages"]["node_modules/x"]["dev"], json!(true));
+        assert!(plan.skipped.iter().any(|(p, why)| p == "node_modules/x" && why.starts_with(EXTRANEOUS)));
+    }
+
+    #[test]
+    fn ideal_node_missing_from_the_lockfile_is_refused() {
+        let lf = lockfile(json!({ "": { "name": "p" }, "node_modules/a": pkg(json!({})) }));
+        let err = parse_ideal(&json!({ "nodes": { "node_modules/a": {}, "node_modules/b": {} } }), &lf).unwrap_err();
+        assert!(format!("{err}").contains("node_modules/b"), "{err}");
+        assert!(parse_ideal(&json!({}), &lf).is_err(), "no `nodes`");
+    }
+
+    #[test]
+    fn deduplicated_nested_entry_is_not_installed_nor_written() {
+        // npm ci dedupes a nested copy the lockfile still records (overrides case).
+        let mut lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/a": pkg(json!({})),
+            "node_modules/a/node_modules/ms": pkg(json!({})),
+            "node_modules/ms": pkg(json!({})),
+        }));
+        let ideal = parse_ideal(&json!({ "nodes": { "node_modules/a": {}, "node_modules/ms": {} } }), &lf).unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        assert!(!plan.entries.iter().any(|e| e.install_path == "node_modules/a/node_modules/ms"));
+        assert!(hidden(&lf, &plan)["packages"].get("node_modules/a/node_modules/ms").is_none());
+    }
+
+    #[test]
+    fn extraneous_is_classified_before_the_ideal_filter() {
+        // An extraneous entry is never in npm's ideal tree; it must still be
+        // skipped AS extraneous, which keeps it in the hidden lockfile.
+        let lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/x": pkg(json!({ "extraneous": true })),
+        }));
+        let plan = build_plan(&lf, Some(&HashSet::new())).unwrap();
+        let why = &plan.skipped.iter().find(|(p, _)| p == "node_modules/x").unwrap().1;
+        assert!(why.starts_with(EXTRANEOUS), "{why}");
+        assert!(hidden(&lf, &plan)["packages"].get("node_modules/x").is_some());
+    }
+
+    #[test]
+    fn lockfile_paths_that_escape_or_sit_under_a_link_are_refused() {
+        for bad in ["../outside", "/abs/node_modules/a", "node_modules/../../x", "./node_modules/a"] {
+            let lf = lockfile(json!({ "": {}, bad: pkg(json!({})) }));
+            assert!(validate_paths(&lf).is_err(), "{bad} accepted");
+        }
+        let lf = lockfile(json!({
+            "": {},
+            "node_modules/ws": { "resolved": "packages/ws", "link": true },
+            "node_modules/ws/node_modules/evil": pkg(json!({})),
+        }));
+        assert!(validate_paths(&lf).is_err(), "entry under a link accepted");
+        let ok = lockfile(json!({ "": {}, "node_modules/a/node_modules/b": pkg(json!({})), "packages/ws": {} }));
+        assert!(validate_paths(&ok).is_ok());
+    }
+
+    #[test]
+    fn key_order_matches_what_npm_wrote() {
+        // Every entry of a lockfile npm wrote, keys reversed, must sort back to
+        // npm's order (fixtures/small: 347 entries, flags, bins, engines, funding).
+        let lock: Value = serde_json::from_str(include_str!("../fixtures/small/package-lock.json")).unwrap();
+        let mut checked = 0;
+        for (loc, entry) in lock["packages"].as_object().unwrap() {
+            let entry = entry.as_object().unwrap();
+            let mut shuffled: Map<String, Value> = entry.iter().rev().map(|(k, v)| (k.clone(), v.clone())).collect();
+            npm_key_order(&mut shuffled);
+            let want: Vec<&String> = entry.keys().collect();
+            let got: Vec<&String> = shuffled.keys().collect();
+            assert_eq!(got, want, "{loc}");
+            checked += 1;
+        }
+        assert!(checked > 300);
+    }
+
+    #[test]
+    fn hidden_lockfile_entries_are_laid_out_as_npm_writes_them() {
+        // A flag appended at the end (a hand-edited lockfile, or a flag npm
+        // added) goes where npm writes it, whether or not npm changed it.
+        let mut lf = lockfile(json!({
+            "": {},
+            "node_modules/a": pkg(json!({ "license": "MIT", "bin": { "a": "a.js" }, "dev": true })),
+            "node_modules/b": pkg(json!({ "license": "MIT", "peer": true, "dependencies": { "a": "1" } })),
+        }));
+        let ideal = parse_ideal(&json!({ "nodes": { "node_modules/a": { "dev": true }, "node_modules/b": { "dev": true } } }), &lf).unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        let h = hidden(&lf, &plan);
+        let keys = |p: &str| h["packages"][p].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys("node_modules/a"), ["version", "resolved", "integrity", "dev", "license", "bin"]);
+        assert_eq!(keys("node_modules/b"), ["version", "resolved", "integrity", "dev", "license", "dependencies"]);
+    }
+
+    #[test]
+    fn workspace_globs_match_like_npm() {
+        assert!(glob_match("packages/*", "packages/a"));
+        assert!(!glob_match("packages/*", "packages/a/b"));
+        assert!(glob_match("packages/**", "packages/a/b"));
+        assert!(glob_match("apps/*-web", "apps/admin-web"));
+        assert!(!glob_match("apps/*-web", "apps/admin-api"));
+        assert!(glob_match("tools/cli", "tools/cli"));
+        let lf = lockfile(json!({ "": { "workspaces": { "packages": ["./packages/*", "apps/web/"] } } }));
+        assert_eq!(workspace_globs(&lf), vec!["packages/*", "apps/web"]);
+        let lf = lockfile(json!({ "": { "workspaces": ["libs/*"] } }));
+        assert_eq!(workspace_globs(&lf), vec!["libs/*"]);
+    }
+
+    #[test]
+    fn dependency_resolution_walks_up_like_node() {
+        let keys: HashSet<&str> = ["node_modules/a", "node_modules/b", "node_modules/a/node_modules/b"].into_iter().collect();
+        assert_eq!(resolve(&keys, "node_modules/a", "b"), Some("node_modules/a/node_modules/b"));
+        assert_eq!(resolve(&keys, "node_modules/b", "a"), Some("node_modules/a"));
+        assert_eq!(resolve(&keys, "packages/ws", "b"), Some("node_modules/b"));
+        assert_eq!(resolve(&keys, "", "c"), None);
     }
 }
