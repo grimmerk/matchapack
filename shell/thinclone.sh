@@ -5,7 +5,9 @@
 # the real npm with the same arguments. Every other npm command goes straight
 # to npm without starting thinclone.
 #
-# Install: add to ~/.zshrc or ~/.bashrc
+# Install: add to ~/.zshrc or ~/.bashrc (the binary prints this file)
+#     command -v thinclone >/dev/null && eval "$(thinclone init)"
+# Sourcing this file from a checkout works too:
 #     [ -f "$HOME/git/thinclone/shell/thinclone.sh" ] && . "$HOME/git/thinclone/shell/thinclone.sh"
 # Bypass for one command:  THINCLONE=0 npm ci     or     command npm ci
 # Remove: delete that line; already installed node_modules keep working.

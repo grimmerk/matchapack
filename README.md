@@ -16,13 +16,22 @@ with `reflink=1`. Elsewhere it hands over to npm.
 cargo install --path .          # puts thinclone in ~/.cargo/bin
 ```
 
-Then add one line to `~/.zshrc` or `~/.bashrc`:
+Then add one line to your shell's startup file. Not sure which shell you use?
+Run `echo $0` (macOS has used zsh by default since 10.15).
 
-```sh
-[ -f "$HOME/git/thinclone/shell/thinclone.sh" ] && . "$HOME/git/thinclone/shell/thinclone.sh"
-```
+| shell | file | line |
+|---|---|---|
+| zsh | `~/.zshrc` | `command -v thinclone >/dev/null && eval "$(thinclone init)"` |
+| bash | `~/.bashrc` | `command -v thinclone >/dev/null && eval "$(thinclone init)"` |
+| fish | `~/.config/fish/config.fish` | `type -q thinclone; and thinclone init \| source` |
 
-(fish: `shell/thinclone.fish`.) From then on, type `npm ci` as usual:
+Put it after the line that puts `~/.cargo/bin` on PATH (rustup usually does
+that in `~/.zshenv` or `~/.profile`); if it comes earlier, it does nothing.
+`thinclone init` detects the shell that runs it; `thinclone init zsh` (or
+`bash`, `fish`) names it explicitly. The function comes from the binary, so no
+checkout of this repository is needed and it updates with `cargo install`.
+Sourcing `shell/thinclone.sh` from a checkout still works. Open a new terminal,
+then type `npm ci` as usual:
 
 ```
 $ npm ci
@@ -82,6 +91,7 @@ its working directory in.
 
 ## Other commands
 
+- `thinclone init zsh|bash|fish`: print the shell integration (see "Use").
 - `thinclone install [dir]`: the install itself, with per-step timings (same
   npm version gate as `npm ci`).
 - `thinclone plan [dir]`: what would be placed and what is skipped, and why.
@@ -91,3 +101,6 @@ its working directory in.
   runs on any npm version and ignores the trial scope file, since it is how a
   new npm version gets verified.
 - `scripts/test-wrapper.sh <work>`: routing tests for the shell integration.
+- `scripts/test-shells.sh`: the same routing in bash, zsh and fish with stubs,
+  in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash
+  /src/scripts/test-shells.sh`).

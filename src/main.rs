@@ -59,6 +59,24 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Print the shell integration for an rc file (routes a bare `npm ci` through thinclone)
+    ///
+    /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts thinclone on
+    /// PATH (otherwise the guard skips it silently):
+    ///
+    ///     command -v thinclone >/dev/null && eval "$(thinclone init)"
+    ///
+    /// fish: ~/.config/fish/config.fish:
+    ///
+    ///     type -q thinclone; and thinclone init | source
+    ///
+    /// Without SHELL, the shell that runs the command (the parent process) is
+    /// used; name it to be explicit.
+    #[command(verbatim_doc_comment)]
+    Init {
+        #[arg(value_parser = INIT_SHELLS)]
+        shell: Option<String>,
+    },
     /// Print the install plan (counts and every skipped entry with its reason); installs nothing.
     Plan {
         #[arg(default_value = ".")]
@@ -339,6 +357,24 @@ fn place(
     Ok(())
 }
 
+const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
+
+/// The shell `thinclone init` was started from: its parent process. In
+/// `eval "$(thinclone init)"` that is the zsh or bash reading the rc file, in
+/// `thinclone init | source` the fish. Not $SHELL, which names the login shell
+/// even inside another one.
+fn parent_shell() -> Option<&'static str> {
+    let ppid = std::os::unix::process::parent_id();
+    let out = std::process::Command::new("ps").args(["-o", "comm=", "-p", &ppid.to_string()]).output().ok()?;
+    shell_from_comm(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// `ps -o comm=` gives `zsh`, `/bin/zsh`, or `-zsh` for a login shell.
+fn shell_from_comm(comm: &str) -> Option<&'static str> {
+    let name = comm.rsplit('/').next().unwrap_or(comm).trim_start_matches('-');
+    INIT_SHELLS.iter().copied().find(|s| *s == name)
+}
+
 pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
     let (root, lf, plan, store, extracted_now) = prepare(o).map_err(InstallError::Declined)?;
@@ -399,6 +435,22 @@ fn main() -> Result<()> {
             let code = wrapper::run(args);
             std::process::exit(code);
         }
+        Cmd::Init { shell } => {
+            let shell = match shell {
+                Some(s) => s,
+                None => parent_shell().map(String::from).with_context(|| {
+                    format!(
+                        "could not tell which shell runs this; name it: thinclone init <{}>\n  \
+                         zsh (~/.zshrc) / bash (~/.bashrc): command -v thinclone >/dev/null && eval \"$(thinclone init zsh)\"\n  \
+                         fish (~/.config/fish/config.fish): type -q thinclone; and thinclone init fish | source",
+                        INIT_SHELLS.join("|")
+                    )
+                })?,
+            };
+            // The files in shell/ are the one definition; the binary carries
+            // them so the rc line needs no checkout of this repository.
+            print!("{}", if shell == "fish" { include_str!("../shell/thinclone.fish") } else { include_str!("../shell/thinclone.sh") });
+        }
         Cmd::Plan { dir } => {
             let root = std::fs::canonicalize(&dir)?;
             let mut lf = lock::Lockfile::load(&root)?;
@@ -442,4 +494,21 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_from_comm;
+
+    #[test]
+    fn shell_names_from_ps() {
+        assert_eq!(shell_from_comm("zsh"), Some("zsh"));
+        assert_eq!(shell_from_comm("/bin/zsh"), Some("zsh"));
+        assert_eq!(shell_from_comm("-zsh"), Some("zsh"));
+        assert_eq!(shell_from_comm("/opt/homebrew/bin/fish"), Some("fish"));
+        assert_eq!(shell_from_comm("-bash"), Some("bash"));
+        assert_eq!(shell_from_comm("sh"), None);
+        assert_eq!(shell_from_comm("tmux"), None);
+        assert_eq!(shell_from_comm(""), None);
+    }
 }
