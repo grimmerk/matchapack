@@ -380,10 +380,9 @@ pub fn apply_flags(lf: &mut Lockfile, ideal: &Ideal) {
         for (loc, flags) in &ideal.flags {
             if let Some(Value::Object(entry)) = pkgs.get_mut(loc) {
                 for k in DEP_FLAGS {
-                    entry.remove(k);
+                    entry.shift_remove(k);
                 }
-                // Appended at the end, where npm writes them in another order;
-                // readers parse the hidden lockfile as JSON.
+                // Key order is restored when the hidden lockfile is written.
                 for (k, v) in flags {
                     entry.insert(k.clone(), v.clone());
                 }
@@ -396,6 +395,25 @@ pub fn apply_flags(lf: &mut Lockfile, ideal: &Ideal) {
             e.dev_optional = f.contains_key("devOptional");
         }
     }
+}
+
+/// Reorder one lockfile entry's keys the way npm writes them
+/// (json-stringify-nice with Shrinkwrap's key order, npm 10.9 and 11.19):
+/// values that are not objects first, then objects; within each group the
+/// keys in `PREFERRED` in that order, then the rest by `localeCompare('en')`.
+/// Lockfile field names are ASCII letters, where that collation is
+/// case-insensitive with lowercase first, which is what this compares. Only
+/// the entry's own keys are ordered: nested objects (dependency names, where
+/// `@` and `-` collate differently) keep the order npm wrote in the lockfile.
+fn npm_key_order(entry: &mut Map<String, Value>) {
+    const PREFERRED: [&str; 8] = ["name", "version", "lockfileVersion", "resolved", "integrity", "requires", "packages", "dependencies"];
+    let rank = |(k, v): (&String, &Value)| {
+        let pref = PREFERRED.iter().position(|p| p == k).unwrap_or(PREFERRED.len());
+        (v.is_object(), pref, k.to_lowercase(), k.chars().map(|c| c.is_uppercase()).collect::<Vec<_>>())
+    };
+    let mut items: Vec<(String, Value)> = std::mem::take(entry).into_iter().collect();
+    items.sort_by_cached_key(|(k, v)| rank((k, v)));
+    entry.extend(items);
 }
 
 const EXTRANEOUS: &str = "extraneous";
@@ -566,7 +584,13 @@ impl NpmRebuild {
                 if skipped.iter().any(|s| k.starts_with(s) && k[s.len()..].starts_with("/node_modules/")) {
                     continue;
                 }
-                pk.insert(k.clone(), v.clone());
+                let mut v = v.clone();
+                if let Value::Object(entry) = &mut v {
+                    // npm re-serializes every entry (it does not keep the
+                    // lockfile's key order), so neither may thinclone.
+                    npm_key_order(entry);
+                }
+                pk.insert(k.clone(), v);
             }
         }
         out.insert("packages".into(), Value::Object(pk));
@@ -781,6 +805,42 @@ mod tests {
         assert!(validate_paths(&lf).is_err(), "entry under a link accepted");
         let ok = lockfile(json!({ "": {}, "node_modules/a/node_modules/b": pkg(json!({})), "packages/ws": {} }));
         assert!(validate_paths(&ok).is_ok());
+    }
+
+    #[test]
+    fn key_order_matches_what_npm_wrote() {
+        // Every entry of a lockfile npm wrote, keys reversed, must sort back to
+        // npm's order (fixtures/small: 347 entries, flags, bins, engines, funding).
+        let lock: Value = serde_json::from_str(include_str!("../fixtures/small/package-lock.json")).unwrap();
+        let mut checked = 0;
+        for (loc, entry) in lock["packages"].as_object().unwrap() {
+            let entry = entry.as_object().unwrap();
+            let mut shuffled: Map<String, Value> = entry.iter().rev().map(|(k, v)| (k.clone(), v.clone())).collect();
+            npm_key_order(&mut shuffled);
+            let want: Vec<&String> = entry.keys().collect();
+            let got: Vec<&String> = shuffled.keys().collect();
+            assert_eq!(got, want, "{loc}");
+            checked += 1;
+        }
+        assert!(checked > 300);
+    }
+
+    #[test]
+    fn hidden_lockfile_entries_are_laid_out_as_npm_writes_them() {
+        // A flag appended at the end (a hand-edited lockfile, or a flag npm
+        // added) goes where npm writes it, whether or not npm changed it.
+        let mut lf = lockfile(json!({
+            "": {},
+            "node_modules/a": pkg(json!({ "license": "MIT", "bin": { "a": "a.js" }, "dev": true })),
+            "node_modules/b": pkg(json!({ "license": "MIT", "peer": true, "dependencies": { "a": "1" } })),
+        }));
+        let ideal = parse_ideal(&json!({ "nodes": { "node_modules/a": { "dev": true }, "node_modules/b": { "dev": true } } }), &lf).unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        let h = hidden(&lf, &plan);
+        let keys = |p: &str| h["packages"][p].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys("node_modules/a"), ["version", "resolved", "integrity", "dev", "license", "bin"]);
+        assert_eq!(keys("node_modules/b"), ["version", "resolved", "integrity", "dev", "license", "dependencies"]);
     }
 
     #[test]
