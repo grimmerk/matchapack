@@ -73,6 +73,11 @@ impl Lockfile {
         let p = root.join("package-lock.json");
         let text = std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
         let raw: Map<String, Value> = serde_json::from_str(&text).context("parsing package-lock.json")?;
+        Lockfile::from_raw(root, raw)
+    }
+
+    /// A lockfile already parsed as JSON (`load` without the file read).
+    pub fn from_raw(root: &Path, raw: Map<String, Value>) -> Result<Lockfile> {
         let ver = raw.get("lockfileVersion").and_then(|v| v.as_u64()).unwrap_or(0);
         if ver < 2 {
             bail!("lockfileVersion {ver} is not supported (need 2 or 3: the `packages` section)");

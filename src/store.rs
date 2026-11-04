@@ -302,3 +302,20 @@ pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Integrity;
+
+    #[test]
+    fn integrity_keeps_the_strongest_hash_and_checks_digest_length() {
+        let sha1 = format!("sha1-{}", "A".repeat(27) + "=");
+        let sha512 = format!("sha512-{}", "A".repeat(86) + "==");
+        let i = Integrity::parse(&format!("{sha1} {sha512}")).unwrap();
+        assert_eq!(i.algo, "sha512");
+        assert_eq!(i.hex.len(), 128);
+        assert!(Integrity::parse("sha512-").is_err(), "empty digest");
+        assert!(Integrity::parse("sha512-AAAA").is_err(), "short digest");
+        assert!(Integrity::parse("md5-AAAA").is_err(), "no supported hash");
+    }
+}

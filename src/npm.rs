@@ -658,3 +658,151 @@ impl PostInstall for NpmRebuild {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn lockfile(packages: Value) -> Lockfile {
+        let raw = json!({ "name": "p", "version": "1.0.0", "lockfileVersion": 3, "requires": true, "packages": packages });
+        let Value::Object(raw) = raw else { unreachable!() };
+        Lockfile::from_raw(Path::new("/nonexistent"), raw).unwrap()
+    }
+
+    fn pkg(extra: Value) -> Value {
+        let mut v = json!({ "version": "1.0.0", "resolved": "https://registry.npmjs.org/x/-/x-1.0.0.tgz",
+                            "integrity": "sha512-AAAA" });
+        if let (Value::Object(m), Value::Object(x)) = (&mut v, extra) {
+            m.extend(x);
+        }
+        v
+    }
+
+    fn hidden(lf: &Lockfile, plan: &Plan) -> Value {
+        NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: true, extra_args: vec![] }.hidden_lockfile(plan)
+    }
+
+    #[test]
+    fn npm_flags_replace_stale_lockfile_flags_in_the_hidden_lockfile() {
+        // R9: the lockfile says peer, npm computes dev; another entry gains optional.
+        let mut lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/a": pkg(json!({ "peer": true, "license": "MIT" })),
+            "node_modules/b": pkg(json!({})),
+            "node_modules/c": pkg(json!({ "dev": true })),
+        }));
+        let ideal = parse_ideal(
+            &json!({ "nodes": { "node_modules/a": { "dev": true }, "node_modules/b": { "optional": true },
+                                "node_modules/c": { "dev": true, "peer": false } } }),
+            &lf,
+        )
+        .unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        let h = hidden(&lf, &plan);
+        let p = &h["packages"];
+        assert_eq!(p["node_modules/a"]["dev"], json!(true));
+        assert!(p["node_modules/a"].get("peer").is_none(), "stale peer flag copied: {}", p["node_modules/a"]);
+        assert_eq!(p["node_modules/a"]["license"], json!("MIT"), "other fields kept");
+        assert_eq!(p["node_modules/b"]["optional"], json!(true));
+        assert!(p["node_modules/c"].get("peer").is_none(), "a false flag is not written");
+        // The parsed entries follow npm too (they drive the optional-package skip).
+        let b = lf.entries.iter().find(|e| e.path == "node_modules/b").unwrap();
+        assert!(b.optional && !b.dev_optional);
+    }
+
+    #[test]
+    fn entries_outside_the_ideal_tree_keep_their_flags() {
+        let mut lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/a": pkg(json!({ "peer": true })),
+            "node_modules/x": pkg(json!({ "extraneous": true, "dev": true })),
+        }));
+        let ideal = parse_ideal(&json!({ "nodes": { "node_modules/a": {} } }), &lf).unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        let h = hidden(&lf, &plan);
+        assert!(h["packages"]["node_modules/a"].get("peer").is_none());
+        // npm's hidden lockfile keeps extraneous entries, as the lockfile has them.
+        assert_eq!(h["packages"]["node_modules/x"]["dev"], json!(true));
+        assert!(plan.skipped.iter().any(|(p, why)| p == "node_modules/x" && why.starts_with(EXTRANEOUS)));
+    }
+
+    #[test]
+    fn ideal_node_missing_from_the_lockfile_is_refused() {
+        let lf = lockfile(json!({ "": { "name": "p" }, "node_modules/a": pkg(json!({})) }));
+        let err = parse_ideal(&json!({ "nodes": { "node_modules/a": {}, "node_modules/b": {} } }), &lf).unwrap_err();
+        assert!(format!("{err}").contains("node_modules/b"), "{err}");
+        assert!(parse_ideal(&json!({}), &lf).is_err(), "no `nodes`");
+    }
+
+    #[test]
+    fn deduplicated_nested_entry_is_not_installed_nor_written() {
+        // npm ci dedupes a nested copy the lockfile still records (overrides case).
+        let mut lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/a": pkg(json!({})),
+            "node_modules/a/node_modules/ms": pkg(json!({})),
+            "node_modules/ms": pkg(json!({})),
+        }));
+        let ideal = parse_ideal(&json!({ "nodes": { "node_modules/a": {}, "node_modules/ms": {} } }), &lf).unwrap();
+        apply_flags(&mut lf, &ideal);
+        let plan = build_plan(&lf, Some(&ideal.paths)).unwrap();
+        assert!(!plan.entries.iter().any(|e| e.install_path == "node_modules/a/node_modules/ms"));
+        assert!(hidden(&lf, &plan)["packages"].get("node_modules/a/node_modules/ms").is_none());
+    }
+
+    #[test]
+    fn extraneous_is_classified_before_the_ideal_filter() {
+        // An extraneous entry is never in npm's ideal tree; it must still be
+        // skipped AS extraneous, which keeps it in the hidden lockfile.
+        let lf = lockfile(json!({
+            "": { "name": "p" },
+            "node_modules/x": pkg(json!({ "extraneous": true })),
+        }));
+        let plan = build_plan(&lf, Some(&HashSet::new())).unwrap();
+        let why = &plan.skipped.iter().find(|(p, _)| p == "node_modules/x").unwrap().1;
+        assert!(why.starts_with(EXTRANEOUS), "{why}");
+        assert!(hidden(&lf, &plan)["packages"].get("node_modules/x").is_some());
+    }
+
+    #[test]
+    fn lockfile_paths_that_escape_or_sit_under_a_link_are_refused() {
+        for bad in ["../outside", "/abs/node_modules/a", "node_modules/../../x", "./node_modules/a"] {
+            let lf = lockfile(json!({ "": {}, bad: pkg(json!({})) }));
+            assert!(validate_paths(&lf).is_err(), "{bad} accepted");
+        }
+        let lf = lockfile(json!({
+            "": {},
+            "node_modules/ws": { "resolved": "packages/ws", "link": true },
+            "node_modules/ws/node_modules/evil": pkg(json!({})),
+        }));
+        assert!(validate_paths(&lf).is_err(), "entry under a link accepted");
+        let ok = lockfile(json!({ "": {}, "node_modules/a/node_modules/b": pkg(json!({})), "packages/ws": {} }));
+        assert!(validate_paths(&ok).is_ok());
+    }
+
+    #[test]
+    fn workspace_globs_match_like_npm() {
+        assert!(glob_match("packages/*", "packages/a"));
+        assert!(!glob_match("packages/*", "packages/a/b"));
+        assert!(glob_match("packages/**", "packages/a/b"));
+        assert!(glob_match("apps/*-web", "apps/admin-web"));
+        assert!(!glob_match("apps/*-web", "apps/admin-api"));
+        assert!(glob_match("tools/cli", "tools/cli"));
+        let lf = lockfile(json!({ "": { "workspaces": { "packages": ["./packages/*", "apps/web/"] } } }));
+        assert_eq!(workspace_globs(&lf), vec!["packages/*", "apps/web"]);
+        let lf = lockfile(json!({ "": { "workspaces": ["libs/*"] } }));
+        assert_eq!(workspace_globs(&lf), vec!["libs/*"]);
+    }
+
+    #[test]
+    fn dependency_resolution_walks_up_like_node() {
+        let keys: HashSet<&str> = ["node_modules/a", "node_modules/b", "node_modules/a/node_modules/b"].into_iter().collect();
+        assert_eq!(resolve(&keys, "node_modules/a", "b"), Some("node_modules/a/node_modules/b"));
+        assert_eq!(resolve(&keys, "node_modules/b", "a"), Some("node_modules/a"));
+        assert_eq!(resolve(&keys, "packages/ws", "b"), Some("node_modules/b"));
+        assert_eq!(resolve(&keys, "", "c"), None);
+    }
+}
