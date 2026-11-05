@@ -80,5 +80,18 @@ gc --dry-run
 wait $holder
 [ ! -e "$store/tmp/1-left" ] && [ -d "$store/tmp/1-held" ] && ok "tmp: leftover removed, held directory kept" || bad "tmp: cleanup ($(ls "$store/tmp" | tr '\n' ' '))"
 
+# 10. A real install holds the store until it ends: its root postinstall
+#     (run by the post-install step, the last one) tries a gc, which is refused.
+p5=$(project p5)
+python3 -c "import json;p='$p5/package.json';d=json.load(open(p));d['scripts']['postinstall']='\"$bin\" store gc > gc.txt 2>&1; true';json.dump(d,open(p,'w'))"
+"$bin" install "$p5" > "$work/out" 2>&1 && grep -q 'in use by a running install' "$p5/gc.txt" && ok "lock: held through the root scripts (a gc from postinstall is refused)" || bad "lock: gc ran inside an install ($(cat "$p5/gc.txt" 2>/dev/null | head -1))"
+
+# 11. An install started while a gc holds the store waits for it, then runs.
+python3 -c "import fcntl,time;f=open('$store/lock','a');fcntl.flock(f,fcntl.LOCK_EX);time.sleep(3)" & holder=$!
+sleep 1
+p6=$(project p6); "$bin" install "$p6" --no-rebuild > "$work/out" 2>&1; rc=$?
+wait $holder
+[ $rc = 0 ] && grep -q 'waiting for a `thinclone store` command' "$work/out" && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc)"
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

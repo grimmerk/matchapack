@@ -15,7 +15,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use sha2::Digest;
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -102,6 +101,20 @@ pub fn cacache_read(cacache: &Path, key: &str) -> Option<Vec<u8>> {
 
 fn flock(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
     if unsafe { libc::flock(f.as_raw_fd(), op) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// flock, retried when a signal interrupts it.
+fn flock_retry(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
+    loop {
+        match flock(f, op) {
+            Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,
+            r => return r,
+        }
+    }
+}
+
+fn unsupported(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(n) if n == libc::ENOTSUP || n == libc::EOPNOTSUPP)
 }
 
 fn would_block(e: &std::io::Error) -> bool {
@@ -223,21 +236,25 @@ impl Store {
         fs::create_dir_all(root.join("tmp"))?;
         let lf = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join("lock"))?;
         let lock = if exclusive {
-            match flock(&lf, libc::LOCK_EX | libc::LOCK_NB) {
+            match flock_retry(&lf, libc::LOCK_EX | libc::LOCK_NB) {
                 Ok(()) => Some(lf),
                 Err(e) if would_block(&e) => bail!("the store is in use by a running install; try again when it has finished"),
                 Err(e) => bail!("cannot lock the store ({e}); refusing to remove entries without it"),
             }
         } else {
-            match flock(&lf, libc::LOCK_SH | libc::LOCK_NB) {
+            match flock_retry(&lf, libc::LOCK_SH | libc::LOCK_NB) {
                 Ok(()) => Some(lf),
                 Err(e) if would_block(&e) => {
                     eprintln!("thinclone: waiting for a `thinclone store` command to release the store");
-                    flock(&lf, libc::LOCK_SH).context("waiting for the store lock")?;
+                    flock_retry(&lf, libc::LOCK_SH).context("waiting for the store lock")?;
                     Some(lf)
                 }
-                // No flock on this filesystem: installs go on unguarded, as before.
-                Err(_) => None,
+                // No flock on this filesystem at all: installs go on unguarded,
+                // as before, and gc / verify --fix refuse (they need the lock).
+                Err(e) if unsupported(&e) => None,
+                // Anything else may pass: refuse rather than install without
+                // the lock while a gc could get it (the install goes to npm).
+                Err(e) => bail!("cannot lock the store ({e})"),
             }
         };
         clean_tmp(&root.join("tmp"))?;
@@ -269,11 +286,18 @@ impl Store {
     pub fn entries(&self) -> Vec<Integrity> {
         let base = self.root.join(LAYOUT);
         let mut v = vec![];
+        // Directories with an entry's name only: a stray file (a Finder
+        // .DS_Store) is not an entry, and gc could not remove it as one.
         for e in walkdir::WalkDir::new(&base).min_depth(3).max_depth(3).into_iter().flatten() {
+            if !e.file_type().is_dir() {
+                continue;
+            }
             let rel = e.path().strip_prefix(&base).unwrap();
             let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
             if let [algo, a, b] = parts.as_slice() {
-                v.push(Integrity { algo: algo.clone(), hex: format!("{a}{b}") });
+                if let Some(i) = Integrity::from_key(&format!("{algo}-{a}{b}")) {
+                    v.push(i);
+                }
             }
         }
         v
@@ -381,73 +405,93 @@ impl Store {
     }
 
     /// Compare an entry with what its tarball in the npm cache extracts to:
-    /// the same files, contents, modes and directories, nothing else. Catches
-    /// an entry left truncated or changed (entries are renamed into place
-    /// without fsync, and a clone tool or a person could write into one).
+    /// the tarball is extracted again into tmp/ on the same filesystem, and
+    /// the two trees must hold the same files (contents, modes), directories
+    /// (modes, the root's included) and nothing else. Extracting rather than
+    /// modelling the result keeps the filesystem's own name rules (a
+    /// case-insensitive volume keeps one of `README.md` and `readme.md`).
+    /// Catches an entry left truncated or changed (entries are renamed into
+    /// place without fsync, and a person or a tool could write into one).
     /// Found by content address only; an entry whose lockfile had only sha1
     /// (cacache keeps those under sha512) reads as NoTarball.
     pub fn verify_entry(&self, i: &Integrity) -> Result<Check> {
+        let dir = self.dir_for(i);
+        let m = fs::symlink_metadata(&dir).with_context(|| format!("reading {}", dir.display()))?;
+        if !m.is_dir() {
+            return Ok(Check::Differs("the entry is not a directory (a symlink?)".into()));
+        }
         let Some(tgz) = self.find_tarball(i, None) else { return Ok(Check::NoTarball) };
         let data = fs::read(&tgz)?;
         if i.digest(&data) != i.hex {
             return Ok(Check::NoTarball);
         }
-        let mut want: BTreeMap<PathBuf, (u32, blake3::Hash)> = BTreeMap::new();
-        tar_files(&data, |rel, mode, r| {
-            // A later archive entry replaces an earlier one at the same path
-            // (extract removes what is there, a directory included).
-            want.retain(|p, _| !p.starts_with(rel));
+        let seq = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
+        let fresh = TmpDir::create(self.root.join("tmp").join(format!("{}-v{seq}-{}", process_tag(), &i.hex[..16])), 0o755)?;
+        let r = extract(&data, &fresh.path).with_context(|| format!("extracting {}", tgz.display())).and_then(|()| {
+            let (want, got) = (tree(&fresh.path)?, tree(&dir)?);
+            Ok(match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
+                Some((w, g)) => Check::Differs(describe(w, g)),
+                None if want.len() != got.len() => {
+                    let (longer, what) = if got.len() > want.len() { (&got, "not in the tarball") } else { (&want, "missing") };
+                    let p = &longer[want.len().min(got.len())].0;
+                    Check::Differs(format!("{}: {what}", show_rel(p)))
+                }
+                None => Check::Match,
+            })
+        });
+        let _ = fs::remove_dir_all(&fresh.path);
+        r
+    }
+}
+
+/// One path in a tree: kind and mode, and for a file its contents' hash.
+#[derive(PartialEq, Eq)]
+enum Node {
+    Dir(u32),
+    File(u32, blake3::Hash),
+    Other,
+}
+
+/// Every path under `root` (`root` itself as ""), sorted, symlinks not followed.
+fn tree(root: &Path) -> Result<Vec<(PathBuf, Node)>> {
+    let mut v = vec![];
+    for e in walkdir::WalkDir::new(root).follow_links(false).follow_root_links(false).sort_by_file_name() {
+        let e = e?;
+        let rel = e.path().strip_prefix(root).unwrap().to_path_buf();
+        let ft = e.file_type();
+        let mode = e.metadata()?.permissions().mode() & 0o7777;
+        let n = if ft.is_dir() {
+            Node::Dir(mode)
+        } else if ft.is_file() {
             let mut h = blake3::Hasher::new();
-            std::io::copy(r, &mut h)?;
-            want.insert(rel.to_path_buf(), (mode, h.finalize()));
-            Ok(())
-        })?;
-        let mut want_dirs: std::collections::BTreeSet<PathBuf> = Default::default();
-        for p in want.keys() {
-            let mut a = p.parent();
-            while let Some(d) = a.filter(|d| !d.as_os_str().is_empty()) {
-                want_dirs.insert(d.to_path_buf());
-                a = d.parent();
-            }
-        }
-        let dir = self.dir_for(i);
-        let mut seen_dirs: std::collections::BTreeSet<PathBuf> = Default::default();
-        let mut seen = 0usize;
-        for e in walkdir::WalkDir::new(&dir).min_depth(1).follow_links(false) {
-            let e = e?;
-            let rel = e.path().strip_prefix(&dir).unwrap().to_path_buf();
-            let ft = e.file_type();
-            if ft.is_dir() {
-                if !want_dirs.contains(&rel) {
-                    return Ok(Check::Differs(format!("{}/: directory not in the tarball", rel.display())));
-                }
-                seen_dirs.insert(rel);
-            } else if ft.is_file() {
-                let Some((mode, hash)) = want.get(&rel) else {
-                    return Ok(Check::Differs(format!("{}: file not in the tarball", rel.display())));
-                };
-                let m = e.metadata()?.permissions().mode() & 0o7777;
-                if m != *mode {
-                    return Ok(Check::Differs(format!("{}: mode {m:o}, the tarball gives {mode:o}", rel.display())));
-                }
-                let mut h = blake3::Hasher::new();
-                std::io::copy(&mut fs::File::open(e.path())?, &mut h)?;
-                if h.finalize() != *hash {
-                    return Ok(Check::Differs(format!("{}: contents differ", rel.display())));
-                }
-                seen += 1;
-            } else {
-                return Ok(Check::Differs(format!("{}: not a regular file or directory", rel.display())));
-            }
-        }
-        if seen != want.len() {
-            let missing = want.keys().find(|p| !dir.join(p).is_file()).map(|p| p.display().to_string()).unwrap_or_default();
-            return Ok(Check::Differs(format!("{missing}: missing ({} of {} files present)", seen, want.len())));
-        }
-        if seen_dirs.len() != want_dirs.len() {
-            return Ok(Check::Differs("a directory is missing".into()));
-        }
-        Ok(Check::Match)
+            std::io::copy(&mut fs::File::open(e.path())?, &mut h)?;
+            Node::File(mode, h.finalize())
+        } else {
+            Node::Other
+        };
+        v.push((rel, n));
+    }
+    Ok(v)
+}
+
+fn show_rel(p: &Path) -> String {
+    if p.as_os_str().is_empty() { "(entry root)".into() } else { p.display().to_string() }
+}
+
+/// The first difference between two tree items, `w` from the tarball.
+fn describe(w: &(PathBuf, Node), g: &(PathBuf, Node)) -> String {
+    if w.0 != g.0 {
+        // Sorted walks: the smaller name is the one the other side lacks.
+        return if w.0 < g.0 { format!("{}: missing", show_rel(&w.0)) } else { format!("{}: not in the tarball", show_rel(&g.0)) };
+    }
+    let p = show_rel(&w.0);
+    match (&w.1, &g.1) {
+        (Node::File(wm, _), Node::File(gm, _)) if wm != gm => format!("{p}: mode {gm:o}, the tarball gives {wm:o}"),
+        (Node::File(..), Node::File(..)) => format!("{p}: contents differ"),
+        (Node::Dir(wm), Node::Dir(gm)) => format!("{p}/: directory mode {gm:o}, the tarball gives {wm:o}"),
+        (_, Node::Other) => format!("{p}: not a regular file or directory"),
+        (Node::Dir(_), _) => format!("{p}: a file where the tarball has a directory"),
+        _ => format!("{p}: a directory where the tarball has a file"),
     }
 }
 
@@ -477,16 +521,15 @@ const UMASK: u32 = 0o022;
 /// the `.gitignore` → `.npmignore` rename.
 pub const LAYOUT: &str = "v2";
 
-/// The files of a package tarball as pacote writes them
-/// (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`), in archive order:
-/// the first path component stripped; FILE entries only (links and directory
+/// Extract like pacote (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`):
+/// strip the first path component; keep FILE entries only (links and directory
 /// entries are filtered out, so empty directories never appear; directories
-/// exist only as parents of files); `..` refused; a `.gitignore` renamed to
-/// `.npmignore` unless a `.npmignore` at that path was seen earlier in the
-/// archive, in which case it is dropped; mode `((mode | 0o666) & ~umask) |
-/// 0o600`. The one definition of these rules: `extract` writes what it
-/// yields, `Store::verify_entry` compares against it.
-fn tar_files(data: &[u8], mut f: impl FnMut(&Path, u32, &mut dyn Read) -> Result<()>) -> Result<()> {
+/// exist only as parents of files, mode 0o755); refuse `..`; a `.gitignore` is
+/// renamed to `.npmignore` unless a `.npmignore` at that path was seen earlier in
+/// the archive, in which case it is dropped; files get
+/// `((mode | 0o666) & ~umask) | 0o600`. Executable bits for declared bins are
+/// added later by npm's bin linking, as in `npm ci`.
+pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
     let reader: Box<dyn Read> = if data.starts_with(&[0x1f, 0x8b]) {
         Box::new(flate2::read::GzDecoder::new(data))
     } else {
@@ -534,18 +577,7 @@ fn tar_files(data: &[u8], mut f: impl FnMut(&Path, u32, &mut dyn Read) -> Result
             }
             _ => {}
         }
-        let mode = ent.header().mode().unwrap_or(0o644);
-        let m = (((mode | 0o666) & !UMASK) | 0o600) & 0o7777;
-        f(&rel, m, &mut ent)?;
-    }
-    Ok(())
-}
-
-/// Extract like pacote (the rules are in `tar_files`). Executable bits for
-/// declared bins are added later by npm's bin linking, as in `npm ci`.
-pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
-    tar_files(data, |rel, mode, r| {
-        let out = dest.join(rel);
+        let out = dest.join(&rel);
         if let Some(p) = out.parent() {
             fs::create_dir_all(p)?;
         }
@@ -556,12 +588,14 @@ pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
                 fs::remove_file(&out)?;
             }
         }
+        let mode = ent.header().mode().unwrap_or(0o644);
         let mut f = fs::File::create(&out)?;
-        std::io::copy(r, &mut f)?;
+        std::io::copy(&mut ent, &mut f)?;
         drop(f);
-        fs::set_permissions(&out, fs::Permissions::from_mode(mode))?;
-        Ok(())
-    })
+        let m = ((mode | 0o666) & !UMASK) | 0o600;
+        fs::set_permissions(&out, fs::Permissions::from_mode(m & 0o7777))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -648,18 +682,50 @@ pub(crate) mod tests {
         assert!(differs("missing").contains("bin/cli"));
         let e = fresh();
         fs::write(e.join("extra.js"), "").unwrap();
-        assert!(differs("extra").contains("extra.js: file not in the tarball"));
+        assert!(differs("extra").contains("extra.js: not in the tarball"));
         let e = fresh();
         fs::set_permissions(e.join("index.js"), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(differs("mode").contains("mode 755"));
         let e = fresh();
         fs::create_dir(e.join("empty")).unwrap();
-        assert!(differs("empty dir").contains("empty/"));
+        assert!(differs("empty dir").contains("empty: not in the tarball"));
         let e = fresh();
         std::os::unix::fs::symlink("index.js", e.join("link")).unwrap();
         assert!(differs("symlink").contains("link"));
+        let e = fresh();
+        fs::set_permissions(e.join("bin"), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(differs("dir mode").contains("bin/: directory mode 700"));
+        let e = fresh();
+        fs::set_permissions(&e, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(differs("root mode").contains("(entry root)"));
+        // The entry root replaced by a symlink to a valid copy.
+        let e = fresh();
+        let moved = d.join("moved");
+        fs::rename(&e, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &e).unwrap();
+        assert!(differs("root symlink").contains("not a directory"));
+        fs::remove_file(&e).unwrap();
+        fs::remove_dir_all(&moved).unwrap();
+        // A stray file where entries live is not an entry.
+        let _e = fresh();
+        fs::write(store.dir_for(&i).parent().unwrap().join(".DS_Store"), "").unwrap();
+        fs::write(store.dir_for(&i).parent().unwrap().join("0123456789abcdef"), "").unwrap();
+        assert_eq!(store.entries(), vec![i.clone()]);
         fs::remove_file(i.split_path(&cacache.join("content-v2"))).unwrap();
         assert_eq!(store.verify_entry(&i).unwrap(), Check::NoTarball);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Two names one case-insensitive volume (default APFS) holds as one
+    /// file: the entry has what extraction left, and that matches.
+    #[test]
+    fn verify_follows_the_filesystem_name_rules() {
+        let d = scratch("verify-case");
+        let cacache = d.join("cacache");
+        let i = cached_tarball(&cacache, &[("README.md", 0o644, "upper\n"), ("readme.md", 0o644, "lower\n")]);
+        let store = Store::new(d.join("store"), cacache).unwrap();
+        assert!(matches!(store.ensure(&i, "http://x/p.tgz").unwrap(), Ensure::Extracted));
+        assert_eq!(store.verify_entry(&i).unwrap(), Check::Match);
         let _ = fs::remove_dir_all(&d);
     }
 
