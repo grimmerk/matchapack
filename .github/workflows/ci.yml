@@ -20,6 +20,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo test --release
       - name: shell routing in bash, zsh and fish (Docker)
         run: docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash /src/scripts/test-shells.sh
@@ -36,6 +38,8 @@ jobs:
           # npm 11.19.1, a version in VERIFIED_NPM (src/wrapper.rs).
           node-version: 24.22.1
       - name: build
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo build --release
       - name: safety tests
         run: scripts/test-safety.sh "$RUNNER_TEMP/safety"

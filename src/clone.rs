@@ -59,7 +59,11 @@ mod sys {
 fn explain(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
     let hint = match e.raw_os_error() {
         Some(libc::EXDEV) => " (store and target are on different volumes: put the store on the same filesystem)",
-        Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) => " (filesystem has no copy-on-write clone support; refusing to fall back to a full copy)",
+        // ENOTSUP and EOPNOTSUPP are one value on Linux and two on macOS: a
+        // guard instead of two patterns, so neither platform warns.
+        Some(n) if n == libc::ENOTSUP || n == libc::EOPNOTSUPP => {
+            " (filesystem has no copy-on-write clone support; refusing to fall back to a full copy)"
+        }
         _ => "",
     };
     anyhow::anyhow!("clone {} -> {}: {e}{hint}", src.display(), dst.display())
