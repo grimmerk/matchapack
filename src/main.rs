@@ -216,7 +216,6 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
         let plan = npm::build_plan(&lf, ideal.as_ref().map(|i| &i.paths))?;
         Ok((lf, plan))
     })?;
-    check_real_paths(&root, &plan)?;
     info!("{} lockfile entries skipped on this platform (THINCLONE_VERBOSE=1 lists them)", plan.skipped.len());
     if std::env::var_os("THINCLONE_VERBOSE").is_some() {
         for (p, why) in &plan.skipped {
@@ -276,6 +275,11 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
             }
         }
     }
+
+    // Checked as late as possible before the first write (the probe below),
+    // after the slow steps (resolution, store fill), to keep the window in
+    // which something could swap a directory for a symlink short.
+    check_real_paths(&root, &plan)?;
 
     // Refuse before deleting anything if this filesystem cannot clone.
     if let Some((i, _)) = pkgs.first() {
@@ -364,10 +368,21 @@ fn place(
 /// node_modules, a workspace directory, a `file:` dependency directory. Below
 /// `<dir>/node_modules` everything is emptied and recreated by thinclone, so
 /// checking each `<dir>` (its real path inside the project) and its
-/// node_modules (not a symlink) covers every write. Runs before the first
-/// write (the clone probe), so a refusal leaves the project untouched.
+/// node_modules (not a symlink) covers every write. In-project link targets
+/// are checked too even when nothing is placed under them: `npm rebuild`
+/// links their bins and chmods the files they point at. Runs right before the
+/// first write (the clone probe), so a refusal leaves the project untouched.
+/// Not covered: another process swapping a directory for a symlink between
+/// this check and the writes (npm ci has the same window).
 fn check_real_paths(root: &Path, plan: &plan::Plan) -> Result<()> {
     let mut bases: Vec<&str> = plan.owned_roots.iter().map(|s| s.as_str()).collect();
+    for e in &plan.entries {
+        if let Kind::Link { target } = &e.kind {
+            if crate::util::safe_relative(target) && !bases.contains(&target.as_str()) {
+                bases.push(target.as_str());
+            }
+        }
+    }
     for e in &plan.entries {
         let base = match e.install_path.find("node_modules/") {
             Some(0) => "",
@@ -380,10 +395,18 @@ fn check_real_paths(root: &Path, plan: &plan::Plan) -> Result<()> {
     }
     for b in bases {
         let dir = root.join(b);
-        if let Ok(real) = std::fs::canonicalize(&dir) {
-            if !real.starts_with(root) {
-                bail!("{} resolves outside the project ({}), through a symlink", show(b), real.display());
+        // A directory that does not exist yet would be created under its
+        // nearest existing ancestor: check that one.
+        let mut existing = dir.as_path();
+        while !existing.exists() {
+            match existing.parent() {
+                Some(p) => existing = p,
+                None => break,
             }
+        }
+        let real = std::fs::canonicalize(existing).with_context(|| format!("resolving {}", existing.display()))?;
+        if !real.starts_with(root) {
+            bail!("{} resolves outside the project ({}), through a symlink", show(b), real.display());
         }
         let nm = dir.join("node_modules");
         if std::fs::symlink_metadata(&nm).is_ok_and(|m| m.file_type().is_symlink()) {

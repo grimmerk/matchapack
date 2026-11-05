@@ -84,11 +84,15 @@ d=$(setup gate "pass"); mkdir -p "$d/node_modules/keepme"
 THINCLONE_NPM_VERSIONS=0.1 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
 [ $rc != 0 ] && grep -q 'has not been verified' "$d.out" && [ -d "$d/node_modules/keepme" ] && ok "version-gate: install refused, node_modules untouched" || bad "version-gate: rc=$rc $(tail -1 "$d.out")"
 
-# 10-12. #5: a directory on the way that is a symlink to outside the project.
-# Each outside directory holds a sentinel that must survive, and nothing new
-# may appear there.
-outside() { local o=$work/outside-$1; rm -rf "${o:?}"; mkdir -p "$o/node_modules/sentinel"; echo "$o"; }
-same_outside() { [ -d "$1/node_modules/sentinel" ] && [ "$(ls "$1/node_modules")" = sentinel ]; }
+# 10-13. #5: a directory on the way that is a symlink to outside the project.
+# The outside directories get a 2020 mtime first: any write into them, even a
+# file created and removed again (the clone probe), moves it to now.
+outside() { local o=$work/outside-$1; rm -rf "${o:?}"; mkdir -p "$o/node_modules/sentinel"; old "$o" "$o/node_modules"; echo "$o"; }
+untouched() { # dir...: each still has its 2020 mtime
+  local x; for x in "$@"; do [ "$(mt "$x")" = "$(mt "$work/.old-ref")" ] || return 1; done
+}
+touch -t 202001010000 "$work/.old-ref"
+same_outside() { [ -d "$1/node_modules/sentinel" ] && [ "$(ls -A "$1/node_modules")" = sentinel ] && untouched "$1" "$1/node_modules"; }
 
 # 10. The project's own node_modules is a symlink to an outside directory.
 d=$(setup nmlink "pass"); o=$(outside nmlink); ln -s "$o/node_modules" "$d/node_modules"
@@ -98,7 +102,7 @@ d=$(setup nmlink "pass"); o=$(outside nmlink); ln -s "$o/node_modules" "$d/node_
 # 11. A workspace directory is a symlink to an outside directory.
 d=$work/wslink; mkproj "$d" '{"name":"wslink","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"ms":"2.1.3"}}'
 mkdir -p "$d/packages/ws"; echo '{"name":"ws","version":"1.0.0","dependencies":{"ms":"2.0.0"}}' > "$d/packages/ws/package.json"; lockgen "$d"
-o=$(outside wslink); cp "$d/packages/ws/package.json" "$o/"; rm -rf "${d:?}/packages/ws"; ln -s "$o" "$d/packages/ws"
+o=$(outside wslink); cp "$d/packages/ws/package.json" "$o/"; old "$o"; rm -rf "${d:?}/packages/ws"; ln -s "$o" "$d/packages/ws"
 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
 [ $rc != 0 ] && grep -q 'resolves outside the project' "$d.out" && same_outside "$o" && ok "ws-symlink: refused, outside untouched" || bad "ws-symlink: rc=$rc, outside: $(ls "$o/node_modules" | head -3 | tr '\n' ' ')"
 
@@ -107,9 +111,18 @@ o=$(outside wslink); cp "$d/packages/ws/package.json" "$o/"; rm -rf "${d:?}/pack
 # another ms than lib, so lib's ms goes to lib/node_modules, not the root.
 d=$work/libsym; mkproj "$d" '{"name":"libsym","version":"1.0.0","dependencies":{"lib":"file:./lib","ms":"2.1.3"}}'
 mkdir -p "$d/lib"; echo '{"name":"lib","version":"1.0.0","dependencies":{"ms":"2.0.0"}}' > "$d/lib/package.json"; lockgen "$d"
-o=$work/outside-libsym; rm -rf "${o:?}"; mkdir -p "$o"; cp "$d/lib/package.json" "$o/"; rm -rf "${d:?}/lib"; ln -s "$o" "$d/lib"
+o=$work/outside-libsym; rm -rf "${o:?}"; mkdir -p "$o"; cp "$d/lib/package.json" "$o/"; old "$o"; rm -rf "${d:?}/lib"; ln -s "$o" "$d/lib"
 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
-[ $rc != 0 ] && grep -q 'resolves outside the project' "$d.out" && [ ! -e "$o/node_modules" ] && ok "file-symlink: refused, nothing written outside" || bad "file-symlink: rc=$rc, outside: $(ls "$o" | tr '\n' ' ')"
+[ $rc != 0 ] && grep -q 'resolves outside the project' "$d.out" && [ ! -e "$o/node_modules" ] && untouched "$o" && ok "file-symlink: refused, nothing written outside" || bad "file-symlink: rc=$rc, outside: $(ls -A "$o" | tr '\n' ' ')"
+
+# 13. A `file:` dependency directory with nothing placed under it (its
+# dependencies are hoisted) but a bin, symlinked outside: npm rebuild would
+# link the bin and chmod the file it points at, through the symlink.
+d=$work/libbin; mkproj "$d" '{"name":"libbin","version":"1.0.0","dependencies":{"lib":"file:./lib"}}'
+mkdir -p "$d/lib"; echo '{"name":"lib","version":"1.0.0","bin":{"libcli":"cli.js"}}' > "$d/lib/package.json"; printf '#!/usr/bin/env node\n' > "$d/lib/cli.js"; lockgen "$d"
+o=$work/outside-libbin; rm -rf "${o:?}"; mkdir -p "$o"; cp "$d/lib/package.json" "$d/lib/cli.js" "$o/"; chmod 644 "$o/cli.js"; old "$o" "$o/cli.js"; rm -rf "${d:?}/lib"; ln -s "$o" "$d/lib"
+"$bin" install "$d" > "$d.out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'resolves outside the project' "$d.out" && untouched "$o" "$o/cli.js" && [ "$(stat -f %Lp "$o/cli.js" 2>/dev/null || stat -c %a "$o/cli.js")" = 644 ] && ok "link-target-symlink: refused, outside file not chmodded" || bad "link-target-symlink: rc=$rc, mode $(stat -f %Lp "$o/cli.js" 2>/dev/null || stat -c %a "$o/cli.js")"
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -279,7 +279,9 @@ const SAFE_CONFIG: &[&str] = &[
     "init-author-name", "init-author-url", "init-license", "init-module", "init-type", "init-version",
     "init-private", "init.author.email", "init.author.name", "init.author.url", "init.license", "init.module",
     "init.version", "searchexclude", "searchlimit", "searchopts", "searchstaleness", "editor", "browser",
-    "viewer", "call",
+    "viewer",
+    // Not `call`: npm ci ignores it, but `npm exec` (which runs the root
+    // scripts helper) refuses a non-empty `call` together with a command.
 ];
 
 /// npm's settings as npm loads them, through src/npm-config.js run with npm's
