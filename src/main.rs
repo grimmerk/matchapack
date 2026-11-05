@@ -336,9 +336,8 @@ fn place(
     // Wipe what npm ci wipes, the way ci.js does: every entry INSIDE each
     // node_modules goes, the directory itself stays (it matters when nothing is
     // installed: npm leaves an empty node_modules, or none if there was none).
-    // In parallel, a scope directory split into its packages: on APFS the
-    // removal is the largest fixed cost of a reinstall (a 453-package project:
-    // 0.87 s one entry after another, 0.63 s in parallel; NOTES "Removal").
+    // The entries are removed in parallel: on APFS the removal is the largest
+    // fixed cost of a reinstall (NOTES "Removal and the fixed cost").
     timed("remove old node_modules", || {
         let mut old: Vec<PathBuf> = vec![];
         for r in &plan.owned_roots {
@@ -405,27 +404,13 @@ fn remove_path(p: &Path) -> Result<()> {
     r.with_context(|| format!("removing {}", p.display()))
 }
 
-/// Remove paths in parallel; a scope directory (`@x`) is split into its packages.
+/// Remove paths in parallel, each as a whole: a directory (a scope directory
+/// included) through remove_dir_all, which never follows a symlink inside the
+/// tree even when one is swapped in during the removal; a symlink as a link.
+/// Not split further: a path queued below a directory could be redirected if
+/// that directory were replaced by a symlink in the meantime.
 fn remove_paths_par(paths: Vec<PathBuf>) -> Result<()> {
-    let mut items = vec![];
-    let mut scopes = vec![];
-    for p in paths {
-        let scope = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('@'))
-            && std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir());
-        if scope {
-            for c in std::fs::read_dir(&p)? {
-                items.push(c?.path());
-            }
-            scopes.push(p);
-        } else {
-            items.push(p);
-        }
-    }
-    items.par_iter().try_for_each(|p| remove_path(p))?;
-    for s in scopes {
-        std::fs::remove_dir(&s).with_context(|| format!("removing {}", s.display()))?;
-    }
-    Ok(())
+    paths.par_iter().try_for_each(|p| remove_path(p))
 }
 
 /// Every directory thinclone will empty or write into must really be inside

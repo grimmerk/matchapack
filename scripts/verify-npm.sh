@@ -17,6 +17,13 @@ bin=$here/target/release/thinclone
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 mkdir -p "$work"
 npm_version=$(npm -v) || { echo "no npm on PATH" >&2; exit 2; }
+mm=$(echo "$npm_version" | cut -d. -f1-2)
+mm_re=$(echo "$mm" | sed 's/\./\\./g')
+cfg=${THINCLONE_CONFIG_DIR:-$HOME/.config/thinclone}
+# What is certified is fixed here, never inherited: a caller's settings that
+# loosen the comparison (ignored paths, noise filtering, another baseline,
+# mtime handling) or route the install differently do not apply.
+unset THINCLONE_VERIFY_IGNORE THINCLONE_VERIFY_NOISE THINCLONE_VERIFY_BASELINE THINCLONE_VERIFY_MTIME THINCLONE_VERIFY_VIA THINCLONE_VERIFY_BYTES
 echo "npm $npm_version, node $(node -v), $("$bin" --version)"
 
 # The optional-upward fixture installs from a local tarball server.
@@ -52,21 +59,29 @@ for p in "$@"; do
   case_ "project-$(basename "$p")" -- "$p"
 done
 
+recorded() { grep -qsE "^[[:space:]]*$mm_re([[:space:]#]|\$)" "$cfg/npm-verified"; }
 if [ $fail != 0 ]; then
+  # A version recorded by an earlier run is taken back: this run found a
+  # difference (perhaps in a project the earlier run did not include).
+  if [ $record = 1 ] && recorded; then
+    if grep -vE "^[[:space:]]*$mm_re([[:space:]#]|\$)" "$cfg/npm-verified" > "$cfg/npm-verified.tmp" || [ ! -s "$cfg/npm-verified.tmp" ]; then
+      mv "$cfg/npm-verified.tmp" "$cfg/npm-verified" && echo "removed $mm from $cfg/npm-verified (recorded by an earlier run)" \
+        || { echo "could NOT remove $mm from $cfg/npm-verified: remove that line by hand" >&2; exit 3; }
+    fi
+  fi
   echo "npm $npm_version: NOT verified; thinclone keeps handing npm ci to npm on it"
   exit 1
 fi
-mm=$(echo "$npm_version" | cut -d. -f1-2)
 if [ $record = 0 ]; then
   echo "npm $npm_version: every case identical (not recorded: --no-record)"
   exit 0
 fi
-cfg=${THINCLONE_CONFIG_DIR:-$HOME/.config/thinclone}
-mkdir -p "$cfg"
-if grep -qsE "^$mm([[:space:]#]|\$)" "$cfg/npm-verified"; then
+if recorded; then
   echo "npm $npm_version: every case identical; $mm was already in $cfg/npm-verified"
-else
-  echo "$mm  # $(date +%F): scripts/verify-npm.sh, npm $npm_version, $("$bin" --version)${*:+, plus $*}" >> "$cfg/npm-verified"
+elif mkdir -p "$cfg" && echo "$mm  # $(date +%F): scripts/verify-npm.sh, npm $npm_version, $("$bin" --version)${*:+, plus $*}" >> "$cfg/npm-verified" && recorded; then
   echo "npm $npm_version: every case identical; recorded $mm in $cfg/npm-verified"
+else
+  echo "npm $npm_version: every case identical, but recording it in $cfg/npm-verified FAILED" >&2
+  exit 3
 fi
 echo "(for every machine: add \"$mm\" to VERIFIED_NPM in src/wrapper.rs)"
