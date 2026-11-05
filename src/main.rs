@@ -1,5 +1,6 @@
 mod clone;
 mod diff;
+mod gc;
 mod lock;
 mod npm;
 mod plan;
@@ -101,10 +102,42 @@ enum Cmd {
         #[arg(long)]
         days: Option<f64>,
     },
-    /// Print the store location and size in entries.
+    /// Print the store location and size; maintain it (gc, verify).
     Store {
-        #[arg(long)]
+        /// Store root (default $THINCLONE_STORE or ~/.cache/thinclone/store).
+        #[arg(long, global = true)]
         store: Option<PathBuf>,
+        #[command(subcommand)]
+        action: Option<StoreCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum StoreCmd {
+    /// Remove the entries no existing project uses
+    ///
+    /// An entry is kept while a project installed from it still has its
+    /// node_modules: every install records its directory and entries in
+    /// <store>/projects/; projects installed before records existed are found
+    /// through the trial log and their node_modules/.package-lock.json.
+    /// Removing an entry never breaks an installed node_modules (clones are
+    /// independent), but space comes back only for entries no node_modules
+    /// still shares, and a later install re-extracts what it needs. Entries
+    /// extracted in the last hour are kept. Refused while an install runs.
+    #[command(verbatim_doc_comment)]
+    Gc {
+        /// Report what would be removed; remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Compare every entry with its tarball in the npm cache; exit 1 when one differs
+    Verify {
+        /// Remove the entries that differ (the next install re-extracts them).
+        #[arg(long)]
+        fix: bool,
+        /// npm content cache (default ~/.npm/_cacache).
+        #[arg(long)]
+        npm_cache: Option<PathBuf>,
     },
 }
 
@@ -444,6 +477,19 @@ fn shell_from_comm(comm: &str) -> Option<&'static str> {
 pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
     let (root, lf, plan, store, extracted_now) = prepare(o).map_err(InstallError::Declined)?;
+    // Before anything is placed: from here on the project holds clones of
+    // these entries, even if the install fails part way.
+    let used: Vec<Integrity> = plan
+        .entries
+        .iter()
+        .filter_map(|e| match &e.kind {
+            Kind::Package { integrity: Some(i), .. } => Integrity::parse(i).ok(),
+            _ => None,
+        })
+        .collect();
+    if let Err(e) = store.record_project(&root, &used) {
+        info!("could not record the project for `thinclone store gc`: {e:#}");
+    }
     let rebuild = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: o.ignore_scripts, npm_args: o.npm_args.clone() };
     let post: Option<&dyn PostInstall> = if o.no_rebuild { None } else { Some(&rebuild) };
     match place(&root, &store, o.clone_mode, o.mtime, post, &plan) {
@@ -557,10 +603,73 @@ fn main() -> Result<()> {
             let store = Store::new(default_store(None), home().join(".npm/_cacache"))?;
             trial::report(days, &store)?;
         }
-        Cmd::Store { store } => {
+        Cmd::Store { store, action } => {
             let s = default_store(store);
-            let n = walkdir::WalkDir::new(s.join(store::LAYOUT)).min_depth(3).max_depth(3).into_iter().count();
-            println!("{} ({n} packages)", s.display());
+            let cacache = home().join(".npm/_cacache");
+            match action {
+                None => {
+                    let n = walkdir::WalkDir::new(s.join(store::LAYOUT)).min_depth(3).max_depth(3).into_iter().count();
+                    let p = std::fs::read_dir(s.join("projects")).map(|d| d.count()).unwrap_or(0);
+                    println!("{} ({n} packages, {p} projects recorded)", s.display());
+                }
+                Some(StoreCmd::Gc { dry_run }) => {
+                    let st = if dry_run { Store::new(s, cacache)? } else { Store::exclusive(s, cacache)? };
+                    let r = gc::gc(&st, &trial::log_path(), dry_run)?;
+                    let gib = |b: u64| format!("{:.2} GiB", b as f64 / 1024f64.powi(3));
+                    println!(
+                        "projects in use: {} ({} recorded, {} from the trial log); records of removed projects {}: {}",
+                        r.projects.0 + r.projects.1,
+                        r.projects.0,
+                        r.projects.1,
+                        if dry_run { "to drop" } else { "dropped" },
+                        r.records_dropped
+                    );
+                    println!(
+                        "{} {} of {} entries, {} of files{}",
+                        if dry_run { "would remove" } else { "removed" },
+                        r.removed,
+                        r.entries,
+                        gib(r.bytes_removed),
+                        if r.recent > 0 { format!(" (kept {} unused entries extracted in the last hour)", r.recent) } else { String::new() }
+                    );
+                    if r.removed > 0 {
+                        println!("disk space comes back only for entries that no node_modules still shares blocks with");
+                    }
+                }
+                Some(StoreCmd::Verify { fix, npm_cache }) => {
+                    let cacache = npm_cache.unwrap_or(cacache);
+                    let st = if fix { Store::exclusive(s, cacache)? } else { Store::new(s, cacache)? };
+                    let all = st.entries();
+                    let checks: Vec<(Integrity, store::Check)> = all
+                        .par_iter()
+                        .map(|i| st.verify_entry(i).map(|c| (i.clone(), c)))
+                        .collect::<Result<_>>()?;
+                    let bad: Vec<&(Integrity, store::Check)> = checks.iter().filter(|(_, c)| matches!(c, store::Check::Differs(_))).collect();
+                    let missing = checks.iter().filter(|(_, c)| *c == store::Check::NoTarball).count();
+                    println!(
+                        "{} entries: {} match their tarball, {} differ, {missing} not checked (tarball no longer in the npm cache)",
+                        all.len(),
+                        all.len() - bad.len() - missing,
+                        bad.len()
+                    );
+                    for (i, c) in &bad {
+                        if let store::Check::Differs(why) = c {
+                            println!("  {}/{}…: {why}", i.algo, &i.hex[..16]);
+                        }
+                    }
+                    if !bad.is_empty() {
+                        if fix {
+                            for (i, _) in &bad {
+                                st.remove_entry(i)?;
+                            }
+                            println!("removed {} entries; the next install that needs one re-extracts it", bad.len());
+                        } else {
+                            println!("`thinclone store verify --fix` removes them (the next install re-extracts them)");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())
