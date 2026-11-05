@@ -56,7 +56,8 @@ thinclone runs plain npm instead, and prints why, when:
   a symlink (the project's node_modules, a workspace or `file:` directory);
 - npm is a version the harness has not been run against (currently 11.19.x
   and 11.17.x, so not npm 10 / Node 22; `THINCLONE_NPM_VERSIONS=any`
-  overrides; `thinclone report` counts these runs);
+  overrides; `thinclone report` counts these runs). After an npm upgrade, see
+  "After an npm upgrade";
 - the project is outside the trial scope (`~/.config/thinclone/paths`);
 - the lockfile has entries it does not support (git dependencies, `file:`
   tarballs), or is out of sync with package.json;
@@ -93,6 +94,25 @@ scripts/convert-existing.sh --apply ~/git    # re-installs each project via thin
 
 Skips projects thinclone would not handle and projects a running process has
 its working directory in.
+
+## After an npm upgrade
+
+thinclone uses npm's own internals (the ideal tree, rebuild, config), so it
+handles only npm versions the harness was run against. On any other version
+every `npm ci` runs plain npm: nothing breaks, nothing is saved. To verify the
+new npm and turn thinclone back on for it:
+
+```sh
+scripts/verify-npm.sh /tmp/verify-npm              # the fixtures
+scripts/verify-npm.sh /tmp/verify-npm ~/git/app    # plus a real project (copied, never changed)
+```
+
+It runs `npm ci` and thinclone side by side on copies and compares the trees
+and the hidden lockfile byte for byte. When every case is identical it
+records the npm major.minor in `~/.config/thinclone/npm-verified`, which the
+version gate reads next to the built-in list (`VERIFIED_NPM` in
+src/wrapper.rs, where a version goes for every machine). When a case differs
+it records nothing and shows the log.
 
 ## Store maintenance
 

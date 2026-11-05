@@ -139,6 +139,12 @@ pub fn remove_run_dir() {
     }
 }
 
+/// thinclone's settings directory: $THINCLONE_CONFIG_DIR, else
+/// ~/.config/thinclone (trial scope `paths`, `npm-verified`).
+pub fn config_dir() -> std::path::PathBuf {
+    std::env::var_os("THINCLONE_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| crate::home().join(".config/thinclone"))
+}
+
 /// A path from the lockfile is used under the project root only if it is
 /// relative and made of plain names: no `..`, no root, no `.`. Path::join with
 /// an absolute path would REPLACE the root, so this guards every delete, clone
