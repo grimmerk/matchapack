@@ -281,8 +281,10 @@ const SAFE_CONFIG: &[&str] = &[
     "init-private", "init.author.email", "init.author.name", "init.author.url", "init.license", "init.module",
     "init.version", "searchexclude", "searchlimit", "searchopts", "searchstaleness", "editor", "browser",
     "viewer",
-    // Not `call`: npm ci ignores it, but `npm exec` (which runs the root
-    // scripts helper) refuses a non-empty `call` together with a command.
+    // npm ci ignores `call` (an `npm exec` option). It was off this list while
+    // the root scripts ran through `npm exec`, which refuses `call` together
+    // with a command; src/post-install.js does not use `npm exec`.
+    "call",
 ];
 
 /// npm's settings as npm loads them, through src/npm-config.js run with npm's

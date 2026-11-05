@@ -158,11 +158,13 @@ check config-allowlist "a setting not on the allow-list (prefer-dedupe) → plai
 d=$(new_project cfgok); printf 'resolution-mode=highest\nmin-release-age=7\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
 [ "$rc" = 0 ] && by_thinclone "$d" && r=ok || r=bad
 check config-allowed "a pnpm-only setting and min-release-age → thinclone" $r "$d"
-# 27. `call` is harmless to npm ci but breaks `npm exec`, which runs the root
-# scripts after node_modules has changed: it must hand over before that.
+# 27. `call` (an `npm exec` option) is ignored by npm ci. thinclone used to
+# run the root scripts through `npm exec`, which refuses it with a command, so
+# the install failed after changing node_modules. The post-install step no
+# longer uses `npm exec`: thinclone installs, root postinstall included.
 d=$(new_project cfgcall); printf 'call=echo hello\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_npm "$d" && grep -q 'call (from project)' "$d.out" && r=ok || r=bad
-check config-call "call=… in .npmrc → plain npm before anything changes" $r "$d"
+[ "$rc" = 0 ] && by_thinclone "$d" && [ -f "$d/root-postinstall.txt" ] && r=ok || r=bad
+check config-call "call=… in .npmrc → thinclone, root postinstall ran" $r "$d"
 
 # 28. An optional dependency whose (approved) install script fails: npm ci
 # drops it and succeeds. thinclone's post-install step reports the failure,
