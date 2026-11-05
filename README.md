@@ -47,8 +47,13 @@ picks the function up from its shell snapshot, so sessions started after the
 line was added use it.
 
 thinclone runs plain npm instead, and prints why, when:
-- a flag or npm setting changes the tree (`--omit=dev`, `NODE_ENV=production`,
-  `install-strategy`, `--workspace`, …);
+- a flag changes the tree (`--omit=dev`, `--workspace`, …), or an npm setting
+  is changed (in an `.npmrc` or the environment) that is not on thinclone's
+  list of settings known to be safe (registry, credentials, cache, output,
+  `legacy-peer-deps`, … ; `SAFE_CONFIG` in src/wrapper.rs), or
+  `NODE_ENV=production` makes npm omit dev dependencies;
+- a directory thinclone would write into resolves outside the project through
+  a symlink (the project's node_modules, a workspace or `file:` directory);
 - npm is a version the harness has not been run against (currently 11.19.x
   and 11.17.x, so not npm 10 / Node 22; `THINCLONE_NPM_VERSIONS=any`
   overrides; `thinclone report` counts these runs);
