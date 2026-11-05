@@ -55,7 +55,7 @@ jobs:
           server=$!
           until curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; do sleep 0.3; done
           fail=0
-          for f in small stale-flags optional-upward optional-engines legacy-peer; do
+          for f in small stale-flags optional-upward optional-engines legacy-peer script-env; do
             echo "::group::$f"
             if scripts/verify.sh "fixtures/$f" "$RUNNER_TEMP/v-$f"; then echo "$f: ok"; else echo "::error::$f: harness failed"; fail=1; fi
             echo "::endgroup::"
