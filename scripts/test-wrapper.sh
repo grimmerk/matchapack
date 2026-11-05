@@ -164,6 +164,35 @@ d=$(new_project cfgcall); printf 'call=echo hello\n' > "$d/.npmrc"; CMD="npm ci"
 [ "$rc" = 0 ] && by_npm "$d" && grep -q 'call (from project)' "$d.out" && r=ok || r=bad
 check config-call "call=… in .npmrc → plain npm before anything changes" $r "$d"
 
+# 28. An optional dependency whose (approved) install script fails: npm ci
+# drops it and succeeds. thinclone's post-install step reports the failure,
+# and the wrapper hands over to npm ci, which rebuilds node_modules the same
+# way (the outcome is logged as "broke"). Needs the fixtures' tarball server.
+if ! curl -sf -o /dev/null http://127.0.0.1:48321/lc-fail-1.0.0.tgz; then
+  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
+  started_server=$!
+  until curl -sf -o /dev/null http://127.0.0.1:48321/lc-fail-1.0.0.tgz; do sleep 0.3; done
+fi
+d=$work/optfail; rm -rf "${d:?}"; mkdir -p "$d"
+cp "$here/fixtures/optional-script-fail/package.json" "$here/fixtures/optional-script-fail/package-lock.json" "$d/"
+CMD="npm ci"; rc=$(run "$d")
+[ -n "${started_server-}" ] && kill "$started_server"
+[ "$rc" = 0 ] && [ "$(ls "$d/node_modules" | tr '\n' ' ')" = "lc-r lc-s " ] && grep -q 'running npm ci to rebuild it' "$d.out" && r=ok || r=bad
+check optional-script-fail "a failing optional dependency script → npm ci takes over, the package is dropped as npm ci does" $r "$d"
+
+# 29. A hand-over happens before thinclone changes anything (#27). With
+# THINCLONE_NO_FALLBACK=1 thinclone exits 3 instead of running npm, so the
+# project shows exactly what thinclone did: an existing node_modules (a
+# sentinel, a 2020 mtime) must be untouched, mtimes included.
+d=$(new_project untouched); printf 'prefer-dedupe=true\n' > "$d/.npmrc"
+mkdir -p "$d/node_modules/sentinel"; echo keep > "$d/node_modules/sentinel/x"
+touch -t 202001010000 "$d/node_modules" "$d/node_modules/sentinel" "$d/node_modules/sentinel/x"
+before=$(cd "$d" && find node_modules -print0 | xargs -0 stat -f '%N %m' 2>/dev/null | sort)
+CMD="npm ci"; rc=$(run "$d" THINCLONE_NO_FALLBACK=1)
+after=$(cd "$d" && find node_modules -print0 | xargs -0 stat -f '%N %m' 2>/dev/null | sort)
+[ "$rc" = 3 ] && grep -q 'not handled, left unchanged' "$d.out" && [ "$before" = "$after" ] && r=ok || r=bad
+check untouched "a hand-over leaves node_modules exactly as it was (exit 3 with THINCLONE_NO_FALLBACK=1)" $r "$d"
+
 # 23–24. The rc one-liner from the README, `eval "$(thinclone init)"`, detects
 # the shell and loads the same function from the binary (no checkout needed).
 for sh in zsh bash; do

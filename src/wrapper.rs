@@ -252,6 +252,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         mtime: clone::Mtime::Now,
         ignore_scripts,
         no_rebuild: false,
+        npm_args: args[1..].to_vec(),
     })
 }
 
