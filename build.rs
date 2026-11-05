@@ -18,11 +18,23 @@ fn main() {
         _ => "unknown".to_string(),
     };
     println!("cargo:rustc-env=THINCLONE_BUILD={build}");
-    // Rebuild the value when HEAD moves or the index changes (a commit, a
-    // checkout, staging); edits to tracked files also change the dirty flag
-    // only once something is rebuilt, which every source edit causes anyway.
-    for p in [".git/HEAD", ".git/index", ".git/refs/heads"] {
-        if std::path::Path::new(p).exists() {
+    // Recompute when HEAD moves or the index changes (a commit, a checkout,
+    // staging). Ask git where those files are: in a worktree `.git` is a file,
+    // HEAD and index live in the worktree's own git dir, refs in the common
+    // one. Source edits rebuild anyway, which refreshes the dirty flag.
+    let git_dir = git(&["rev-parse", "--git-dir"]);
+    let common_dir = git(&["rev-parse", "--git-common-dir"]);
+    let mut watch = vec![];
+    if let Some(d) = &git_dir {
+        watch.push(format!("{d}/HEAD"));
+        watch.push(format!("{d}/index"));
+    }
+    if let Some(d) = &common_dir {
+        watch.push(format!("{d}/refs/heads"));
+        watch.push(format!("{d}/packed-refs"));
+    }
+    for p in watch {
+        if std::path::Path::new(&p).exists() {
             println!("cargo:rerun-if-changed={p}");
         }
     }
