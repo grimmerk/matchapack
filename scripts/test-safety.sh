@@ -84,5 +84,32 @@ d=$(setup gate "pass"); mkdir -p "$d/node_modules/keepme"
 THINCLONE_NPM_VERSIONS=0.1 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
 [ $rc != 0 ] && grep -q 'has not been verified' "$d.out" && [ -d "$d/node_modules/keepme" ] && ok "version-gate: install refused, node_modules untouched" || bad "version-gate: rc=$rc $(tail -1 "$d.out")"
 
+# 10-12. #5: a directory on the way that is a symlink to outside the project.
+# Each outside directory holds a sentinel that must survive, and nothing new
+# may appear there.
+outside() { local o=$work/outside-$1; rm -rf "${o:?}"; mkdir -p "$o/node_modules/sentinel"; echo "$o"; }
+same_outside() { [ -d "$1/node_modules/sentinel" ] && [ "$(ls "$1/node_modules")" = sentinel ]; }
+
+# 10. The project's own node_modules is a symlink to an outside directory.
+d=$(setup nmlink "pass"); o=$(outside nmlink); ln -s "$o/node_modules" "$d/node_modules"
+"$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'node_modules is a symlink' "$d.out" && same_outside "$o" && ok "nm-symlink: refused, outside untouched" || bad "nm-symlink: rc=$rc, outside: $(ls "$o/node_modules" | head -3 | tr '\n' ' ')"
+
+# 11. A workspace directory is a symlink to an outside directory.
+d=$work/wslink; mkproj "$d" '{"name":"wslink","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"ms":"2.1.3"}}'
+mkdir -p "$d/packages/ws"; echo '{"name":"ws","version":"1.0.0","dependencies":{"ms":"2.0.0"}}' > "$d/packages/ws/package.json"; lockgen "$d"
+o=$(outside wslink); cp "$d/packages/ws/package.json" "$o/"; rm -rf "${d:?}/packages/ws"; ln -s "$o" "$d/packages/ws"
+"$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'resolves outside the project' "$d.out" && same_outside "$o" && ok "ws-symlink: refused, outside untouched" || bad "ws-symlink: rc=$rc, outside: $(ls "$o/node_modules" | head -3 | tr '\n' ' ')"
+
+# 12. A `file:` dependency directory (its dependencies go to lib/node_modules)
+# is a symlink to an outside directory with no node_modules. The root needs
+# another ms than lib, so lib's ms goes to lib/node_modules, not the root.
+d=$work/libsym; mkproj "$d" '{"name":"libsym","version":"1.0.0","dependencies":{"lib":"file:./lib","ms":"2.1.3"}}'
+mkdir -p "$d/lib"; echo '{"name":"lib","version":"1.0.0","dependencies":{"ms":"2.0.0"}}' > "$d/lib/package.json"; lockgen "$d"
+o=$work/outside-libsym; rm -rf "${o:?}"; mkdir -p "$o"; cp "$d/lib/package.json" "$o/"; rm -rf "${d:?}/lib"; ln -s "$o" "$d/lib"
+"$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'resolves outside the project' "$d.out" && [ ! -e "$o/node_modules" ] && ok "file-symlink: refused, nothing written outside" || bad "file-symlink: rc=$rc, outside: $(ls "$o" | tr '\n' ' ')"
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -216,6 +216,7 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
         let plan = npm::build_plan(&lf, ideal.as_ref().map(|i| &i.paths))?;
         Ok((lf, plan))
     })?;
+    check_real_paths(&root, &plan)?;
     info!("{} lockfile entries skipped on this platform (THINCLONE_VERBOSE=1 lists them)", plan.skipped.len());
     if std::env::var_os("THINCLONE_VERBOSE").is_some() {
         for (p, why) in &plan.skipped {
@@ -355,6 +356,45 @@ fn place(
         timed("post-install", || p.run(root, plan))?;
     }
     Ok(())
+}
+
+/// Every directory thinclone will empty or write into must really be inside
+/// the project. The lockfile paths are plain relative names (checked when the
+/// plan is built), but a directory on the way can be a symlink: the project's
+/// node_modules, a workspace directory, a `file:` dependency directory. Below
+/// `<dir>/node_modules` everything is emptied and recreated by thinclone, so
+/// checking each `<dir>` (its real path inside the project) and its
+/// node_modules (not a symlink) covers every write. Runs before the first
+/// write (the clone probe), so a refusal leaves the project untouched.
+fn check_real_paths(root: &Path, plan: &plan::Plan) -> Result<()> {
+    let mut bases: Vec<&str> = plan.owned_roots.iter().map(|s| s.as_str()).collect();
+    for e in &plan.entries {
+        let base = match e.install_path.find("node_modules/") {
+            Some(0) => "",
+            Some(i) => e.install_path[..i].trim_end_matches('/'),
+            None => continue,
+        };
+        if !bases.contains(&base) {
+            bases.push(base);
+        }
+    }
+    for b in bases {
+        let dir = root.join(b);
+        if let Ok(real) = std::fs::canonicalize(&dir) {
+            if !real.starts_with(root) {
+                bail!("{} resolves outside the project ({}), through a symlink", show(b), real.display());
+            }
+        }
+        let nm = dir.join("node_modules");
+        if std::fs::symlink_metadata(&nm).is_ok_and(|m| m.file_type().is_symlink()) {
+            bail!("{}/node_modules is a symlink; npm ci replaces it, thinclone does not", show(b));
+        }
+    }
+    Ok(())
+}
+
+fn show(base: &str) -> &str {
+    if base.is_empty() { "the project directory" } else { base }
 }
 
 const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
