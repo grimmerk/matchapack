@@ -125,6 +125,7 @@ fn one_line(e: &anyhow::Error) -> String {
 /// Replace this process with the real npm. `THINCLONE=0` keeps any wrapper
 /// from routing back here.
 fn exec_npm(args: &[String]) -> i32 {
+    util::remove_run_dir();
     let err = Command::new("npm").args(args).env("THINCLONE", "0").exec();
     eprintln!("thinclone: could not start npm: {err}");
     127
@@ -252,6 +253,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         mtime: clone::Mtime::Now,
         ignore_scripts,
         no_rebuild: false,
+        npm_args: args[1..].to_vec(),
     })
 }
 
@@ -280,17 +282,17 @@ const SAFE_CONFIG: &[&str] = &[
     "init-private", "init.author.email", "init.author.name", "init.author.url", "init.license", "init.module",
     "init.version", "searchexclude", "searchlimit", "searchopts", "searchstaleness", "editor", "browser",
     "viewer",
-    // Not `call`: npm ci ignores it, but `npm exec` (which runs the root
-    // scripts helper) refuses a non-empty `call` together with a command.
+    // npm ci ignores `call` (an `npm exec` option). It was off this list while
+    // the root scripts ran through `npm exec`, which refuses `call` together
+    // with a command; src/post-install.js does not use `npm exec`.
+    "call",
 ];
 
 /// npm's settings as npm loads them, through src/npm-config.js run with npm's
 /// own @npmcli/config: `changed` (setting -> source) and `effective` values.
 fn npm_config(cwd: &std::path::Path) -> Result<Value, String> {
     let npm_dir = util::npm_dir().ok_or("cannot locate npm's installation")?;
-    let tmp = crate::default_store(None).join("tmp");
-    let _ = std::fs::create_dir_all(&tmp);
-    let helper = tmp.join(format!("{}-npm-config.js", std::process::id()));
+    let helper = util::private_run_dir().map_err(|e| format!("npm config helper: {e}"))?.join("npm-config.js");
     let _ = std::fs::remove_file(&helper);
     {
         use std::io::Write;

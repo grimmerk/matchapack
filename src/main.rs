@@ -158,6 +158,9 @@ pub struct InstallOpts {
     pub mtime: clone::Mtime,
     pub ignore_scripts: bool,
     pub no_rebuild: bool,
+    /// The arguments after `ci` in the user's `npm ci` (the wrapper accepts
+    /// only passive flags), passed on to npm for the post-install steps.
+    pub npm_args: Vec<String>,
 }
 
 pub struct Summary {
@@ -202,8 +205,8 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
     // the ideal tree and flags come from npm's internals (ideal-tree.js).
     wrapper::npm_version_gate().map_err(|e| anyhow::anyhow!(e))?;
     let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
-    for m in ["node_modules/@npmcli/run-script", "node_modules/semver", "node_modules/@npmcli/arborist", "lib"] {
-        if !npm_dir.join(m).is_dir() {
+    for m in ["node_modules/@npmcli/run-script", "node_modules/semver", "node_modules/@npmcli/arborist", "node_modules/@npmcli/config", "lib/npm.js", "lib/commands/rebuild.js"] {
+        if !npm_dir.join(m).exists() {
             bail!("npm installation {} has no {m}", npm_dir.display());
         }
     }
@@ -441,7 +444,7 @@ fn shell_from_comm(comm: &str) -> Option<&'static str> {
 pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
     let (root, lf, plan, store, extracted_now) = prepare(o).map_err(InstallError::Declined)?;
-    let rebuild = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: o.ignore_scripts, extra_args: vec![] };
+    let rebuild = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: o.ignore_scripts, npm_args: o.npm_args.clone() };
     let post: Option<&dyn PostInstall> = if o.no_rebuild { None } else { Some(&rebuild) };
     match place(&root, &store, o.clone_mode, o.mtime, post, &plan) {
         Ok(()) => {
@@ -491,11 +494,15 @@ fn main() -> Result<()> {
                 mtime,
                 ignore_scripts,
                 no_rebuild,
+                npm_args: if ignore_scripts { vec!["--ignore-scripts".into()] } else { vec![] },
             };
-            run_install(&o).map_err(InstallError::into_inner)?;
+            let r = run_install(&o).map_err(InstallError::into_inner);
+            util::remove_run_dir();
+            r?;
         }
         Cmd::Npm { args } => {
             let code = wrapper::run(args);
+            util::remove_run_dir();
             std::process::exit(code);
         }
         Cmd::Init { shell } => {

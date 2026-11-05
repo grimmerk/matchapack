@@ -1,0 +1,14 @@
+{
+  "name": "thinclone-fixture-optional-script-fail",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "lc-r": "http://127.0.0.1:48321/lc-r-1.0.0.tgz"
+  },
+  "optionalDependencies": {
+    "lc-fail": "http://127.0.0.1:48321/lc-fail-1.0.0.tgz"
+  },
+  "allowScripts": {
+    "lc-fail": true
+  }
+}

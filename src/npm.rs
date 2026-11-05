@@ -310,8 +310,9 @@ fn dry_run_ideal(root: &Path, scratch: &Path, lf: &Lockfile) -> Result<Ideal> {
     // scripts even under --dry-run (measured: `husky` exit 127, a root script
     // building a workspace failing, with no node_modules yet).
     let npm_dir = crate::util::npm_dir().context("cannot locate npm's installation")?;
-    let helper = scratch.with_file_name(format!("{}-ideal-tree.js", std::process::id()));
-    let out_file = scratch.with_file_name(format!("{}-ideal.json", std::process::id()));
+    let dir = crate::util::private_run_dir()?;
+    let helper = dir.join("ideal-tree.js");
+    let out_file = dir.join("ideal.json");
     let _ = std::fs::remove_file(&helper);
     let _ = std::fs::remove_file(&out_file);
     {
@@ -537,7 +538,9 @@ pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan
 pub struct NpmRebuild {
     pub lock_raw: Map<String, Value>,
     pub ignore_scripts: bool,
-    pub extra_args: Vec<String>,
+    /// The arguments of the user's `npm ci` (passive flags), given to npm
+    /// when it is loaded for the post-install steps.
+    pub npm_args: Vec<String>,
 }
 
 impl NpmRebuild {
@@ -620,67 +623,81 @@ impl PostInstall for NpmRebuild {
                 specs.push(format!("{node_name}@*"));
             }
         }
-        let t = std::time::Instant::now();
-        if !specs.is_empty() {
-            let mut cmd = crate::util::npm_cmd();
-            cmd.arg("rebuild").current_dir(root);
-            if self.ignore_scripts {
-                cmd.arg("--ignore-scripts");
-            }
-            cmd.args(&self.extra_args).args(&specs);
-            if crate::util::quiet() {
-                cmd.stdout(std::process::Stdio::null());
-            }
-            let st = cmd.status().context("running npm rebuild")?;
-            if !st.success() {
-                // Not reported as a script failure: npm ci drops an OPTIONAL
-                // dependency whose install script fails and carries on, which
-                // only npm ci itself reproduces. The wrapper hands over to it.
-                bail!("npm rebuild failed: {st}");
-            }
-        }
-        crate::util::record("npm rebuild", t.elapsed().as_secs_f64());
-        crate::info!("  npm rebuild (deps): {:.2}s", t.elapsed().as_secs_f64());
-        // 2. Hidden lockfile.
+        // 1-3 run in one process with npm loaded as for the user's `npm ci`
+        // (src/post-install.js): npm's rebuild for these packages, then the
+        // hidden lockfile, then the root lifecycle scripts as ci.js runs them.
+        // Its files live in a directory only this user can enter, made fresh
+        // for this run (util::private_run_dir).
+        let npm_dir = crate::util::npm_dir().context("cannot locate npm's installation")?;
+        let dir = crate::util::private_run_dir()?;
+        let helper = dir.join("post-install.js");
+        let job = dir.join("post-install-job.json");
+        let status = dir.join("post-install-status.json");
+        let hidden_file = dir.join("hidden-lockfile.json");
+        let files = [&helper, &job, &status, &hidden_file];
         // npm writes the hidden lockfile whenever node_modules exists, even with
         // no packages in it, but never creates node_modules just for it
         // (measured on a project without dependencies, with and without an
         // existing empty node_modules).
-        let hidden = self.hidden_lockfile(plan);
-        if root.join("node_modules").is_dir() {
-            let text = serde_json::to_string_pretty(&hidden)? + "\n";
-            std::fs::write(root.join("node_modules/.package-lock.json"), text)?;
+        let hidden = if root.join("node_modules").is_dir() {
+            let text = serde_json::to_string_pretty(&self.hidden_lockfile(plan))? + "\n";
+            write_new(&hidden_file, text.as_bytes())?;
+            Some(hidden_file.clone())
+        } else {
+            None
+        };
+        write_new(&helper, include_str!("post-install.js").as_bytes())?;
+        let mut npm_args = self.npm_args.clone();
+        if self.ignore_scripts && !npm_args.iter().any(|a| a == "--ignore-scripts") {
+            npm_args.push("--ignore-scripts".into());
         }
-        // 3. Root lifecycle scripts, as ci.js runs them.
+        let job_json = serde_json::json!({
+            "root": root, "specs": specs, "hiddenLockfile": hidden, "status": status, "npmArgs": npm_args,
+        });
+        write_new(&job, serde_json::to_string(&job_json)?.as_bytes())?;
         let t = std::time::Instant::now();
-        if !self.ignore_scripts {
-            let npm_dir = crate::util::npm_dir().context("cannot locate npm's installation")?;
-            // Under the store's tmp dir (user-owned), created fresh: never through
-            // a pre-existing path in a shared /tmp.
-            let helper = crate::default_store(None).join("tmp").join(format!("{}-root-scripts.js", std::process::id()));
-            let _ = std::fs::remove_file(&helper);
-            {
-                use std::io::Write;
-                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&helper)?;
-                f.write_all(include_str!("root-scripts.js").as_bytes())?;
-            }
-            let st = crate::util::npm_cmd()
-                .args(["exec", "--no", "--", "node"])
-                .arg(&helper)
-                .arg(&npm_dir)
-                .arg(root)
-                .current_dir(root)
-                .status()
-                .context("running root lifecycle scripts")?;
-            let _ = std::fs::remove_file(&helper);
-            if !st.success() {
-                return Err(crate::util::ScriptFailure(format!("root lifecycle script failed: {st}")).into());
-            }
+        let st = crate::util::node_cmd().arg(&helper).arg(&npm_dir).arg(&job).current_dir(root).status();
+        let report = std::fs::read_to_string(&status);
+        for f in files {
+            let _ = std::fs::remove_file(f);
         }
-        crate::util::record("root scripts", t.elapsed().as_secs_f64());
-        crate::info!("  root lifecycle scripts: {:.2}s", t.elapsed().as_secs_f64());
-        Ok(())
+        let st = st.context("running npm's post-install steps")?;
+        let report: Value = serde_json::from_str(&report.context("the post-install step reported nothing")?)
+            .context("parsing the post-install status")?;
+        let secs = |k: &str| report["secs"][k].as_f64().unwrap_or(0.0);
+        crate::util::record("npm rebuild", secs("rebuild"));
+        crate::util::record("root scripts", secs("scripts"));
+        crate::info!(
+            "  npm rebuild (deps): {:.2}s, root lifecycle scripts: {:.2}s ({:.2}s with npm's load)",
+            secs("rebuild"),
+            secs("scripts"),
+            t.elapsed().as_secs_f64()
+        );
+        let message = report["message"].as_str().unwrap_or("").to_string();
+        match report["failed"].as_str() {
+            None if st.success() && report["ok"] == Value::Bool(true) => Ok(()),
+            // The helper died during the root scripts without a final report:
+            // a script was killed by a signal, which run-script passes on to
+            // its parent (npm ci dies the same way). Reported, not retried.
+            None if report["phase"] == "scripts" => {
+                Err(crate::util::ScriptFailure(format!("root lifecycle script failed: npm's process ended ({st})")).into())
+            }
+            // A root script failed: npm ci fails the same way; reported, not retried.
+            Some("scripts") => Err(crate::util::ScriptFailure(format!("root lifecycle script failed: {message}")).into()),
+            // Not reported as a script failure: npm ci drops an OPTIONAL
+            // dependency whose install script fails and carries on, which
+            // only npm ci itself reproduces. The wrapper hands over to it.
+            _ => bail!("npm rebuild failed: {message} ({st})"),
+        }
     }
+}
+
+/// Create `path` (it must not exist) and write `data` into it.
+fn write_new(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    f.write_all(data)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -704,7 +721,7 @@ mod tests {
     }
 
     fn hidden(lf: &Lockfile, plan: &Plan) -> Value {
-        NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: true, extra_args: vec![] }.hidden_lockfile(plan)
+        NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: true, npm_args: vec![] }.hidden_lockfile(plan)
     }
 
     #[test]
