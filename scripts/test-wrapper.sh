@@ -114,8 +114,9 @@ check scope-in "project inside the trial scope → thinclone" $r "$d"
 # 16. the run log records installs and declines (in the test's own log dir)
 n_inst=$(grep -c '"outcome":"installed"' "$THINCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
 n_decl=$(grep -c '"outcome":"declined"' "$THINCLONE_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
-[ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && r=ok || r=bad
-check log "log.jsonl records installs ($n_inst) and declines ($n_decl)" $r "$work/logs"
+n_nobuild=$(grep -vc '"build":"' "$THINCLONE_LOG_DIR/log.jsonl" 2>/dev/null)
+[ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && [ "${n_nobuild:-1}" = 0 ] && r=ok || r=bad
+check log "log.jsonl records installs ($n_inst) and declines ($n_decl), each with the build (missing: ${n_nobuild:-?})" $r "$work/logs"
 
 # 17–19. settings npm applies and thinclone does not → plain npm with the reason
 d=$(new_project strict); CMD="npm ci"; rc=$(run "$d" npm_config_strict_allow_scripts=true)

@@ -46,9 +46,11 @@ for d in "${dirs[@]}"; do
   out=$(THINCLONE_VERIFY_NOISE=1 THINCLONE_LOG_DIR="$work/logs" "$here/scripts/verify.sh" "$d" "$work/v" 2>&1)
   printf '%s\n' "$out" | grep -E 'RESULT|npm ci:|noise|npm ls:|stale in B|^  ' | head -20
   printf '%s\n' "$out" > "$work/out.txt"
-  python3 -I - "$logdir/verify.jsonl" "$d" "$work/out.txt" <<'EOF'
+  # The build verify.sh ran (target/release), which may differ from the one on PATH.
+  build=$("$here/target/release/thinclone" --version 2>/dev/null | sed -n 's/.*(\(.*\)).*/\1/p')
+  python3 -I - "$logdir/verify.jsonl" "$d" "$work/out.txt" "${build:-unknown}" <<'EOF'
 import json, re, sys, time
-log, d, outfile = sys.argv[1:4]
+log, d, outfile, build = sys.argv[1:5]
 out = open(outfile, errors="replace").read()
 m = re.search(r"RESULT: (\w+)", out)
 t = re.search(r"npm ci: ([\d.]+)s\s+thinclone: ([\d.]+)s", out)
@@ -61,7 +63,7 @@ result = m.group(1) if m else "ERROR"
 paths = re.findall(r"^  ([^ :]+)(?::|$)", out.split("== diff A B")[-1].split("== mtime")[0], re.M)
 if result == "DIFFERENT" and paths and all(not (p.startswith("node_modules/") or "/node_modules/" in p) for p in paths):
     result = "BUILD-OUTPUT-ONLY"
-rec = {"ts": time.time(), "dir": d, "result": result, "differing": paths[:20],
+rec = {"ts": time.time(), "build": build, "dir": d, "result": result, "differing": paths[:20],
        "npm_ci_secs": float(t.group(1)) if t else None, "thinclone_secs": float(t.group(2)) if t else None,
        "noise_paths": int(n.group(1)) if n else None, "npm_ls": ls.group(1).strip() if ls else None}
 open(log, "a").write(json.dumps(rec) + "\n")

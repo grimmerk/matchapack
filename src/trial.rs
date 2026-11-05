@@ -34,6 +34,9 @@ pub fn append(mut rec: Value) {
     if let Value::Object(m) = &mut rec {
         m.insert("ts".into(), json!(now()));
         m.insert("thinclone".into(), json!(env!("CARGO_PKG_VERSION")));
+        // The git commit of this binary (build.rs): trial numbers from two
+        // builds must not be mixed.
+        m.insert("build".into(), json!(env!("THINCLONE_BUILD")));
     }
     let p = log_path();
     let _ = std::fs::create_dir_all(p.parent().unwrap());
@@ -128,6 +131,33 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             list.join(", ")
         );
     }
+    // One line per thinclone build, in order of first use, so numbers from
+    // different binaries are never read as one series.
+    let mut builds: Vec<(String, usize, Vec<f64>)> = vec![];
+    for r in &runs {
+        let b = r["build"].as_str().unwrap_or("(no build recorded)").to_string();
+        let i = match builds.iter().position(|(k, _, _)| *k == b) {
+            Some(i) => i,
+            None => {
+                builds.push((b, 0, vec![]));
+                builds.len() - 1
+            }
+        };
+        builds[i].1 += 1;
+        if r["outcome"] == "installed" {
+            if let Some(s) = r["secs"].as_f64() {
+                builds[i].2.push(s);
+            }
+        }
+    }
+    if builds.len() > 1 || builds.first().is_some_and(|(k, _, _)| k.starts_with('(')) {
+        println!("by build:");
+        for (b, n, mut secs) in builds {
+            secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = if secs.is_empty() { "-".to_string() } else { format!("{:.1} s", secs[secs.len() / 2]) };
+            println!("  {b:<22} runs {n:>4}, installed {:>4}, median install {med}", secs.len());
+        }
+    }
     let inst: Vec<&Value> = runs.iter().filter(|r| r["outcome"] == "installed").collect();
     if !inst.is_empty() {
         let mut secs: Vec<f64> = inst.iter().filter_map(|r| r["secs"].as_f64()).collect();
@@ -180,12 +210,13 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         println!("verification samples: {} run, {ok} identical", ver.len());
         for v in ver.iter().rev().take(5) {
             println!(
-                "  {}  {:<10} {}  (npm ci {} s, thinclone {} s)",
+                "  {}  {:<17} {}  (npm ci {} s, thinclone {} s, build {})",
                 when(v["ts"].as_f64().unwrap_or(0.0)),
                 v["result"].as_str().unwrap_or("?"),
                 v["dir"].as_str().unwrap_or("?"),
                 v["npm_ci_secs"],
-                v["thinclone_secs"]
+                v["thinclone_secs"],
+                v["build"].as_str().unwrap_or("not recorded")
             );
         }
     }
