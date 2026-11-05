@@ -1,0 +1,63 @@
+# Checks for every pull request (and on demand). macOS runners bill 10x on a
+# private repository, so only what needs APFS clones runs there; the rest runs
+# on Linux. Not on pushes to master: a pull request already ran them.
+name: ci
+on:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --release
+      - name: shell routing in bash, zsh and fish (Docker)
+        run: docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash /src/scripts/test-shells.sh
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          # npm 11.19.1, a version in VERIFIED_NPM (src/wrapper.rs).
+          node-version: 24.22.1
+      - name: build
+        run: cargo build --release
+      - name: safety tests
+        run: scripts/test-safety.sh "$RUNNER_TEMP/safety"
+      - name: routing tests
+        run: scripts/test-wrapper.sh "$RUNNER_TEMP/wrapper"
+      - name: harness on the fixtures (npm ci vs thinclone)
+        env:
+          THINCLONE_VERIFY_BYTES: "1"
+        run: |
+          # One process with all output redirected: a subshell left holding
+          # the step's stdout would keep the step from ever finishing.
+          python3 -m http.server 48321 --bind 127.0.0.1 --directory fixtures/optional-upward/tarballs >/dev/null 2>&1 &
+          server=$!
+          until curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; do sleep 0.3; done
+          fail=0
+          for f in small stale-flags optional-upward optional-engines legacy-peer; do
+            echo "::group::$f"
+            if scripts/verify.sh "fixtures/$f" "$RUNNER_TEMP/v-$f"; then echo "$f: ok"; else echo "::error::$f: harness failed"; fail=1; fi
+            echo "::endgroup::"
+          done
+          echo "::group::legacy-peer with legacy-peer-deps"
+          npm_config_legacy_peer_deps=true scripts/verify.sh fixtures/legacy-peer "$RUNNER_TEMP/v-legacy-on" || { echo "::error::legacy-peer (legacy-peer-deps): harness failed"; fail=1; }
+          echo "::endgroup::"
+          kill "$server"
+          exit $fail
