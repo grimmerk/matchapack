@@ -451,6 +451,14 @@ impl Store {
     }
 }
 
+/// Free bytes on the volume holding `p` (for unprivileged users), from statvfs.
+pub fn free_bytes(p: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+}
+
 fn dir_bytes(d: &Path) -> u64 {
     walkdir::WalkDir::new(d)
         .into_iter()

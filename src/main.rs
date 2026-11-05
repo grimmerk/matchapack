@@ -614,7 +614,9 @@ fn main() -> Result<()> {
                 }
                 Some(StoreCmd::Gc { dry_run }) => {
                     let st = if dry_run { Store::new(s, cacache)? } else { Store::exclusive(s, cacache)? };
+                    let free0 = store::free_bytes(&st.root);
                     let r = gc::gc(&st, &trial::log_path(), dry_run)?;
+                    let free1 = store::free_bytes(&st.root);
                     let gib = |b: u64| format!("{:.2} GiB", b as f64 / 1024f64.powi(3));
                     println!(
                         "projects in use: {} ({} recorded, {} from the trial log); records of removed projects {}: {}",
@@ -632,8 +634,20 @@ fn main() -> Result<()> {
                         gib(r.bytes_removed),
                         if r.recent > 0 { format!(" (kept {} unused entries extracted in the last hour)", r.recent) } else { String::new() }
                     );
+                    // The file bytes above are not the space freed: a removed
+                    // entry whose blocks a node_modules still shares (a clone
+                    // of it) frees nothing. The volume's free space tells.
                     if r.removed > 0 {
-                        println!("disk space comes back only for entries that no node_modules still shares blocks with");
+                        if dry_run {
+                            println!("space comes back only for entries no node_modules still shares blocks with; the real run reports the volume's free space before and after");
+                        } else if let (Some(a), Some(b)) = (free0, free1) {
+                            println!(
+                                "free space on the store's volume: {} before, {} after ({:+.2} GiB; other activity on the volume counts too)",
+                                gib(a),
+                                gib(b),
+                                (b as f64 - a as f64) / 1024f64.powi(3)
+                            );
+                        }
                     }
                 }
                 Some(StoreCmd::Verify { fix, npm_cache }) => {
