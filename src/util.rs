@@ -114,37 +114,28 @@ fn is_executable(p: &std::path::Path) -> bool {
     std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
 
-/// A directory for this run's helper files: `<store>/tmp/<pid>-run-<nanos>`,
-/// created fresh with mode 0700, once per process. Nobody else can create,
-/// replace or symlink files in it, even when the store itself is shared.
-/// Store::new removes it once the process is gone and it is an hour old.
+static RUN_DIR: std::sync::OnceLock<crate::store::TmpDir> = std::sync::OnceLock::new();
+
+/// A directory for this run's helper files: `<store>/tmp/<pid>-<nanos>-run`,
+/// created fresh with mode 0700, once per process, and held (TmpDir) until
+/// the process exits. Nobody else can create, replace or symlink files in it,
+/// even when the store itself is shared. Store::new removes it once no
+/// process holds it and it is an hour old.
 pub fn private_run_dir() -> anyhow::Result<std::path::PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
-    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    if let Some(d) = DIR.get() {
-        return Ok(d.clone());
+    if let Some(d) = RUN_DIR.get() {
+        return Ok(d.path.clone());
     }
     let tmp = crate::default_store(None).join("tmp");
-    std::fs::create_dir_all(&tmp)?;
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let d = tmp.join(format!("{}-run-{nanos}", std::process::id()));
-    std::fs::DirBuilder::new().mode(0o700).create(&d)?;
-    Ok(DIR.get_or_init(|| d).clone())
+    let d = crate::store::TmpDir::create(tmp.join(format!("{}-run", crate::store::process_tag())), 0o700)?;
+    Ok(RUN_DIR.get_or_init(|| d).path.clone())
 }
 
 /// Remove this run's private directory if it was made and is empty (each
 /// helper removes its own files). Left behind on an early error or a crash,
-/// it goes with Store::new's cleanup an hour after the process is gone.
+/// it goes with Store::new's cleanup.
 pub fn remove_run_dir() {
-    // OnceLock has no take(): read the path the same way private_run_dir made it.
-    let tmp = crate::default_store(None).join("tmp");
-    let prefix = format!("{}-run-", std::process::id());
-    if let Ok(entries) = std::fs::read_dir(&tmp) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_dir(e.path());
-            }
-        }
+    if let Some(d) = RUN_DIR.get() {
+        let _ = std::fs::remove_dir(&d.path);
     }
 }
 

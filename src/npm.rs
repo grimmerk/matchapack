@@ -265,12 +265,13 @@ pub fn check_in_sync(root: &Path, lf: &Lockfile) -> Result<Option<Ideal>> {
     {
         // Run it in a scratch copy without node_modules (package.json, lockfile,
         // .npmrc and each workspace's package.json): with a node_modules on disk
-        // npm would diff against it. Under the store's tmp/ (named `<pid>-dryrun`,
-        // so Store::new removes it if this process dies).
-        let scratch = crate::default_store(None).join("tmp").join(format!("{}-dryrun", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch)?;
-        let scratch = std::fs::canonicalize(&scratch)?;
+        // npm would diff against it. Under the store's tmp/, held by this
+        // process (TmpDir), so Store::new removes it if this process dies.
+        let held = crate::store::TmpDir::create(
+            crate::default_store(None).join("tmp").join(format!("{}-dryrun", crate::store::process_tag())),
+            0o755,
+        )?;
+        let scratch = std::fs::canonicalize(&held.path)?;
         let t = std::time::Instant::now();
         let result = dry_run_ideal(root, &scratch, lf);
         crate::util::record("npm ci --dry-run", t.elapsed().as_secs_f64());

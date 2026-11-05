@@ -45,6 +45,8 @@ jobs:
         run: scripts/test-safety.sh "$RUNNER_TEMP/safety"
       - name: routing tests
         run: scripts/test-wrapper.sh "$RUNNER_TEMP/wrapper"
+      - name: store tests (records, gc, verify, locks)
+        run: scripts/test-store.sh "$RUNNER_TEMP/store"
       - name: harness on the fixtures (npm ci vs thinclone)
         env:
           THINCLONE_VERIFY_BYTES: "1"

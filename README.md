@@ -94,6 +94,24 @@ scripts/convert-existing.sh --apply ~/git    # re-installs each project via thin
 Skips projects thinclone would not handle and projects a running process has
 its working directory in.
 
+## Store maintenance
+
+- `thinclone store`: where the store is, how many packages and recorded
+  projects it holds.
+- `thinclone store gc [--dry-run]`: remove the packages no existing project
+  uses. A package stays while a project installed from it still has its
+  node_modules (every install records its directory and packages in
+  `<store>/projects/`; projects installed before records existed are found
+  through the trial log). Removing a package never breaks an installed
+  node_modules, but disk space comes back only for packages no node_modules
+  still shares blocks with, so the real run reports the volume's free space
+  before and after. Packages extracted in the last hour are kept. Refused while
+  an install is running.
+- `thinclone store verify [--fix]`: compare every package with its tarball in
+  the npm cache (files, contents, file modes, directories); exit 1 when one
+  differs. `--fix` removes those, and the next install re-extracts them. About
+  1.5 minutes for 8,700 packages (4.9 GiB): each tarball is extracted again.
+
 ## Other commands
 
 - `thinclone init zsh|bash|fish`: print the shell integration (see "Use").
@@ -107,8 +125,11 @@ its working directory in.
   new npm version gets verified. `THINCLONE_VERIFY_BYTES=1` also requires the
   hidden lockfile to be byte-identical (CI sets it).
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
-  `test-shells.sh` on Linux; safety, routing and the fixture harness on macOS.
+  `test-shells.sh` on Linux; safety, routing, store and the fixture harness on
+  macOS.
 - `scripts/test-wrapper.sh <work>`: routing tests for the shell integration.
+- `scripts/test-store.sh <work>`: project records, `store gc`, `store verify`,
+  the store lock and the tmp cleanup, on a store of its own.
 - `scripts/test-shells.sh`: the same routing in bash, zsh and fish with stubs,
   in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash
   /src/scripts/test-shells.sh`).
