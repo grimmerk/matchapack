@@ -125,6 +125,7 @@ fn one_line(e: &anyhow::Error) -> String {
 /// Replace this process with the real npm. `THINCLONE=0` keeps any wrapper
 /// from routing back here.
 fn exec_npm(args: &[String]) -> i32 {
+    util::remove_run_dir();
     let err = Command::new("npm").args(args).env("THINCLONE", "0").exec();
     eprintln!("thinclone: could not start npm: {err}");
     127

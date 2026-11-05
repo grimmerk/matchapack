@@ -496,10 +496,13 @@ fn main() -> Result<()> {
                 no_rebuild,
                 npm_args: if ignore_scripts { vec!["--ignore-scripts".into()] } else { vec![] },
             };
-            run_install(&o).map_err(InstallError::into_inner)?;
+            let r = run_install(&o).map_err(InstallError::into_inner);
+            util::remove_run_dir();
+            r?;
         }
         Cmd::Npm { args } => {
             let code = wrapper::run(args);
+            util::remove_run_dir();
             std::process::exit(code);
         }
         Cmd::Init { shell } => {

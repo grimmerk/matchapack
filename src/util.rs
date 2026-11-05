@@ -132,6 +132,22 @@ pub fn private_run_dir() -> anyhow::Result<std::path::PathBuf> {
     Ok(DIR.get_or_init(|| d).clone())
 }
 
+/// Remove this run's private directory if it was made and is empty (each
+/// helper removes its own files). Left behind on an early error or a crash,
+/// it goes with Store::new's cleanup an hour after the process is gone.
+pub fn remove_run_dir() {
+    // OnceLock has no take(): read the path the same way private_run_dir made it.
+    let tmp = crate::default_store(None).join("tmp");
+    let prefix = format!("{}-run-", std::process::id());
+    if let Ok(entries) = std::fs::read_dir(&tmp) {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_dir(e.path());
+            }
+        }
+    }
+}
+
 /// A path from the lockfile is used under the project root only if it is
 /// relative and made of plain names: no `..`, no root, no `.`. Path::join with
 /// an absolute path would REPLACE the root, so this guards every delete, clone
