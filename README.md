@@ -108,7 +108,7 @@ its working directory in.
   before and after. Packages extracted in the last hour are kept. Refused while
   an install is running.
 - `thinclone store verify [--fix]`: compare every package with its tarball in
-  the npm cache (files, contents, file and directory modes); exit 1 when one
+  the npm cache (files, contents, file modes, directories); exit 1 when one
   differs. `--fix` removes those, and the next install re-extracts them. About
   1.5 minutes for 8,700 packages (4.9 GiB): each tarball is extracted again.
 

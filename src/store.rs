@@ -234,7 +234,9 @@ impl Store {
     fn open(root: PathBuf, cacache: PathBuf, exclusive: bool) -> Result<Store> {
         fs::create_dir_all(root.join(LAYOUT))?;
         fs::create_dir_all(root.join("tmp"))?;
-        let lf = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join("lock"))?;
+        // Read and write: NFSv4 refuses a shared lock on a file not open for
+        // reading (EBADF), an exclusive one on a file not open for writing.
+        let lf = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(root.join("lock"))?;
         let lock = if exclusive {
             match flock_retry(&lf, libc::LOCK_EX | libc::LOCK_NB) {
                 Ok(()) => Some(lf),
@@ -287,9 +289,11 @@ impl Store {
         let base = self.root.join(LAYOUT);
         let mut v = vec![];
         // Directories with an entry's name only: a stray file (a Finder
-        // .DS_Store) is not an entry, and gc could not remove it as one.
+        // .DS_Store) is not an entry, and gc could not remove it as one. A
+        // symlink with an entry's name is listed, so that verify reports it
+        // and gc or --fix can remove it (ensure refuses to use it).
         for e in walkdir::WalkDir::new(&base).min_depth(3).max_depth(3).into_iter().flatten() {
-            if !e.file_type().is_dir() {
+            if !(e.file_type().is_dir() || e.file_type().is_symlink()) {
                 continue;
             }
             let rel = e.path().strip_prefix(&base).unwrap();
@@ -380,8 +384,11 @@ impl Store {
 
     pub fn ensure(&self, i: &Integrity, url: &str) -> Result<Ensure> {
         let dest = self.dir_for(i);
-        if dest.is_dir() {
-            return Ok(Ensure::Present);
+        match fs::symlink_metadata(&dest) {
+            Ok(m) if m.is_dir() => return Ok(Ensure::Present),
+            // A directory clone of a symlink places the symlink, not a package.
+            Ok(_) => bail!("store entry {} is not a directory; `thinclone store verify --fix` removes it", dest.display()),
+            Err(_) => {}
         }
         let Some(tgz) = self.find_tarball(i, Some(url)) else { return Ok(Ensure::Missing) };
         let data = fs::read(&tgz)?;
@@ -406,8 +413,12 @@ impl Store {
 
     /// Compare an entry with what its tarball in the npm cache extracts to:
     /// the tarball is extracted again into tmp/ on the same filesystem, and
-    /// the two trees must hold the same files (contents, modes), directories
-    /// (modes, the root's included) and nothing else. Extracting rather than
+    /// the two trees must hold the same files (contents, modes), the same
+    /// directories and nothing else; the entry itself must be a directory.
+    /// Directory modes are not compared: they follow the umask of the process
+    /// that extracted the entry (as npm's do), so the tarball does not fix
+    /// them, and a verify under another umask would condemn every entry.
+    /// File modes are set explicitly and are compared. Extracting rather than
     /// modelling the result keeps the filesystem's own name rules (a
     /// case-insensitive volume keeps one of `README.md` and `readme.md`).
     /// Catches an entry left truncated or changed (entries are renamed into
@@ -444,10 +455,10 @@ impl Store {
     }
 }
 
-/// One path in a tree: kind and mode, and for a file its contents' hash.
+/// One path in a tree: its kind, and for a file its mode and contents' hash.
 #[derive(PartialEq, Eq)]
 enum Node {
-    Dir(u32),
+    Dir,
     File(u32, blake3::Hash),
     Other,
 }
@@ -461,7 +472,7 @@ fn tree(root: &Path) -> Result<Vec<(PathBuf, Node)>> {
         let ft = e.file_type();
         let mode = e.metadata()?.permissions().mode() & 0o7777;
         let n = if ft.is_dir() {
-            Node::Dir(mode)
+            Node::Dir
         } else if ft.is_file() {
             let mut h = blake3::Hasher::new();
             std::io::copy(&mut fs::File::open(e.path())?, &mut h)?;
@@ -488,9 +499,8 @@ fn describe(w: &(PathBuf, Node), g: &(PathBuf, Node)) -> String {
     match (&w.1, &g.1) {
         (Node::File(wm, _), Node::File(gm, _)) if wm != gm => format!("{p}: mode {gm:o}, the tarball gives {wm:o}"),
         (Node::File(..), Node::File(..)) => format!("{p}: contents differ"),
-        (Node::Dir(wm), Node::Dir(gm)) => format!("{p}/: directory mode {gm:o}, the tarball gives {wm:o}"),
         (_, Node::Other) => format!("{p}: not a regular file or directory"),
-        (Node::Dir(_), _) => format!("{p}: a file where the tarball has a directory"),
+        (Node::Dir, _) => format!("{p}: a file where the tarball has a directory"),
         _ => format!("{p}: a directory where the tarball has a file"),
     }
 }
@@ -692,18 +702,20 @@ pub(crate) mod tests {
         let e = fresh();
         std::os::unix::fs::symlink("index.js", e.join("link")).unwrap();
         assert!(differs("symlink").contains("link"));
+        // Directory modes follow the extracting process's umask: not a difference.
         let e = fresh();
         fs::set_permissions(e.join("bin"), fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(differs("dir mode").contains("bin/: directory mode 700"));
-        let e = fresh();
         fs::set_permissions(&e, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(differs("root mode").contains("(entry root)"));
+        assert_eq!(store.verify_entry(&i).unwrap(), Check::Match);
+        fs::set_permissions(&e, fs::Permissions::from_mode(0o755)).unwrap();
         // The entry root replaced by a symlink to a valid copy.
         let e = fresh();
         let moved = d.join("moved");
         fs::rename(&e, &moved).unwrap();
         std::os::unix::fs::symlink(&moved, &e).unwrap();
         assert!(differs("root symlink").contains("not a directory"));
+        assert_eq!(store.entries(), vec![i.clone()], "listed, so the CLI verify and gc see it");
+        assert!(store.ensure(&i, "http://x/p.tgz").is_err(), "never used for an install");
         fs::remove_file(&e).unwrap();
         fs::remove_dir_all(&moved).unwrap();
         // A stray file where entries live is not an entry.
