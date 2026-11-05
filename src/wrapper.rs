@@ -158,13 +158,27 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
 
     npm_version_gate()?;
 
-    let out = util::npm_cmd()
-        .args(["config", "list", "--json"])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| format!("npm config list: {e}"))?;
-    let cfg: Value = serde_json::from_slice(&out.stdout).map_err(|_| "could not read npm config".to_string())?;
-    let get = |k: &str| cfg.get(k).cloned().unwrap_or(Value::Null);
+    let cfg = npm_config(&cwd)?;
+    // First gate (an allow-list): every npm setting changed from npm's
+    // default, in any npmrc or the environment, must be one known not to
+    // change what `npm ci` installs or how. Settings npm does not define are
+    // not listed by the helper (npm ignores them).
+    let mut unknown: Vec<String> = cfg
+        .get("changed")
+        .and_then(|c| c.as_object())
+        .ok_or("could not read npm config")?
+        .iter()
+        .filter(|(k, _)| !SAFE_CONFIG.contains(&k.as_str()))
+        .map(|(k, w)| format!("{k} (from {})", w.as_str().unwrap_or("?")))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort();
+        return Err(format!("npm config not on thinclone's list of settings known to be safe: {}", unknown.join(", ")));
+    }
+    // Second gate: the effective values, defaults included (NODE_ENV=production
+    // makes `omit` default to dev without any setting being changed).
+    let eff = cfg.get("effective").cloned().unwrap_or(Value::Null);
+    let get = |k: &str| eff.get(k).cloned().unwrap_or(Value::Null);
     let nonempty = |k: &str| get(k).as_array().is_some_and(|a| !a.is_empty());
     let is_true = |k: &str| get(k).as_bool() == Some(true);
     if nonempty("omit") {
@@ -239,6 +253,59 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         ignore_scripts,
         no_rebuild: false,
     })
+}
+
+/// npm settings that, changed from their default, leave `npm ci`'s result as
+/// thinclone reproduces it. Anything else npm defines hands over to npm.
+const SAFE_CONFIG: &[&str] = &[
+    // registry, network, credentials, cache
+    "registry", "scope", "_auth", "auth-type", "otp", "cache", "cache-max", "cache-min", "prefer-offline",
+    "prefer-online", "fetch-retries", "fetch-retry-factor", "fetch-retry-maxtimeout", "fetch-retry-mintimeout",
+    "fetch-timeout", "proxy", "https-proxy", "noproxy", "local-address", "strict-ssl", "ca", "cafile", "cert",
+    "key", "maxsockets", "user-agent",
+    // output only
+    "loglevel", "logs-dir", "logs-max", "progress", "color", "unicode", "timing", "heading", "audit",
+    "audit-level", "fund", "update-notifier", "foreground-scripts", "usage", "yes",
+    // handled: thinclone follows npm (its own dry-run, npm rebuild, npm's
+    // script runner): scripts on or off, peer handling, engines, release age
+    "ignore-scripts", "legacy-peer-deps", "engine-strict", "min-release-age", "min-release-age-exclude",
+    "script-shell", "node-gyp", "shell",
+    // config file locations (their contents are loaded and checked too)
+    "userconfig", "globalconfig",
+    // used only by publish, init, version, save and search, never by npm ci
+    "access", "provenance", "provenance-file", "tag", "tag-version-prefix", "preid", "message",
+    "git-tag-version", "commit-hooks", "sign-git-commit", "sign-git-tag", "git", "save", "save-bundle",
+    "save-dev", "save-exact", "save-optional", "save-peer", "save-prefix", "save-prod", "init-author-email",
+    "init-author-name", "init-author-url", "init-license", "init-module", "init-type", "init-version",
+    "init-private", "init.author.email", "init.author.name", "init.author.url", "init.license", "init.module",
+    "init.version", "searchexclude", "searchlimit", "searchopts", "searchstaleness", "editor", "browser",
+    "viewer", "call",
+];
+
+/// npm's settings as npm loads them, through src/npm-config.js run with npm's
+/// own @npmcli/config: `changed` (setting -> source) and `effective` values.
+fn npm_config(cwd: &std::path::Path) -> Result<Value, String> {
+    let npm_dir = util::npm_dir().ok_or("cannot locate npm's installation")?;
+    let tmp = crate::default_store(None).join("tmp");
+    let _ = std::fs::create_dir_all(&tmp);
+    let helper = tmp.join(format!("{}-npm-config.js", std::process::id()));
+    let _ = std::fs::remove_file(&helper);
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&helper)
+            .map_err(|e| format!("npm config helper: {e}"))?;
+        f.write_all(include_str!("npm-config.js").as_bytes()).map_err(|e| format!("npm config helper: {e}"))?;
+    }
+    let out = util::node_cmd().arg(&helper).arg(&npm_dir).current_dir(cwd).output();
+    let _ = std::fs::remove_file(&helper);
+    let out = out.map_err(|e| format!("npm config helper: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("could not read npm config: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|_| "could not read npm config".to_string())
 }
 
 /// The npm on PATH must be a version the harness was run against. Checked
