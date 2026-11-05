@@ -18,7 +18,6 @@ bin=$here/target/release/thinclone
 mkdir -p "$work"
 npm_version=$(npm -v) || { echo "no npm on PATH" >&2; exit 2; }
 mm=$(echo "$npm_version" | cut -d. -f1-2)
-mm_re=$(echo "$mm" | sed 's/\./\\./g')
 cfg=${THINCLONE_CONFIG_DIR:-$HOME/.config/thinclone}
 # What is certified is fixed here, never inherited: a caller's settings that
 # loosen the comparison (ignored paths, noise filtering, another baseline,
@@ -59,15 +58,55 @@ for p in "$@"; do
   case_ "project-$(basename "$p")" -- "$p"
 done
 
-recorded() { grep -qsE "^[[:space:]]*$mm_re([[:space:]#]|\$)" "$cfg/npm-verified"; }
+# Add or remove this version's line in npm-verified: under a lock, written to
+# a fresh temporary file and renamed over the old one, so concurrent runs never
+# lose each other's lines and an error never leaves a partial file. Prints
+# what it did; exits 3 on any error (the file is then unchanged).
+#   update add|remove <line to add>
+update() {
+  python3 -c '
+import fcntl, os, re, sys, tempfile
+cfg, mm, action, line = sys.argv[1:]
+f = os.path.join(cfg, "npm-verified")
+try:
+    os.makedirs(cfg, exist_ok=True)
+    with open(f + ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            with open(f) as h:
+                lines = h.read().splitlines(keepends=True)
+        except FileNotFoundError:
+            lines = []
+        mine = re.compile(r"^\s*" + re.escape(mm) + r"(\s|#|$)")
+        present = any(mine.match(l) for l in lines)
+        if action == "add":
+            if present:
+                print("already"); sys.exit(0)
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(line + "\n")
+        else:
+            if not present:
+                print("absent"); sys.exit(0)
+            lines = [l for l in lines if not mine.match(l)]
+        fd, tmp = tempfile.mkstemp(dir=cfg, prefix=".npm-verified.")
+        with os.fdopen(fd, "w") as h:
+            h.writelines(lines)
+            h.flush()
+            os.fsync(h.fileno())
+        os.replace(tmp, f)
+        print("added" if action == "add" else "removed")
+except Exception as e:
+    print(f"error: {e}", file=sys.stderr); sys.exit(3)
+' "$cfg" "$mm" "$1" "${2-}"
+}
+
 if [ $fail != 0 ]; then
   # A version recorded by an earlier run is taken back: this run found a
   # difference (perhaps in a project the earlier run did not include).
-  if [ $record = 1 ] && recorded; then
-    if grep -vE "^[[:space:]]*$mm_re([[:space:]#]|\$)" "$cfg/npm-verified" > "$cfg/npm-verified.tmp" || [ ! -s "$cfg/npm-verified.tmp" ]; then
-      mv "$cfg/npm-verified.tmp" "$cfg/npm-verified" && echo "removed $mm from $cfg/npm-verified (recorded by an earlier run)" \
-        || { echo "could NOT remove $mm from $cfg/npm-verified: remove that line by hand" >&2; exit 3; }
-    fi
+  if [ $record = 1 ]; then
+    r=$(update remove) || { echo "could NOT take $mm back out of $cfg/npm-verified: remove that line by hand" >&2; exit 3; }
+    [ "$r" = removed ] && echo "removed $mm from $cfg/npm-verified (recorded by an earlier run)"
   fi
   echo "npm $npm_version: NOT verified; thinclone keeps handing npm ci to npm on it"
   exit 1
@@ -76,12 +115,11 @@ if [ $record = 0 ]; then
   echo "npm $npm_version: every case identical (not recorded: --no-record)"
   exit 0
 fi
-if recorded; then
+r=$(update add "$mm  # $(date +%F): scripts/verify-npm.sh, npm $npm_version, $("$bin" --version)${*:+, plus $*}") \
+  || { echo "npm $npm_version: every case identical, but recording it in $cfg/npm-verified FAILED" >&2; exit 3; }
+if [ "$r" = already ]; then
   echo "npm $npm_version: every case identical; $mm was already in $cfg/npm-verified"
-elif mkdir -p "$cfg" && echo "$mm  # $(date +%F): scripts/verify-npm.sh, npm $npm_version, $("$bin" --version)${*:+, plus $*}" >> "$cfg/npm-verified" && recorded; then
-  echo "npm $npm_version: every case identical; recorded $mm in $cfg/npm-verified"
 else
-  echo "npm $npm_version: every case identical, but recording it in $cfg/npm-verified FAILED" >&2
-  exit 3
+  echo "npm $npm_version: every case identical; recorded $mm in $cfg/npm-verified"
 fi
 echo "(for every machine: add \"$mm\" to VERIFIED_NPM in src/wrapper.rs)"
