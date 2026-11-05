@@ -14,12 +14,17 @@
 // argv: <npm install dir> <job file>. The job file (JSON) holds root, specs,
 // hiddenLockfile (path of the text to write, or null), status (path) and
 // npmArgs. The status file gets {ok, failed: "rebuild"|"scripts"|null,
-// message, code, secs: {rebuild, scripts}}.
+// message, code, phase, secs: {rebuild, scripts}}. It is written once with
+// phase "scripts" before the root scripts start: @npmcli/run-script re-raises
+// a signal that killed a script on this process, which then dies without
+// reaching its own status write, and thinclone must still treat that as a
+// root script failure (reported, not retried), as npm ci would die with it.
+// All files live in a private (0700) directory thinclone made for this run.
 const path = require('path')
 const fs = require('fs')
 const [npmDir, jobFile] = process.argv.slice(2)
 const job = JSON.parse(fs.readFileSync(jobFile, 'utf8'))
-const status = { ok: false, failed: null, message: '', code: 0, secs: { rebuild: 0, scripts: 0 } }
+const status = { ok: false, failed: null, message: '', code: 0, phase: 'rebuild', secs: { rebuild: 0, scripts: 0 } }
 const writeStatus = () => fs.writeFileSync(job.status, JSON.stringify(status))
 const now = () => Number(process.hrtime.bigint()) / 1e9
 
@@ -63,6 +68,8 @@ const runScript = require(path.join(npmDir, 'node_modules', '@npmcli', 'run-scri
   }
 
   t = now()
+  status.phase = 'scripts'
+  writeStatus()
   if (!npm.config.get('ignore-scripts')) {
     const scriptShell = npm.config.get('script-shell') || undefined
     const events = ['preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare', 'postprepare']
@@ -82,7 +89,11 @@ const runScript = require(path.join(npmDir, 'node_modules', '@npmcli', 'run-scri
 })().catch((e) => {
   status.failed = status.failed || 'rebuild'
   status.message = e && e.message ? e.message : String(e)
-}).finally(() => {
+}).finally(async () => {
   writeStatus()
+  // Let npm's own output (warnings, banners) reach the terminal before
+  // exiting: process.exit does not wait for pending writes to a pipe.
+  await new Promise((resolve) => process.stdout.write('', resolve))
+  await new Promise((resolve) => process.stderr.write('', resolve))
   process.exit(status.ok ? 0 : 1)
 })

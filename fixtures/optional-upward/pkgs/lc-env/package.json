@@ -1,1 +1,7 @@
-{"name":"lc-env","version":"1.0.0","scripts":{"install":"node -e \"require('fs').writeFileSync('env.txt', [process.env.npm_command, process.env.npm_lifecycle_event, process.env.npm_config_audit || '-', process.env.npm_config_fund || '-'].join(' ') + '\\n')\""}}
+{
+ "name": "lc-env",
+ "version": "1.1.0",
+ "scripts": {
+  "install": "node -e \"const e=process.env,p=require('path');require('fs').writeFileSync('env.json',JSON.stringify({command:e.npm_command??null,event:e.npm_lifecycle_event??null,audit:e.npm_config_audit??null,fund:e.npm_config_fund??null,legacy_peer_deps:e.npm_config_legacy_peer_deps??null,ignore_scripts:e.npm_config_ignore_scripts??null,user_agent:e.npm_config_user_agent??null,execpath:e.npm_execpath??null,node_execpath:e.npm_node_execpath??null,init_cwd_is_root:e.INIT_CWD===p.resolve('../..')},null,1)+'\\\\n')\""
+ }
+}

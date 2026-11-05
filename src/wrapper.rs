@@ -291,9 +291,7 @@ const SAFE_CONFIG: &[&str] = &[
 /// own @npmcli/config: `changed` (setting -> source) and `effective` values.
 fn npm_config(cwd: &std::path::Path) -> Result<Value, String> {
     let npm_dir = util::npm_dir().ok_or("cannot locate npm's installation")?;
-    let tmp = crate::default_store(None).join("tmp");
-    let _ = std::fs::create_dir_all(&tmp);
-    let helper = tmp.join(format!("{}-npm-config.js", std::process::id()));
+    let helper = util::private_run_dir().map_err(|e| format!("npm config helper: {e}"))?.join("npm-config.js");
     let _ = std::fs::remove_file(&helper);
     {
         use std::io::Write;

@@ -195,6 +195,15 @@ after=$(cd "$d" && find node_modules -print0 | xargs -0 stat -f '%N %m' 2>/dev/n
 [ "$rc" = 3 ] && grep -q 'not handled, left unchanged' "$d.out" && [ "$before" = "$after" ] && r=ok || r=bad
 check untouched "a hand-over leaves node_modules exactly as it was (exit 3 with THINCLONE_NO_FALLBACK=1)" $r "$d"
 
+# 30. A root script killed by a signal: run-script passes the signal on to
+# the post-install process, which dies before its final report. That is a root
+# script failure (npm ci dies the same way): reported, never retried with npm
+# ci, so the script runs exactly once.
+d=$(new_project rootkill "d['scripts']['postinstall']='echo ran >> runs.txt; kill -TERM \$\$'"); CMD="npm ci"; rc=$(run "$d")
+runs=$(wc -l < "$d/runs.txt" 2>/dev/null | tr -d ' ')
+[ "$rc" != 0 ] && [ "$runs" = 1 ] && ! grep -q 'running npm ci to rebuild it' "$d.out" && r=ok || r=bad
+check root-killed "a root script killed by a signal → reported once, not retried (ran $runs time(s))" $r "$d"
+
 # 23–24. The rc one-liner from the README, `eval "$(thinclone init)"`, detects
 # the shell and loads the same function from the binary (no checkout needed).
 for sh in zsh bash; do

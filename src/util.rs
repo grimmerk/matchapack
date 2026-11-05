@@ -114,6 +114,24 @@ fn is_executable(p: &std::path::Path) -> bool {
     std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
 
+/// A directory for this run's helper files: `<store>/tmp/<pid>-run-<nanos>`,
+/// created fresh with mode 0700, once per process. Nobody else can create,
+/// replace or symlink files in it, even when the store itself is shared.
+/// Store::new removes it once the process is gone and it is an hour old.
+pub fn private_run_dir() -> anyhow::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    if let Some(d) = DIR.get() {
+        return Ok(d.clone());
+    }
+    let tmp = crate::default_store(None).join("tmp");
+    std::fs::create_dir_all(&tmp)?;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let d = tmp.join(format!("{}-run-{nanos}", std::process::id()));
+    std::fs::DirBuilder::new().mode(0o700).create(&d)?;
+    Ok(DIR.get_or_init(|| d).clone())
+}
+
 /// A path from the lockfile is used under the project root only if it is
 /// relative and made of plain names: no `..`, no root, no `.`. Path::join with
 /// an absolute path would REPLACE the root, so this guards every delete, clone
