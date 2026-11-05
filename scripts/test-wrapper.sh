@@ -149,6 +149,21 @@ if [ "$(npm -v | cut -d. -f1)" -ge 11 ]; then want_react=no; else want_react=yes
 [ "$rc" = 0 ] && by_thinclone "$d" && [ "$has_react" = "$want_react" ] && r=ok || r=bad
 check legacy-peer "npm ci --legacy-peer-deps → thinclone, react installed: $has_react (npm $(npm -v) installs it: $want_react)" $r "$d"
 
+# 25–26. #6: npm settings are an allow-list. A setting npm defines that is
+# not on the list hands over to npm, naming it; settings npm does not define
+# (another package manager's) and listed ones (min-release-age) do not.
+d=$(new_project cfgdeny); printf 'prefer-dedupe=true\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
+[ "$rc" = 0 ] && by_npm "$d" && grep -q 'not on thinclone.s list.*prefer-dedupe (from project)' "$d.out" && r=ok || r=bad
+check config-allowlist "a setting not on the allow-list (prefer-dedupe) → plain npm, named" $r "$d"
+d=$(new_project cfgok); printf 'resolution-mode=highest\nmin-release-age=7\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
+[ "$rc" = 0 ] && by_thinclone "$d" && r=ok || r=bad
+check config-allowed "a pnpm-only setting and min-release-age → thinclone" $r "$d"
+# 27. `call` is harmless to npm ci but breaks `npm exec`, which runs the root
+# scripts after node_modules has changed: it must hand over before that.
+d=$(new_project cfgcall); printf 'call=echo hello\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
+[ "$rc" = 0 ] && by_npm "$d" && grep -q 'call (from project)' "$d.out" && r=ok || r=bad
+check config-call "call=… in .npmrc → plain npm before anything changes" $r "$d"
+
 # 23–24. The rc one-liner from the README, `eval "$(thinclone init)"`, detects
 # the shell and loads the same function from the binary (no checkout needed).
 for sh in zsh bash; do
