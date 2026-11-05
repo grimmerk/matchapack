@@ -65,7 +65,13 @@ if [ "${THINCLONE_VERIFY_NOISE:-0}" = 1 ]; then
   while IFS= read -r i; do [ -n "$i" ] && ign+=(--ignore "$i"); done < "$work/noise.txt"
 fi
 echo "== diff A B"
-"$bin" diff "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} || rc=1
+"$bin" diff "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} > "$work/diff.txt" || rc=1
+cat "$work/diff.txt"
+# THINCLONE_VERIFY_BYTES=1: the hidden lockfile must also be byte-identical, not
+# only equal as JSON (npm writes every entry in a fixed key order).
+if [ "${THINCLONE_VERIFY_BYTES:-0}" = 1 ] && grep -q 'hidden lockfile byte-identical: false' "$work/diff.txt"; then
+  echo "hidden lockfile is not byte-identical (THINCLONE_VERIFY_BYTES=1)"; rc=1
+fi
 # npm ci leaves every extracted file and directory with the install time; a
 # path under node_modules not newer than the marker is a stale mtime. Install
 # scripts can legitimately leave old mtimes (bcrypt unpacks a prebuilt binary

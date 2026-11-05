@@ -99,7 +99,10 @@ its working directory in.
 - `scripts/verify.sh <project> <work>`: `npm ci` vs thinclone on copies of a
   project (`THINCLONE_VERIFY_VIA=wrapper` goes through the shell function). It
   runs on any npm version and ignores the trial scope file, since it is how a
-  new npm version gets verified.
+  new npm version gets verified. `THINCLONE_VERIFY_BYTES=1` also requires the
+  hidden lockfile to be byte-identical (CI sets it).
+- CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
+  `test-shells.sh` on Linux; safety, routing and the fixture harness on macOS.
 - `scripts/test-wrapper.sh <work>`: routing tests for the shell integration.
 - `scripts/test-shells.sh`: the same routing in bash, zsh and fish with stubs,
   in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash

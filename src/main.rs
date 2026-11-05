@@ -20,7 +20,7 @@ use std::time::Instant;
 use store::{Ensure, Integrity, Store};
 
 #[derive(Parser)]
-#[command(version, about = "Materialize node_modules from package-lock.json with copy-on-write clones")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("THINCLONE_BUILD"), ")"), about = "Materialize node_modules from package-lock.json with copy-on-write clones")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
