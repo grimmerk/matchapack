@@ -336,18 +336,18 @@ fn place(
     // Wipe what npm ci wipes, the way ci.js does: every entry INSIDE each
     // node_modules goes, the directory itself stays (it matters when nothing is
     // installed: npm leaves an empty node_modules, or none if there was none).
+    // The entries are removed in parallel: on APFS the removal is the largest
+    // fixed cost of a reinstall (NOTES "Removal and the fixed cost").
     timed("remove old node_modules", || {
+        let mut old: Vec<PathBuf> = vec![];
         for r in &plan.owned_roots {
             let nm = root.join(r).join("node_modules");
             let Ok(entries) = std::fs::read_dir(&nm) else { continue };
             for ent in entries {
-                let ent = ent?;
-                let p = ent.path();
-                let r = if ent.file_type()?.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
-                r.with_context(|| format!("removing {}", p.display()))?;
+                old.push(ent?.path());
             }
         }
-        Ok(())
+        remove_paths_par(old)
     })?;
 
     // Place packages, parents before children; one depth level at a time.
@@ -396,6 +396,21 @@ fn place(
         timed("post-install", || p.run(root, plan))?;
     }
     Ok(())
+}
+
+fn remove_path(p: &Path) -> Result<()> {
+    let m = std::fs::symlink_metadata(p).with_context(|| format!("removing {}", p.display()))?;
+    let r = if m.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+    r.with_context(|| format!("removing {}", p.display()))
+}
+
+/// Remove paths in parallel, each as a whole: a directory (a scope directory
+/// included) through remove_dir_all, which never follows a symlink inside the
+/// tree even when one is swapped in during the removal; a symlink as a link.
+/// Not split further: a path queued below a directory could be redirected if
+/// that directory were replaced by a symlink in the meantime.
+fn remove_paths_par(paths: Vec<PathBuf>) -> Result<()> {
+    paths.par_iter().try_for_each(|p| remove_path(p))
 }
 
 /// Every directory thinclone will empty or write into must really be inside

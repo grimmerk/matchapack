@@ -51,7 +51,7 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
     let list: Vec<String> = match std::env::var("THINCLONE_PATHS") {
         Ok(v) => v.split(':').map(String::from).collect(),
         Err(_) => {
-            let f = crate::home().join(".config/thinclone/paths");
+            let f = crate::util::config_dir().join("paths");
             match std::fs::read_to_string(&f) {
                 Ok(t) => t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect(),
                 Err(_) => return Ok(()),
@@ -126,7 +126,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     if !gated.is_empty() {
         let list: Vec<String> = gated.iter().map(|(v, n)| format!("npm {v}: {n}")).collect();
         println!(
-            "npm version gate: {} runs went to plain npm ({}); run the harness on that npm, then add it to VERIFIED_NPM",
+            "npm version gate: {} runs went to plain npm ({}); run scripts/verify-npm.sh with that npm on PATH",
             gated.values().sum::<usize>(),
             list.join(", ")
         );

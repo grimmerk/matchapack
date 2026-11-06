@@ -22,8 +22,10 @@ use std::process::Command;
 const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "isntall-clean"];
 
 /// npm major.minor versions the harness was run against. Another version runs
-/// plain npm until the harness has been re-run (override: THINCLONE_NPM_VERSIONS
-/// = comma list, or `any`).
+/// plain npm until the harness has been re-run: scripts/verify-npm.sh runs it
+/// on the npm on PATH and, when every case is identical, records the version
+/// in `<config dir>/npm-verified`, which is read as well (override:
+/// THINCLONE_NPM_VERSIONS = comma list, or `any`).
 const VERIFIED_NPM: &[&str] = &["11.19", "11.17"];
 
 /// Flags that change only npm's output or network policy, never the tree.
@@ -321,7 +323,11 @@ pub fn npm_version_gate() -> Result<(), String> {
     let ok = match allowed.as_deref() {
         Some("any") => true,
         Some(list) => list.split(',').any(|v| version_matches(&version, v.trim())),
-        None => VERIFIED_NPM.iter().any(|v| version_matches(&version, v)),
+        None => {
+            let local = std::fs::read_to_string(util::config_dir().join("npm-verified")).unwrap_or_default();
+            VERIFIED_NPM.iter().any(|v| version_matches(&version, v))
+                || verified_lines(&local).any(|v| version_matches(&version, v))
+        }
     };
     if !ok {
         return Err(format!("npm {version} has not been verified against npm ci"));
@@ -332,4 +338,25 @@ pub fn npm_version_gate() -> Result<(), String> {
 /// "11.19" matches 11.19.x; "11" matches 11.x; an exact version matches itself.
 fn version_matches(version: &str, pattern: &str) -> bool {
     version == pattern || version.starts_with(&format!("{pattern}."))
+}
+
+/// The versions in an npm-verified file: the first word of each line; `#`
+/// starts a comment.
+fn verified_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter_map(|l| l.split('#').next()?.split_whitespace().next())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{verified_lines, version_matches};
+
+    #[test]
+    fn npm_verified_file_lines() {
+        let text = "# recorded by scripts/verify-npm.sh\n11.20  # 2026-11-06, build abc\n\n  12.0.1\n";
+        let v: Vec<&str> = verified_lines(text).collect();
+        assert_eq!(v, ["11.20", "12.0.1"]);
+        assert!(v.iter().any(|p| version_matches("11.20.3", p)));
+        assert!(!v.iter().any(|p| version_matches("11.2.0", p)), "11.20 must not match 11.2.x");
+        assert!(!v.iter().any(|p| version_matches("12.0.2", p)), "an exact version matches only itself");
+    }
 }

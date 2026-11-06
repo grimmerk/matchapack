@@ -57,13 +57,18 @@ mkdir -p "$d/lib/node_modules/fake"; echo keep > "$d/lib/node_modules/fake/x"
 [ -f "$d/lib/node_modules/fake/x" ] && ok "file-lib: the file: directory's node_modules kept" || bad "file-lib: the file: directory's node_modules was wiped"
 [ $rc != 0 ] && grep -q 'has its own node_modules' "$d.out" && ok "file-lib: refused with the reason" || bad "file-lib: not refused (rc=$rc)"
 
-# 5. R2: installing never touches workspace or file: sources.
+# 5. R2: installing never touches workspace or file: sources, also when a
+# reinstall removes the old node_modules (in parallel, scope directories split:
+# node_modules/@s/ws2 is a link to a workspace inside a scope directory).
 d=$work/wsmtime; mkproj "$d" '{"name":"wsroot","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"ms":"2.1.3","lib":"file:./lib"}}'
-mkdir -p "$d/packages/ws" "$d/lib"; echo '{"name":"ws","version":"1.0.0"}' > "$d/packages/ws/package.json"; echo '{"name":"lib","version":"1.0.0"}' > "$d/lib/package.json"
-echo 'x' > "$d/packages/ws/index.js"; echo 'x' > "$d/lib/index.js"; lockgen "$d"; old "$d/packages/ws/index.js" "$d/lib/index.js"
-m1=$(mt "$d/packages/ws/index.js"); m2=$(mt "$d/lib/index.js")
+mkdir -p "$d/packages/ws" "$d/packages/ws2" "$d/lib"; echo '{"name":"ws","version":"1.0.0"}' > "$d/packages/ws/package.json"; echo '{"name":"lib","version":"1.0.0"}' > "$d/lib/package.json"
+echo '{"name":"@s/ws2","version":"1.0.0"}' > "$d/packages/ws2/package.json"
+echo 'x' > "$d/packages/ws/index.js"; echo 'x' > "$d/lib/index.js"; echo 'x' > "$d/packages/ws2/index.js"; lockgen "$d"
+old "$d/packages/ws/index.js" "$d/lib/index.js" "$d/packages/ws2/index.js"
+m1=$(mt "$d/packages/ws/index.js"); m2=$(mt "$d/lib/index.js"); m3=$(mt "$d/packages/ws2/index.js")
 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1 && ok "ws-mtime: install ran" || bad "ws-mtime: install failed: $(tail -1 "$d.out")"
-[ "$(mt "$d/packages/ws/index.js")" = "$m1" ] && [ "$(mt "$d/lib/index.js")" = "$m2" ] && ok "ws-mtime: workspace and file: sources keep their mtime" || bad "ws-mtime: source mtimes changed"
+[ -L "$d/node_modules/@s/ws2" ] && "$bin" install "$d" --no-rebuild > "$d.out" 2>&1 && ok "ws-mtime: reinstall over the links ran" || bad "ws-mtime: reinstall failed: $(tail -1 "$d.out")"
+[ "$(mt "$d/packages/ws/index.js")" = "$m1" ] && [ "$(mt "$d/lib/index.js")" = "$m2" ] && [ "$(mt "$d/packages/ws2/index.js")" = "$m3" ] && [ -L "$d/node_modules/@s/ws2" ] && ok "ws-mtime: workspace and file: sources kept, with their mtime" || bad "ws-mtime: sources changed or gone"
 
 # 6. R3: a lockfile missing a transitive entry is refused (npm ci: EUSAGE).
 d=$(setup missing "del l['packages']['node_modules/@sinonjs/commons']")
@@ -83,6 +88,22 @@ if "$bin" plan "$d" > "$d.out" 2>&1; then bad "under-link: accepted"; else grep 
 d=$(setup gate "pass"); mkdir -p "$d/node_modules/keepme"
 THINCLONE_NPM_VERSIONS=0.1 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
 [ $rc != 0 ] && grep -q 'has not been verified' "$d.out" && [ -d "$d/node_modules/keepme" ] && ok "version-gate: install refused, node_modules untouched" || bad "version-gate: rc=$rc $(tail -1 "$d.out")"
+
+# 9b. A version recorded by scripts/verify-npm.sh (<config dir>/npm-verified)
+# passes the gate. A stand-in npm 99.1 on PATH (only what the version lookup
+# reads): refused by the gate until 99.1 is recorded; then it gets past the
+# gate and fails later, on the missing npm internals.
+fake=$work/fakenpm; rm -rf "${fake:?}"; mkdir -p "$fake/lib/node_modules/npm/bin" "$fake/bin"
+echo '{"name":"npm","version":"99.1.0"}' > "$fake/lib/node_modules/npm/package.json"
+printf '#!/bin/sh\nexit 1\n' > "$fake/lib/node_modules/npm/bin/npm-cli.js"; chmod +x "$fake/lib/node_modules/npm/bin/npm-cli.js"
+ln -s ../lib/node_modules/npm/bin/npm-cli.js "$fake/bin/npm"
+cfg=$work/cfg; mkdir -p "$cfg"; printf '# test\n11.0  # another version\n' > "$cfg/npm-verified"
+d=$(setup gate-file "pass")
+gated() { env -u THINCLONE_NPM_VERSIONS THINCLONE_CONFIG_DIR="$cfg" PATH="$fake/bin:$PATH" "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; grep -q 'npm 99.1.0 has not been verified' "$d.out"; }
+gated; g1=$?
+printf '99.1  # recorded\n' >> "$cfg/npm-verified"
+gated; g2=$?
+[ $g1 = 0 ] && [ $g2 != 0 ] && grep -q 'has no' "$d.out" && ok "version-gate: a version in npm-verified passes the gate" || bad "version-gate file: before $g1, after $g2: $(tail -1 "$d.out")"
 
 # 10-13. #5: a directory on the way that is a symlink to outside the project.
 # The outside directories get a 2020 mtime first: any write into them, even a
