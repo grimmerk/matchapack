@@ -110,7 +110,10 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         }
     };
 
-    let mut cmd = util::node_cmd();
+    // Not util::node_cmd: npm runs here as the user's `npm ci`, and the
+    // scripts it starts must see the user's environment, without a
+    // THINCLONE=0 of ours. (The helper removes THINCLONE_INJECT_FD.)
+    let mut cmd = std::process::Command::new("node");
     cmd.arg(&helper).arg(&npm_dir).args(&o.npm_args).current_dir(&root).env("THINCLONE_INJECT_FD", CHILD_FD.to_string());
     let theirs_fd = theirs.as_raw_fd();
     // The child's end of the socket becomes its fd 3. Only async-signal-safe

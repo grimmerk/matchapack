@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# Inject engine tests (THINCLONE_ENGINE=inject), end to end with the release
+# binary and the npm on PATH:   test-inject.sh <work-dir>
+# What the fixture harness cannot show: that the hook really cloned, that a
+# disabled hook and a store miss still give npm ci's tree, the gates before
+# npm starts, that npm's own failures stay npm's, the store lock and the
+# project record, and the hook's eligibility rules (test-inject-hook.js).
+# Uses its own store and log directory, never the real ones.
+set -uo pipefail
+work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/thinclone
+[ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
+mkdir -p "$work"; work=$(cd "$work" && pwd -P)
+export THINCLONE_NPM_VERSIONS=any THINCLONE_STORE=$work/store THINCLONE_LOG_DIR=$work/logs THINCLONE_PATHS=$work
+export THINCLONE_ENGINE=inject
+unset THINCLONE_INJECT_HOOK THINCLONE_INJECT_THREADS THINCLONE
+store=$work/store
+rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere"
+pass=0; fail=0
+ok() { pass=$((pass+1)); echo "PASS $1"; }
+bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -6; }
+npm_major=$(npm -v | cut -d. -f1)
+# npm 12 refuses tarballs from a non-registry URL unless told otherwise; the
+# local fixtures install from 127.0.0.1.
+[ "$npm_major" -ge 12 ] && export npm_config_allow_remote=all
+
+# The local fixtures install from a tarball server (as in verify-npm.sh).
+server=
+if ! curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; then
+  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
+  server=$!
+  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz && break; sleep 0.1; done
+fi
+trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
+
+project() { # name fixture [python statement on the package.json dict d]
+  local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"
+  cp "$here/fixtures/$2/package.json" "$here/fixtures/$2/package-lock.json" "$d/"
+  if [ -n "${3-}" ]; then python3 -c "import json;p='$d/package.json';d=json.load(open(p));$3;json.dump(d,open(p,'w'),indent=2)"; fi
+  echo "$d"
+}
+# thinclone install <dir> [args]: output in $work/out.
+install() { local d=$1; shift; "$bin" install "$d" "$@" -- --no-audit --no-fund > "$work/out" 2>&1; }
+cloned() { grep -Eo 'inject: cloned [0-9]+' "$work/out" | grep -Eo '[0-9]+$'; }
+filled() { grep -Eo '[0-9]+ new in the store' "$work/out" | grep -Eo '^[0-9]+'; }
+by_npm() { grep -Eo 'extracted by npm [0-9]+' "$work/out" | grep -Eo '[0-9]+$'; }
+# same <ref> <dir>: the same tree as plain npm ci's, hidden lockfile bytes included.
+same() { "$bin" diff "$1" "$2" > "$work/diff" 2>&1 && grep -q 'hidden lockfile byte-identical: true' "$work/diff"; }
+# The shell function, as a user's shell would have it.
+wrapped() { # dir command...
+  local d=$1; shift
+  (cd "$d" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/thinclone.sh'; $*" > "$work/out" 2>&1)
+}
+last_log() { tail -1 "$work/logs/log.jsonl" | python3 -c "import json,sys;r=json.load(sys.stdin);print($1)"; }
+
+# Reference trees: plain npm ci.
+ref_small=$(project ref-small small); (cd "$ref_small" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || { echo "npm ci failed on fixtures/small"; tail -5 "$work/ref.log"; exit 2; }
+ref_local=$(project ref-local bundled); (cd "$ref_local" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || { echo "npm ci failed on fixtures/bundled"; tail -5 "$work/ref.log"; exit 2; }
+# Packages npm placed, and how many distinct tarballs they are (a package
+# installed at two paths is one store entry).
+n_small=$(python3 -c "import json;print(sum(1 for k,v in json.load(open('$ref_small/node_modules/.package-lock.json'))['packages'].items() if not v.get('link') and not v.get('inBundle')))")
+d_small=$(python3 -c "import json;print(len({v['integrity'] for k,v in json.load(open('$ref_small/node_modules/.package-lock.json'))['packages'].items() if not v.get('link') and not v.get('inBundle')}))")
+
+# 0. The hook's eligibility rules, against this npm's pacote.
+npm_dir=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd)
+if node "$here/scripts/test-inject-hook.js" "$npm_dir" > "$work/out" 2>&1; then
+  ok "hook rules: $(grep -c '^PASS' "$work/out") eligibility cases against pacote $(node -p "require('$npm_dir/node_modules/pacote/package.json').version")"
+else
+  bad "hook rules: $(grep '^FAIL' "$work/out" | head -3)"
+fi
+
+# 1. A first install with an empty store: every package is extracted into the
+#    store from npm's cache on demand, then cloned. The hook fired.
+p=$(project small1 small)
+install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(filled)" = "$d_small" ] && [ "$(by_npm)" = 0 ] && same "$ref_small" "$p" \
+  && ok "first install: all $n_small packages cloned (the hook fired), $d_small entries filled from npm's cache, tree identical" \
+  || bad "first install: cloned $(cloned) of $n_small, filled $(filled), by npm $(by_npm)"
+
+# 2. A reinstall over the existing node_modules, with a changed file and a
+#    stray directory in it: npm removes the old tree, nothing new in the store.
+echo "// changed" >> "$p/node_modules/lodash/lodash.js"; mkdir -p "$p/node_modules/stray"; echo x > "$p/node_modules/stray/x"
+install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(filled)" = 0 ] && [ ! -e "$p/node_modules/stray" ] && same "$ref_small" "$p" \
+  && ok "reinstall: old node_modules replaced, $n_small cloned, 0 new in the store, tree identical" \
+  || bad "reinstall: cloned $(cloned), filled $(filled)"
+# The edit above went to the clone, never to the store.
+! grep -rqs '^// changed' "$store/v2" \
+  && ok "a file changed in node_modules left the store entry as it was" || bad "the store entry changed"
+
+# 3. The hook installed but switched off: npm extracts everything itself and
+#    the tree is the same.
+p=$(project hookoff small)
+THINCLONE_INJECT_HOOK=off install "$p" && [ "$(cloned)" = 0 ] && grep -q "hook-off $n_small" "$work/out" && same "$ref_small" "$p" \
+  && ok "hook off: 0 cloned, $n_small extracted by npm, tree identical" || bad "hook off: cloned $(cloned)"
+
+# 4. A package in neither the store nor npm's cache is npm's to fetch and
+#    extract; once npm has cached it, the next install clones it.
+p=$(project miss bundled)
+THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 0 ] && grep -q 'store-miss 3' "$work/out" && same "$ref_local" "$p" \
+  && ok "store miss: 3 packages left to npm (store-miss), tree identical" || bad "store miss: cloned $(cloned)"
+THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 3 ] && [ "$(filled)" = 3 ] && same "$ref_local" "$p" \
+  && ok "after a miss: the next install fills the store from npm's cache and clones all 3" || bad "after a miss: cloned $(cloned), filled $(filled)"
+
+# 5. The project is recorded with the entries it cloned, so gc keeps them.
+p=$(project recorded small); install "$p"
+rec=$(grep -l "\"$p\"" "$store"/projects/*.json 2>/dev/null | head -1)
+[ -n "$rec" ] && [ "$(python3 -c "import json;print(len(json.load(open('$rec'))['entries']))")" -gt 0 ] \
+  && find "$store/v2" -mindepth 3 -maxdepth 3 -type d -exec touch -t 202001010000 {} + \
+  && "$bin" store gc --dry-run > "$work/out" 2>&1 && grep -q 'would remove 0 of' "$work/out" \
+  && ok "record: the project and its entries are recorded; gc would remove nothing" || bad "record: missing, or gc would remove entries in use"
+
+# 6. The store's shared lock is held while npm runs: a gc started from the
+#    root postinstall is refused.
+p=$(project locked bundled "d['scripts']={'postinstall':'\"$bin\" store gc > gc.out 2>&1; echo \$? > gc.rc'}")
+install "$p" && [ "$(cat "$p/gc.rc")" != 0 ] && grep -q 'in use by a running install' "$p/gc.out" \
+  && ok "lock: store gc during the install is refused" || bad "lock: gc ran during an install (rc $(cat "$p/gc.rc" 2>/dev/null))"
+
+# 7. Install scripts' files keep their later times: every touch is done
+#    before npm runs a script (script-env's lc-env writes env.json).
+p=$(project times script-env)
+install "$p" && python3 -c "
+import os,sys
+d='$p/node_modules/lc-env'
+sys.exit(0 if os.stat(d+'/env.json').st_mtime_ns > os.stat(d+'/package.json').st_mtime_ns else 1)" \
+  && ok "times: a file written by an install script is newer than the package's cloned files" || bad "times: the cloned files are not older than the script's file"
+
+# 8. Gates before npm starts: nothing in the project changes.
+p=$(project umask small); mkdir -p "$p/node_modules/sentinel"
+(umask 002; "$bin" install "$p" > "$work/out" 2>&1); rc=$?
+[ $rc != 0 ] && grep -q 'umask is 002' "$work/out" && [ -d "$p/node_modules/sentinel" ] \
+  && ok "umask 002: refused before npm starts, node_modules untouched" || bad "umask 002: rc=$rc"
+(umask 002; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q 'running plain npm instead (umask is 002' "$work/out" && ! grep -q 'thinclone: added' "$work/out" && [ ! -e "$p/node_modules/sentinel" ] && [ -d "$p/node_modules/lodash" ] \
+  && ok "umask 002 through the shell function: plain npm ci installs" || bad "umask 002 wrapper: rc=$rc"
+
+p=$(project nmlink small); mkdir -p "$work/outside-nm/sentinel"; ln -s "$work/outside-nm" "$p/node_modules"
+install "$p"; rc=$?
+[ $rc != 0 ] && grep -q 'node_modules is a symlink' "$work/out" && [ -d "$work/outside-nm/sentinel" ] && [ -L "$p/node_modules" ] \
+  && ok "node_modules symlink: refused, the link's target untouched" || bad "node_modules symlink: rc=$rc"
+
+p=$(project badengine small)
+THINCLONE_ENGINE=bogus "$bin" install "$p" > "$work/out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'THINCLONE_ENGINE=bogus is not an engine' "$work/out" && [ ! -e "$p/node_modules" ] \
+  && ok "an unknown engine name is an error, not a default" || bad "unknown engine: rc=$rc"
+THINCLONE_ENGINE=bogus wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && grep -q 'running plain npm instead (THINCLONE_ENGINE=bogus' "$work/out" && [ -d "$p/node_modules/lodash" ] \
+  && ok "an unknown engine name through the shell function: plain npm" || bad "unknown engine wrapper: rc=$rc"
+
+# 9. Options of the other engine are refused, not ignored.
+p=$(project flags small)
+"$bin" install "$p" --no-rebuild > "$work/out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'not available with THINCLONE_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "--no-rebuild is refused with the inject engine" || bad "--no-rebuild: rc=$rc"
+env -u THINCLONE_ENGINE "$bin" install "$p" -- --no-audit > "$work/out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'need THINCLONE_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "npm arguments are refused by the classic engine" || bad "classic with npm args: rc=$rc"
+env -u THINCLONE_ENGINE "$bin" install "$p" > "$work/out" 2>&1; rc=$?
+[ $rc = 0 ] && ! grep -q 'inject:' "$work/out" && grep -q 'post-install' "$work/out" && ok "without THINCLONE_ENGINE the classic engine installs" || bad "default engine: rc=$rc"
+
+# 10. npm's failures are npm's: same status, said once, nothing retried.
+p=$(project outofsync small "d['dependencies']['left-pad']='1.3.0'"); mkdir -p "$p/node_modules/sentinel"
+(cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
+install "$p"; rc=$?
+[ $want != 0 ] && [ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ -d "$p/node_modules/sentinel" ] \
+  && ok "lockfile out of sync: npm's own error and status ($rc), node_modules untouched" || bad "out of sync: rc=$rc, npm ci gives $want"
+wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
+[ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
+  && ok "lockfile out of sync through the shell function: status $rc, npm not run again, logged as npm_failed" || bad "out of sync wrapper: rc=$rc ($(last_log "r['outcome']"))"
+p=$(project failscript bundled "d['scripts']={'postinstall':'exit 7'}")
+(cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
+install "$p"; rc=$?
+[ $want != 0 ] && [ $rc = $want ] && [ "$(cloned)" = 3 ] && ok "a failing root script: npm's status ($rc) after cloning" || bad "failing root script: rc=$rc, npm ci gives $want"
+
+# 11. Through the shell function npm's arguments are npm's: a flag the
+#     classic engine hands to plain npm is handled, and logged.
+p=$(project omit small)
+wrapped "$p" "npm ci --omit=dev --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && grep -q 'thinclone: added' "$work/out" && [ ! -d "$p/node_modules/jest" ] && [ -d "$p/node_modules/lodash" ] \
+  && [ "$(last_log "r['outcome'], r['engine'], r['inject']['cloned'] > 0, r['inject']['cloned'] < $n_small, '--omit=dev' in r['args']")" = "installed inject True True True" ] \
+  && ok "npm ci --omit=dev through the shell function: cloned, dev dependencies absent, logged with the counts" || bad "omit wrapper: rc=$rc"
+mkdir -p "$work/elsewhere"; cp "$here/fixtures/bundled/package.json" "$here/fixtures/bundled/package-lock.json" "$work/elsewhere/"
+wrapped "$p" "npm ci --prefix '$work/elsewhere' --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && grep -q 'moves the install out of this directory' "$work/out" && ! grep -q 'thinclone: added' "$work/out" && [ -d "$work/elsewhere/node_modules/lc-s" ] \
+  && ok "npm ci --prefix: plain npm (the project is not this directory)" || bad "prefix: rc=$rc"
+
+# 12. The report counts the inject runs.
+"$bin" report > "$work/out" 2>&1 && grep -Eq 'inject engine: [0-9]+ runs, [0-9]+ packages cloned' "$work/out" && grep -q 'npm failed 1' "$work/out" \
+  && ok "report: inject runs, clones and npm failures are counted" || bad "report"
+
+# 13. npm 12: a tarball npm refuses (allow-remote=none, its default) is
+#     refused the same way with the hook, which is never asked.
+if [ "$npm_major" -ge 12 ]; then
+  p=$(project remote bundled)
+  (unset npm_config_allow_remote; cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
+  (unset npm_config_allow_remote; install "$p"); rc=$?
+  [ $want != 0 ] && [ $rc = $want ] && grep -q EALLOWREMOTE "$work/plain.out" && grep -q EALLOWREMOTE "$work/out" && [ "$(cloned)" = 0 ] && [ "$(by_npm)" = 0 ] \
+    && ok "npm $npm_major allow-remote: EALLOWREMOTE with and without the hook (status $rc), nothing cloned" || bad "allow-remote: rc=$rc, npm ci gives $want"
+else
+  echo "SKIP allow-remote: npm $npm_major has no default refusal of remote tarballs (npm 12 does)"
+fi
+
+echo "== $pass passed, $fail failed"
+[ "$fail" = 0 ]
