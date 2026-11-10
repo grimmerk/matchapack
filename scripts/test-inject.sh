@@ -179,6 +179,20 @@ wrapped "$p" "npm ci --prefix '$work/elsewhere' --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'moves the install out of this directory' "$work/out" && ! grep -q 'thinclone: added' "$work/out" && [ -d "$work/elsewhere/node_modules/lc-s" ] \
   && ok "npm ci --prefix: plain npm (the project is not this directory)" || bad "prefix: rc=$rc"
 
+# 11b. A workspace directory that is a symlink to a directory outside the
+#      project: npm installs the workspace's own dependency there, as npm ci
+#      does; thinclone refuses to clone outside the project (rejected-dest),
+#      so that package is npm's own extraction.
+p=$work/wslink; rm -rf "${p:?}" "${work:?}/outside-ws"; mkdir -p "$p/packages" "$work/outside-ws"
+echo '{"name":"wsroot","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}' > "$p/package.json"
+echo '{"name":"ws","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}' > "$work/outside-ws/package.json"
+ln -s "$work/outside-ws" "$p/packages/ws"
+(cd "$p" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$work/out" 2>&1)
+install "$p"; rc=$?
+[ $rc = 0 ] && [ "$(cloned)" = 1 ] && grep -q 'rejected-dest 1' "$work/out" && grep -q 'outside the project' "$work/out" \
+  && grep -q '"version":"2.0.0"' "$work/outside-ws/node_modules/lc-s/package.json" && grep -q '"version":"1.0.0"' "$p/node_modules/lc-s/package.json" \
+  && ok "a workspace symlinked out of the project: its dependency is refused by the clone server and extracted by npm" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
+
 # 12. The report counts the inject runs.
 "$bin" report > "$work/out" 2>&1 && grep -Eq 'inject engine: [0-9]+ runs, [0-9]+ packages cloned' "$work/out" && grep -q 'npm failed 1' "$work/out" \
   && ok "report: inject runs, clones and npm failures are counted" || bad "report"
