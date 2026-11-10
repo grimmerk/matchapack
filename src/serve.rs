@@ -26,6 +26,13 @@
 //!     holds nothing but `node_modules`;
 //!   - `cache` is only read from, and a tarball found there is used only when
 //!     its digest equals the requested integrity.
+//! These checks catch a wrong request (a bug in the hook, a path npm derived
+//! from an odd lockfile). They are not a boundary against another process of
+//! the same user changing the project's directories while a package is
+//! placed (a component swapped for a symlink between the check and the
+//! operation): such a process can already write anywhere this one can. The
+//! store's own layout (`<store>/v2/<algo>/…`) is trusted the same way: only
+//! the entry itself is checked not to be a symlink.
 
 use crate::clone::{self, Mode};
 use crate::store::{Ensure, Integrity, Store, TmpDir};
@@ -305,6 +312,12 @@ impl<'a> Server<'a> {
                 return Err(io_err("creating", e));
             }
         }
+        // Checked again right before entries are moved in: dest_state and
+        // the renames below follow a symlink here.
+        if !is_real_dir(dst) {
+            cleanup();
+            return Err(refused("rejected-dest", format!("{} is no longer a directory", dst.display())));
+        }
         match dest_state(dst) {
             Ok(DestState::Other(name)) => {
                 cleanup();
@@ -398,20 +411,29 @@ impl<'a> Server<'a> {
         }
     }
 
-    /// One line from the hook; the answer line, if the line was a request.
-    fn handle_line(&self, line: &str) -> Option<String> {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return None;
-        };
+    /// Record a message that needs no answer (`hello`, `note`). Returns
+    /// false when `v` is something else.
+    fn record_message(&self, v: &Value) -> bool {
         if v.get("hello").is_some() {
-            self.stats.lock().unwrap().hello = Some(v);
-            return None;
+            self.stats.lock().unwrap().hello = Some(v.clone());
+            return true;
         }
         if let Some(note) = v.get("note").and_then(|n| n.as_str()) {
             // A reason is a short word chosen by the hook; keep the log sane
             // whatever arrives.
             let key: String = note.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
             *self.stats.lock().unwrap().fallbacks.entry(key).or_default() += 1;
+            return true;
+        }
+        false
+    }
+
+    /// One line from the hook; the answer line, if the line was a request.
+    fn handle_line(&self, line: &str) -> Option<String> {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return None;
+        };
+        if self.record_message(&v) {
             return None;
         }
         let id = v.get("id")?.clone();
@@ -478,6 +500,12 @@ impl<'a> Server<'a> {
             for line in reader.lines() {
                 match line {
                     Ok(l) => {
+                        // Messages that need no answer are recorded here, at
+                        // once: the workers drop what is queued after stop(),
+                        // and a lost `hello` would read as "npm never started".
+                        if serde_json::from_str::<Value>(&l).is_ok_and(|v| self.record_message(&v)) {
+                            continue;
+                        }
                         if tx.send(l).is_err() {
                             break;
                         }
@@ -820,6 +848,26 @@ mod tests {
         assert_eq!(reason, "store-error", "{msg}");
         assert!(msg.contains("integrity mismatch"), "{msg}");
         assert!(!fx.store.dir_for(&j).exists() && !dst2.exists());
+    }
+
+    #[test]
+    fn hello_and_notes_are_recorded_after_stop_while_requests_are_dropped() {
+        // inject::run calls stop() once node has exited; lines still unread
+        // at that point are dropped, except the ones that need no answer: a
+        // lost hello would make a finished npm run read as "never started".
+        let fx = Fx::new("serve-stop");
+        let s = fx.server(Mode::File);
+        s.stop();
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut w = theirs.try_clone().unwrap();
+        let req = json!({ "id": 1, "integrity": "sha512-x", "dest": fx.root.join("node_modules/p") });
+        w.write_all(format!("{{\"hello\":true,\"pacote\":\"9.9.9\"}}\n{{\"note\":\"hook-off\"}}\n{req}\n").as_bytes()).unwrap();
+        theirs.shutdown(std::net::Shutdown::Write).unwrap();
+        s.serve(ours, 2).unwrap();
+        let st = s.stats.lock().unwrap();
+        assert_eq!(st.hello.as_ref().unwrap()["pacote"], "9.9.9");
+        assert_eq!(st.fallbacks.get("hook-off"), Some(&1));
+        assert_eq!(st.cloned + st.fallbacks.values().sum::<usize>(), 1, "the request was dropped, not served");
     }
 
     #[test]

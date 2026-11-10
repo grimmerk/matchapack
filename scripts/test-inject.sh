@@ -173,6 +173,21 @@ install "$p"; rc=$?
 wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
 [ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
   && ok "lockfile out of sync through the shell function: status $rc, npm not run again, logged as npm_failed" || bad "out of sync wrapper: rc=$rc ($(last_log "r['outcome']"))"
+
+# 10b. The helper stops before npm starts (here: an npm whose pacote has no
+# fetchers): status 90, nothing changed, so the wrapper declines and runs
+# plain npm, once. The fake npm is the real one except for a stub pacote.
+real_npm=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd -P)
+fake=$work/fake-npm; rm -rf "${fake:?}"; mkdir -p "$fake/bin" "$fake/npm/bin" "$fake/npm/node_modules/pacote"
+cp "$real_npm/package.json" "$fake/npm/"; cp "$real_npm/bin/npm-cli.js" "$fake/npm/bin/"; ln -s "$real_npm/lib" "$fake/npm/lib"
+for m in "$real_npm"/node_modules/* "$real_npm"/node_modules/.bin; do [ "$(basename "$m")" = pacote ] || ln -s "$m" "$fake/npm/node_modules/"; done
+echo '{"name":"pacote","version":"0.0.0"}' > "$fake/npm/node_modules/pacote/package.json"; echo 'module.exports = {}' > "$fake/npm/node_modules/pacote/index.js"
+ln -s ../npm/bin/npm-cli.js "$fake/bin/npm"
+p=$(project helper-declined small)
+(PATH=$fake/bin:$PATH; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q 'no FetcherBase.prototype.extract' "$work/out" && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] \
+  && [ "$(grep -c 'added [0-9]* packages' "$work/out")" = 1 ] && same "$ref_small" "$p" \
+  && ok "the helper stops before npm: declined, plain npm runs once" || bad "helper declined: rc=$rc ($(last_log "r['outcome']"))"
 p=$(project failscript bundled "d['scripts']={'postinstall':'exit 7'}")
 (cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
 install "$p"; rc=$?

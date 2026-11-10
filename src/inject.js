@@ -21,7 +21,7 @@
 //                              an npm that no longer calls the method looks
 //                              like to thinclone)
 // Exit status: npm's. 90 before npm starts: the hook could not be installed
-// (thinclone then runs plain npm).
+// (thinclone then runs plain npm), also on an unexpected error up to there.
 'use strict'
 const path = require('path')
 
@@ -212,13 +212,22 @@ function main () {
     // only for the log
   }
   // From here on npm is running: thinclone reports its exit status as npm's.
+  npmStarted = true
   send({ hello: true, pacote: pacoteVersion, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'on' })
   process.argv = [process.argv[0], path.join(npmDir, 'bin', 'npm-cli.js'), ...npmArgs]
   require(path.join(npmDir, 'lib', 'cli.js'))(process)
 }
 
+let npmStarted = false
 if (require.main === module) {
-  main()
+  try {
+    main()
+  } catch (e) {
+    if (npmStarted) {
+      throw e
+    }
+    fail(`before npm started: ${e && e.stack ? e.stack : e}`)
+  }
 } else {
   module.exports = { ineligible }
 }

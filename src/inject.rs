@@ -49,6 +49,9 @@ pub struct InjectOpts {
 /// The fd number the node child finds the socket at.
 const CHILD_FD: i32 = 3;
 
+/// The helper's exit status when it stops before npm starts (src/inject.js).
+const HELPER_DECLINED: i32 = 90;
+
 /// The checks that must hold before npm starts. A refusal changes nothing in
 /// the project, so the caller can run plain npm.
 fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf)> {
@@ -194,9 +197,10 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         Ok(s) => s,
         Err(e) => return Err(InstallError::Broke(anyhow!("waiting for npm: {e}"))),
     };
-    if stats.hello.is_none() {
-        // The helper stopped before npm started (it says why on stderr):
-        // nothing in the project has changed.
+    // The helper exits with HELPER_DECLINED (and says why on stderr) when it
+    // stops before npm starts: nothing in the project has changed. Both
+    // signs are required, so that npm, once started, is never run twice.
+    if stats.hello.is_none() && status.code() == Some(HELPER_DECLINED) {
         return Err(InstallError::Declined(anyhow!("the inject helper could not start npm ({status})")));
     }
     // From here on the project holds clones of these entries, whatever npm's
