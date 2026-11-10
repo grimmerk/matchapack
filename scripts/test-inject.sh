@@ -115,8 +115,11 @@ install "$p" && [ "$(cat "$p/gc.rc")" != 0 ] && grep -q 'in use by a running ins
 
 # 7. Install scripts' files keep their later times: every touch is done
 #    before npm runs a script (script-env's lc-env writes env.json).
+#    npm 12 blocks dependency scripts unless allowed; this fixture's
+#    package.json `allowScripts` entry is honoured by npm 11 only.
 p=$(project times script-env)
-install "$p" && python3 -c "
+allow=(); [ "$npm_major" -ge 12 ] && allow=(npm_config_dangerously_allow_all_scripts=true)
+env ${allow[@]+"${allow[@]}"} "$bin" install "$p" -- --no-audit --no-fund > "$work/out" 2>&1 && python3 -c "
 import os,sys
 d='$p/node_modules/lc-env'
 sys.exit(0 if os.stat(d+'/env.json').st_mtime_ns > os.stat(d+'/package.json').st_mtime_ns else 1)" \
