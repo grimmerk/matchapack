@@ -276,8 +276,8 @@ impl<'a> Server<'a> {
                 // Filled since the check: decided again below.
                 Err(_) => false,
             },
-            DestState::OnlyNodeModules => false,
-            DestState::Other(name) => return Err(not_empty(name)),
+            // Refused below, where the directory is looked at again.
+            DestState::OnlyNodeModules | DestState::Other(_) => false,
         };
         if direct {
             match clone::clone_tree(src, dst, self.mode) {
@@ -733,6 +733,9 @@ mod tests {
             (outside.join("node_modules/p"), "outside the project"),
             (PathBuf::from("node_modules/p"), "relative"),
             (fx.root.join("node_modules/a/../../../victim/node_modules/p"), "dot-dot"),
+            // Not a plain path, although it resolves inside the project: npm
+            // never sends one.
+            (fx.root.join("node_modules/a/../p"), "dot-dot that stays inside"),
             (fx.root.join("node_modules/@out/p"), "symlinked parent, outside"),
             (fx.root.join("node_modules/@src/p"), "symlinked parent, inside but not node_modules"),
             (fx.root.join("node_modules/link"), "the destination is a symlink"),

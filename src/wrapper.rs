@@ -174,6 +174,11 @@ fn decide_inject(args: &[String]) -> Result<crate::inject::InjectOpts, String> {
         if ["--prefix", "-C", "--global", "-g", "--location"].contains(&name) {
             return Err(format!("option {a} moves the install out of this directory"));
         }
+        // Not installs: nothing to clone, and a run that places nothing
+        // would read in the log as a hook that no longer fires.
+        if ["--help", "-h", "-?", "--usage", "--dry-run"].contains(&name) {
+            return Err(format!("option {a} installs nothing"));
+        }
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     // Without a package.json here npm looks for the project in a parent

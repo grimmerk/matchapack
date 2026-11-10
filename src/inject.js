@@ -16,7 +16,10 @@
 // argv: <npm install dir> <npm args...>   (e.g. ci --no-audit)
 // env:  THINCLONE_INJECT_FD    the socket to thinclone (protocol: src/serve.rs)
 //       THINCLONE_INJECT_HOOK  `off`: install the hook but let pacote extract
-//                              every package (tests, and to rule the hook out)
+//                              every package (tests, and to rule the hook out);
+//                              `none`: do not install it at all (tests: what
+//                              an npm that no longer calls the method looks
+//                              like to thinclone)
 // Exit status: npm's. 90 before npm starts: the hook could not be installed
 // (thinclone then runs plain npm).
 'use strict'
@@ -68,7 +71,8 @@ function fail (message) {
 function main () {
   const [npmDir, ...npmArgs] = process.argv.slice(2)
   const fd = Number(process.env.THINCLONE_INJECT_FD)
-  const hookOff = process.env.THINCLONE_INJECT_HOOK === 'off'
+  const hookMode = process.env.THINCLONE_INJECT_HOOK
+  const hookOff = hookMode === 'off'
   // Not for the scripts npm runs.
   delete process.env.THINCLONE_INJECT_FD
   delete process.env.THINCLONE_INJECT_HOOK
@@ -162,7 +166,7 @@ function main () {
     send({ id, ...req })
   })
 
-  FetcherBase.prototype.extract = async function (dest) {
+  const hook = async function (dest) {
     let why
     try {
       why = down || ineligible(pacote, this, processUmask)
@@ -195,6 +199,10 @@ function main () {
     return { resolved: this.resolved, integrity: this.integrity && String(this.integrity), from: this.from }
   }
 
+  if (hookMode !== 'none') {
+    FetcherBase.prototype.extract = hook
+  }
+
   let pacoteVersion = null
   try {
     pacoteVersion = require(path.join(path.dirname(require.resolve('pacote', {
@@ -204,7 +212,7 @@ function main () {
     // only for the log
   }
   // From here on npm is running: thinclone reports its exit status as npm's.
-  send({ hello: true, pacote: pacoteVersion, hook: hookOff ? 'off' : 'on' })
+  send({ hello: true, pacote: pacoteVersion, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'on' })
   process.argv = [process.argv[0], path.join(npmDir, 'bin', 'npm-cli.js'), ...npmArgs]
   require(path.join(npmDir, 'lib', 'cli.js'))(process)
 }

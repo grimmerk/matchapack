@@ -69,6 +69,58 @@ Bypass for one command: `THINCLONE=0 npm ci`, or `command npm ci`.
 Remove: delete the line. Installed node_modules keep working without the store
 (clones are independent files); the store is `~/.cache/thinclone/store`.
 
+## The inject engine (try it with `THINCLONE_ENGINE=inject`)
+
+A second way to install, built to replace the one above (grimmerk/thinclone#33;
+design and measurements in `NOTES.md`, "Inject engine"). The engine above (the
+"classic" engine) runs the steps of `npm ci` itself, calling npm for pieces.
+The inject engine runs npm's own `npm ci`, unchanged, and replaces one thing
+inside it: where npm would extract a package's tarball into a directory,
+thinclone clones the package from the store instead. Scripts, bin links, the
+hidden lockfile, the lockfile check, npm's flags and settings are all npm's
+own, so they behave exactly as in `npm ci`, on any npm version.
+
+```sh
+THINCLONE_ENGINE=inject npm ci        # one command, through the shell function
+export THINCLONE_ENGINE=inject        # or for the whole shell (classic: unset it)
+THINCLONE_ENGINE=inject thinclone install . -- --no-audit   # after `--`: npm's own arguments
+```
+
+```
+$ THINCLONE_ENGINE=inject npm ci
+thinclone: npm ci with clones from the store (THINCLONE=0 npm ci for plain npm)
+…npm's own output: warnings, script output, "added 347 packages in 1s", the audit summary…
+thinclone: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
+```
+
+What differs from the classic engine:
+- Every `npm ci` flag and npm setting works (`--omit=dev`, `--workspace`,
+  `NODE_ENV=production`, `.npmrc` settings): npm reads them. Projects the
+  classic engine hands to npm (git dependencies, `file:` tarballs, a
+  shrinkwrap) are installed too: the packages thinclone cannot clone are
+  extracted by npm, the rest are cloned.
+- A package is cloned only when the result is exactly what npm would extract:
+  a registry tarball with an integrity in the lockfile, npm's default file
+  modes, umask 022. A package missing from the store is extracted into it
+  from npm's cache first; one that is in neither is downloaded and extracted
+  by npm, and cloned from the next install on.
+- `npm ci`'s own output comes back, the `npm audit` summary included (and its
+  network request; `--no-audit` turns it off, as with npm).
+- npm's own errors (lockfile out of sync, a failing script) are printed once,
+  by npm, with npm's exit status.
+- Root `predependencies` / `dependencies` / `postdependencies` scripts run, as
+  in `npm ci` (the classic engine does not run them).
+
+thinclone still runs plain npm instead, before anything starts, when: the npm
+version is not one the harness was run against (same list as above; for npm 12
+set `THINCLONE_NPM_VERSIONS=any`), the umask is not 022, the project's
+`node_modules` is a symlink, the project is outside the trial scope, or
+`--prefix` / `--global` point npm at another directory.
+
+`thinclone report` shows a line for this engine: packages cloned, packages npm
+extracted and why, and runs that cloned nothing (the sign that the hook no
+longer fits a new npm: installs stay correct, only slower).
+
 ## Trial: logs, checks, scope
 
 - `thinclone report [--days N]`: what happened (installed / handed to npm and
@@ -143,10 +195,16 @@ it records nothing and shows the log.
   project (`THINCLONE_VERIFY_VIA=wrapper` goes through the shell function). It
   runs on any npm version and ignores the trial scope file, since it is how a
   new npm version gets verified. `THINCLONE_VERIFY_BYTES=1` also requires the
-  hidden lockfile to be byte-identical (CI sets it).
+  hidden lockfile to be byte-identical (CI sets it). `THINCLONE_ENGINE=inject`
+  makes B (and `scripts/verify-npm.sh`'s whole list, plus the cases only that
+  engine handles) use the inject engine; nothing is recorded then.
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
-  `test-shells.sh` on Linux; safety, routing, store and the fixture harness on
-  macOS.
+  `test-shells.sh` on Linux; safety, routing, store, the inject engine's tests
+  and the fixture harness with both engines on macOS.
+- `scripts/test-inject.sh <work>`: the inject engine end to end (the hook
+  cloned, a disabled hook and a store miss give the same tree, the gates,
+  npm's own failures, the store lock, the project record) and the hook's
+  eligibility rules against the real pacote (`scripts/test-inject-hook.js`).
 - `scripts/test-wrapper.sh <work>`: routing tests for the shell integration.
 - `scripts/test-store.sh <work>`: project records, `store gc`, `store verify`,
   the store lock and the tmp cleanup, on a store of its own.

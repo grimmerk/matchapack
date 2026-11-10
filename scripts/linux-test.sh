@@ -2,7 +2,9 @@
 # Linux FICLONE test, run inside a privileged container:
 #   docker run --rm --privileged -v "$PWD":/src:ro rust:1-bookworm bash /src/scripts/linux-test.sh
 # Builds thinclone, then for btrfs and XFS (reflink=1) on loop devices runs the
-# harness on fixtures/small and fixtures/optional-upward, checks that cloned
+# harness on fixtures/small and fixtures/optional-upward with both engines
+# (classic, then THINCLONE_ENGINE=inject) and the clone server's unit tests
+# with their scratch directory on that filesystem, checks that cloned
 # files share extents with the store, and checks that a filesystem WITHOUT
 # reflink (the container's overlayfs) makes thinclone fail loudly.
 set -euo pipefail
@@ -41,14 +43,26 @@ run_fs() {
     echo "== $fs / $f"
     /build/src/scripts/verify.sh $w/src-$f $w/v-$f --npm-cache $mnt/npmcache/_cacache \
       | grep -E 'RESULT|only in|differ:|^A:|^B:|npm ls:|clone:|touch' || true
+    # The inject engine: npm's own npm ci, packages placed by the clone
+    # server with per-file FICLONE (no directory reflink on Linux).
+    echo "== $fs / $f, inject engine"
+    THINCLONE_ENGINE=inject THINCLONE_VERIFY_CLONES=some THINCLONE_VERIFY_BYTES=1 /build/src/scripts/verify.sh $w/src-$f $w/vi-$f \
+      | grep -E 'RESULT|only in|differ:|^A:|^B:|npm ls:|inject:|cloned nothing|byte-identical' || true
   done
-  echo "== $fs: placed esbuild binary shares extents with the store?"
-  f=$(find $w/v-small/B/node_modules/@esbuild -name esbuild -path '*bin*' -type f | head -1)
-  echo "file: ${f#$w/}"
-  case $fs in
-    btrfs) btrfs filesystem du -s "$f" 2>/dev/null | tail -1 ;;
-    xfs) xfs_io -c "fiemap -v" "$f" | sed -n 3p ;;
-  esac
+  # The clone server's unit tests place packages only where the filesystem
+  # can clone: run them with the temporary directory on this filesystem.
+  echo "== $fs: cargo test serve:: (placement tests on a reflink filesystem)"
+  mkdir -p $mnt/tmp
+  (cd /build/src && TMPDIR=$mnt/tmp CARGO_TARGET_DIR=/build/target cargo test --release -q serve:: 2>&1 | grep -E 'test result|skipped|FAILED|panicked' || true)
+  echo "== $fs: placed esbuild binary shares extents with the store? (classic, then inject)"
+  for v in v-small vi-small; do
+    f=$(find $w/$v/B/node_modules/@esbuild -name esbuild -path '*bin*' -type f | head -1)
+    echo "file: ${f#$w/}"
+    case $fs in
+      btrfs) btrfs filesystem du -s "$f" 2>/dev/null | tail -1 ;;
+      xfs) xfs_io -c "fiemap -v" "$f" | sed -n 3p ;;
+    esac
+  done
   sf=$(find $THINCLONE_STORE/v2 -path "*bin/esbuild" -type f | head -1)
   [ "$fs" = xfs ] && xfs_io -c "fiemap -v" "$sf" | sed -n 3p
   df -k $mnt | tail -1

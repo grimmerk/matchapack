@@ -179,14 +179,28 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         let by_npm: u64 = why.iter().map(|(_, n)| n).sum();
         let list: Vec<String> = why.iter().take(6).map(|(k, n)| format!("{k} {n}")).collect();
         println!(
-            "inject engine: {} runs, {} packages cloned, {} extracted by npm{}, {} new in the store, {} runs cloned nothing",
+            "inject engine: {} runs, {} packages cloned, {} extracted by npm{}, {} new in the store",
             inj.len(),
             sum("cloned"),
             by_npm,
             if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) },
             sum("filled"),
-            inj.iter().filter(|r| r["inject"]["cloned"].as_u64() == Some(0)).count()
         );
+        // npm placed packages the hook never saw: the patched method is no
+        // longer (the only) way this npm extracts. Installs stay correct;
+        // this line is the only sign.
+        let blind: Vec<&&Value> = inj.iter().filter(|r| r["inject"]["unseen"].as_u64().unwrap_or(0) > 0).collect();
+        if !blind.is_empty() {
+            let mut versions: Vec<&str> = blind.iter().filter_map(|r| r["npm"].as_str()).collect();
+            versions.sort();
+            versions.dedup();
+            println!(
+                "inject engine: in {} runs npm placed {} packages the hook never saw (npm {}): the hook may no longer fit this npm",
+                blind.len(),
+                blind.iter().filter_map(|r| r["inject"]["unseen"].as_u64()).sum::<u64>(),
+                versions.join(", ")
+            );
+        }
     }
     let inst: Vec<&Value> = runs.iter().filter(|r| r["outcome"] == "installed").collect();
     if !inst.is_empty() {

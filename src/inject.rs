@@ -75,6 +75,17 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf)> {
     Ok((root, npm_dir))
 }
 
+/// How many packages npm left installed that it had to extract: the entries
+/// of the hidden lockfile it wrote, without links and bundled packages (those
+/// come inside their bundler's tarball). Every one of them went through
+/// pacote's extract, so the hook should have seen at least as many.
+fn installed_packages(root: &std::path::Path) -> Option<usize> {
+    let text = std::fs::read(root.join("node_modules/.package-lock.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&text).ok()?;
+    let flag = |p: &serde_json::Value, k: &str| p.get(k).and_then(|x| x.as_bool()) == Some(true);
+    Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| !k.is_empty() && !flag(p, "link") && !flag(p, "inBundle")).count())
+}
+
 fn threads() -> usize {
     std::env::var("THINCLONE_INJECT_THREADS")
         .ok()
@@ -198,11 +209,28 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     for e in &stats.errors {
         crate::info!("inject: {e}");
     }
+    let mut inject = stats.to_json();
     if !status.success() {
         // npm reported its own failure (a script, the lockfile, the network);
         // `npm ci` would have failed the same way. Not retried.
         let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
-        return Err(InstallError::Npm { code, inject: stats.to_json() });
+        return Err(InstallError::Npm { code, inject });
+    }
+    // The hook is a patch of a method npm does not promise to keep calling.
+    // If a future npm extracts some other way, installs stay correct and
+    // nothing here fails: the only sign is npm having placed packages the
+    // hook never saw. Said out loud and logged (`thinclone report` counts it).
+    if let Some(installed) = installed_packages(&root) {
+        let seen = stats.cloned + stats.fallback_total();
+        let unseen = installed.saturating_sub(seen);
+        inject["installed"] = serde_json::json!(installed);
+        inject["unseen"] = serde_json::json!(unseen);
+        if unseen > 0 {
+            eprintln!(
+                "thinclone: npm installed {installed} packages, but only {seen} went through thinclone's hook: \
+                 this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)"
+            );
+        }
     }
     let bytes_logical = stats.used.par_iter().map(|i| store.entry_size(i)).sum();
     let bytes_store_new = stats.filled.iter().map(|i| store.entry_size(i)).sum();
@@ -214,6 +242,6 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         store_new: stats.filled.len(),
         bytes_logical,
         bytes_store_new,
-        inject: Some(stats.to_json()),
+        inject: Some(inject),
     })
 }

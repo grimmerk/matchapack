@@ -91,6 +91,14 @@ p=$(project hookoff small)
 THINCLONE_INJECT_HOOK=off install "$p" && [ "$(cloned)" = 0 ] && grep -q "hook-off $n_small" "$work/out" && same "$ref_small" "$p" \
   && ok "hook off: 0 cloned, $n_small extracted by npm, tree identical" || bad "hook off: cloned $(cloned)"
 
+# 3b. No hook at all (what an npm that no longer extracts through the
+#     patched method would look like): the tree is npm's, and thinclone says
+#     that npm placed packages its hook never saw.
+p=$(project nohook small)
+THINCLONE_INJECT_HOOK=none install "$p" && [ "$(cloned)" = 0 ] && [ "$(by_npm)" = 0 ] \
+  && grep -q "npm installed $n_small packages, but only 0 went through thinclone's hook" "$work/out" && same "$ref_small" "$p" \
+  && ok "no hook: tree identical, and the $n_small packages the hook never saw are reported" || bad "no hook: cloned $(cloned)"
+
 # 4. A package in neither the store nor npm's cache is npm's to fetch and
 #    extract; once npm has cached it, the next install clones it.
 p=$(project miss bundled)
@@ -175,12 +183,16 @@ install "$p"; rc=$?
 p=$(project omit small)
 wrapped "$p" "npm ci --omit=dev --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'thinclone: added' "$work/out" && [ ! -d "$p/node_modules/jest" ] && [ -d "$p/node_modules/lodash" ] \
-  && [ "$(last_log "r['outcome'], r['engine'], r['inject']['cloned'] > 0, r['inject']['cloned'] < $n_small, '--omit=dev' in r['args']")" = "installed inject True True True" ] \
+  && [ "$(last_log "r['outcome'], r['engine'], r['inject']['cloned'] > 0, r['inject']['cloned'] < $n_small, '--omit=dev' in r['args'], r['inject']['installed'] == r['inject']['cloned'], r['inject']['unseen']")" = "installed inject True True True True 0" ] \
   && ok "npm ci --omit=dev through the shell function: cloned, dev dependencies absent, logged with the counts" || bad "omit wrapper: rc=$rc"
 mkdir -p "$work/elsewhere"; cp "$here/fixtures/bundled/package.json" "$here/fixtures/bundled/package-lock.json" "$work/elsewhere/"
 wrapped "$p" "npm ci --prefix '$work/elsewhere' --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'moves the install out of this directory' "$work/out" && ! grep -q 'thinclone: added' "$work/out" && [ -d "$work/elsewhere/node_modules/lc-s" ] \
   && ok "npm ci --prefix: plain npm (the project is not this directory)" || bad "prefix: rc=$rc"
+
+wrapped "$p" "npm ci --dry-run --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && grep -q 'running plain npm instead (option --dry-run installs nothing' "$work/out" && ! grep -q 'thinclone: added' "$work/out" \
+  && ok "npm ci --dry-run: plain npm (not an install)" || bad "dry-run: rc=$rc"
 
 # 11b. A workspace directory that is a symlink to a directory outside the
 #      project: npm installs the workspace's own dependency there, as npm ci
