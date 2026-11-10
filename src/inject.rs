@@ -75,15 +75,32 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf)> {
     Ok((root, npm_dir))
 }
 
+/// A hidden-lockfile key that names a package directory inside a
+/// node_modules (`node_modules/a`, `packages/w/node_modules/@s/b`), as
+/// opposed to the target of a link (a workspace or `file:` directory such as
+/// `packages/w`, which npm lists too and never extracts).
+fn is_package_key(key: &str) -> bool {
+    let Some(i) = key.rfind("node_modules/") else { return false };
+    if i > 0 && !key[..i].ends_with('/') {
+        return false;
+    }
+    let name = &key[i + "node_modules/".len()..];
+    match name.split_once('/') {
+        None => !name.is_empty() && !name.starts_with('@'),
+        Some((scope, rest)) => scope.starts_with('@') && !rest.is_empty() && !rest.contains('/'),
+    }
+}
+
 /// How many packages npm left installed that it had to extract: the entries
-/// of the hidden lockfile it wrote, without links and bundled packages (those
-/// come inside their bundler's tarball). Every one of them went through
-/// pacote's extract, so the hook should have seen at least as many.
+/// of the hidden lockfile it wrote that sit in a node_modules, without links
+/// and bundled packages (those come inside their bundler's tarball). Every
+/// one of them went through pacote's extract, so the hook should have seen
+/// at least as many.
 fn installed_packages(root: &std::path::Path) -> Option<usize> {
     let text = std::fs::read(root.join("node_modules/.package-lock.json")).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&text).ok()?;
     let flag = |p: &serde_json::Value, k: &str| p.get(k).and_then(|x| x.as_bool()) == Some(true);
-    Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| !k.is_empty() && !flag(p, "link") && !flag(p, "inBundle")).count())
+    Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| is_package_key(k) && !flag(p, "link") && !flag(p, "inBundle")).count())
 }
 
 fn threads() -> usize {
@@ -250,4 +267,33 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         bytes_store_new,
         inject: Some(inject),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installed_packages_counts_what_npm_extracted() {
+        for k in ["node_modules/a", "node_modules/@s/b", "node_modules/a/node_modules/b", "packages/w/node_modules/@s/b", "node_modules/.store/a@1.0.0/node_modules/a"] {
+            assert!(is_package_key(k), "{k}");
+        }
+        // The root, link targets (workspaces, file: directories), and keys
+        // that only look alike.
+        for k in ["", "packages/w", "vendor/lib", "node_modules/", "node_modules/@s", "node_modules/@s/", "node_modules/a/lib", "my_node_modules/a", "node_modules/@s/b/c"] {
+            assert!(!is_package_key(k), "{k}");
+        }
+        let d = crate::store::tests::scratch("inject-installed");
+        std::fs::create_dir_all(d.join("node_modules")).unwrap();
+        assert_eq!(installed_packages(&d), None, "no hidden lockfile");
+        let hidden = serde_json::json!({ "name": "p", "lockfileVersion": 3, "requires": true, "packages": {
+            "node_modules/a": { "version": "1.0.0" },
+            "node_modules/a/node_modules/b": { "version": "1.0.0", "inBundle": true },
+            "node_modules/@s/w": { "resolved": "packages/w", "link": true },
+            "packages/w": { "version": "1.0.0" },
+            "packages/w/node_modules/c": { "version": "2.0.0" },
+        }});
+        std::fs::write(d.join("node_modules/.package-lock.json"), hidden.to_string()).unwrap();
+        assert_eq!(installed_packages(&d), Some(2), "a and packages/w/node_modules/c");
+    }
 }

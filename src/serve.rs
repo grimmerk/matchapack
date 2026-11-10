@@ -379,7 +379,7 @@ impl<'a> Server<'a> {
         let mut s = self.stats.lock().unwrap();
         s.last = Some(Instant::now());
         match o {
-            Outcome::Placed { kind, filled, entry, place_secs, touch_secs, paths } => {
+            Outcome::Placed { kind, entry, place_secs, touch_secs, paths, .. } => {
                 s.cloned += 1;
                 let k = s.kinds.entry(self.kind_name(*kind).to_string()).or_default();
                 k.0 += 1;
@@ -387,7 +387,6 @@ impl<'a> Server<'a> {
                 k.2 += touch_secs;
                 s.paths_touched += paths;
                 s.used.push(entry.clone());
-                let _ = filled;
             }
             Outcome::Refused { reason, message, .. } => {
                 *s.fallbacks.entry(reason.to_string()).or_default() += 1;

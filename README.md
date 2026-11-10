@@ -94,8 +94,9 @@ thinclone: added 347 packages from the store in 0.8s (inject engine; npm extract
 ```
 
 What differs from the classic engine:
-- Every `npm ci` flag and npm setting works (`--omit=dev`, `--workspace`,
-  `NODE_ENV=production`, `.npmrc` settings): npm reads them. Projects the
+- Every `npm ci` flag and npm setting is npm's to read (`--omit=dev`,
+  `--workspace`, `NODE_ENV=production`, `.npmrc` settings; `--omit=dev` is in
+  the tests, the others take the same path). Projects the
   classic engine hands to npm are installed too: the packages thinclone
   cannot clone are extracted by npm, the rest are cloned (checked with a
   `file:` tarball and bundled dependencies; git dependencies and a
@@ -111,16 +112,22 @@ What differs from the classic engine:
   by npm, with npm's exit status.
 - Root `predependencies` / `dependencies` / `postdependencies` scripts run, as
   in `npm ci` (the classic engine does not run them).
+- Linux works the same way, with per-file clones (checked on btrfs and XFS in
+  Docker, `scripts/linux-test.sh`).
 
 thinclone still runs plain npm instead, before anything starts, when: the npm
 version is not one the harness was run against (same list as above; for npm 12
-set `THINCLONE_NPM_VERSIONS=any`), the umask is not 022, the project's
-`node_modules` is a symlink, the project is outside the trial scope, or
-`--prefix` / `--global` point npm at another directory.
+set `THINCLONE_NPM_VERSIONS=any`, and only together with
+`THINCLONE_ENGINE=inject`: that variable opens the gate for the classic engine
+too, which does not support npm 12), the umask is not 022, the project's
+`node_modules` is a symlink, the project is outside the trial scope,
+`--prefix` / `--global` point npm at another directory, or the command
+installs nothing (`--dry-run`, `--help`).
 
 `thinclone report` shows a line for this engine: packages cloned, packages npm
-extracted and why, and runs that cloned nothing (the sign that the hook no
-longer fits a new npm: installs stay correct, only slower).
+extracted and why, and a second line when npm placed packages that never
+reached thinclone's hook (the sign that the hook no longer fits a new npm:
+installs stay correct, only slower; the install itself prints a line too).
 
 ## Trial: logs, checks, scope
 
