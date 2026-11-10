@@ -56,6 +56,38 @@ mod sys {
     pub const DIR_SUPPORTED: bool = false;
 }
 
+/// A failed clone: the message `explain` builds, plus the errno, so a caller
+/// can tell "this filesystem pair cannot clone at all" from one bad package.
+#[derive(Debug)]
+pub struct CloneError {
+    msg: String,
+    pub errno: Option<i32>,
+}
+
+impl std::fmt::Display for CloneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for CloneError {}
+
+#[cfg(test)]
+impl CloneError {
+    pub fn for_test(errno: i32) -> CloneError {
+        CloneError { msg: format!("clone failed (errno {errno})"), errno: Some(errno) }
+    }
+}
+
+/// True when `e` is a clone refused because the filesystem (or the pair of
+/// filesystems) has no copy-on-write clone: every later clone would fail the
+/// same way.
+pub fn unsupported(e: &anyhow::Error) -> bool {
+    e.chain().filter_map(|c| c.downcast_ref::<CloneError>()).any(|c| {
+        matches!(c.errno, Some(n) if n == libc::EXDEV || n == libc::ENOTSUP || n == libc::EOPNOTSUPP)
+    })
+}
+
 fn explain(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
     let hint = match e.raw_os_error() {
         Some(libc::EXDEV) => " (store and target are on different volumes: put the store on the same filesystem)",
@@ -66,7 +98,38 @@ fn explain(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
         }
         _ => "",
     };
-    anyhow::anyhow!("clone {} -> {}: {e}{hint}", src.display(), dst.display())
+    anyhow::Error::new(CloneError { msg: format!("clone {} -> {}: {e}{hint}", src.display(), dst.display()), errno: e.raw_os_error() })
+}
+
+fn touch_now(c: &std::ffi::CStr) -> Result<()> {
+    let ts = [
+        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+    ];
+    let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    if r != 0 {
+        bail!("utimensat {:?}: {}", c, std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set atime/mtime to the current time on every path of `dst` that came from
+/// `src` (a store entry just placed there): `dst` itself and `dst/<p>` for
+/// every path `p` under `src`, symlinks not followed. The walk is over `src`,
+/// which nothing changes, so paths other packages are placing under
+/// `dst/node_modules` at the same moment are neither touched nor read.
+pub fn touch_placed(src: &Path, dst: &Path) -> Result<usize> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let mut n = 0;
+    for ent in walkdir::WalkDir::new(src).follow_links(false).follow_root_links(false) {
+        let ent = ent?;
+        let rel = ent.path().strip_prefix(src).unwrap();
+        let out = if rel.as_os_str().is_empty() { dst.to_path_buf() } else { dst.join(rel) };
+        touch_now(&CString::new(out.as_os_str().as_bytes())?)?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// What a placed file's modification time should be.
@@ -130,17 +193,7 @@ pub fn touch_trees(dirs: &[std::path::PathBuf]) -> Result<usize> {
         .collect::<Result<_>>()?;
     lists.push(heads);
     let all: Vec<CString> = lists.into_iter().flatten().collect();
-    let ts = [
-        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
-        libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
-    ];
-    all.par_iter().try_for_each(|c| -> Result<()> {
-        let r = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
-        if r != 0 {
-            bail!("utimensat {:?}: {}", c, std::io::Error::last_os_error());
-        }
-        Ok(())
-    })?;
+    all.par_iter().try_for_each(|c| touch_now(c))?;
     Ok(all.len())
 }
 

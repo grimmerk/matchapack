@@ -1,11 +1,13 @@
 mod clone;
 mod diff;
 mod gc;
+mod inject;
 mod lock;
 mod npm;
 mod plan;
 mod platform;
 mod resolve;
+mod serve;
 mod store;
 mod trial;
 mod util;
@@ -205,6 +207,9 @@ pub struct Summary {
     pub bytes_logical: u64,
     /// File bytes newly added to the store by this install.
     pub bytes_store_new: u64,
+    /// The inject engine's counts (clones by placement, packages npm
+    /// extracted itself and why), for the log; None for the classic engine.
+    pub inject: Option<serde_json::Value>,
 }
 
 /// How an install ended when it did not succeed.
@@ -215,12 +220,16 @@ pub enum InstallError {
     Scripts(anyhow::Error),
     /// thinclone itself failed after node_modules was changed.
     Broke(anyhow::Error),
+    /// Inject engine: npm ran and exited with this status, having reported
+    /// the failure itself; `npm ci` would have failed the same way.
+    Npm { code: i32, inject: serde_json::Value },
 }
 
 impl InstallError {
     pub fn into_inner(self) -> anyhow::Error {
         match self {
             InstallError::Declined(e) | InstallError::Scripts(e) | InstallError::Broke(e) => e,
+            InstallError::Npm { code, .. } => anyhow::anyhow!("npm exited with status {code}"),
         }
     }
 }
@@ -521,7 +530,7 @@ pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError
                 .map(|i| store.entry_size(&i))
                 .sum();
             let bytes_store_new = extracted_now.iter().map(|i| store.entry_size(i)).sum();
-            Ok(Summary { placed: plan.entries.len(), secs, store_new: extracted_now.len(), bytes_logical, bytes_store_new })
+            Ok(Summary { placed: plan.entries.len(), secs, store_new: extracted_now.len(), bytes_logical, bytes_store_new, inject: None })
         }
         Err(e) if e.downcast_ref::<util::ScriptFailure>().is_some() => Err(InstallError::Scripts(e)),
         Err(e) => Err(InstallError::Broke(e)),
@@ -546,6 +555,33 @@ fn relative(to: &Path, from: &Path) -> PathBuf {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild }
+            if inject::engine().map_err(|e| anyhow::anyhow!(e))? == inject::Engine::Inject =>
+        {
+            // npm does the whole install; these belong to the classic engine.
+            if no_rebuild {
+                bail!("--no-rebuild is not available with THINCLONE_ENGINE=inject (npm ci runs as a whole)");
+            }
+            if mtime != clone::Mtime::Now {
+                bail!("--mtime keep is not available with THINCLONE_ENGINE=inject");
+            }
+            if npm_cache.is_some() {
+                info!("--npm-cache is ignored with THINCLONE_ENGINE=inject: npm's own cache setting decides");
+            }
+            let mut npm_args = vec!["ci".to_string()];
+            if ignore_scripts {
+                npm_args.push("--ignore-scripts".into());
+            }
+            let o = inject::InjectOpts { dir, store: default_store(store), clone_mode: clone_mode.unwrap_or_else(default_clone_mode), npm_args };
+            let r = inject::run(&o);
+            util::remove_run_dir();
+            match r {
+                Ok(_) => {}
+                // npm printed its own error; pass its status on.
+                Err(InstallError::Npm { code, .. }) => std::process::exit(code),
+                Err(e) => return Err(e.into_inner()),
+            }
+        }
         Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild } => {
             let o = InstallOpts {
                 dir,
