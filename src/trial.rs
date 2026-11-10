@@ -97,12 +97,14 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     println!("thinclone report ({window}; {})", log_path().display());
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
     println!(
-        "runs {}: installed {}, plain npm {}, script failed {}, failed then npm {}",
+        "runs {}: installed {}, plain npm {}, script failed {}, failed then npm {}{}",
         runs.len(),
         count("installed"),
         count("declined"),
         count("script_failed"),
-        count("broke")
+        count("broke"),
+        // Inject engine only: npm itself ran and exited non-zero.
+        if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() }
     );
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] != "installed") {
@@ -158,6 +160,48 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             println!("  {b:<22} runs {n:>4}, installed {:>4}, median install {med}", secs.len());
         }
     }
+    // The inject engine: how much of what npm installed came from the store,
+    // and why the rest did not. A hook that stops firing shows here as
+    // installs with nothing cloned.
+    let inj: Vec<&Value> = runs.iter().filter(|r| r["engine"] == "inject" && r["inject"].is_object()).collect();
+    if !inj.is_empty() {
+        let sum = |k: &str| inj.iter().filter_map(|r| r["inject"][k].as_u64()).sum::<u64>();
+        let mut why: std::collections::BTreeMap<String, u64> = Default::default();
+        for r in &inj {
+            if let Some(m) = r["inject"]["fallbacks"].as_object() {
+                for (k, n) in m {
+                    *why.entry(k.clone()).or_default() += n.as_u64().unwrap_or(0);
+                }
+            }
+        }
+        let mut why: Vec<(String, u64)> = why.into_iter().collect();
+        why.sort_by(|a, b| b.1.cmp(&a.1));
+        let by_npm: u64 = why.iter().map(|(_, n)| n).sum();
+        let list: Vec<String> = why.iter().take(6).map(|(k, n)| format!("{k} {n}")).collect();
+        println!(
+            "inject engine: {} runs, {} packages cloned, {} extracted by npm{}, {} new in the store",
+            inj.len(),
+            sum("cloned"),
+            by_npm,
+            if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) },
+            sum("filled"),
+        );
+        // npm placed packages the hook never saw: the patched method is no
+        // longer (the only) way this npm extracts. Installs stay correct;
+        // this line is the only sign.
+        let blind: Vec<&&Value> = inj.iter().filter(|r| r["inject"]["unseen"].as_u64().unwrap_or(0) > 0).collect();
+        if !blind.is_empty() {
+            let mut versions: Vec<&str> = blind.iter().filter_map(|r| r["npm"].as_str()).collect();
+            versions.sort();
+            versions.dedup();
+            println!(
+                "inject engine: in {} runs npm placed {} packages the hook never saw (npm {}): the hook may no longer fit this npm",
+                blind.len(),
+                blind.iter().filter_map(|r| r["inject"]["unseen"].as_u64()).sum::<u64>(),
+                versions.join(", ")
+            );
+        }
+    }
     let inst: Vec<&Value> = runs.iter().filter(|r| r["outcome"] == "installed").collect();
     if !inst.is_empty() {
         let mut secs: Vec<f64> = inst.iter().filter_map(|r| r["secs"].as_f64()).collect();
@@ -195,6 +239,10 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
                     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
                     let top: Vec<String> = v.iter().take(3).map(|(k, f)| format!("{k} {f:.1}")).collect();
                     s += &format!("; slowest: {}", top.join(", "));
+                }
+                if r["engine"] == "inject" {
+                    let by_npm: u64 = r["inject"]["fallbacks"].as_object().map(|m| m.values().filter_map(|n| n.as_u64()).sum()).unwrap_or(0);
+                    s = format!("inject, {:.1} s, {} cloned, {by_npm} extracted by npm", r["secs"].as_f64().unwrap_or(0.0), r["inject"]["cloned"]);
                 }
                 s
             }

@@ -359,14 +359,14 @@ impl Store {
     /// Locate the tarball in npm's cache: first by content address, then via the
     /// index entry for the request URL (needed when the lockfile only has sha1:
     /// cacache stores content under the sha512 it computed itself).
-    fn find_tarball(&self, i: &Integrity, url: Option<&str>) -> Option<PathBuf> {
-        let direct = i.split_path(&self.cacache.join("content-v2"));
+    fn find_tarball(&self, cacache: &Path, i: &Integrity, url: Option<&str>) -> Option<PathBuf> {
+        let direct = i.split_path(&cacache.join("content-v2"));
         if direct.is_file() {
             return Some(direct);
         }
         let key = format!("make-fetch-happen:request-cache:{}", url?);
         let kh = hex::encode(sha2::Sha256::digest(key.as_bytes()));
-        let idx = self.cacache.join("index-v5").join(&kh[0..2]).join(&kh[2..4]).join(&kh[4..]);
+        let idx = cacache.join("index-v5").join(&kh[0..2]).join(&kh[2..4]).join(&kh[4..]);
         let text = fs::read_to_string(idx).ok()?;
         let mut found = None;
         for line in text.lines() {
@@ -378,11 +378,20 @@ impl Store {
             found = v.get("integrity").and_then(|x| x.as_str()).map(String::from);
         }
         let ci = Integrity::parse(&found?).ok()?;
-        let p = ci.split_path(&self.cacache.join("content-v2"));
+        let p = ci.split_path(&cacache.join("content-v2"));
         p.is_file().then_some(p)
     }
 
     pub fn ensure(&self, i: &Integrity, url: &str) -> Result<Ensure> {
+        self.ensure_from(&self.cacache, i, url)
+    }
+
+    /// `ensure` with the tarball looked up in the npm content cache at
+    /// `cacache` (the inject engine passes the cache directory of the npm
+    /// that is running, which only that npm knows). The tarball's digest is
+    /// checked against `i` before anything is extracted, so where it was
+    /// read from does not decide what the entry holds.
+    pub fn ensure_from(&self, cacache: &Path, i: &Integrity, url: &str) -> Result<Ensure> {
         let dest = self.dir_for(i);
         match fs::symlink_metadata(&dest) {
             Ok(m) if m.is_dir() => return Ok(Ensure::Present),
@@ -390,7 +399,7 @@ impl Store {
             Ok(_) => bail!("store entry {} is not a directory; `thinclone store verify --fix` removes it", dest.display()),
             Err(_) => {}
         }
-        let Some(tgz) = self.find_tarball(i, Some(url)) else { return Ok(Ensure::Missing) };
+        let Some(tgz) = self.find_tarball(cacache, i, Some(url)) else { return Ok(Ensure::Missing) };
         let data = fs::read(&tgz)?;
         let got = i.digest(&data);
         if got != i.hex {
@@ -431,7 +440,7 @@ impl Store {
         if !m.is_dir() {
             return Ok(Check::Differs("the entry is not a directory (a symlink?)".into()));
         }
-        let Some(tgz) = self.find_tarball(i, None) else { return Ok(Check::NoTarball) };
+        let Some(tgz) = self.find_tarball(&self.cacache, i, None) else { return Ok(Check::NoTarball) };
         let data = fs::read(&tgz)?;
         if i.digest(&data) != i.hex {
             return Ok(Check::NoTarball);

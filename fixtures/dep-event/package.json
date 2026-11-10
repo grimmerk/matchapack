@@ -1,0 +1,14 @@
+{
+  "name": "thinclone-fixture-dep-event",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "lc-r": "http://127.0.0.1:48321/lc-r-1.0.0.tgz"
+  },
+  "scripts": {
+    "predependencies": "node -e \"require('fs').writeFileSync('ev-predependencies.txt','x')\"",
+    "dependencies": "node -e \"require('fs').writeFileSync('ev-dependencies.txt','x')\"",
+    "postdependencies": "node -e \"require('fs').writeFileSync('ev-postdependencies.txt','x')\"",
+    "postinstall": "node -e \"require('fs').writeFileSync('ev-postinstall.txt','x')\""
+  }
+}

@@ -59,6 +59,16 @@ pub fn run(args: Vec<String>) -> i32 {
         }
         trial::append(rec);
     };
+    let engine = match crate::inject::engine() {
+        Ok(e) => e,
+        Err(reason) => {
+            log("declined", json!({ "reason": reason }));
+            return decline(&args, &reason);
+        }
+    };
+    if engine == crate::inject::Engine::Inject {
+        return run_inject(&args, &log);
+    }
     let opts = match decide(&args) {
         Ok(o) => o,
         Err(reason) => {
@@ -99,7 +109,90 @@ pub fn run(args: Vec<String>) -> i32 {
             eprintln!("thinclone: failed after changing node_modules ({}); running npm ci to rebuild it", one_line(&e));
             exec_npm(&args)
         }
+        // Only the inject engine returns this.
+        Err(InstallError::Npm { code, .. }) => code,
     }
+}
+
+/// `npm ci` through the inject engine: npm itself runs, with the user's
+/// arguments unchanged; thinclone declines only what it must know before
+/// npm starts.
+fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
+    let opts = match decide_inject(args) {
+        Ok(o) => o,
+        Err(reason) => {
+            log("declined", json!({ "engine": "inject", "reason": reason }));
+            return decline(args, &reason);
+        }
+    };
+    util::set_quiet(true);
+    eprintln!("thinclone: npm ci with clones from the store (THINCLONE=0 npm ci for plain npm)");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::inject::run(&opts)));
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(_) => Err(InstallError::Broke(anyhow::anyhow!("internal error (panic)"))),
+    };
+    match outcome {
+        Ok(s) => {
+            let by_npm = s.inject.as_ref().and_then(|i| i["fallbacks"].as_object()).map(|m| m.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);
+            eprintln!(
+                "thinclone: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})",
+                s.placed, s.secs
+            );
+            log(
+                "installed",
+                json!({ "engine": "inject", "secs": s.secs, "packages": s.placed, "store_new": s.store_new,
+                        "bytes_logical": s.bytes_logical, "bytes_store_new": s.bytes_store_new, "inject": s.inject }),
+            );
+            0
+        }
+        Err(InstallError::Declined(e)) => {
+            log("declined", json!({ "engine": "inject", "reason": one_line(&e) }));
+            decline(args, &one_line(&e))
+        }
+        // npm ran and failed, and has said why: its status is the answer.
+        Err(InstallError::Npm { code, inject }) => {
+            log("npm_failed", json!({ "engine": "inject", "code": code, "reason": format!("npm exited with status {code}"), "inject": inject }));
+            code
+        }
+        Err(InstallError::Scripts(e)) | Err(InstallError::Broke(e)) => {
+            log("broke", json!({ "engine": "inject", "reason": one_line(&e) }));
+            eprintln!("thinclone: failed while npm was running ({}); running npm ci to rebuild node_modules", one_line(&e));
+            exec_npm(args)
+        }
+    }
+}
+
+/// What thinclone must know before npm starts, for the inject engine. npm's
+/// flags and settings are npm's to read: whatever they make it install, the
+/// hook replaces only extractions it can reproduce exactly.
+fn decide_inject(args: &[String]) -> Result<crate::inject::InjectOpts, String> {
+    // The clone server accepts destinations inside this directory only; with
+    // these npm installs somewhere else.
+    for a in &args[1..] {
+        let name = a.split('=').next().unwrap_or(a);
+        if ["--prefix", "-C", "--global", "-g", "--location"].contains(&name) {
+            return Err(format!("option {a} moves the install out of this directory"));
+        }
+        // Not installs: nothing to clone, and a run that places nothing
+        // would read in the log as a hook that no longer fires.
+        if ["--help", "-h", "-?", "--usage", "--dry-run"].contains(&name) {
+            return Err(format!("option {a} installs nothing"));
+        }
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    // Without a package.json here npm looks for the project in a parent
+    // directory.
+    if !cwd.join("package.json").is_file() {
+        return Err("no package.json in this directory".into());
+    }
+    trial::in_scope(&cwd)?;
+    Ok(crate::inject::InjectOpts {
+        dir: cwd,
+        store: crate::default_store(None),
+        clone_mode: crate::default_clone_mode(),
+        npm_args: args.to_vec(),
+    })
 }
 
 /// thinclone will not handle this install and nothing has been changed. Run
@@ -234,11 +327,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     }
     // File modes: npm (pacote) applies the process umask and npm's `umask`
     // config; the store is extracted with 022.
-    let process_umask = unsafe {
-        let m = libc::umask(0o022);
-        libc::umask(m);
-        m as u32
-    };
+    let process_umask = process_umask();
     if process_umask != 0o022 {
         return Err(format!("umask is {process_umask:03o}, the store assumes 022"));
     }
@@ -257,6 +346,16 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         no_rebuild: false,
         npm_args: args[1..].to_vec(),
     })
+}
+
+/// This process's umask (read by setting and restoring it: there is no other
+/// call).
+pub fn process_umask() -> u32 {
+    unsafe {
+        let m = libc::umask(0o022);
+        libc::umask(m);
+        m as u32
+    }
 }
 
 /// npm settings that, changed from their default, leave `npm ci`'s result as

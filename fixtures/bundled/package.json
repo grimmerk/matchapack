@@ -1,0 +1,9 @@
+{
+  "name": "thinclone-fixture-bundled",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "lc-bundler": "http://127.0.0.1:48321/lc-bundler-1.0.0.tgz",
+    "lc-s": "http://127.0.0.1:48321/lc-s-1.0.0.tgz"
+  }
+}

@@ -8,7 +8,9 @@ work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/thincl
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 export THINCLONE_NPM_VERSIONS=any THINCLONE_STORE=$work/store THINCLONE_LOG_DIR=$work/logs
 store=$work/store
-rm -rf "${store:?}" "${work:?}/logs"
+# moved-entry: left by the last case; a third run over the same work
+# directory failed on it (the `mv` into it found a non-empty directory).
+rm -rf "${store:?}" "${work:?}/logs" "${work:?}/moved-entry"
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -5; }

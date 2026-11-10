@@ -1,0 +1,1 @@
+module.exports = 'lc-inner';
