@@ -209,6 +209,12 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     for e in &stats.errors {
         crate::info!("inject: {e}");
     }
+    // Not an error, but not what the user set thinclone up for: say it even
+    // when the per-step lines are hidden.
+    if stats.fallbacks.contains_key("clone-unsupported") {
+        let why = stats.errors.iter().find(|e| e.starts_with("clone-unsupported")).map(String::as_str).unwrap_or("clone-unsupported");
+        eprintln!("thinclone: no clones from the store here, npm extracted the packages itself ({why})");
+    }
     let mut inject = stats.to_json();
     if !status.success() {
         // npm reported its own failure (a script, the lockfile, the network);

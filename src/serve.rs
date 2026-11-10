@@ -337,6 +337,11 @@ impl<'a> Server<'a> {
             Ok(s) => s,
             Err(o) => return o,
         };
+        if filled {
+            // Counted here: the entry is in the store now, whatever becomes
+            // of the placement.
+            self.stats.lock().unwrap().filled.push(entry.clone());
+        }
         let t0 = Instant::now();
         let kind = match self.place(&src, &dst) {
             Ok(k) => k,
@@ -382,14 +387,13 @@ impl<'a> Server<'a> {
                 k.2 += touch_secs;
                 s.paths_touched += paths;
                 s.used.push(entry.clone());
-                if *filled {
-                    s.filled.push(entry.clone());
-                }
+                let _ = filled;
             }
             Outcome::Refused { reason, message, .. } => {
                 *s.fallbacks.entry(reason.to_string()).or_default() += 1;
-                if *reason != "store-miss" && s.errors.len() < 5 {
-                    s.errors.push(format!("{reason}: {message}"));
+                let line = format!("{reason}: {message}");
+                if *reason != "store-miss" && s.errors.len() < 5 && !s.errors.contains(&line) {
+                    s.errors.push(line);
                 }
             }
         }
@@ -804,6 +808,7 @@ mod tests {
         assert_eq!(refusal(s.place_entry(&sri_of(&i), &dst, None)).0, "store-miss", "no cache named");
         assert_eq!(refusal(s.place_entry(&sri_of(&i), &dst, Some((&fx.cacache, "http://x/p.tgz")))).0, "store-miss", "not in that cache");
         assert_eq!(placed(s.place_entry(&sri_of(&i), &dst, Some((&other_cache, "http://x/p.tgz")))), (Kind::Fast, true));
+        assert_eq!(s.stats.lock().unwrap().filled, vec![i.clone()]);
         assert!(fx.store.dir_for(&i).is_dir());
         assert_eq!(listing(&dst), listing(&fx.store.dir_for(&i)));
         // A cache file whose bytes are not what the integrity names is never

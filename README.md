@@ -96,9 +96,10 @@ thinclone: added 347 packages from the store in 0.8s (inject engine; npm extract
 What differs from the classic engine:
 - Every `npm ci` flag and npm setting works (`--omit=dev`, `--workspace`,
   `NODE_ENV=production`, `.npmrc` settings): npm reads them. Projects the
-  classic engine hands to npm (git dependencies, `file:` tarballs, a
-  shrinkwrap) are installed too: the packages thinclone cannot clone are
-  extracted by npm, the rest are cloned.
+  classic engine hands to npm are installed too: the packages thinclone
+  cannot clone are extracted by npm, the rest are cloned (checked with a
+  `file:` tarball and bundled dependencies; git dependencies and a
+  shrinkwrap follow the same rule but have not been run yet).
 - A package is cloned only when the result is exactly what npm would extract:
   a registry tarball with an integrity in the lockfile, npm's default file
   modes, umask 022. A package missing from the store is extracted into it
