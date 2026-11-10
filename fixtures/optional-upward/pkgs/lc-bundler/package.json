@@ -1,0 +1,1 @@
+{"name":"lc-bundler","version":"1.0.0","dependencies":{"lc-inner":"1.0.0","lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"},"bundleDependencies":["lc-inner"]}

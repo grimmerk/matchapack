@@ -54,6 +54,10 @@ enum Cmd {
         /// Skip the npm rebuild step entirely (no scripts, no bin links).
         #[arg(long)]
         no_rebuild: bool,
+        /// With THINCLONE_ENGINE=inject: arguments for npm's own `npm ci`,
+        /// after `--` (e.g. `thinclone install . -- --no-audit --omit=dev`).
+        #[arg(last = true)]
+        npm_args: Vec<String>,
     },
     /// Stand in for `npm <args>`: handle a bare `npm ci` from the store when it
     /// is safe to, otherwise run the real npm with the same arguments. Meant to
@@ -555,7 +559,7 @@ fn relative(to: &Path, from: &Path) -> PathBuf {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild }
+        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild, npm_args: extra }
             if inject::engine().map_err(|e| anyhow::anyhow!(e))? == inject::Engine::Inject =>
         {
             // npm does the whole install; these belong to the classic engine.
@@ -572,6 +576,7 @@ fn main() -> Result<()> {
             if ignore_scripts {
                 npm_args.push("--ignore-scripts".into());
             }
+            npm_args.extend(extra);
             let o = inject::InjectOpts { dir, store: default_store(store), clone_mode: clone_mode.unwrap_or_else(default_clone_mode), npm_args };
             let r = inject::run(&o);
             util::remove_run_dir();
@@ -582,7 +587,10 @@ fn main() -> Result<()> {
                 Err(e) => return Err(e.into_inner()),
             }
         }
-        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild } => {
+        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild, npm_args } => {
+            if !npm_args.is_empty() {
+                bail!("arguments for npm (after --) need THINCLONE_ENGINE=inject; the classic engine reads npm's settings from its config");
+            }
             let o = InstallOpts {
                 dir,
                 store: default_store(store),

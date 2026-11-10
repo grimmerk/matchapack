@@ -8,6 +8,9 @@
 # shell function, legacy-peer with legacy-peer-deps, then each extra project
 # (a real repository is worth adding: the fixtures are small). CI runs it with
 # --no-record.
+# THINCLONE_ENGINE=inject runs the same cases with the inject engine, plus the
+# cases only it handles (dep-event), requires every case to have cloned
+# something, and never records: npm-verified is the classic engine's gate.
 set -uo pipefail
 record=1
 if [ "${1-}" = --no-record ]; then record=0; shift; fi
@@ -22,8 +25,17 @@ cfg=${THINCLONE_CONFIG_DIR:-$HOME/.config/thinclone}
 # What is certified is fixed here, never inherited: a caller's settings that
 # loosen the comparison (ignored paths, noise filtering, another baseline,
 # mtime handling) or route the install differently do not apply.
-unset THINCLONE_VERIFY_IGNORE THINCLONE_VERIFY_NOISE THINCLONE_VERIFY_BASELINE THINCLONE_VERIFY_MTIME THINCLONE_VERIFY_VIA THINCLONE_VERIFY_BYTES
-echo "npm $npm_version, node $(node -v), $("$bin" --version)"
+unset THINCLONE_VERIFY_IGNORE THINCLONE_VERIFY_NOISE THINCLONE_VERIFY_BASELINE THINCLONE_VERIFY_MTIME THINCLONE_VERIFY_VIA THINCLONE_VERIFY_BYTES THINCLONE_VERIFY_CLONES
+engine=${THINCLONE_ENGINE:-classic}
+case $engine in
+  classic) ;;
+  inject)
+    if [ $record = 1 ]; then echo "THINCLONE_ENGINE=inject: nothing is recorded (npm-verified is the classic engine's gate)"; record=0; fi
+    # A run in which the hook never fired would pass without testing it.
+    export THINCLONE_VERIFY_CLONES=some ;;
+  *) echo "THINCLONE_ENGINE=$engine is not an engine (classic, inject)" >&2; exit 2 ;;
+esac
+echo "npm $npm_version, node $(node -v), $("$bin" --version), $engine engine"
 
 # The optional-upward fixture installs from a local tarball server.
 server=
@@ -35,21 +47,32 @@ fi
 trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
 
 fail=0
-case_() { # name env-assignments... -- source
+case_() { # name env-assignments... -- source [thinclone install args...]
   local name=$1; shift
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done
   shift
   local out="$work/$name.txt"
-  if env THINCLONE_VERIFY_BYTES=1 ${envs[@]+"${envs[@]}"} "$here/scripts/verify.sh" "$1" "$work/$name" > "$out" 2>&1; then
+  local src=$1; shift
+  if env THINCLONE_VERIFY_BYTES=1 ${envs[@]+"${envs[@]}"} "$here/scripts/verify.sh" "$src" "$work/$name" "$@" > "$out" 2>&1; then
     echo "ok    $name ($(grep -m1 '^npm ci:' "$out"))"
   else
     fail=1; echo "FAIL  $name (log: $out)"; tail -15 "$out" | sed 's/^/      /'
   fi
 }
-for f in small stale-flags optional-upward optional-engines legacy-peer; do
+for f in small stale-flags optional-upward optional-engines legacy-peer bundled; do
   case_ "$f" -- "$here/fixtures/$f"
 done
+if [ $engine = inject ]; then
+  # The root's predependencies / dependencies / postdependencies scripts,
+  # which npm ci runs and the classic engine does not (NOTES "Inject engine").
+  case_ dep-event -- "$here/fixtures/dep-event"
+  # A failing optional dependency script: npm ci removes the package. The
+  # classic engine hands that install to npm (routing case 28).
+  case_ optional-script-fail -- "$here/fixtures/optional-script-fail"
+  # The same package placed by per-file clones (the Linux placement).
+  case_ small-file-clones -- "$here/fixtures/small" --clone-mode file
+fi
 # script-env records the npm environment scripts see; the user's flags
 # (--no-audit) reach thinclone only through the shell function.
 case_ script-env THINCLONE_VERIFY_VIA=wrapper -- "$here/fixtures/script-env"

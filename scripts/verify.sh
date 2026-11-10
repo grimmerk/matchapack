@@ -7,6 +7,11 @@
 #   1. thinclone diff A B  (paths, types, modes, content hashes, symlink targets,
 #      hidden lockfile as JSON)
 #   2. npm ls --all in B must exit 0
+# The engine in B is thinclone's own switch: THINCLONE_ENGINE=inject runs the
+# inject engine (npm's own `npm ci` with the extraction replaced by clones).
+# With it, THINCLONE_VERIFY_CLONES=some fails the run when B cloned nothing
+# (the hook did not fire: the trees are then identical without testing
+# anything), =none when it cloned anything.
 set -euo pipefail
 src=$1; work=$2; shift 2
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -38,7 +43,8 @@ if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.
   echo "NOTE: npm $base rewrote package-lock.json"
 fi
 t1=$(python3 -c 'import time;print(time.time())')
-echo "== thinclone install (B)"
+engine=${THINCLONE_ENGINE:-classic}
+echo "== thinclone install (B, $engine engine)"
 if [ "${THINCLONE_VERIFY_VIA:-install}" = wrapper ]; then
   # The path a user takes: plain `npm ci` in a shell that sourced the wrapper.
   # Not anchored: a script may leave the line unterminated (husky prints
@@ -46,13 +52,26 @@ if [ "${THINCLONE_VERIFY_VIA:-install}" = wrapper ]; then
   (cd "$work/B" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/thinclone.sh'; npm ci --no-audit --no-fund" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
   grep -q 'thinclone: added' "$work/B.log" || { echo "wrapper did NOT install from the store:"; grep '^thinclone' "$work/B.log"; exit 1; }
 else
-  (cd "$work/B" && "$bin" install . "$@" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
+  # The inject engine runs npm's own `npm ci`: give it A's flags (the classic
+  # engine never runs the audit).
+  npmflags=(); [ "$engine" = inject ] && npmflags=(-- --no-audit --no-fund)
+  (cd "$work/B" && "$bin" install . "$@" ${npmflags[@]+"${npmflags[@]}"} > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
 fi
 t2=$(python3 -c 'import time;print(time.time())')
 grep '^\[thinclone\]\|^thinclone:' "$work/B.log" | grep -v '\] skip ' || true
 python3 -c "print(f'npm ci: {$t1-$t0:.2f}s   thinclone: {$t2-$t1:.2f}s')" 2>/dev/null || true
 
 rc=0
+if [ "$engine" = inject ] && [ -n "${THINCLONE_VERIFY_CLONES:-}" ]; then
+  # `thinclone install` prints "inject: cloned N", the shell function
+  # "thinclone: added N packages".
+  cloned=$(grep -Eo 'inject: cloned [0-9]+|thinclone: added [0-9]+' "$work/B.log" | grep -Eo '[0-9]+$' | head -1)
+  case "$THINCLONE_VERIFY_CLONES:${cloned:-missing}" in
+    some:missing|some:0) echo "the inject hook cloned nothing (THINCLONE_VERIFY_CLONES=some)"; rc=1 ;;
+    none:0) ;;
+    none:*) echo "expected no clones, got ${cloned} (THINCLONE_VERIFY_CLONES=none)"; rc=1 ;;
+  esac
+fi
 ign=()
 for i in ${THINCLONE_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
 # THINCLONE_VERIFY_NOISE=1: run npm ci a second time (A2); paths that differ
