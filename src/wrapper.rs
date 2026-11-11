@@ -467,9 +467,11 @@ fn inject_version_allowed(version: &str, allowed: Option<&str>) -> Result<(), St
     };
     if ok {
         Ok(())
+    } else if let Some(list) = allowed {
+        Err(format!("npm {version} is not in THINCLONE_NPM_VERSIONS ({list})"))
     } else {
         let majors: Vec<String> = INJECT_NPM_MAJORS.iter().map(u32::to_string).collect();
-        Err(format!("npm {version}: the inject engine runs on npm {} (THINCLONE_NPM_VERSIONS=any to try another)", majors.join(" and ")))
+        Err(format!("npm {version}: the inject engine runs on npm {} (THINCLONE_NPM_VERSIONS=any to try another)", majors.join(", ")))
     }
 }
 
@@ -498,7 +500,8 @@ mod tests {
         }
         assert!(inject_version_allowed("13.0.0", Some("any")).is_ok());
         assert!(inject_version_allowed("13.1.0", Some("13.1")).is_ok());
-        assert!(inject_version_allowed("11.20.0", Some("13.1")).is_err(), "an explicit list replaces the majors");
+        let e = inject_version_allowed("11.20.0", Some("13.1")).unwrap_err();
+        assert!(e.contains("not in THINCLONE_NPM_VERSIONS (13.1)"), "an explicit list replaces the majors, and says so: {e}");
     }
 
     #[test]

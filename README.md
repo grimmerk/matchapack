@@ -106,10 +106,11 @@ What differs from the classic engine:
   modes, umask 022. A package missing from the store is extracted into it by
   npm's own pacote (from npm's cache, or downloaded as npm would), then
   cloned: the store holds exactly what npm extracts.
-- The store is checked against npm's extraction: before its first use by this
-  engine an entry made by the classic engine is compared with pacote's
-  extraction; the first install under a new npm (pacote and tar version)
-  compares every entry it uses; after that one in 50 at random
+- The store is checked against npm's extraction: every entry is compared with
+  pacote's extraction once under each npm (pacote and tar version) before
+  that npm clones it, entries the classic engine made included, so the first
+  install after an npm upgrade, or the first one under another Node's npm, is
+  slower for the entries it uses; after that one in 50 at random
   (`THINCLONE_INJECT_CHECK=all`, `off` or another number). An entry that
   differs is replaced by pacote's extraction, which is what gets installed,
   and thinclone says so. Details: `NOTES.md`, "Store fill through pacote".

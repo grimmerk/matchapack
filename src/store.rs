@@ -10,9 +10,7 @@
 //! record per installed project, for `thinclone store gc`), `lock` (held
 //! shared by every install, exclusively by commands that remove entries), and
 //! for the inject engine `made-by/` (per entry: the pacote and tar versions
-//! that made it or were last found to extract it the same way) and
-//! `inject-checked` / `inject-strict` (one line per pacote and tar version;
-//! see serve.rs).
+//! under which it is known to be what pacote extracts; see serve.rs).
 //!
 //! Tarballs come from npm's own content-addressed cache (`~/.npm/_cacache`).
 
@@ -279,23 +277,47 @@ impl Store {
         self.root.join("made-by").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
     }
 
-    /// The pacote and tar versions (`pacote@… tar@…`) that extracted this
-    /// entry, or were last found to extract its tarball to the same tree.
-    /// None: made by thinclone's own extractor (the classic engine), or
-    /// before this was recorded.
-    pub fn made_by(&self, i: &Integrity) -> Option<String> {
-        fs::read_to_string(self.made_by_file(i)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    /// The pacote and tar versions (`pacote@… tar@…`, one per line) under
+    /// which this entry is known to be what pacote extracts: the one that
+    /// made it, and every one that later extracted its tarball to the same
+    /// tree. Empty: made by thinclone's own extractor (the classic engine),
+    /// or before this was recorded.
+    pub fn made_by(&self, i: &Integrity) -> Vec<String> {
+        fs::read_to_string(self.made_by_file(i))
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
+    /// Add `key` to the entry's record (written whole: tmp, then rename).
+    pub fn add_made_by(&self, i: &Integrity, key: &str) -> Result<()> {
+        let mut keys = self.made_by(i);
+        if keys.iter().any(|k| k == key) {
+            return Ok(());
+        }
+        keys.push(key.to_string());
+        self.write_made_by(i, &keys)
     }
 
     pub fn forget_made_by(&self, i: &Integrity) {
         let _ = fs::remove_file(self.made_by_file(i));
     }
 
+    /// The entry was made (or replaced) by `key`: the record is that key only.
     pub fn set_made_by(&self, i: &Integrity, key: &str) -> Result<()> {
+        self.write_made_by(i, &[key.to_string()])
+    }
+
+    fn write_made_by(&self, i: &Integrity, keys: &[String]) -> Result<()> {
         let f = self.made_by_file(i);
         fs::create_dir_all(f.parent().unwrap())?;
         let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
-        fs::write(&tmp, format!("{key}\n"))?;
+        let mut text = keys.join("\n");
+        text.push('\n');
+        fs::write(&tmp, text)?;
         fs::rename(&tmp, &f)?;
         Ok(())
     }
@@ -493,27 +515,6 @@ impl Store {
         let _ = fs::remove_file(self.size_file(i));
     }
 
-    /// Lines of `<store>/<file>` whose first tab-separated field is `key`
-    /// (the inject engine's `inject-checked` / `inject-blocked`).
-    pub fn key_lines(&self, file: &str, key: &str) -> Vec<String> {
-        fs::read_to_string(self.root.join(file))
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| l.split('\t').next() == Some(key))
-            .map(String::from)
-            .collect()
-    }
-
-    /// Append one line `key<TAB>date<TAB>note` to `<store>/<file>`, in one
-    /// write (O_APPEND), so concurrent installs never interleave lines.
-    pub fn add_key_line(&self, file: &str, key: &str, note: &str) -> Result<PathBuf> {
-        use std::io::Write;
-        let p = self.root.join(file);
-        let note: String = note.chars().map(|c| if c == '\n' || c == '\t' { ' ' } else { c }).collect();
-        let line = format!("{key}\t{}\t{note}\n", crate::trial::now());
-        fs::OpenOptions::new().create(true).append(true).open(&p)?.write_all(line.as_bytes())?;
-        Ok(p)
-    }
 }
 
 /// The first difference between two extracted trees, `want` the reference
