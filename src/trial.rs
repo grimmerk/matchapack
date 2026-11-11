@@ -200,17 +200,16 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
                 }
             }
         }
-        let all = inj.iter().filter(|r| r["inject"]["check_all"] == true).count();
         let listed: Vec<String> = differs.iter().map(|(k, (n, _))| format!("{k} {n}")).collect();
         println!(
-            "inject engine: {} store entries compared with npm's extraction ({all} runs compared every entry), {}",
+            "inject engine: {} store entries compared with npm's extraction, {}",
             sum("checked"),
             if listed.is_empty() { "none differed".to_string() } else { format!("differed and replaced: {}", listed.join(", ")) }
         );
         for (kind, what) in [
             ("extractor", "made by the classic engine's extractor (expected for odd tarballs)"),
             ("changed", "changed after npm's pacote had made them: look at what writes into the store"),
-            ("pacote", "made by an earlier npm's pacote, which extracted differently: entries of earlier npm versions are now compared before use"),
+            ("pacote", "made under another npm's pacote/tar, which extracted differently"),
         ] {
             if let Some((n, first)) = differs.get(kind) {
                 println!("inject engine: {n} differing entries {what}; first: {first}");

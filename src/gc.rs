@@ -106,6 +106,7 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
     r.removed = old.len();
     if !dry_run {
         old.par_iter().try_for_each(|i| store.remove_entry(i))?;
+        store.remove_orphan_locks();
     }
     Ok(r)
 }

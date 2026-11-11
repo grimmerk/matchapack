@@ -106,10 +106,11 @@ What differs from the classic engine:
   modes, umask 022. A package missing from the store is extracted into it by
   npm's own pacote (from npm's cache, or downloaded as npm would), then
   cloned: the store holds exactly what npm extracts.
-- The store is checked against npm's extraction: before its first use by this
-  engine an entry made by the classic engine is compared with pacote's
-  extraction; the first install under a new npm (pacote and tar version)
-  compares every entry it uses; after that one in 50 at random
+- The store is checked against npm's extraction: every entry is compared with
+  pacote's extraction once under each npm (pacote and tar version) before
+  that npm clones it, entries the classic engine made included, so the first
+  install after an npm upgrade, or the first one under another Node's npm, is
+  slower for the entries it uses; after that one in 50 at random
   (`THINCLONE_INJECT_CHECK=all`, `off` or another number). An entry that
   differs is replaced by pacote's extraction, which is what gets installed,
   and thinclone says so. Details: `NOTES.md`, "Store fill through pacote".
@@ -122,11 +123,12 @@ What differs from the classic engine:
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
   Docker, `scripts/linux-test.sh`).
 
-thinclone still runs plain npm instead, before anything starts, when: the npm
-version is not one the harness was run against (same list as above; for npm 12
-set `THINCLONE_NPM_VERSIONS=any`, and only together with
-`THINCLONE_ENGINE=inject`: that variable opens the gate for the classic engine
-too, which does not support npm 12), the umask is not 022, the project's
+thinclone still runs plain npm instead, before anything starts, when: npm is
+not a major version this engine has been run on (10, 11 and 12; it has no code
+per npm version, so every 10.x, 11.x and 12.x is taken, unlike the classic
+engine's list
+of verified minors; `THINCLONE_NPM_VERSIONS` overrides it as for the classic
+engine), the umask is not 022, the project's
 `node_modules` is a symlink, the project is outside the trial scope,
 `--prefix` / `--global` point npm at another directory, the directory has no
 `package-lock.json` or `npm-shrinkwrap.json` (inside a workspace of a

@@ -10,9 +10,7 @@
 //! record per installed project, for `thinclone store gc`), `lock` (held
 //! shared by every install, exclusively by commands that remove entries), and
 //! for the inject engine `made-by/` (per entry: the pacote and tar versions
-//! that made it or were last found to extract it the same way) and
-//! `inject-checked` / `inject-strict` (one line per pacote and tar version;
-//! see serve.rs).
+//! under which it is known to be what pacote extracts; see serve.rs).
 //!
 //! Tarballs come from npm's own content-addressed cache (`~/.npm/_cacache`).
 
@@ -279,23 +277,64 @@ impl Store {
         self.root.join("made-by").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
     }
 
-    /// The pacote and tar versions (`pacote@… tar@…`) that extracted this
-    /// entry, or were last found to extract its tarball to the same tree.
-    /// None: made by thinclone's own extractor (the classic engine), or
-    /// before this was recorded.
-    pub fn made_by(&self, i: &Integrity) -> Option<String> {
-        fs::read_to_string(self.made_by_file(i)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    /// The pacote and tar versions (`pacote@… tar@…`, one per line) under
+    /// which this entry is known to be what pacote extracts: the one that
+    /// made it, and every one that later extracted its tarball to the same
+    /// tree. Empty: made by thinclone's own extractor (the classic engine),
+    /// or before this was recorded.
+    pub fn made_by(&self, i: &Integrity) -> Vec<String> {
+        fs::read_to_string(self.made_by_file(i))
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
+    /// Add `key` to the entry's record (written whole: tmp, then rename).
+    pub fn add_made_by(&self, i: &Integrity, key: &str) -> Result<()> {
+        let mut keys = self.made_by(i);
+        if keys.iter().any(|k| k == key) {
+            return Ok(());
+        }
+        keys.push(key.to_string());
+        self.write_made_by(i, &keys)
+    }
+
+    /// A lock on one entry (`<store>/locks/…`, a file beside the entry, never
+    /// inside it): shared while an install clones the entry, exclusive while
+    /// one replaces or fills it or writes its made-by record. So a clone sees
+    /// one tree, and a record is written for the tree that was compared.
+    /// Released when the returned file is dropped. Where the filesystem has no
+    /// flock, no lock (as for the store lock).
+    pub fn entry_lock(&self, i: &Integrity, exclusive: bool) -> Result<fs::File> {
+        let p = self.root.join("locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]);
+        fs::create_dir_all(p.parent().unwrap())?;
+        let f = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&p)?;
+        match flock_retry(&f, if exclusive { libc::LOCK_EX } else { libc::LOCK_SH }) {
+            Ok(()) => Ok(f),
+            Err(e) if unsupported(&e) => Ok(f),
+            Err(e) => Err(e).with_context(|| format!("locking {}", p.display())),
+        }
     }
 
     pub fn forget_made_by(&self, i: &Integrity) {
         let _ = fs::remove_file(self.made_by_file(i));
     }
 
+    /// The entry was made (or replaced) by `key`: the record is that key only.
     pub fn set_made_by(&self, i: &Integrity, key: &str) -> Result<()> {
+        self.write_made_by(i, &[key.to_string()])
+    }
+
+    fn write_made_by(&self, i: &Integrity, keys: &[String]) -> Result<()> {
         let f = self.made_by_file(i);
         fs::create_dir_all(f.parent().unwrap())?;
         let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
-        fs::write(&tmp, format!("{key}\n"))?;
+        let mut text = keys.join("\n");
+        text.push('\n');
+        fs::write(&tmp, text)?;
         fs::rename(&tmp, &f)?;
         Ok(())
     }
@@ -347,6 +386,26 @@ impl Store {
     /// seen half-deleted, which would read as present), then deleted. A crash
     /// mid-way leaves an unlocked directory in tmp/ for Store::new to remove.
     /// Only on a store opened with `exclusive`.
+    /// Remove the entry locks (`locks/`) whose entry is gone (left by an
+    /// interrupted replacement). Only on a store opened with `exclusive`:
+    /// no install holds any entry lock then. Returns how many.
+    pub fn remove_orphan_locks(&self) -> usize {
+        let base = self.root.join("locks");
+        let mut n = 0;
+        for e in walkdir::WalkDir::new(&base).min_depth(3).max_depth(3).into_iter().flatten() {
+            let rel = e.path().strip_prefix(&base).unwrap();
+            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            let gone = match parts.as_slice() {
+                [algo, a, b] => Integrity::from_key(&format!("{algo}-{a}{b}")).is_some_and(|i| fs::symlink_metadata(self.dir_for(&i)).is_err()),
+                _ => false,
+            };
+            if gone && fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn remove_entry(&self, i: &Integrity) -> Result<()> {
         let src = self.dir_for(i);
         let f = fs::File::open(&src).with_context(|| format!("opening {}", src.display()))?;
@@ -356,6 +415,7 @@ impl Store {
         fs::rename(&src, &trash).with_context(|| format!("moving {} out of the store", src.display()))?;
         let _ = fs::remove_file(self.size_file(i));
         let _ = fs::remove_file(self.made_by_file(i));
+        let _ = fs::remove_file(self.root.join("locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]));
         fs::remove_dir_all(&trash).with_context(|| format!("removing {}", trash.display()))?;
         Ok(())
     }
@@ -435,13 +495,19 @@ impl Store {
         let tmp = TmpDir::create(self.root.join("tmp").join(format!("{}-x{seq}-{}", process_tag(), &i.hex[..16])), 0o755)?;
         extract(&data, &tmp.path).with_context(|| format!("extracting {url}"))?;
         fs::create_dir_all(dest.parent().unwrap())?;
-        match fs::rename(&tmp.path, &dest) {
-            Ok(()) => {
-                // Made by thinclone's extractor: a record left by an entry
-                // that was here before is not about this one.
-                self.forget_made_by(i);
-                Ok(Ensure::Extracted)
-            }
+        // The inject engine's entry lock, exclusive: the entry and the
+        // removal of a stale record happen together (serve.rs). A no-replace
+        // rename: a plain one would replace an empty directory.
+        let excl = self.entry_lock(i, true)?;
+        let renamed = rename_noreplace(&tmp.path, &dest);
+        if renamed.is_ok() {
+            // Made by thinclone's extractor: a record left by an entry that
+            // was here before is not about this one.
+            self.forget_made_by(i);
+        }
+        drop(excl);
+        match renamed {
+            Ok(()) => Ok(Ensure::Extracted),
             Err(_) if dest.is_dir() => {
                 // Another process won the race; its copy is equally valid.
                 let _ = fs::remove_dir_all(&tmp.path);
@@ -493,27 +559,6 @@ impl Store {
         let _ = fs::remove_file(self.size_file(i));
     }
 
-    /// Lines of `<store>/<file>` whose first tab-separated field is `key`
-    /// (the inject engine's `inject-checked` / `inject-blocked`).
-    pub fn key_lines(&self, file: &str, key: &str) -> Vec<String> {
-        fs::read_to_string(self.root.join(file))
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| l.split('\t').next() == Some(key))
-            .map(String::from)
-            .collect()
-    }
-
-    /// Append one line `key<TAB>date<TAB>note` to `<store>/<file>`, in one
-    /// write (O_APPEND), so concurrent installs never interleave lines.
-    pub fn add_key_line(&self, file: &str, key: &str, note: &str) -> Result<PathBuf> {
-        use std::io::Write;
-        let p = self.root.join(file);
-        let note: String = note.chars().map(|c| if c == '\n' || c == '\t' { ' ' } else { c }).collect();
-        let line = format!("{key}\t{}\t{note}\n", crate::trial::now());
-        fs::OpenOptions::new().create(true).append(true).open(&p)?.write_all(line.as_bytes())?;
-        Ok(p)
-    }
 }
 
 /// The first difference between two extracted trees, `want` the reference
@@ -691,6 +736,38 @@ pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Rename `from` to `to` only if `to` does not exist: a plain rename(2)
+/// replaces an existing empty directory. Where the system has no such rename
+/// (or the filesystem refuses it), an existence check and a plain rename.
+pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let (f, t) = (c(from)?, c(to)?);
+    #[cfg(target_os = "macos")]
+    let r = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    let r: libc::c_int = {
+        let _ = (&f, &t);
+        unsafe { *libc::__errno_location() = libc::ENOSYS };
+        -1
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            std::fs::rename(from, to)
+        }
+        _ => Err(e),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -842,6 +919,23 @@ pub(crate) mod tests {
         assert!(fresh.is_dir(), "a directory younger than the grace period is kept");
         drop(held);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn locks_of_entries_that_are_gone_are_removed() {
+        let d = scratch("store-orphan-locks");
+        let cacache = d.join("cacache");
+        let kept = cached_tarball(&cacache, &[("package.json", 0o644, "{}")]);
+        let store = Store::new(d.join("store"), cacache.clone()).unwrap();
+        store.ensure(&kept, "http://x/k.tgz").unwrap();
+        drop(store.entry_lock(&kept, false).unwrap());
+        let gone = Integrity { algo: "sha512".into(), hex: "ab".repeat(64) };
+        drop(store.entry_lock(&gone, true).unwrap());
+        drop(store);
+        let store = Store::exclusive(d.join("store"), cacache).unwrap();
+        assert_eq!(store.remove_orphan_locks(), 1);
+        let lock = |i: &Integrity| d.join("store/locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]);
+        assert!(lock(&kept).exists() && !lock(&gone).exists());
     }
 
     #[test]

@@ -120,17 +120,16 @@ THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" 
 
 # 4b. Store entries that thinclone's own extractor made (the classic
 #     engine's) are compared with pacote's extraction before their first
-#     use; the first install under this pacote and tar compares every entry
-#     and records them as checked.
+#     use, and then recorded as known to this pacote and tar.
 cs=$work/store-classic
 p=$(project classic-fill small)
 THINCLONE_STORE=$cs env -u THINCLONE_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1 && [ -z "$(ls "$cs/made-by" 2>/dev/null)" ] || bad "classic fill"
 p=$(project classic-then-inject small)
-THINCLONE_STORE=$cs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] && grep -q 'checked against pacote (all)' "$work/out" \
-  && [ "$(cut -f1 "$cs/inject-checked" | sort -u | wc -l | tr -d ' ')" = 1 ] && same "$ref_small" "$p" \
-  && ok "entries made by the classic engine: all $n_small compared before use, the version recorded as checked, tree identical" \
+THINCLONE_STORE=$cs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] \
+  && [ "$(cat "$cs/made-by/sha512/"*/* | sort -u)" = "$want_key" ] && same "$ref_small" "$p" \
+  && ok "entries made by the classic engine: all $n_small compared before use, then recorded for this pacote/tar, tree identical" \
   || bad "classic then inject: cloned $(cloned), checked $(checked)"
-# Now made by this pacote and recorded: sampled (one in a million here).
+# Now known to this pacote/tar: sampled (one in a million here).
 p=$(project sampled small)
 THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
   && ok "the next install: sampled, nothing compared at one in a million" || bad "sampled: checked $(checked)"
@@ -146,19 +145,30 @@ THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=all install "$p" && [ "$(cloned)" = "
   && [ "$(stat -f %Lp "$lentry/package.json" 2>/dev/null || stat -c %a "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
   && ok "a store entry changed since it was made: found, replaced by pacote's extraction, tree identical" || bad "changed entry: $(grep -c 'had changed' "$work/out")"
 
-# 4d. An entry an earlier pacote made extracts differently with this one:
-#     the rules changed. Replaced, and from then on every entry an earlier
-#     pacote made is compared before use (inject-strict).
+# 4d. Entries known only to another pacote/tar version (an install under
+#     another npm) are compared once under this one before use, whatever the
+#     sampling rate; one that differs is replaced. Then both versions know the
+#     ones that matched: switching back and forth compares nothing again.
 old="pacote@0.0.1 tar@0.0.1"
-echo "$old" > "$cs/made-by/sha512/${lhex:0:2}/${lhex:2}"; chmod 600 "$lentry/package.json"
-p=$(project rules-changed small)
-THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=all install "$p" && grep -q "extracts 1 package(s) differently from store entries an earlier pacote made" "$work/out" \
-  && [ -s "$cs/inject-strict" ] && same "$ref_small" "$p" \
-  && ok "an earlier pacote's entry differs: replaced, this version made strict, tree identical" || bad "rules changed: $(tail -3 "$work/out")"
 for f in "$cs"/made-by/sha512/*/*; do echo "$old" > "$f"; done
-p=$(project strict small)
-THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = "$n_small" ] && same "$ref_small" "$p" \
-  && ok "strict: every entry an earlier pacote made is compared before use ($n_small)" || bad "strict: checked $(checked)"
+chmod 600 "$lentry/package.json"
+p=$(project other-version small)
+THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = "$n_small" ] \
+  && grep -q "extracts 1 package(s) differently from what another pacote/tar version put in the store" "$work/out" \
+  && [ "$(stat -f %Lp "$lentry/package.json" 2>/dev/null || stat -c %a "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
+  && ok "entries of another pacote/tar version: all $n_small compared once under this one, the differing one replaced, tree identical" \
+  || bad "other version: checked $(checked), $(tail -2 "$work/out")"
+python3 - "$cs/made-by" "$old" "$want_key" <<'PY' \
+  && ok "the matching entries now record both versions, the replaced one this version only" || bad "made-by after the other version"
+import os, sys
+d, old, new = sys.argv[1:]
+recs = [open(os.path.join(r, f)).read().split("\n")[:-1] for r, _, fs in os.walk(d) for f in fs]
+both, only_new = sum(r == [old, new] for r in recs), sum(r == [new] for r in recs)
+sys.exit(0 if both + only_new == len(recs) and only_new >= 1 and both >= 1 else 1)
+PY
+p=$(project both-versions small)
+THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
+  && ok "known to this version too: nothing compared again" || bad "both versions: checked $(checked)"
 
 # 4e. A tarball whose path is listed twice: the classic engine's extractor
 #     gives the file another mode than npm does. Its entry is compared
@@ -239,6 +249,30 @@ install "$p"; rc=$?
 wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
 [ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
   && ok "lockfile out of sync through the shell function: status $rc, npm not run again, logged as npm_failed" || bad "out of sync wrapper: rc=$rc ($(last_log "r['outcome']"))"
+
+# 10a. The inject engine's version gate is by npm major, not the classic
+#      engine's list of verified minors: this npm (11 or 12) is taken with no
+#      override and no npm-verified file; an npm 13 is handed to plain npm.
+# (Run on an npm major not listed yet, to see whether it can be: the first
+# case is skipped, since the gate rightly hands that npm to plain npm.)
+if grep -q "pub const INJECT_NPM_MAJORS: &\[u32\] = &\[.*\b$npm_major\b" "$here/src/wrapper.rs"; then
+  p=$(project gate-ok small)
+  (unset THINCLONE_NPM_VERSIONS; THINCLONE_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+  [ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "installed inject" ] \
+    && ok "version gate: npm $(npm -v) taken by its major, no override, no npm-verified" || bad "version gate ok: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
+else
+  echo "SKIP version gate: npm $(npm -v) is not a listed major"
+fi
+real_npm13=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd -P)
+fake13=$work/fake-npm13; rm -rf "${fake13:?}"; mkdir -p "$fake13/bin" "$fake13/npm/bin"
+python3 -c "import json;d=json.load(open('$real_npm13/package.json'));d['version']='13.0.0';json.dump(d,open('$fake13/npm/package.json','w'))"
+cp "$real_npm13/bin/npm-cli.js" "$fake13/npm/bin/"; ln -s "$real_npm13/lib" "$fake13/npm/lib"; ln -s "$real_npm13/node_modules" "$fake13/npm/node_modules"
+ln -s ../npm/bin/npm-cli.js "$fake13/bin/npm"
+p=$(project gate-13 small)
+(unset THINCLONE_NPM_VERSIONS; PATH=$fake13/bin:$PATH; THINCLONE_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && last_log "r['reason']" | grep -q 'npm 13.0.0: the inject engine runs on npm' \
+  && same "$ref_small" "$p" \
+  && ok "version gate: npm 13 handed to plain npm, tree identical" || bad "version gate 13: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
 
 # 10b. The helper stops before npm starts (here: an npm whose pacote has no
 # fetchers): status 90, nothing changed, so the wrapper declines and runs
@@ -326,9 +360,9 @@ r={'outcome':'installed','engine':'inject','dir':'$work/x','npm':'11.19.1','ts':
                         'pacote':{'n':1,'first':['sha512-bb: x.js: contents differ']}}}}
 print(json.dumps(r))" >> "$work/logs/log.jsonl"
 "$bin" report > "$work/out" 2>&1 \
-  && grep -Eq "inject engine: [0-9]+ store entries compared with npm's extraction \([0-9]+ runs compared every entry\), differed and replaced: extractor 2, pacote 1" "$work/out" \
+  && grep -Eq "inject engine: [0-9]+ store entries compared with npm's extraction, differed and replaced: extractor 2, pacote 1" "$work/out" \
   && grep -q "2 differing entries made by the classic engine's extractor (expected for odd tarballs); first: sha512-aa" "$work/out" \
-  && grep -q "1 differing entries made by an earlier npm's pacote" "$work/out" \
+  && grep -q "1 differing entries made under another npm's pacote/tar" "$work/out" \
   && ok "report: entries compared with npm's extraction, and the differing ones by kind" || bad "report: store checks ($(grep 'compared with' "$work/out"))"
 
 # 13. npm 12: a tarball npm refuses (allow-remote=none, its default) is
