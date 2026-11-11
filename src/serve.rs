@@ -257,9 +257,11 @@ pub struct Server<'a> {
     /// for the same package that wait for that fill (id, destination): a
     /// package installed at several paths is extracted once.
     filling: Mutex<HashMap<Integrity, Vec<(Value, PathBuf)>>>,
-    /// Entries filled in this run: their files have just been extracted, so
-    /// a clone of them needs no touch.
-    filled_now: Mutex<std::collections::HashSet<Integrity>>,
+    /// Entries filled in this run, with the inode of the directory published:
+    /// while the entry is still that directory, its files have just been
+    /// extracted by this install's pacote (a clone needs no touch, waiters
+    /// may be given it). Another install may replace it any time after.
+    filled_now: Mutex<HashMap<Integrity, u64>>,
     rng: AtomicU64,
     pub stats: Mutex<Stats>,
 }
@@ -377,7 +379,7 @@ impl<'a> Server<'a> {
             incomplete: AtomicU64::new(0),
             issued: Mutex::new(HashMap::new()),
             filling: Mutex::new(HashMap::new()),
-            filled_now: Mutex::new(std::collections::HashSet::new()),
+            filled_now: Mutex::new(HashMap::new()),
             rng: AtomicU64::new(seed | 1),
             stats: Mutex::new(Stats::default()),
         })
@@ -577,7 +579,7 @@ impl<'a> Server<'a> {
                 if self.should_check(self.store.made_by(&i).as_deref()) {
                     return one(self.issue(i, "check"));
                 }
-                let fresh = self.filled_now.lock().unwrap().contains(&i);
+                let fresh = self.ours(&i);
                 one(self.finish(i, &dir, &dst, false, false, None, fresh))
             }
             Ok(_) => one(refused("rejected-source", format!("store entry {} is not a directory", dir.display()))),
@@ -609,18 +611,29 @@ impl<'a> Server<'a> {
     fn release(&self, i: &Integrity) -> Vec<(Value, Outcome)> {
         let waiting = self.filling.lock().unwrap().remove(i).unwrap_or_default();
         let entry = self.store.dir_for(i);
-        let ours = self.filled_now.lock().unwrap().contains(i);
+        let ours = self.ours(i);
         waiting
             .into_iter()
             .map(|(id, dst)| {
-                let o = if ours && is_real_dir(&entry) {
-                    self.finish(i.clone(), &entry, &dst, false, false, None, true)
-                } else {
-                    refused("store-miss", "the fill this package waited for did not complete here")
-                };
+                // One waiter's failure (even a panic) must not leave the
+                // others unanswered.
+                let o = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if ours {
+                        self.finish(i.clone(), &entry, &dst, false, false, None, true)
+                    } else {
+                        refused("store-miss", "the fill this package waited for did not complete here")
+                    }
+                }))
+                .unwrap_or_else(|_| refused("store-miss", "internal error (panic) while placing it"));
                 (id, o)
             })
             .collect()
+    }
+
+    /// The entry for `i` is still the directory this install published.
+    fn ours(&self, i: &Integrity) -> bool {
+        let Some(&published) = self.filled_now.lock().unwrap().get(i) else { return false };
+        std::fs::symlink_metadata(self.store.dir_for(i)).is_ok_and(|m| m.is_dir() && std::os::unix::fs::MetadataExt::ino(&m) == published)
     }
 
     /// The hook has run pacote's extract into `extracted` (handed out by
@@ -797,11 +810,16 @@ impl<'a> Server<'a> {
         }
         // Rename-if-absent (a no-replace rename: a plain rename would replace
         // an empty directory), so concurrent installs fill an entry once.
+        // The inode is taken before the rename (a rename keeps it): whatever
+        // is at the entry's path later is ours only if it is this directory.
+        let published = std::fs::symlink_metadata(extracted).map(|m| std::os::unix::fs::MetadataExt::ino(&m)).ok();
         match rename_noreplace(extracted, &entry) {
             Ok(()) => {
                 self.store.forget_size(&i);
                 self.mark_made_by(&i);
-                self.filled_now.lock().unwrap().insert(i.clone());
+                if let Some(ino) = published {
+                    self.filled_now.lock().unwrap().insert(i.clone(), ino);
+                }
                 // Counted here: the entry is in the store now, whatever
                 // became of the placement.
                 self.stats.lock().unwrap().filled.push(i);
@@ -1764,6 +1782,36 @@ mod tests {
         assert_eq!(done["3"]["ok"], true, "{done:?}");
         assert_eq!(done["2"]["reason"], "store-miss", "{done:?}");
         assert!(!dst("b").join("package.json").exists());
+    }
+
+    #[test]
+    fn an_entry_replaced_after_this_install_published_it_is_not_given_to_waiters() {
+        // Another install (another pacote) replaces the entry between this
+        // install's publication and the release of its waiters.
+        let fx = Fx::new("serve-coalesce-replaced");
+        if !fx.can_clone() {
+            return;
+        }
+        let i = cached_tarball(&fx.cacache, PKG);
+        let sri = sri_of(&i);
+        let s = fx.server(clone::Mode::File);
+        let dst = |n: &str| fx.root.join(format!("node_modules/{n}"));
+        let to = extract_to(s.place_entry(&sri, &dst("a")), "fill");
+        fx.pacote_extract(&i, &to);
+        placed_full(s.place_extracted(&sri, &dst("a"), &to));
+        assert!(s.ours(&i), "published by this install");
+        let entry = fx.store.dir_for(&i);
+        fs::rename(&entry, fx.dir.join("old-entry")).unwrap();
+        fx.pacote_extract(&i, &{
+            fs::create_dir_all(&entry).unwrap();
+            entry.clone()
+        });
+        assert!(!s.ours(&i), "the entry is another directory now");
+        s.filling.lock().unwrap().insert(i.clone(), vec![(json!(9), dst("b"))]);
+        let released = s.release(&i);
+        assert_eq!(refusal(released.into_iter().next().unwrap().1).0, "store-miss");
+        // And a plain request is touched again (the entry's times are not this install's).
+        assert!(matches!(s.place_entry(&sri, &dst("c")), Outcome::Placed { paths, .. } if paths > 0));
     }
 
     #[test]
