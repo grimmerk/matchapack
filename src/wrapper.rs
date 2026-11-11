@@ -447,8 +447,9 @@ pub fn npm_version_gate() -> Result<(), String> {
 /// with pacote's extraction; npm placing packages the hook never saw is
 /// reported). A major is listed once the inject harness has run on it
 /// (`THINCLONE_ENGINE=inject scripts/verify-npm.sh`, `scripts/test-inject.sh`):
-/// 11 (11.17–11.20 in use), 12 (12.2.2).
-pub const INJECT_NPM_MAJORS: &[u32] = &[11, 12];
+/// 10 (10.8.2 and 10.9.2, also a 3-workspace project; NOTES), 11 (11.17–11.20
+/// in use), 12 (12.2.2).
+pub const INJECT_NPM_MAJORS: &[u32] = &[10, 11, 12];
 
 /// The inject engine's version gate: THINCLONE_NPM_VERSIONS when set (`any`, or
 /// a list as for the classic engine), otherwise the majors above. Separate
@@ -489,10 +490,10 @@ mod tests {
 
     #[test]
     fn inject_engine_npm_majors() {
-        for v in ["11.0.0", "11.17.0", "11.20.0", "12.2.2"] {
+        for v in ["10.8.2", "10.9.2", "11.0.0", "11.17.0", "11.20.0", "12.2.2"] {
             assert!(inject_version_allowed(v, None).is_ok(), "{v}");
         }
-        for v in ["9.9.9", "13.0.0", "110.0.0", "", "x"] {
+        for v in ["9.9.9", "13.0.0", "1.0.0", "110.0.0", "", "x"] {
             assert!(inject_version_allowed(v, None).is_err(), "{v}");
         }
         assert!(inject_version_allowed("13.0.0", Some("any")).is_ok());

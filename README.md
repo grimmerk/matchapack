@@ -123,8 +123,9 @@ What differs from the classic engine:
   Docker, `scripts/linux-test.sh`).
 
 thinclone still runs plain npm instead, before anything starts, when: npm is
-not a major version this engine has been run on (11 and 12; it has no code per
-npm version, so every 11.x and 12.x is taken, unlike the classic engine's list
+not a major version this engine has been run on (10, 11 and 12; it has no code
+per npm version, so every 10.x, 11.x and 12.x is taken, unlike the classic
+engine's list
 of verified minors; `THINCLONE_NPM_VERSIONS` overrides it as for the classic
 engine), the umask is not 022, the project's
 `node_modules` is a symlink, the project is outside the trial scope,
