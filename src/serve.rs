@@ -545,6 +545,11 @@ impl<'a> Server<'a> {
                 if self.should_check(&self.store.made_by(&i)) {
                     return one(self.issue(i, "check"));
                 }
+                // Shared: no replacement of the entry while it is cloned.
+                let _shared = match self.store.entry_lock(&i, false) {
+                    Ok(l) => l,
+                    Err(e) => return one(refused("store-error", format!("{e:#}"))),
+                };
                 let fresh = self.ours(&i);
                 one(self.finish(i, &dir, &dst, false, false, None, fresh))
             }
@@ -577,14 +582,15 @@ impl<'a> Server<'a> {
     fn release(&self, i: &Integrity) -> Vec<(Value, Outcome)> {
         let waiting = self.filling.lock().unwrap().remove(i).unwrap_or_default();
         let entry = self.store.dir_for(i);
-        let ours = self.ours(i);
         waiting
             .into_iter()
             .map(|(id, dst)| {
                 // One waiter's failure (even a panic) must not leave the
                 // others unanswered.
                 let o = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if ours {
+                    // Shared, and the entry checked to be ours under it.
+                    let _shared = self.store.entry_lock(i, false);
+                    if self.ours(i) {
                         self.finish(i.clone(), &entry, &dst, false, false, None, true)
                     } else {
                         refused("store-miss", "the fill this package waited for did not complete here")
@@ -673,12 +679,22 @@ impl<'a> Server<'a> {
             // is compared and then moved into the project: it shares blocks
             // with the store, and a replacement of the entry during the clone
             // shows up as a difference, never in the project.
-            let made_by = self.store.made_by(&i);
             let cand = self.tmp.path.join(format!("c{}", self.seq.fetch_add(1, Ordering::Relaxed)));
             let drop_cand = || {
                 let _ = std::fs::remove_dir_all(&cand);
             };
-            if let Err(e) = clone::clone_tree(&entry, &cand, self.mode) {
+            // Shared while the candidate is cloned: one tree, with its record.
+            let shared = match self.store.entry_lock(&i, false) {
+                Ok(l) => l,
+                Err(e) => {
+                    discard();
+                    return refused("store-error", format!("{e:#}"));
+                }
+            };
+            let made_by = self.store.made_by(&i);
+            let cloned = clone::clone_tree(&entry, &cand, self.mode);
+            drop(shared);
+            if let Err(e) = cloned {
                 drop_cand();
                 discard();
                 if clone::unsupported(&e) {
@@ -721,13 +737,16 @@ impl<'a> Server<'a> {
                 // (a replacement by another install changes its inode and
                 // its record). A replacement between this check and the write
                 // is not excluded (NOTES).
-                if known_key(self.k())
-                    && !made_by.iter().any(|k| k == self.k())
-                    && ino(&entry) == Some(ino_before)
-                    && self.store.made_by(&i) == made_by
-                {
-                    if let Err(e) = self.store.add_made_by(&i, self.k()) {
-                        crate::info!("could not record which pacote compared {}: {e:#}", i.key());
+                // Exclusive: the record is written only for the tree that was
+                // compared (same inode, same record as when it was cloned),
+                // and no replacement can come in between.
+                if known_key(self.k()) && !made_by.iter().any(|k| k == self.k()) {
+                    if let Ok(_excl) = self.store.entry_lock(&i, true) {
+                        if ino(&entry) == Some(ino_before) && self.store.made_by(&i) == made_by {
+                            if let Err(e) = self.store.add_made_by(&i, self.k()) {
+                                crate::info!("could not record which pacote compared {}: {e:#}", i.key());
+                            }
+                        }
                     }
                 }
                 return Outcome::Placed {
@@ -748,13 +767,18 @@ impl<'a> Server<'a> {
             // comment). The record goes first: whatever happens next, an
             // entry left here is never taken for this pacote's without a
             // new record.
+            // Exclusive: nobody clones the entry or writes its record while
+            // it is replaced.
+            let excl = self.store.entry_lock(&i, true);
             self.store.forget_made_by(&i);
             let aside = self.tmp.path.join(format!("q{}", self.seq.fetch_add(1, Ordering::Relaxed)));
-            let healed = std::fs::rename(&entry, &aside).is_ok() && rename_noreplace(extracted, &entry).is_ok();
+            let healed = excl.is_ok() && std::fs::rename(&entry, &aside).is_ok() && rename_noreplace(extracted, &entry).is_ok();
             self.store.forget_size(&i);
             if healed {
                 self.mark_made_by(&i);
-            } else {
+            }
+            drop(excl);
+            if !healed {
                 // Someone else moved the entry meanwhile.
                 discard();
             }
@@ -773,10 +797,16 @@ impl<'a> Server<'a> {
         // The inode is taken before the rename (a rename keeps it): whatever
         // is at the entry's path later is ours only if it is this directory.
         let published = std::fs::symlink_metadata(extracted).map(|m| std::os::unix::fs::MetadataExt::ino(&m)).ok();
-        match rename_noreplace(extracted, &entry) {
+        // Exclusive: the entry and its record appear together.
+        let excl = self.store.entry_lock(&i, true);
+        let renamed = rename_noreplace(extracted, &entry);
+        if renamed.is_ok() {
+            self.mark_made_by(&i);
+        }
+        drop(excl);
+        match renamed {
             Ok(()) => {
                 self.store.forget_size(&i);
-                self.mark_made_by(&i);
                 if let Some(ino) = published {
                     self.filled_now.lock().unwrap().insert(i.clone(), ino);
                 }
@@ -787,8 +817,9 @@ impl<'a> Server<'a> {
                     *filled = true;
                 }
             }
-            // Another install filled it while pacote extracted here (theirs
-            // is compared when its maker calls for it, decision 4 in NOTES).
+            // Another install filled it while pacote extracted here: theirs
+            // is compared before this version uses it, if this version is not
+            // in its record.
             Err(_) => discard(),
         }
         o
@@ -1424,6 +1455,28 @@ mod tests {
     }
 
     #[test]
+    fn a_clone_waits_while_the_entry_is_being_replaced() {
+        // The exclusive entry lock is what a replacement (and a fill, and a
+        // record write) holds: a clone of the entry starts only after it.
+        let fx = Fx::new("serve-entry-lock");
+        if !fx.can_clone() {
+            return;
+        }
+        let (i, sri) = fx.entry(PKG);
+        let s = fx.server(clone::Mode::File);
+        let dst = fx.root.join("node_modules/p");
+        let excl = fx.store.entry_lock(&i, true).unwrap();
+        std::thread::scope(|sc| {
+            let t = sc.spawn(|| placed(s.place_entry(&sri, &dst)));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(!dst.join("package.json").exists(), "the clone waited for the lock");
+            drop(excl);
+            assert_eq!(t.join().unwrap().0, Kind::Fast);
+        });
+        assert!(dst.join("package.json").exists());
+    }
+
+    #[test]
     fn a_fill_replaces_a_record_left_by_an_earlier_entry() {
         // The entry went (removed by hand, or an interrupted replacement) but
         // its record stayed: the tree pacote makes now is this version's only.
@@ -1517,6 +1570,12 @@ mod tests {
         let (d, _) = check_once(&fx, &s, &m, &fx.root.join("node_modules/e"), |_| {});
         assert_eq!(d, None);
         assert_eq!(fx.store.made_by(&m), vec![OLD.to_string(), KEY.to_string()]);
+        // This version first in the record, and different now: changed since.
+        let (n, _) = fx.entry(&[("package.json", 0o644, "{\"name\":\"n\"}\n"), ("bin/cli", 0o755, "z\n")]);
+        fx.store.set_made_by(&n, KEY).unwrap();
+        fx.store.add_made_by(&n, OLD).unwrap();
+        let (d, _) = check_once(&fx, &s, &n, &fx.root.join("node_modules/f"), chmod_644);
+        assert_eq!(d.map(|x| x.0), Some("changed"));
     }
 
     #[test]
@@ -1649,9 +1708,14 @@ mod tests {
         // Known to other versions only: compared once under this one.
         fx.store.set_made_by(&i, OLD).unwrap();
         assert!(checks(&never()), "not yet compared under this pacote/tar");
-        // Known to both (an install under each): sampled, whichever runs.
+        // Known to both (an install under each): sampled, whichever runs and
+        // in whichever order they were recorded.
         fx.store.add_made_by(&i, KEY).unwrap();
         assert!(!checks(&never()));
+        fx.store.set_made_by(&i, KEY).unwrap();
+        fx.store.add_made_by(&i, OLD).unwrap();
+        assert_eq!(fx.store.made_by(&i), vec![KEY.to_string(), OLD.to_string()]);
+        assert!(!checks(&never()), "this version first in the record");
         // A key the hook could not name vouches for nothing.
         let fresh = Fx::new("serve-policy-unknown");
         let (j, sri_j) = fresh.entry(PKG);

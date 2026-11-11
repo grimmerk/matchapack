@@ -302,6 +302,23 @@ impl Store {
         self.write_made_by(i, &keys)
     }
 
+    /// A lock on one entry (`<store>/locks/…`, a file beside the entry, never
+    /// inside it): shared while an install clones the entry, exclusive while
+    /// one replaces or fills it or writes its made-by record. So a clone sees
+    /// one tree, and a record is written for the tree that was compared.
+    /// Released when the returned file is dropped. Where the filesystem has no
+    /// flock, no lock (as for the store lock).
+    pub fn entry_lock(&self, i: &Integrity, exclusive: bool) -> Result<fs::File> {
+        let p = self.root.join("locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]);
+        fs::create_dir_all(p.parent().unwrap())?;
+        let f = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&p)?;
+        match flock_retry(&f, if exclusive { libc::LOCK_EX } else { libc::LOCK_SH }) {
+            Ok(()) => Ok(f),
+            Err(e) if unsupported(&e) => Ok(f),
+            Err(e) => Err(e).with_context(|| format!("locking {}", p.display())),
+        }
+    }
+
     pub fn forget_made_by(&self, i: &Integrity) {
         let _ = fs::remove_file(self.made_by_file(i));
     }
@@ -378,6 +395,7 @@ impl Store {
         fs::rename(&src, &trash).with_context(|| format!("moving {} out of the store", src.display()))?;
         let _ = fs::remove_file(self.size_file(i));
         let _ = fs::remove_file(self.made_by_file(i));
+        let _ = fs::remove_file(self.root.join("locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]));
         fs::remove_dir_all(&trash).with_context(|| format!("removing {}", trash.display()))?;
         Ok(())
     }
