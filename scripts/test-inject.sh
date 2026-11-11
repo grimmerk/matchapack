@@ -293,6 +293,20 @@ install "$p"; rc=$?
 # 12. The report counts the inject runs.
 "$bin" report > "$work/out" 2>&1 && grep -Eq 'inject engine: [0-9]+ runs, [0-9]+ packages cloned' "$work/out" && grep -q 'npm failed 1' "$work/out" \
   && ok "report: inject runs, clones and npm failures are counted" || bad "report"
+# The store checks: compared entries, and the differing ones by who made
+# them (a record as inject::run writes it, appended to this run's log).
+python3 -c "
+import json
+r={'outcome':'installed','engine':'inject','dir':'$work/x','npm':'11.19.1','ts':0,'secs':1.0,
+   'inject':{'cloned':5,'filled':0,'checked':5,'check_all':True,'fallbacks':{},
+             'differs':{'extractor':{'n':2,'first':['sha512-aa: run.sh: mode 644, the tarball gives 755']},
+                        'pacote':{'n':1,'first':['sha512-bb: x.js: contents differ']}}}}
+print(json.dumps(r))" >> "$work/logs/log.jsonl"
+"$bin" report > "$work/out" 2>&1 \
+  && grep -Eq "inject engine: [0-9]+ store entries compared with npm's extraction \([0-9]+ runs compared every entry\), differed and replaced: extractor 2, pacote 1" "$work/out" \
+  && grep -q "2 differing entries made by the classic engine's extractor (expected for odd tarballs); first: sha512-aa" "$work/out" \
+  && grep -q "1 differing entries made by an earlier npm's pacote" "$work/out" \
+  && ok "report: entries compared with npm's extraction, and the differing ones by kind" || bad "report: store checks ($(grep 'compared with' "$work/out"))"
 
 # 13. npm 12: a tarball npm refuses (allow-remote=none, its default) is
 #     refused the same way with the hook, which is never asked.

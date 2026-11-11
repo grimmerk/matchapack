@@ -186,6 +186,36 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) },
             sum("filled"),
         );
+        // Store entries compared with npm's own extraction before use (serve.rs),
+        // and the ones that differed, by who had made them.
+        let mut differs: std::collections::BTreeMap<String, (u64, String)> = Default::default();
+        for r in &inj {
+            if let Some(m) = r["inject"]["differs"].as_object() {
+                for (k, v) in m {
+                    let e = differs.entry(k.clone()).or_default();
+                    e.0 += v["n"].as_u64().unwrap_or(0);
+                    if e.1.is_empty() {
+                        e.1 = v["first"][0].as_str().unwrap_or("").to_string();
+                    }
+                }
+            }
+        }
+        let all = inj.iter().filter(|r| r["inject"]["check_all"] == true).count();
+        let listed: Vec<String> = differs.iter().map(|(k, (n, _))| format!("{k} {n}")).collect();
+        println!(
+            "inject engine: {} store entries compared with npm's extraction ({all} runs compared every entry), {}",
+            sum("checked"),
+            if listed.is_empty() { "none differed".to_string() } else { format!("differed and replaced: {}", listed.join(", ")) }
+        );
+        for (kind, what) in [
+            ("extractor", "made by the classic engine's extractor (expected for odd tarballs)"),
+            ("changed", "changed after npm's pacote had made them: look at what writes into the store"),
+            ("pacote", "made by an earlier npm's pacote, which extracted differently: entries of earlier npm versions are now compared before use"),
+        ] {
+            if let Some((n, first)) = differs.get(kind) {
+                println!("inject engine: {n} differing entries {what}; first: {first}");
+            }
+        }
         // npm placed packages the hook never saw: the patched method is no
         // longer (the only) way this npm extracts. Installs stay correct;
         // this line is the only sign.
