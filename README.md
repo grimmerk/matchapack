@@ -1,4 +1,4 @@
-# thinclone
+# matchapack
 
 Makes `npm ci` place every package as a copy-on-write clone from one
 machine-wide store, so N worktrees of a repo cost about one copy on disk. The
@@ -13,7 +13,7 @@ with `reflink=1`. Elsewhere it hands over to npm.
 ## Use
 
 ```sh
-cargo install --path .          # puts thinclone in ~/.cargo/bin
+cargo install --path .          # puts matchapack in ~/.cargo/bin
 ```
 
 Then add one line to your shell's startup file. Not sure which shell you use?
@@ -21,83 +21,83 @@ Run `echo $0` (macOS has used zsh by default since 10.15).
 
 | shell | file | line |
 |---|---|---|
-| zsh | `~/.zshrc` | `command -v thinclone >/dev/null && eval "$(thinclone init)"` |
-| bash | `~/.bashrc` | `command -v thinclone >/dev/null && eval "$(thinclone init)"` |
-| fish | `~/.config/fish/config.fish` | `type -q thinclone; and thinclone init \| source` |
+| zsh | `~/.zshrc` | `command -v matchapack >/dev/null && eval "$(matchapack init)"` |
+| bash | `~/.bashrc` | `command -v matchapack >/dev/null && eval "$(matchapack init)"` |
+| fish | `~/.config/fish/config.fish` | `type -q matchapack; and matchapack init \| source` |
 
 Put it after the line that puts `~/.cargo/bin` on PATH (rustup usually does
 that in `~/.zshenv` or `~/.profile`); if it comes earlier, it does nothing.
-`thinclone init` detects the shell that runs it; `thinclone init zsh` (or
+`matchapack init` detects the shell that runs it; `matchapack init zsh` (or
 `bash`, `fish`) names it explicitly. The function comes from the binary, so no
 checkout of this repository is needed and it updates with `cargo install`.
-Sourcing `shell/thinclone.sh` from a checkout still works. Open a new terminal,
+Sourcing `shell/matchapack.sh` from a checkout still works. Open a new terminal,
 then type `npm ci` as usual:
 
 ```
 $ npm ci
-thinclone: npm ci from the store (THINCLONE=0 npm ci for plain npm)
+matchapack: npm ci from the store (MATCHAPACK=0 npm ci for plain npm)
 …lifecycle script output…
-thinclone: added 3383 packages from the store in 23.6s
+matchapack: added 3383 packages from the store in 23.6s
 ```
 
 Only a bare `npm ci` (or `npm clean-install`, `npm ic`, `npm install-clean`,
 with output-only flags such as `--no-audit`) is taken over. Every other npm
-command runs npm directly and never starts thinclone. A Claude Code session
+command runs npm directly and never starts matchapack. A Claude Code session
 picks the function up from its shell snapshot, so sessions started after the
 line was added use it.
 
-thinclone runs plain npm instead, and prints why, when:
+matchapack runs plain npm instead, and prints why, when:
 - a flag changes the tree (`--omit=dev`, `--workspace`, …), or an npm setting
-  is changed (in an `.npmrc` or the environment) that is not on thinclone's
+  is changed (in an `.npmrc` or the environment) that is not on matchapack's
   list of settings known to be safe (registry, credentials, cache, output,
   `legacy-peer-deps`, … ; `SAFE_CONFIG` in src/wrapper.rs), or
   `NODE_ENV=production` makes npm omit dev dependencies;
-- a directory thinclone would write into resolves outside the project through
+- a directory matchapack would write into resolves outside the project through
   a symlink (the project's node_modules, a workspace or `file:` directory);
 - npm is a version the harness has not been run against (currently 11.19.x
-  and 11.17.x, so not npm 10 / Node 22; `THINCLONE_NPM_VERSIONS=any`
-  overrides; `thinclone report` counts these runs). After an npm upgrade, see
+  and 11.17.x, so not npm 10 / Node 22; `MATCHAPACK_NPM_VERSIONS=any`
+  overrides; `matchapack report` counts these runs). After an npm upgrade, see
   "After an npm upgrade";
-- the project is outside the trial scope (`~/.config/thinclone/paths`);
+- the project is outside the trial scope (`~/.config/matchapack/paths`);
 - the lockfile has entries it does not support (git dependencies, `file:`
   tarballs), or is out of sync with package.json;
 - the filesystem cannot clone.
 All of these are decided before anything in the project changes. A failing
 install script is reported like npm would report it, not retried.
 
-Bypass for one command: `THINCLONE=0 npm ci`, or `command npm ci`.
+Bypass for one command: `MATCHAPACK=0 npm ci`, or `command npm ci`.
 Remove: delete the line. Installed node_modules keep working without the store
-(clones are independent files); the store is `~/.cache/thinclone/store`.
+(clones are independent files); the store is `~/.cache/matchapack/store`.
 
-## The inject engine (try it with `THINCLONE_ENGINE=inject`)
+## The inject engine (try it with `MATCHAPACK_ENGINE=inject`)
 
-A second way to install, built to replace the one above (grimmerk/thinclone#33;
+A second way to install, built to replace the one above (grimmerk/matchapack-private#33;
 design and measurements in `NOTES.md`, "Inject engine"). The engine above (the
 "classic" engine) runs the steps of `npm ci` itself, calling npm for pieces.
 The inject engine runs npm's own `npm ci`, unchanged, and replaces one thing
 inside it: where npm would extract a package's tarball into a directory,
-thinclone clones the package from the store instead. Scripts, bin links, the
+matchapack clones the package from the store instead. Scripts, bin links, the
 hidden lockfile, the lockfile check, npm's flags and settings are all npm's
 own, so they behave exactly as in `npm ci`, on any npm version.
 
 ```sh
-THINCLONE_ENGINE=inject npm ci        # one command, through the shell function
-export THINCLONE_ENGINE=inject        # or for the whole shell (classic: unset it)
-THINCLONE_ENGINE=inject thinclone install . -- --no-audit   # after `--`: npm's own arguments
+MATCHAPACK_ENGINE=inject npm ci       # one command, through the shell function
+export MATCHAPACK_ENGINE=inject       # or for the whole shell (classic: unset it)
+MATCHAPACK_ENGINE=inject matchapack install . -- --no-audit  # after `--`: npm's own arguments
 ```
 
 ```
-$ THINCLONE_ENGINE=inject npm ci
-thinclone: npm ci with clones from the store (THINCLONE=0 npm ci for plain npm)
+$ MATCHAPACK_ENGINE=inject npm ci
+matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm)
 …npm's own output: warnings, script output, "added 347 packages in 1s", the audit summary…
-thinclone: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
+matchapack: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
 ```
 
 What differs from the classic engine:
 - Every `npm ci` flag and npm setting is npm's to read (`--omit=dev`,
   `--workspace`, `NODE_ENV=production`, `.npmrc` settings; `--omit=dev` is in
   the tests, the others take the same path). Projects the
-  classic engine hands to npm are installed too: the packages thinclone
+  classic engine hands to npm are installed too: the packages matchapack
   cannot clone are extracted by npm, the rest are cloned (checked with a
   `file:` tarball and bundled dependencies; git dependencies and a
   shrinkwrap follow the same rule but have not been run yet).
@@ -111,9 +111,9 @@ What differs from the classic engine:
   that npm clones it, entries the classic engine made included, so the first
   install after an npm upgrade, or the first one under another Node's npm, is
   slower for the entries it uses; after that one in 50 at random
-  (`THINCLONE_INJECT_CHECK=all`, `off` or another number). An entry that
+  (`MATCHAPACK_INJECT_CHECK=all`, `off` or another number). An entry that
   differs is replaced by pacote's extraction, which is what gets installed,
-  and thinclone says so. Details: `NOTES.md`, "Store fill through pacote".
+  and matchapack says so. Details: `NOTES.md`, "Store fill through pacote".
 - `npm ci`'s own output comes back, the `npm audit` summary included (and its
   network request; `--no-audit` turns it off, as with npm).
 - npm's own errors (lockfile out of sync, a failing script) are printed once,
@@ -123,11 +123,11 @@ What differs from the classic engine:
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
   Docker, `scripts/linux-test.sh`).
 
-thinclone still runs plain npm instead, before anything starts, when: npm is
+matchapack still runs plain npm instead, before anything starts, when: npm is
 not a major version this engine has been run on (10, 11 and 12; it has no code
 per npm version, so every 10.x, 11.x and 12.x is taken, unlike the classic
 engine's list
-of verified minors; `THINCLONE_NPM_VERSIONS` overrides it as for the classic
+of verified minors; `MATCHAPACK_NPM_VERSIONS` overrides it as for the classic
 engine), the umask is not 022, the project's
 `node_modules` is a symlink, the project is outside the trial scope,
 `--prefix` / `--global` point npm at another directory, the directory has no
@@ -135,22 +135,22 @@ engine), the umask is not 022, the project's
 monorepo, `npm ci` installs into the root's `node_modules`; #36), or the
 command installs nothing (`--dry-run`, `--help`).
 
-`thinclone report` shows a line for this engine: packages cloned, packages npm
+`matchapack report` shows a line for this engine: packages cloned, packages npm
 extracted and why, and a second line when npm placed packages that never
-reached thinclone's hook (the sign that the hook no longer fits a new npm:
+reached matchapack's hook (the sign that the hook no longer fits a new npm:
 installs stay correct, only slower; the install itself prints a line too).
 
 ## Trial: logs, checks, scope
 
-- `thinclone report [--days N]`: what happened (installed / handed to npm and
+- `matchapack report [--days N]`: what happened (installed / handed to npm and
   why / failed), install times, space not written, store size, free space.
-  Every `npm ci` that reaches thinclone appends one line to
-  `~/.cache/thinclone/log.jsonl` (`THINCLONE_LOG=0` turns it off).
-- `scripts/verify-sample.sh [N]`: re-checks the N most recent thinclone
+  Every `npm ci` that reaches matchapack appends one line to
+  `~/.cache/matchapack/log.jsonl` (`MATCHAPACK_LOG=0` turns it off).
+- `scripts/verify-sample.sh [N]`: re-checks the N most recent matchapack
   installs against a real `npm ci` on copies (npm ci runs twice so build noise
-  is told apart); results show up in `thinclone report`.
+  is told apart); results show up in `matchapack report`.
 - Limit the trial to some projects: list path prefixes, one per line, in
-  `~/.config/thinclone/paths` (e.g. `~/git/app` also covers `~/git/app-<topic>`
+  `~/.config/matchapack/paths` (e.g. `~/git/app` also covers `~/git/app-<topic>`
   worktrees). Elsewhere npm ci runs as usual.
 
 Known differences from `npm ci` that do not change the tree: the `npm audit`
@@ -160,36 +160,36 @@ summary is not run; the output lines differ.
 
 ```sh
 scripts/convert-existing.sh ~/git            # lists what it would do
-scripts/convert-existing.sh --apply ~/git    # re-installs each project via thinclone
+scripts/convert-existing.sh --apply ~/git    # re-installs each project via matchapack
 ```
 
-Skips projects thinclone would not handle and projects a running process has
+Skips projects matchapack would not handle and projects a running process has
 its working directory in.
 
 ## After an npm upgrade
 
-thinclone uses npm's own internals (the ideal tree, rebuild, config), so it
+matchapack uses npm's own internals (the ideal tree, rebuild, config), so it
 handles only npm versions the harness was run against. On any other version
 every `npm ci` runs plain npm: nothing breaks, nothing is saved. To verify the
-new npm and turn thinclone back on for it:
+new npm and turn matchapack back on for it:
 
 ```sh
 scripts/verify-npm.sh /tmp/verify-npm              # the fixtures
 scripts/verify-npm.sh /tmp/verify-npm ~/git/app    # plus a real project (copied, never changed)
 ```
 
-It runs `npm ci` and thinclone side by side on copies and compares the trees
+It runs `npm ci` and matchapack side by side on copies and compares the trees
 and the hidden lockfile byte for byte. When every case is identical it
-records the npm major.minor in `~/.config/thinclone/npm-verified`, which the
+records the npm major.minor in `~/.config/matchapack/npm-verified`, which the
 version gate reads next to the built-in list (`VERIFIED_NPM` in
 src/wrapper.rs, where a version goes for every machine). When a case differs
 it records nothing and shows the log.
 
 ## Store maintenance
 
-- `thinclone store`: where the store is, how many packages and recorded
+- `matchapack store`: where the store is, how many packages and recorded
   projects it holds.
-- `thinclone store gc [--dry-run]`: remove the packages no existing project
+- `matchapack store gc [--dry-run]`: remove the packages no existing project
   uses. A package stays while a project installed from it still has its
   node_modules (every install records its directory and packages in
   `<store>/projects/`; projects installed before records existed are found
@@ -198,23 +198,23 @@ it records nothing and shows the log.
   still shares blocks with, so the real run reports the volume's free space
   before and after. Packages extracted in the last hour are kept. Refused while
   an install is running.
-- `thinclone store verify [--fix]`: compare every package with its tarball in
+- `matchapack store verify [--fix]`: compare every package with its tarball in
   the npm cache (files, contents, file modes, directories); exit 1 when one
   differs. `--fix` removes those, and the next install re-extracts them. About
   1.5 minutes for 8,700 packages (4.9 GiB): each tarball is extracted again.
 
 ## Other commands
 
-- `thinclone init zsh|bash|fish`: print the shell integration (see "Use").
-- `thinclone install [dir]`: the install itself, with per-step timings (same
+- `matchapack init zsh|bash|fish`: print the shell integration (see "Use").
+- `matchapack install [dir]`: the install itself, with per-step timings (same
   npm version gate as `npm ci`).
-- `thinclone plan [dir]`: what would be placed and what is skipped, and why.
-- `thinclone diff A B`: the harness's tree comparison.
-- `scripts/verify.sh <project> <work>`: `npm ci` vs thinclone on copies of a
-  project (`THINCLONE_VERIFY_VIA=wrapper` goes through the shell function). It
+- `matchapack plan [dir]`: what would be placed and what is skipped, and why.
+- `matchapack diff A B`: the harness's tree comparison.
+- `scripts/verify.sh <project> <work>`: `npm ci` vs matchapack on copies of a
+  project (`MATCHAPACK_VERIFY_VIA=wrapper` goes through the shell function). It
   runs on any npm version and ignores the trial scope file, since it is how a
-  new npm version gets verified. `THINCLONE_VERIFY_BYTES=1` also requires the
-  hidden lockfile to be byte-identical (CI sets it). `THINCLONE_ENGINE=inject`
+  new npm version gets verified. `MATCHAPACK_VERIFY_BYTES=1` also requires the
+  hidden lockfile to be byte-identical (CI sets it). `MATCHAPACK_ENGINE=inject`
   makes B (and `scripts/verify-npm.sh`'s whole list, plus the cases only that
   engine handles) use the inject engine; nothing is recorded then.
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
