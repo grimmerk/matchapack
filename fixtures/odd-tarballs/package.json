@@ -1,0 +1,9 @@
+{
+  "name": "thinclone-fixture-odd-tarballs",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "lc-dup": "http://127.0.0.1:48321/lc-dup-1.0.0.tgz",
+    "lc-ignore": "http://127.0.0.1:48321/lc-ignore-1.0.0.tgz"
+  }
+}

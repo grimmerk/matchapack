@@ -103,9 +103,16 @@ What differs from the classic engine:
   shrinkwrap follow the same rule but have not been run yet).
 - A package is cloned only when the result is exactly what npm would extract:
   a registry tarball with an integrity in the lockfile, npm's default file
-  modes, umask 022. A package missing from the store is extracted into it
-  from npm's cache first; one that is in neither is downloaded and extracted
-  by npm, and cloned from the next install on.
+  modes, umask 022. A package missing from the store is extracted into it by
+  npm's own pacote (from npm's cache, or downloaded as npm would), then
+  cloned: the store holds exactly what npm extracts.
+- The store is checked against npm's extraction: before its first use by this
+  engine an entry made by the classic engine is compared with pacote's
+  extraction; the first install under a new npm (pacote and tar version)
+  compares every entry it uses; after that one in 50 at random
+  (`THINCLONE_INJECT_CHECK=all`, `off` or another number). An entry that
+  differs is replaced by pacote's extraction, which is what gets installed,
+  and thinclone says so. Details: `NOTES.md`, "Store fill through pacote".
 - `npm ci`'s own output comes back, the `npm audit` summary included (and its
   network request; `--no-audit` turns it off, as with npm).
 - npm's own errors (lockfile out of sync, a failing script) are printed once,

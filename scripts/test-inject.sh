@@ -14,7 +14,7 @@ export THINCLONE_NPM_VERSIONS=any THINCLONE_STORE=$work/store THINCLONE_LOG_DIR=
 export THINCLONE_ENGINE=inject
 unset THINCLONE_INJECT_HOOK THINCLONE_INJECT_THREADS THINCLONE
 store=$work/store
-rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere"
+rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/store-classic" "${work:?}/store-odd"
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -6; }
@@ -43,6 +43,7 @@ install() { local d=$1; shift; "$bin" install "$d" "$@" -- --no-audit --no-fund 
 cloned() { grep -Eo 'inject: cloned [0-9]+' "$work/out" | grep -Eo '[0-9]+$'; }
 filled() { grep -Eo '[0-9]+ new in the store' "$work/out" | grep -Eo '^[0-9]+'; }
 by_npm() { grep -Eo 'extracted by npm [0-9]+' "$work/out" | grep -Eo '[0-9]+$'; }
+checked() { grep -Eo '[0-9]+ checked against pacote' "$work/out" | grep -Eo '^[0-9]+'; }
 # same <ref> <dir>: the same tree as plain npm ci's, hidden lockfile bytes included.
 same() { "$bin" diff "$1" "$2" > "$work/diff" 2>&1 && grep -q 'hidden lockfile byte-identical: true' "$work/diff"; }
 # The shell function, as a user's shell would have it.
@@ -68,11 +69,21 @@ else
   bad "hook rules: $(grep '^FAIL' "$work/out" | head -3)"
 fi
 
-# 1. A first install with an empty store: every package is extracted into the
-#    store from npm's cache on demand, then cloned. The hook fired.
+# The pacote and tar npm's arborist loads, as node resolves them: what the
+# store records as the maker of the entries it fills.
+want_key=$(node -e "
+const path = require('path')
+const pacoteDir = path.dirname(path.dirname(require.resolve('pacote', { paths: [path.join(process.argv[1], 'node_modules/@npmcli/arborist')] })))
+const tar = require(require.resolve('tar/package.json', { paths: [pacoteDir] })).version
+console.log('pacote@' + require(path.join(pacoteDir, 'package.json')).version + ' tar@' + tar)" "$npm_dir")
+
+# 1. A first install with an empty store: pacote extracts every package into
+#    the store (thinclone's own extractor is not used), then it is cloned.
+#    The hook fired.
 p=$(project small1 small)
 install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(filled)" = "$d_small" ] && [ "$(by_npm)" = 0 ] && same "$ref_small" "$p" \
-  && ok "first install: all $n_small packages cloned (the hook fired), $d_small entries filled from npm's cache, tree identical" \
+  && [ "$(cat "$store/made-by/sha512/"*/* 2>/dev/null | sort -u)" = "$want_key" ] \
+  && ok "first install: all $n_small packages cloned (the hook fired), $d_small entries filled by pacote and marked $want_key, tree identical" \
   || bad "first install: cloned $(cloned) of $n_small, filled $(filled), by npm $(by_npm)"
 
 # 2. A reinstall over the existing node_modules, with a changed file and a
@@ -99,13 +110,68 @@ THINCLONE_INJECT_HOOK=none install "$p" && [ "$(cloned)" = 0 ] && [ "$(by_npm)" 
   && grep -q "npm installed $n_small packages, but only 0 went through thinclone's hook" "$work/out" && same "$ref_small" "$p" \
   && ok "no hook: tree identical, and the $n_small packages the hook never saw are reported" || bad "no hook: cloned $(cloned)"
 
-# 4. A package in neither the store nor npm's cache is npm's to fetch and
-#    extract; once npm has cached it, the next install clones it.
+# 4. A package in neither the store nor npm's cache: pacote fetches it into
+#    the store, and it is cloned in the same install.
 p=$(project miss bundled)
-THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 0 ] && grep -q 'store-miss 3' "$work/out" && same "$ref_local" "$p" \
-  && ok "store miss: 3 packages left to npm (store-miss), tree identical" || bad "store miss: cloned $(cloned)"
 THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 3 ] && [ "$(filled)" = 3 ] && same "$ref_local" "$p" \
-  && ok "after a miss: the next install fills the store from npm's cache and clones all 3" || bad "after a miss: cloned $(cloned), filled $(filled)"
+  && ok "store and npm cache empty: pacote fetches all 3 into the store, all 3 cloned, tree identical" || bad "store miss: cloned $(cloned), filled $(filled)"
+THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 3 ] && [ "$(filled)" = 0 ] && same "$ref_local" "$p" \
+  && ok "the next install: 0 new in the store, all 3 cloned" || bad "after a miss: cloned $(cloned), filled $(filled)"
+
+# 4b. Store entries that thinclone's own extractor made (the classic
+#     engine's) are compared with pacote's extraction before their first
+#     use; the first install under this pacote and tar compares every entry
+#     and records them as checked.
+cs=$work/store-classic
+p=$(project classic-fill small)
+THINCLONE_STORE=$cs env -u THINCLONE_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1 && [ -z "$(ls "$cs/made-by" 2>/dev/null)" ] || bad "classic fill"
+p=$(project classic-then-inject small)
+THINCLONE_STORE=$cs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] && grep -q 'checked against pacote (all)' "$work/out" \
+  && [ "$(cut -f1 "$cs/inject-checked" | sort -u | wc -l | tr -d ' ')" = 1 ] && same "$ref_small" "$p" \
+  && ok "entries made by the classic engine: all $n_small compared before use, the version recorded as checked, tree identical" \
+  || bad "classic then inject: cloned $(cloned), checked $(checked)"
+# Now made by this pacote and recorded: sampled (one in a million here).
+p=$(project sampled small)
+THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
+  && ok "the next install: sampled, nothing compared at one in a million" || bad "sampled: checked $(checked)"
+
+# 4c. An entry changed since pacote made it: a check finds it, pacote's
+#     extraction is placed and replaces the entry, and thinclone says so.
+lp=$(python3 -c "import json;print(json.load(open('$ref_small/node_modules/.package-lock.json'))['packages']['node_modules/lodash']['integrity'])")
+lhex=$(python3 -c "import base64;a,b='$lp'.split('-',1);print(base64.b64decode(b).hex())")
+lentry=$cs/v2/sha512/${lhex:0:2}/${lhex:2}
+chmod 600 "$lentry/package.json"
+p=$(project changed small)
+THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=all install "$p" && [ "$(cloned)" = "$n_small" ] && grep -q '1 store entries had changed since' "$work/out" \
+  && [ "$(stat -f %Lp "$lentry/package.json" 2>/dev/null || stat -c %a "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
+  && ok "a store entry changed since it was made: found, replaced by pacote's extraction, tree identical" || bad "changed entry: $(grep -c 'had changed' "$work/out")"
+
+# 4d. An entry an earlier pacote made extracts differently with this one:
+#     the rules changed. Replaced, and from then on every entry an earlier
+#     pacote made is compared before use (inject-strict).
+old="pacote@0.0.1 tar@0.0.1"
+echo "$old" > "$cs/made-by/sha512/${lhex:0:2}/${lhex:2}"; chmod 600 "$lentry/package.json"
+p=$(project rules-changed small)
+THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=all install "$p" && grep -q "extracts 1 package(s) differently from store entries an earlier pacote made" "$work/out" \
+  && [ -s "$cs/inject-strict" ] && same "$ref_small" "$p" \
+  && ok "an earlier pacote's entry differs: replaced, this version made strict, tree identical" || bad "rules changed: $(tail -3 "$work/out")"
+for f in "$cs"/made-by/sha512/*/*; do echo "$old" > "$f"; done
+p=$(project strict small)
+THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = "$n_small" ] && same "$ref_small" "$p" \
+  && ok "strict: every entry an earlier pacote made is compared before use ($n_small)" || bad "strict: checked $(checked)"
+
+# 4e. A tarball whose path is listed twice: the classic engine's extractor
+#     gives the file another mode than npm does. Its entry is compared
+#     before the inject engine's first use and replaced by pacote's.
+os=$work/store-odd
+ref_odd=$(project ref-odd odd-tarballs); (cd "$ref_odd" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci on odd-tarballs"
+p=$(project odd-classic odd-tarballs)
+THINCLONE_STORE=$os env -u THINCLONE_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1
+! same "$ref_odd" "$p" || bad "odd-tarballs: the classic engine was expected to differ (lc-dup/run.sh)"
+p=$(project odd-inject odd-tarballs)
+THINCLONE_STORE=$os install "$p" && [ "$(cloned)" = 2 ] && same "$ref_odd" "$p" \
+  && grep -q "1 store entries made by thinclone's extractor differed from npm's extraction and were replaced (first: .*run.sh: mode 644, the tarball gives 755)" "$work/out" \
+  && ok "a path listed twice: the classic engine's entry is replaced by pacote's before use, tree identical" || bad "odd-tarballs inject: cloned $(cloned)"
 
 # 5. The project is recorded with the entries it cloned, so gc keeps them.
 p=$(project recorded small); install "$p"

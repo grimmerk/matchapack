@@ -57,5 +57,6 @@ jobs:
         run: scripts/test-inject.sh "$RUNNER_TEMP/inject"
       - name: harness on the fixtures, inject engine
         # The same list plus the cases only this engine handles (dep-event,
-        # optional-script-fail, per-file clones); every case must have cloned.
+        # optional-script-fail, per-file clones, odd-tarballs); every case
+        # must have cloned.
         run: THINCLONE_ENGINE=inject scripts/verify-npm.sh --no-record "$RUNNER_TEMP/vi"

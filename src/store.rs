@@ -7,8 +7,12 @@
 //! deleted).
 //!
 //! Also under the store: `sizes/` (cached entry sizes), `projects/` (one
-//! record per installed project, for `thinclone store gc`) and `lock` (held
-//! shared by every install, exclusively by commands that remove entries).
+//! record per installed project, for `thinclone store gc`), `lock` (held
+//! shared by every install, exclusively by commands that remove entries), and
+//! for the inject engine `made-by/` (per entry: the pacote and tar versions
+//! that made it or were last found to extract it the same way) and
+//! `inject-checked` / `inject-strict` (one line per pacote and tar version;
+//! see serve.rs).
 //!
 //! Tarballs come from npm's own content-addressed cache (`~/.npm/_cacache`).
 
@@ -271,6 +275,31 @@ impl Store {
         self.root.join("sizes").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
     }
 
+    fn made_by_file(&self, i: &Integrity) -> PathBuf {
+        self.root.join("made-by").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
+    }
+
+    /// The pacote and tar versions (`pacote@… tar@…`) that extracted this
+    /// entry, or were last found to extract its tarball to the same tree.
+    /// None: made by thinclone's own extractor (the classic engine), or
+    /// before this was recorded.
+    pub fn made_by(&self, i: &Integrity) -> Option<String> {
+        fs::read_to_string(self.made_by_file(i)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    pub fn forget_made_by(&self, i: &Integrity) {
+        let _ = fs::remove_file(self.made_by_file(i));
+    }
+
+    pub fn set_made_by(&self, i: &Integrity, key: &str) -> Result<()> {
+        let f = self.made_by_file(i);
+        fs::create_dir_all(f.parent().unwrap())?;
+        let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
+        fs::write(&tmp, format!("{key}\n"))?;
+        fs::rename(&tmp, &f)?;
+        Ok(())
+    }
+
     /// Sum of the file sizes in a store entry, cached in `<store>/sizes/` (never
     /// inside the entry, which is cloned into projects as a whole).
     pub fn entry_size(&self, i: &Integrity) -> u64 {
@@ -326,6 +355,7 @@ impl Store {
         let trash = self.root.join("tmp").join(format!("{}-gc{seq}", process_tag()));
         fs::rename(&src, &trash).with_context(|| format!("moving {} out of the store", src.display()))?;
         let _ = fs::remove_file(self.size_file(i));
+        let _ = fs::remove_file(self.made_by_file(i));
         fs::remove_dir_all(&trash).with_context(|| format!("removing {}", trash.display()))?;
         Ok(())
     }
@@ -382,16 +412,12 @@ impl Store {
         p.is_file().then_some(p)
     }
 
+    /// The entry for `i`, extracted by thinclone's own extractor from the
+    /// tarball in npm's cache when missing (the classic engine; the inject
+    /// engine's entries are extracted by pacote, serve.rs). The tarball's
+    /// digest is checked against `i` before anything is extracted.
     pub fn ensure(&self, i: &Integrity, url: &str) -> Result<Ensure> {
-        self.ensure_from(&self.cacache, i, url)
-    }
-
-    /// `ensure` with the tarball looked up in the npm content cache at
-    /// `cacache` (the inject engine passes the cache directory of the npm
-    /// that is running, which only that npm knows). The tarball's digest is
-    /// checked against `i` before anything is extracted, so where it was
-    /// read from does not decide what the entry holds.
-    pub fn ensure_from(&self, cacache: &Path, i: &Integrity, url: &str) -> Result<Ensure> {
+        let cacache = &self.cacache;
         let dest = self.dir_for(i);
         match fs::symlink_metadata(&dest) {
             Ok(m) if m.is_dir() => return Ok(Ensure::Present),
@@ -410,7 +436,12 @@ impl Store {
         extract(&data, &tmp.path).with_context(|| format!("extracting {url}"))?;
         fs::create_dir_all(dest.parent().unwrap())?;
         match fs::rename(&tmp.path, &dest) {
-            Ok(()) => Ok(Ensure::Extracted),
+            Ok(()) => {
+                // Made by thinclone's extractor: a record left by an entry
+                // that was here before is not about this one.
+                self.forget_made_by(i);
+                Ok(Ensure::Extracted)
+            }
             Err(_) if dest.is_dir() => {
                 // Another process won the race; its copy is equally valid.
                 let _ = fs::remove_dir_all(&tmp.path);
@@ -447,21 +478,59 @@ impl Store {
         }
         let seq = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
         let fresh = TmpDir::create(self.root.join("tmp").join(format!("{}-v{seq}-{}", process_tag(), &i.hex[..16])), 0o755)?;
-        let r = extract(&data, &fresh.path).with_context(|| format!("extracting {}", tgz.display())).and_then(|()| {
-            let (want, got) = (tree(&fresh.path)?, tree(&dir)?);
-            Ok(match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
-                Some((w, g)) => Check::Differs(describe(w, g)),
-                None if want.len() != got.len() => {
-                    let (longer, what) = if got.len() > want.len() { (&got, "not in the tarball") } else { (&want, "missing") };
-                    let p = &longer[want.len().min(got.len())].0;
-                    Check::Differs(format!("{}: {what}", show_rel(p)))
-                }
+        let r = extract(&data, &fresh.path)
+            .with_context(|| format!("extracting {}", tgz.display()))
+            .and_then(|()| Ok(match compare_trees(&fresh.path, &dir)? {
+                Some(d) => Check::Differs(d),
                 None => Check::Match,
-            })
-        });
+            }));
         let _ = fs::remove_dir_all(&fresh.path);
         r
     }
+
+    /// Forget an entry's cached size (its contents were replaced).
+    pub fn forget_size(&self, i: &Integrity) {
+        let _ = fs::remove_file(self.size_file(i));
+    }
+
+    /// Lines of `<store>/<file>` whose first tab-separated field is `key`
+    /// (the inject engine's `inject-checked` / `inject-blocked`).
+    pub fn key_lines(&self, file: &str, key: &str) -> Vec<String> {
+        fs::read_to_string(self.root.join(file))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.split('\t').next() == Some(key))
+            .map(String::from)
+            .collect()
+    }
+
+    /// Append one line `key<TAB>date<TAB>note` to `<store>/<file>`, in one
+    /// write (O_APPEND), so concurrent installs never interleave lines.
+    pub fn add_key_line(&self, file: &str, key: &str, note: &str) -> Result<PathBuf> {
+        use std::io::Write;
+        let p = self.root.join(file);
+        let note: String = note.chars().map(|c| if c == '\n' || c == '\t' { ' ' } else { c }).collect();
+        let line = format!("{key}\t{}\t{note}\n", crate::trial::now());
+        fs::OpenOptions::new().create(true).append(true).open(&p)?.write_all(line.as_bytes())?;
+        Ok(p)
+    }
+}
+
+/// The first difference between two extracted trees, `want` the reference
+/// (what the tarball extracts to) and `got` the one checked: the same files
+/// (contents, modes), the same directories and nothing else. Directory modes
+/// are not compared (see `verify_entry`). None when they are the same.
+pub fn compare_trees(want: &Path, got: &Path) -> Result<Option<String>> {
+    let (want, got) = (tree(want)?, tree(got)?);
+    Ok(match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
+        Some((w, g)) => Some(describe(w, g)),
+        None if want.len() != got.len() => {
+            let (longer, what) = if got.len() > want.len() { (&got, "not in the tarball") } else { (&want, "missing") };
+            let p = &longer[want.len().min(got.len())].0;
+            Some(format!("{}: {what}", show_rel(p)))
+        }
+        None => None,
+    })
 }
 
 /// One path in a tree: its kind, and for a file its mode and contents' hash.

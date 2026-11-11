@@ -9,7 +9,7 @@
 //! lockfile, removing the old node_modules, scripts, bin links, the hidden
 //! lockfile, the audit.
 
-use crate::serve::Server;
+use crate::serve::{CheckPolicy, Server, CHECKED_FILE};
 use crate::store::Store;
 use crate::{clone, util, wrapper, InstallError, Summary};
 use anyhow::{anyhow, bail, Context, Result};
@@ -54,7 +54,7 @@ const HELPER_DECLINED: i32 = 90;
 
 /// The checks that must hold before npm starts. A refusal changes nothing in
 /// the project, so the caller can run plain npm.
-fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf)> {
+fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy)> {
     let root = std::fs::canonicalize(&o.dir).with_context(|| format!("resolving {}", o.dir.display()))?;
     wrapper::npm_version_gate().map_err(|e| anyhow!(e))?;
     // Clones carry the modes the store was extracted with under umask 022;
@@ -75,7 +75,8 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf)> {
             bail!("npm installation {} has no {m}", npm_dir.display());
         }
     }
-    Ok((root, npm_dir))
+    let policy = CheckPolicy::from_env().map_err(|e| anyhow!(e))?;
+    Ok((root, npm_dir, policy))
 }
 
 /// A hidden-lockfile key that names a package directory inside a
@@ -116,7 +117,7 @@ fn threads() -> usize {
 
 pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
-    let (root, npm_dir) = gates(o).map_err(InstallError::Declined)?;
+    let (root, npm_dir, policy) = gates(o).map_err(InstallError::Declined)?;
     let prepared = (|| -> Result<_> {
         // The shared lock: no entry is removed while npm may ask for it. The
         // cache path is unused: every request names the cache of the npm
@@ -133,7 +134,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         Ok((store, helper, ours, theirs))
     })();
     let (store, helper, ours, theirs) = prepared.map_err(InstallError::Declined)?;
-    let server = match Server::new(&store, root.clone(), o.clone_mode) {
+    let server = match Server::new(&store, root.clone(), o.clone_mode, None, policy) {
         Ok(s) => s,
         Err(e) => {
             let _ = std::fs::remove_file(&helper);
@@ -191,6 +192,10 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let npm_secs = t_npm.elapsed().as_secs_f64();
     let _ = std::fs::remove_file(&helper);
     let stats = std::mem::take(&mut *server.stats.lock().unwrap());
+    // The pacote and tar versions from the hook's hello (what node loaded).
+    let key = server.key();
+    let check_all = server.checks_all();
+    let checks_complete = server.checks_complete();
     drop(server);
 
     let status = match status {
@@ -218,12 +223,14 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let kinds: Vec<String> = stats.kinds.iter().map(|(k, v)| format!("{k} {}", v.0)).collect();
     let falls: Vec<String> = stats.fallbacks.iter().map(|(k, n)| format!("{k} {n}")).collect();
     crate::info!(
-        "inject: cloned {} ({}), extracted by npm {} ({}), {} new in the store; npm {:.2}s, clone requests {:.2}s",
+        "inject: cloned {} ({}), extracted by npm {} ({}), {} new in the store, {} checked against pacote{}; npm {:.2}s, clone requests {:.2}s",
         stats.cloned,
         if kinds.is_empty() { "-".to_string() } else { kinds.join(", ") },
         stats.fallback_total(),
         if falls.is_empty() { "-".to_string() } else { falls.join(", ") },
         stats.filled.len(),
+        stats.checked,
+        if check_all { " (all)" } else { "" },
         npm_secs,
         stats.wall_secs()
     );
@@ -236,7 +243,29 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         let why = stats.errors.iter().find(|e| e.starts_with("clone-unsupported")).map(String::as_str).unwrap_or("clone-unsupported");
         eprintln!("thinclone: no clones from the store here, npm extracted the packages itself ({why})");
     }
+    // Entries that differed from pacote's extraction were replaced and the
+    // packages placed from pacote's: this install is right. What it says
+    // about the store depends on who made them (serve.rs).
+    for (kind, (n, first)) in &stats.differs {
+        match kind.as_str() {
+            // Expected: thinclone's own extractor (the classic engine's)
+            // differs from pacote for some odd tarballs.
+            "extractor" => crate::info!("inject: {n} store entries made by thinclone's extractor differed from npm's extraction and were replaced (first: {})", first[0]),
+            "changed" => eprintln!(
+                "thinclone: {n} store entries had changed since npm's pacote made them; replaced with npm's extraction (first: {})",
+                first[0]
+            ),
+            _ => eprintln!(
+                "thinclone: npm's {key} extracts {n} package(s) differently from store entries an earlier pacote made (first: {}); \
+                 replaced, and from now on every entry an earlier pacote made is compared before use.{}",
+                first[0],
+                if check_all { "" } else { " Not every package of this install was compared: `THINCLONE=0 npm ci` reinstalls with npm alone." }
+            ),
+        }
+    }
     let mut inject = stats.to_json();
+    inject["key"] = serde_json::json!(key);
+    inject["check_all"] = serde_json::json!(check_all);
     if !status.success() {
         // npm reported its own failure (a script, the lockfile, the network);
         // `npm ci` would have failed the same way. Not retried.
@@ -257,6 +286,22 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
                 "thinclone: npm installed {installed} packages, but only {seen} went through thinclone's hook: \
                  this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)"
             );
+        }
+    }
+    // Every entry this install used was compared with pacote's extraction
+    // (or made by it), every check completed, and none made by an earlier
+    // pacote differed: entries of earlier pacotes need only the sampled
+    // checks from now on. Never for versions the hook could not name.
+    if check_all
+        && checks_complete
+        && !stats.differs.contains_key("pacote")
+        && stats.cloned > 0
+        && !key.contains('?')
+        && store.key_lines(CHECKED_FILE, &key).is_empty()
+    {
+        let note = format!("{} compared, {} filled, {}", stats.checked, stats.filled.len(), root.display());
+        if let Err(e) = store.add_key_line(CHECKED_FILE, &key, &note) {
+            crate::info!("could not record {key} in {CHECKED_FILE}: {e:#}");
         }
     }
     let bytes_logical = stats.used.par_iter().map(|i| store.entry_size(i)).sum();
