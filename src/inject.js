@@ -214,17 +214,22 @@ function main () {
     FetcherBase.prototype.extract = hook
   }
 
+  // The pacote and tar this process really loaded: thinclone keys its
+  // checks of the store on them (src/serve.rs).
   let pacoteVersion = null
+  let tarVersion = null
   try {
-    pacoteVersion = require(path.join(path.dirname(require.resolve('pacote', {
+    const pacoteDir = path.dirname(path.dirname(require.resolve('pacote', {
       paths: [path.join(npmDir, 'node_modules', '@npmcli', 'arborist')],
-    })), '..', 'package.json')).version
+    })))
+    pacoteVersion = require(path.join(pacoteDir, 'package.json')).version
+    tarVersion = require(require.resolve('tar/package.json', { paths: [pacoteDir] })).version
   } catch {
-    // only for the log
+    // unknown: every entry is compared, as under a new version
   }
   // From here on npm is running: thinclone reports its exit status as npm's.
   npmStarted = true
-  send({ hello: true, pacote: pacoteVersion, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'on' })
+  send({ hello: true, pacote: pacoteVersion, tar: tarVersion, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'on' })
   process.argv = [process.argv[0], path.join(npmDir, 'bin', 'npm-cli.js'), ...npmArgs]
   require(path.join(npmDir, 'lib', 'cli.js'))(process)
 }

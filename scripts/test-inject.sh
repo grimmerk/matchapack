@@ -69,13 +69,21 @@ else
   bad "hook rules: $(grep '^FAIL' "$work/out" | head -3)"
 fi
 
+# The pacote and tar npm's arborist loads, as node resolves them: what the
+# store records as the maker of the entries it fills.
+want_key=$(node -e "
+const path = require('path')
+const pacoteDir = path.dirname(path.dirname(require.resolve('pacote', { paths: [path.join(process.argv[1], 'node_modules/@npmcli/arborist')] })))
+const tar = require(require.resolve('tar/package.json', { paths: [pacoteDir] })).version
+console.log('pacote@' + require(path.join(pacoteDir, 'package.json')).version + ' tar@' + tar)" "$npm_dir")
+
 # 1. A first install with an empty store: pacote extracts every package into
 #    the store (thinclone's own extractor is not used), then it is cloned.
 #    The hook fired.
 p=$(project small1 small)
 install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(filled)" = "$d_small" ] && [ "$(by_npm)" = 0 ] && same "$ref_small" "$p" \
-  && [ "$(cat "$store/made-by/sha512/"*/* 2>/dev/null | sort -u | wc -l | tr -d ' ')" = 1 ] \
-  && ok "first install: all $n_small packages cloned (the hook fired), $d_small entries filled by pacote and marked so, tree identical" \
+  && [ "$(cat "$store/made-by/sha512/"*/* 2>/dev/null | sort -u)" = "$want_key" ] \
+  && ok "first install: all $n_small packages cloned (the hook fired), $d_small entries filled by pacote and marked $want_key, tree identical" \
   || bad "first install: cloned $(cloned) of $n_small, filled $(filled), by npm $(by_npm)"
 
 # 2. A reinstall over the existing node_modules, with a changed file and a

@@ -54,25 +54,7 @@ const HELPER_DECLINED: i32 = 90;
 
 /// The checks that must hold before npm starts. A refusal changes nothing in
 /// the project, so the caller can run plain npm.
-/// The pacote and tar that npm extracts with, as the hook finds them
-/// (`require` from npm's arborist): `pacote@21.5.1 tar@7.5.22`. The store is
-/// checked against each such pair (serve.rs).
-pub fn extract_key(npm_dir: &std::path::Path) -> String {
-    let version = |d: &std::path::Path| -> Option<String> {
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(d.join("package.json")).ok()?).ok()?;
-        v.get("version")?.as_str().map(String::from)
-    };
-    let nested = npm_dir.join("node_modules/@npmcli/arborist/node_modules/pacote");
-    let pacote = if nested.join("package.json").is_file() { nested } else { npm_dir.join("node_modules/pacote") };
-    let tar = [pacote.join("node_modules/tar"), npm_dir.join("node_modules/tar")].into_iter().find(|d| d.join("package.json").is_file());
-    format!(
-        "pacote@{} tar@{}",
-        version(&pacote).unwrap_or_else(|| "?".into()),
-        tar.and_then(|t| version(&t)).unwrap_or_else(|| "?".into())
-    )
-}
-
-fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, String, CheckPolicy)> {
+fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy)> {
     let root = std::fs::canonicalize(&o.dir).with_context(|| format!("resolving {}", o.dir.display()))?;
     wrapper::npm_version_gate().map_err(|e| anyhow!(e))?;
     // Clones carry the modes the store was extracted with under umask 022;
@@ -94,8 +76,7 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, String, CheckPolicy)> {
         }
     }
     let policy = CheckPolicy::from_env().map_err(|e| anyhow!(e))?;
-    let key = extract_key(&npm_dir);
-    Ok((root, npm_dir, key, policy))
+    Ok((root, npm_dir, policy))
 }
 
 /// A hidden-lockfile key that names a package directory inside a
@@ -136,7 +117,7 @@ fn threads() -> usize {
 
 pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
-    let (root, npm_dir, key, policy) = gates(o).map_err(InstallError::Declined)?;
+    let (root, npm_dir, policy) = gates(o).map_err(InstallError::Declined)?;
     let prepared = (|| -> Result<_> {
         // The shared lock: no entry is removed while npm may ask for it. The
         // cache path is unused: every request names the cache of the npm
@@ -153,7 +134,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         Ok((store, helper, ours, theirs))
     })();
     let (store, helper, ours, theirs) = prepared.map_err(InstallError::Declined)?;
-    let server = match Server::new(&store, root.clone(), o.clone_mode, key.clone(), policy) {
+    let server = match Server::new(&store, root.clone(), o.clone_mode, None, policy) {
         Ok(s) => s,
         Err(e) => {
             let _ = std::fs::remove_file(&helper);
@@ -211,7 +192,10 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let npm_secs = t_npm.elapsed().as_secs_f64();
     let _ = std::fs::remove_file(&helper);
     let stats = std::mem::take(&mut *server.stats.lock().unwrap());
+    // The pacote and tar versions from the hook's hello (what node loaded).
+    let key = server.key();
     let check_all = server.checks_all();
+    let checks_complete = server.checks_complete();
     drop(server);
 
     let status = match status {
@@ -305,9 +289,16 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         }
     }
     // Every entry this install used was compared with pacote's extraction
-    // (or made by it), and none made by an earlier pacote differed: entries
-    // of earlier pacotes need only the sampled checks from now on.
-    if check_all && !stats.differs.contains_key("pacote") && stats.cloned > 0 && store.key_lines(CHECKED_FILE, &key).is_empty() {
+    // (or made by it), every check completed, and none made by an earlier
+    // pacote differed: entries of earlier pacotes need only the sampled
+    // checks from now on. Never for versions the hook could not name.
+    if check_all
+        && checks_complete
+        && !stats.differs.contains_key("pacote")
+        && stats.cloned > 0
+        && !key.contains('?')
+        && store.key_lines(CHECKED_FILE, &key).is_empty()
+    {
         let note = format!("{} compared, {} filled, {}", stats.checked, stats.filled.len(), root.display());
         if let Err(e) = store.add_key_line(CHECKED_FILE, &key, &note) {
             crate::info!("could not record {key} in {CHECKED_FILE}: {e:#}");

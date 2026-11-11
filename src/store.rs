@@ -287,6 +287,10 @@ impl Store {
         fs::read_to_string(self.made_by_file(i)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
 
+    pub fn forget_made_by(&self, i: &Integrity) {
+        let _ = fs::remove_file(self.made_by_file(i));
+    }
+
     pub fn set_made_by(&self, i: &Integrity, key: &str) -> Result<()> {
         let f = self.made_by_file(i);
         fs::create_dir_all(f.parent().unwrap())?;
@@ -432,7 +436,12 @@ impl Store {
         extract(&data, &tmp.path).with_context(|| format!("extracting {url}"))?;
         fs::create_dir_all(dest.parent().unwrap())?;
         match fs::rename(&tmp.path, &dest) {
-            Ok(()) => Ok(Ensure::Extracted),
+            Ok(()) => {
+                // Made by thinclone's extractor: a record left by an entry
+                // that was here before is not about this one.
+                self.forget_made_by(i);
+                Ok(Ensure::Extracted)
+            }
             Err(_) if dest.is_dir() => {
                 // Another process won the race; its copy is equally valid.
                 let _ = fs::remove_dir_all(&tmp.path);
