@@ -1130,6 +1130,7 @@ mod tests {
         let want = listing(&to);
         assert_eq!(placed_full(s.place_extracted(&sri_of(&i), &dst, &to)), (Kind::Fast, true, false, None));
         assert_eq!(listing(&fx.store.dir_for(&i)), want, "pacote's extraction became the entry");
+        assert_eq!(fx.store.made_by(&i).as_deref(), Some(KEY), "and is recorded as made by this pacote");
         assert_eq!(listing(&dst), want);
         assert!(!to.exists(), "renamed into the store");
         assert_eq!(s.stats.lock().unwrap().filled, vec![i.clone()]);
