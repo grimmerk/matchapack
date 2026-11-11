@@ -6,9 +6,9 @@ needs (arborist `optional-set.js`); `lc-s` stays because `lc-r` also needs it.
 Expected node_modules: `lc-r`, `lc-s`.
 
 npm 11 drops such packages while it builds the ideal tree (marks them inert),
-so the tree thinclone takes from npm's dry run already lacks them. npm 10.9
+so the tree matchapack takes from npm's dry run already lacks them. npm 10.9
 decides only when it extracts them, which a dry run never reaches: on npm 10.9.2
-thinclone installed `lc-eng` and `lc-q` here, one reason npm 10 is not in the
+matchapack installed `lc-eng` and `lc-q` here, one reason npm 10 is not in the
 version gate (NOTES, "npm 10").
 
 The tarballs live with the optional-upward fixture (`lc-eng`'s source is in

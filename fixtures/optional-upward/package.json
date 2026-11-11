@@ -1,1 +1,1 @@
-{"name":"thinclone-fixture-optional-upward","version":"1.0.0","private":true,"dependencies":{"lc-r":"http://127.0.0.1:48321/lc-r-1.0.0.tgz"},"optionalDependencies":{"lc-p":"http://127.0.0.1:48321/lc-p-1.0.0.tgz"}}
+{"name":"matchapack-fixture-optional-upward","version":"1.0.0","private":true,"dependencies":{"lc-r":"http://127.0.0.1:48321/lc-r-1.0.0.tgz"},"optionalDependencies":{"lc-p":"http://127.0.0.1:48321/lc-p-1.0.0.tgz"}}

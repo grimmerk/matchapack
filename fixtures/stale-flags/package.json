@@ -1,5 +1,5 @@
 {
-  "name": "thinclone-fixture-small",
+  "name": "matchapack-fixture-small",
   "version": "1.0.0",
   "private": true,
   "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('root-postinstall.txt','ok')\"" },
