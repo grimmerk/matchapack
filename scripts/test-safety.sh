@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Safety tests: a tampered lockfile must never make thinclone delete, clone or
+# Safety tests: a tampered lockfile must never make matchapack delete, clone or
 # write outside the project.   test-safety.sh <work-dir>
 set -uo pipefail
-work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/thinclone
+work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 pass=0; fail=0
 # Run on any npm: a version-gate refusal would pass the "refused" cases vacuously.
-export THINCLONE_NPM_VERSIONS=any
+export MATCHAPACK_NPM_VERSIONS=any
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; }
 
@@ -83,10 +83,10 @@ d=$(setup badint "l['packages']['node_modules/lodash']['integrity']='sha512-'")
 d=$(setup underlink "l['packages']['node_modules/zz']={'resolved':'zz','link':True}; l['packages']['node_modules/zz/evil']=dict(l['packages']['node_modules/lodash'])")
 if "$bin" plan "$d" > "$d.out" 2>&1; then bad "under-link: accepted"; else grep -q 'under a link' "$d.out" && ok "under-link: refused" || bad "under-link: refused for another reason: $(tail -1 "$d.out")"; fi
 
-# 9. The npm version gate holds for `thinclone install` too, before anything
+# 9. The npm version gate holds for `matchapack install` too, before anything
 # in the project changes (not only for the `npm ci` wrapper).
 d=$(setup gate "pass"); mkdir -p "$d/node_modules/keepme"
-THINCLONE_NPM_VERSIONS=0.1 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
+MATCHAPACK_NPM_VERSIONS=0.1 "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; rc=$?
 [ $rc != 0 ] && grep -q 'has not been verified' "$d.out" && [ -d "$d/node_modules/keepme" ] && ok "version-gate: install refused, node_modules untouched" || bad "version-gate: rc=$rc $(tail -1 "$d.out")"
 
 # 9b. A version recorded by scripts/verify-npm.sh (<config dir>/npm-verified)
@@ -99,7 +99,7 @@ printf '#!/bin/sh\nexit 1\n' > "$fake/lib/node_modules/npm/bin/npm-cli.js"; chmo
 ln -s ../lib/node_modules/npm/bin/npm-cli.js "$fake/bin/npm"
 cfg=$work/cfg; mkdir -p "$cfg"; printf '# test\n11.0  # another version\n' > "$cfg/npm-verified"
 d=$(setup gate-file "pass")
-gated() { env -u THINCLONE_NPM_VERSIONS THINCLONE_CONFIG_DIR="$cfg" PATH="$fake/bin:$PATH" "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; grep -q 'npm 99.1.0 has not been verified' "$d.out"; }
+gated() { env -u MATCHAPACK_NPM_VERSIONS MATCHAPACK_CONFIG_DIR="$cfg" PATH="$fake/bin:$PATH" "$bin" install "$d" --no-rebuild > "$d.out" 2>&1; grep -q 'npm 99.1.0 has not been verified' "$d.out"; }
 gated; g1=$?
 printf '99.1  # recorded\n' >> "$cfg/npm-verified"
 gated; g2=$?

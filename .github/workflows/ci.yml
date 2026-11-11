@@ -47,7 +47,7 @@ jobs:
         run: scripts/test-wrapper.sh "$RUNNER_TEMP/wrapper"
       - name: store tests (records, gc, verify, locks)
         run: scripts/test-store.sh "$RUNNER_TEMP/store"
-      - name: harness on the fixtures (npm ci vs thinclone)
+      - name: harness on the fixtures (npm ci vs matchapack)
         # The same cases as the npm upgrade routine, which starts the tarball
         # server, requires byte-identical hidden lockfiles, and runs
         # script-env through the shell function and legacy-peer with
@@ -59,4 +59,4 @@ jobs:
         # The same list plus the cases only this engine handles (dep-event,
         # optional-script-fail, per-file clones, odd-tarballs); every case
         # must have cloned.
-        run: THINCLONE_ENGINE=inject scripts/verify-npm.sh --no-record "$RUNNER_TEMP/vi"
+        run: MATCHAPACK_ENGINE=inject scripts/verify-npm.sh --no-record "$RUNNER_TEMP/vi"

@@ -1,9 +1,9 @@
 // What `npm ci` does after placing the files, in npm's own code and in one
 // process (npm/lib/commands/ci.js and arborist reify):
 //   1. dependency scripts and bin links: npm's rebuild command, for the
-//      packages thinclone placed;
+//      packages matchapack placed;
 //   2. the hidden lockfile (node_modules/.package-lock.json), whose text
-//      thinclone computed: written after the dependency scripts, as reify does,
+//      matchapack computed: written after the dependency scripts, as reify does,
 //      since npm compares its mtime with the package folders;
 //   3. the root project's seven lifecycle events, in ci.js's order, through
 //      npm's @npmcli/run-script (NOT `npm run`, which adds pre/post hooks).
@@ -17,9 +17,9 @@
 // message, code, phase, secs: {rebuild, scripts}}. It is written once with
 // phase "scripts" before the root scripts start: @npmcli/run-script re-raises
 // a signal that killed a script on this process, which then dies without
-// reaching its own status write, and thinclone must still treat that as a
+// reaching its own status write, and matchapack must still treat that as a
 // root script failure (reported, not retried), as npm ci would die with it.
-// All files live in a private (0700) directory thinclone made for this run.
+// All files live in a private (0700) directory matchapack made for this run.
 const path = require('path')
 const fs = require('fs')
 const [npmDir, jobFile] = process.argv.slice(2)

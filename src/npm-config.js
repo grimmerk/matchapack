@@ -46,6 +46,6 @@ const { definitions, flatten, nerfDarts, shorthands } = require(path.join(config
   }
   process.stdout.write(JSON.stringify({ changed, effective }))
 })().catch((e) => {
-  process.stderr.write(`thinclone npm-config helper: ${e && e.message ? e.message : e}\n`)
+  process.stderr.write(`matchapack npm-config helper: ${e && e.message ? e.message : e}\n`)
   process.exit(1)
 })

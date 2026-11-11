@@ -4,9 +4,9 @@
 #   test-store.sh <work-dir>
 # Uses its own store and log directory, never the real ones.
 set -uo pipefail
-work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/thinclone
+work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
-export THINCLONE_NPM_VERSIONS=any THINCLONE_STORE=$work/store THINCLONE_LOG_DIR=$work/logs
+export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs
 store=$work/store
 # moved-entry: left by the last case; a third run over the same work
 # directory failed on it (the `mv` into it found a non-empty directory).
@@ -111,12 +111,12 @@ python3 -c "import json;p='$p5/package.json';d=json.load(open(p));d['scripts']['
 p6=$(project p6)
 hold "$store/lock" ex
 "$bin" install "$p6" --no-rebuild > "$work/out" 2>&1 & inst=$!
-for _ in $(seq 1200); do grep -q 'waiting for a `thinclone store` command' "$work/out" 2>/dev/null && break; sleep 0.05; done
+for _ in $(seq 1200); do grep -q 'waiting for a `matchapack store` command' "$work/out" 2>/dev/null && break; sleep 0.05; done
 sleep 1   # time it would need to get past the lock if it did not wait
 kill -0 "$inst" 2>/dev/null && waited=yes || waited=no
 release
 wait "$inst"; rc=$?
-[ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `thinclone store` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
+[ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `matchapack store` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
 
 # 12. An entry replaced by a symlink: verify reports it, --fix removes it,
 #     and an install never clones it (it goes to npm instead of placing a link).

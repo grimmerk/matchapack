@@ -4,11 +4,11 @@
 #   reaches Claude Code worktrees at <repo>/.claude/worktrees/<name>/)
 # Finds npm projects (package.json + package-lock.json + node_modules, not
 # inside node_modules) under each root and re-installs each one with
-# `thinclone npm ci`, i.e. npm ci semantics: node_modules is rebuilt and its
+# `matchapack npm ci`, i.e. npm ci semantics: node_modules is rebuilt and its
 # install scripts run again. Without --apply it only lists what it would do.
 #
 # Skipped, and left exactly as they are:
-#   - projects thinclone would not handle (it reports why; THINCLONE_NO_FALLBACK=1
+#   - projects matchapack would not handle (it reports why; MATCHAPACK_NO_FALLBACK=1
 #     keeps it from falling back to a plain npm ci, which would gain nothing);
 #   - projects where a running process has its working directory inside the
 #     project (a dev server, a watcher, a shell), so nothing in use is replaced.
@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ ${#roots[@]} -gt 0 ] || { echo "usage: $0 [--apply] [--max-depth N] <root>..." >&2; exit 2; }
-command -v thinclone >/dev/null || { echo "thinclone is not on PATH" >&2; exit 2; }
+command -v matchapack >/dev/null || { echo "matchapack is not on PATH" >&2; exit 2; }
 
 # lsof reports real paths (/private/tmp, resolved symlinks): compare like with like.
 for i in "${!roots[@]}"; do roots[$i]=$(cd "${roots[$i]}" && pwd -P) || exit 2; done
@@ -68,14 +68,14 @@ EOF
     echo "CANDIDATE        $dir"; continue
   fi
   # Copy-on-write backup outside the repository, restored if the install fails.
-  bk="$HOME/.cache/thinclone/backup/$(printf '%s' "$dir" | shasum | cut -c1-16)"
+  bk="$HOME/.cache/matchapack/backup/$(printf '%s' "$dir" | shasum | cut -c1-16)"
   rm -rf "${bk:?}"; mkdir -p "$(dirname "$bk")"
   cp -c -R "$dir/node_modules" "$bk" 2>/dev/null || cp -a --reflink=auto "$dir/node_modules" "$bk"
-  out=$(cd "$dir" && THINCLONE_NO_FALLBACK=1 thinclone npm ci --no-audit --no-fund 2>&1); rc=$?
+  out=$(cd "$dir" && MATCHAPACK_NO_FALLBACK=1 matchapack npm ci --no-audit --no-fund 2>&1); rc=$?
   case $rc in
-    0) echo "CONVERTED        $dir  ($(printf '%s\n' "$out" | grep -o 'thinclone: added.*' | sed 's/^thinclone: //'))"; n_conv=$((n_conv+1)); rm -rf "${bk:?}" ;;
+    0) echo "CONVERTED        $dir  ($(printf '%s\n' "$out" | grep -o 'matchapack: added.*' | sed 's/^matchapack: //'))"; n_conv=$((n_conv+1)); rm -rf "${bk:?}" ;;
     3) echo "SKIP not handled $dir  ($(printf '%s\n' "$out" | grep -o 'not handled, left unchanged.*' | sed 's/^not handled, left unchanged //'))"; n_skip=$((n_skip+1)); rm -rf "${bk:?}" ;;
-    *) echo "FAILED (rc=$rc)  $dir  (previous node_modules restored)"; printf '%s\n' "$out" | grep -E 'thinclone|npm error' | head -3 | sed 's/^/    /'; n_fail=$((n_fail+1))
+    *) echo "FAILED (rc=$rc)  $dir  (previous node_modules restored)"; printf '%s\n' "$out" | grep -E 'matchapack|npm error' | head -3 | sed 's/^/    /'; n_fail=$((n_fail+1))
        rm -rf "${dir:?}/node_modules"; mv "$bk" "$dir/node_modules" ;;
   esac
 # -prune: never descend into node_modules or .git (a -not -path filter would
@@ -87,5 +87,5 @@ if [ $apply = 1 ]; then
   after=$(free_kb "${roots[0]}")
   echo "converted $n_conv, skipped $n_skip, failed $n_fail; free space $((before/1048576)) GiB → $((after/1048576)) GiB"
 else
-  echo "dry run: nothing changed. Candidates thinclone cannot handle are found and skipped at --apply."
+  echo "dry run: nothing changed. Candidates matchapack cannot handle are found and skipped at --apply."
 fi

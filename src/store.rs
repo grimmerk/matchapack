@@ -7,7 +7,7 @@
 //! deleted).
 //!
 //! Also under the store: `sizes/` (cached entry sizes), `projects/` (one
-//! record per installed project, for `thinclone store gc`), `lock` (held
+//! record per installed project, for `matchapack store gc`), `lock` (held
 //! shared by every install, exclusively by commands that remove entries), and
 //! for the inject engine `made-by/` (per entry: the pacote and tar versions
 //! under which it is known to be what pacote extracts; see serve.rs).
@@ -249,7 +249,7 @@ impl Store {
             match flock_retry(&lf, libc::LOCK_SH | libc::LOCK_NB) {
                 Ok(()) => Some(lf),
                 Err(e) if would_block(&e) => {
-                    eprintln!("thinclone: waiting for a `thinclone store` command to release the store");
+                    eprintln!("matchapack: waiting for a `matchapack store` command to release the store");
                     flock_retry(&lf, libc::LOCK_SH).context("waiting for the store lock")?;
                     Some(lf)
                 }
@@ -280,7 +280,7 @@ impl Store {
     /// The pacote and tar versions (`pacote@… tar@…`, one per line) under
     /// which this entry is known to be what pacote extracts: the one that
     /// made it, and every one that later extracted its tarball to the same
-    /// tree. Empty: made by thinclone's own extractor (the classic engine),
+    /// tree. Empty: made by matchapack's own extractor (the classic engine),
     /// or before this was recorded.
     pub fn made_by(&self, i: &Integrity) -> Vec<String> {
         fs::read_to_string(self.made_by_file(i))
@@ -427,7 +427,7 @@ impl Store {
     }
 
     /// Record which entries the project at `root` (canonical) was installed
-    /// from, for `thinclone store gc`. Replaces the project's earlier record.
+    /// from, for `matchapack store gc`. Replaces the project's earlier record.
     pub fn record_project(&self, root: &Path, used: &[Integrity]) -> Result<()> {
         let mut keys: Vec<String> = used.iter().map(Integrity::key).collect();
         keys.sort();
@@ -435,7 +435,7 @@ impl Store {
         let rec = serde_json::json!({
             "path": root,
             "ts": crate::trial::now(),
-            "build": env!("THINCLONE_BUILD"),
+            "build": env!("MATCHAPACK_BUILD"),
             "entries": keys,
         });
         let f = self.project_file(root);
@@ -472,7 +472,7 @@ impl Store {
         p.is_file().then_some(p)
     }
 
-    /// The entry for `i`, extracted by thinclone's own extractor from the
+    /// The entry for `i`, extracted by matchapack's own extractor from the
     /// tarball in npm's cache when missing (the classic engine; the inject
     /// engine's entries are extracted by pacote, serve.rs). The tarball's
     /// digest is checked against `i` before anything is extracted.
@@ -482,7 +482,7 @@ impl Store {
         match fs::symlink_metadata(&dest) {
             Ok(m) if m.is_dir() => return Ok(Ensure::Present),
             // A directory clone of a symlink places the symlink, not a package.
-            Ok(_) => bail!("store entry {} is not a directory; `thinclone store verify --fix` removes it", dest.display()),
+            Ok(_) => bail!("store entry {} is not a directory; `matchapack store verify --fix` removes it", dest.display()),
             Err(_) => {}
         }
         let Some(tgz) = self.find_tarball(cacache, i, Some(url)) else { return Ok(Ensure::Missing) };
@@ -501,7 +501,7 @@ impl Store {
         let excl = self.entry_lock(i, true)?;
         let renamed = rename_noreplace(&tmp.path, &dest);
         if renamed.is_ok() {
-            // Made by thinclone's extractor: a record left by an entry that
+            // Made by matchapack's extractor: a record left by an entry that
             // was here before is not about this one.
             self.forget_made_by(i);
         }
@@ -789,7 +789,7 @@ pub(crate) mod tests {
     /// A fresh directory under the system temp dir, removed first if a
     /// previous run left it.
     pub fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("thinclone-test-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("matchapack-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

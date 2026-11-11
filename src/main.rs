@@ -23,7 +23,7 @@ use std::time::Instant;
 use store::{Ensure, Integrity, Store};
 
 #[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("THINCLONE_BUILD"), ")"), about = "Materialize node_modules from package-lock.json with copy-on-write clones")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MATCHAPACK_BUILD"), ")"), about = "Materialize node_modules from package-lock.json with copy-on-write clones")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -35,7 +35,7 @@ enum Cmd {
     Install {
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// Store root (default $THINCLONE_STORE or ~/.cache/thinclone/store).
+        /// Store root (default $MATCHAPACK_STORE or ~/.cache/matchapack/store).
         #[arg(long)]
         store: Option<PathBuf>,
         /// npm content cache (default ~/.npm/_cacache).
@@ -54,28 +54,28 @@ enum Cmd {
         /// Skip the npm rebuild step entirely (no scripts, no bin links).
         #[arg(long)]
         no_rebuild: bool,
-        /// With THINCLONE_ENGINE=inject: arguments for npm's own `npm ci`,
-        /// after `--` (e.g. `thinclone install . -- --no-audit --omit=dev`).
+        /// With MATCHAPACK_ENGINE=inject: arguments for npm's own `npm ci`,
+        /// after `--` (e.g. `matchapack install . -- --no-audit --omit=dev`).
         #[arg(last = true)]
         npm_args: Vec<String>,
     },
     /// Stand in for `npm <args>`: handle a bare `npm ci` from the store when it
     /// is safe to, otherwise run the real npm with the same arguments. Meant to
-    /// be called by the shell wrapper (shell/thinclone.sh).
+    /// be called by the shell wrapper (shell/matchapack.sh).
     Npm {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Print the shell integration for an rc file (routes a bare `npm ci` through thinclone)
+    /// Print the shell integration for an rc file (routes a bare `npm ci` through matchapack)
     ///
-    /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts thinclone on
+    /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts matchapack on
     /// PATH (otherwise the guard skips it silently):
     ///
-    ///     command -v thinclone >/dev/null && eval "$(thinclone init)"
+    ///     command -v matchapack >/dev/null && eval "$(matchapack init)"
     ///
     /// fish: ~/.config/fish/config.fish:
     ///
-    ///     type -q thinclone; and thinclone init | source
+    ///     type -q matchapack; and matchapack init | source
     ///
     /// Without SHELL, the shell that runs the command (the parent process) is
     /// used; name it to be explicit.
@@ -110,7 +110,7 @@ enum Cmd {
     },
     /// Print the store location and size; maintain it (gc, verify).
     Store {
-        /// Store root (default $THINCLONE_STORE or ~/.cache/thinclone/store).
+        /// Store root (default $MATCHAPACK_STORE or ~/.cache/matchapack/store).
         #[arg(long, global = true)]
         store: Option<PathBuf>,
         #[command(subcommand)]
@@ -152,8 +152,8 @@ fn home() -> PathBuf {
 }
 
 fn default_store(s: Option<PathBuf>) -> PathBuf {
-    s.or_else(|| std::env::var_os("THINCLONE_STORE").map(PathBuf::from))
-        .unwrap_or_else(|| home().join(".cache/thinclone/store"))
+    s.or_else(|| std::env::var_os("MATCHAPACK_STORE").map(PathBuf::from))
+        .unwrap_or_else(|| home().join(".cache/matchapack/store"))
 }
 
 fn default_clone_mode() -> clone::Mode {
@@ -222,7 +222,7 @@ pub enum InstallError {
     Declined(anyhow::Error),
     /// A lifecycle script failed; `npm ci` would have failed the same way.
     Scripts(anyhow::Error),
-    /// thinclone itself failed after node_modules was changed.
+    /// matchapack itself failed after node_modules was changed.
     Broke(anyhow::Error),
     /// Inject engine: npm ran and exited with this status, having reported
     /// the failure itself; `npm ci` would have failed the same way.
@@ -265,10 +265,10 @@ fn prepare(o: &InstallOpts) -> Result<Prepared> {
         let plan = npm::build_plan(&lf, ideal.as_ref().map(|i| &i.paths))?;
         Ok((lf, plan))
     })?;
-    info!("{} lockfile entries skipped on this platform (THINCLONE_VERBOSE=1 lists them)", plan.skipped.len());
-    if std::env::var_os("THINCLONE_VERBOSE").is_some() {
+    info!("{} lockfile entries skipped on this platform (MATCHAPACK_VERBOSE=1 lists them)", plan.skipped.len());
+    if std::env::var_os("MATCHAPACK_VERBOSE").is_some() {
         for (p, why) in &plan.skipped {
-            eprintln!("[thinclone] skip {p}: {why}");
+            eprintln!("[matchapack] skip {p}: {why}");
         }
     }
     let n = timed("resolve name@version entries", || resolve::resolve(&mut plan, &root, &o.cacache))?;
@@ -430,11 +430,11 @@ fn remove_paths_par(paths: Vec<PathBuf>) -> Result<()> {
     paths.par_iter().try_for_each(|p| remove_path(p))
 }
 
-/// Every directory thinclone will empty or write into must really be inside
+/// Every directory matchapack will empty or write into must really be inside
 /// the project. The lockfile paths are plain relative names (checked when the
 /// plan is built), but a directory on the way can be a symlink: the project's
 /// node_modules, a workspace directory, a `file:` dependency directory. Below
-/// `<dir>/node_modules` everything is emptied and recreated by thinclone, so
+/// `<dir>/node_modules` everything is emptied and recreated by matchapack, so
 /// checking each `<dir>` (its real path inside the project) and its
 /// node_modules (not a symlink) covers every write. In-project link targets
 /// are checked too even when nothing is placed under them: `npm rebuild`
@@ -478,7 +478,7 @@ fn check_real_paths(root: &Path, plan: &plan::Plan) -> Result<()> {
         }
         let nm = dir.join("node_modules");
         if std::fs::symlink_metadata(&nm).is_ok_and(|m| m.file_type().is_symlink()) {
-            bail!("{}/node_modules is a symlink; npm ci replaces it, thinclone does not", show(b));
+            bail!("{}/node_modules is a symlink; npm ci replaces it, matchapack does not", show(b));
         }
     }
     Ok(())
@@ -490,9 +490,9 @@ fn show(base: &str) -> &str {
 
 const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
 
-/// The shell `thinclone init` was started from: its parent process. In
-/// `eval "$(thinclone init)"` that is the zsh or bash reading the rc file, in
-/// `thinclone init | source` the fish. Not $SHELL, which names the login shell
+/// The shell `matchapack init` was started from: its parent process. In
+/// `eval "$(matchapack init)"` that is the zsh or bash reading the rc file, in
+/// `matchapack init | source` the fish. Not $SHELL, which names the login shell
 /// even inside another one.
 fn parent_shell() -> Option<&'static str> {
     let ppid = std::os::unix::process::parent_id();
@@ -520,7 +520,7 @@ pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError
         })
         .collect();
     if let Err(e) = store.record_project(&root, &used) {
-        info!("could not record the project for `thinclone store gc`: {e:#}");
+        info!("could not record the project for `matchapack store gc`: {e:#}");
     }
     let rebuild = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: o.ignore_scripts, npm_args: o.npm_args.clone() };
     let post: Option<&dyn PostInstall> = if o.no_rebuild { None } else { Some(&rebuild) };
@@ -568,13 +568,13 @@ fn main() -> Result<()> {
         {
             // npm does the whole install; these belong to the classic engine.
             if no_rebuild {
-                bail!("--no-rebuild is not available with THINCLONE_ENGINE=inject (npm ci runs as a whole)");
+                bail!("--no-rebuild is not available with MATCHAPACK_ENGINE=inject (npm ci runs as a whole)");
             }
             if mtime != clone::Mtime::Now {
-                bail!("--mtime keep is not available with THINCLONE_ENGINE=inject");
+                bail!("--mtime keep is not available with MATCHAPACK_ENGINE=inject");
             }
             if npm_cache.is_some() {
-                info!("--npm-cache is ignored with THINCLONE_ENGINE=inject: npm's own cache setting decides");
+                info!("--npm-cache is ignored with MATCHAPACK_ENGINE=inject: npm's own cache setting decides");
             }
             let mut npm_args = vec!["ci".to_string()];
             if ignore_scripts {
@@ -593,7 +593,7 @@ fn main() -> Result<()> {
         }
         Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild, npm_args } => {
             if !npm_args.is_empty() {
-                bail!("arguments for npm (after --) need THINCLONE_ENGINE=inject; the classic engine reads npm's settings from its config");
+                bail!("arguments for npm (after --) need MATCHAPACK_ENGINE=inject; the classic engine reads npm's settings from its config");
             }
             let o = InstallOpts {
                 dir,
@@ -619,16 +619,16 @@ fn main() -> Result<()> {
                 Some(s) => s,
                 None => parent_shell().map(String::from).with_context(|| {
                     format!(
-                        "could not tell which shell runs this; name it: thinclone init <{}>\n  \
-                         zsh (~/.zshrc) / bash (~/.bashrc): command -v thinclone >/dev/null && eval \"$(thinclone init zsh)\"\n  \
-                         fish (~/.config/fish/config.fish): type -q thinclone; and thinclone init fish | source",
+                        "could not tell which shell runs this; name it: matchapack init <{}>\n  \
+                         zsh (~/.zshrc) / bash (~/.bashrc): command -v matchapack >/dev/null && eval \"$(matchapack init zsh)\"\n  \
+                         fish (~/.config/fish/config.fish): type -q matchapack; and matchapack init fish | source",
                         INIT_SHELLS.join("|")
                     )
                 })?,
             };
             // The files in shell/ are the one definition; the binary carries
             // them so the rc line needs no checkout of this repository.
-            print!("{}", if shell == "fish" { include_str!("../shell/thinclone.fish") } else { include_str!("../shell/thinclone.sh") });
+            print!("{}", if shell == "fish" { include_str!("../shell/matchapack.fish") } else { include_str!("../shell/matchapack.sh") });
         }
         Cmd::Plan { dir } => {
             let root = std::fs::canonicalize(&dir)?;
@@ -741,7 +741,7 @@ fn main() -> Result<()> {
                             }
                             println!("removed {} entries; the next install that needs one re-extracts it", bad.len());
                         } else {
-                            println!("`thinclone store verify --fix` removes them (the next install re-extracts them)");
+                            println!("`matchapack store verify --fix` removes them (the next install re-extracts them)");
                             std::process::exit(1);
                         }
                     }

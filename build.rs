@@ -1,4 +1,4 @@
-// Embeds the git commit this binary was built from (THINCLONE_BUILD), so the
+// Embeds the git commit this binary was built from (MATCHAPACK_BUILD), so the
 // trial logs can tell binaries apart: `<short sha>`, `<short sha>-dirty` when
 // tracked files had uncommitted changes, or `unknown` outside a git checkout
 // (for example a build from a crates.io package).
@@ -17,7 +17,7 @@ fn main() {
         }
         _ => "unknown".to_string(),
     };
-    println!("cargo:rustc-env=THINCLONE_BUILD={build}");
+    println!("cargo:rustc-env=MATCHAPACK_BUILD={build}");
     // Recompute when HEAD moves or the index changes (a commit, a checkout,
     // staging). Ask git where those files are: in a worktree `.git` is a file,
     // HEAD and index live in the worktree's own git dir, refs in the common

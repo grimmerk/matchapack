@@ -1,4 +1,4 @@
-//! `thinclone npm <args>`: what the shell wrapper calls instead of npm.
+//! `matchapack npm <args>`: what the shell wrapper calls instead of npm.
 //!
 //! Only a bare `npm ci` (or one of its aliases, with output-only flags) is a
 //! candidate. Everything else, and every candidate that fails a check, runs the
@@ -7,10 +7,10 @@
 //!   - npm's version is one the harness was run against (VERIFIED_NPM);
 //!   - no npm setting changes the shape of the tree (omit, install-strategy, …);
 //!   - the project has package.json + package-lock.json and no shrinkwrap;
-//!   - thinclone's own prepare step succeeds (lockfile support, sync, store,
+//!   - matchapack's own prepare step succeeds (lockfile support, sync, store,
 //!     reflink probe).
 //! After node_modules has been changed: a failing lifecycle script is reported
-//! as npm would report it; any other thinclone failure hands over to npm, whose
+//! as npm would report it; any other matchapack failure hands over to npm, whose
 //! `npm ci` wipes and rebuilds node_modules.
 
 use crate::{clone, trial, util, InstallError, InstallOpts};
@@ -25,7 +25,7 @@ const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "is
 /// plain npm until the harness has been re-run: scripts/verify-npm.sh runs it
 /// on the npm on PATH and, when every case is identical, records the version
 /// in `<config dir>/npm-verified`, which is read as well (override:
-/// THINCLONE_NPM_VERSIONS = comma list, or `any`).
+/// MATCHAPACK_NPM_VERSIONS = comma list, or `any`).
 const VERIFIED_NPM: &[&str] = &["11.19", "11.17"];
 
 /// Flags that change only npm's output or network policy, never the tree.
@@ -44,7 +44,7 @@ const PASSIVE_FLAGS: [&str; 11] = [
 ];
 
 pub fn run(args: Vec<String>) -> i32 {
-    if std::env::var("THINCLONE").as_deref() == Ok("0") {
+    if std::env::var("MATCHAPACK").as_deref() == Ok("0") {
         return exec_npm(&args);
     }
     if !args.first().is_some_and(|a| CI_ALIASES.contains(&a.as_str())) {
@@ -77,7 +77,7 @@ pub fn run(args: Vec<String>) -> i32 {
         }
     };
     util::set_quiet(true);
-    eprintln!("thinclone: npm ci from the store (THINCLONE=0 npm ci for plain npm)");
+    eprintln!("matchapack: npm ci from the store (MATCHAPACK=0 npm ci for plain npm)");
     // A panic must not skip the fallback: npm ci rebuilds node_modules from
     // whatever state it is in.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::run_install(&opts)));
@@ -87,7 +87,7 @@ pub fn run(args: Vec<String>) -> i32 {
     };
     match outcome {
         Ok(s) => {
-            eprintln!("thinclone: added {} packages from the store in {:.1}s", s.placed, s.secs);
+            eprintln!("matchapack: added {} packages from the store in {:.1}s", s.placed, s.secs);
             log(
                 "installed",
                 json!({ "secs": s.secs, "packages": s.placed, "store_new": s.store_new,
@@ -101,12 +101,12 @@ pub fn run(args: Vec<String>) -> i32 {
         }
         Err(InstallError::Scripts(e)) => {
             log("script_failed", json!({ "reason": one_line(&e) }));
-            eprintln!("thinclone: {e:#}");
+            eprintln!("matchapack: {e:#}");
             1
         }
         Err(InstallError::Broke(e)) => {
             log("broke", json!({ "reason": one_line(&e) }));
-            eprintln!("thinclone: failed after changing node_modules ({}); running npm ci to rebuild it", one_line(&e));
+            eprintln!("matchapack: failed after changing node_modules ({}); running npm ci to rebuild it", one_line(&e));
             exec_npm(&args)
         }
         // Only the inject engine returns this.
@@ -115,7 +115,7 @@ pub fn run(args: Vec<String>) -> i32 {
 }
 
 /// `npm ci` through the inject engine: npm itself runs, with the user's
-/// arguments unchanged; thinclone declines only what it must know before
+/// arguments unchanged; matchapack declines only what it must know before
 /// npm starts.
 fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
     let opts = match decide_inject(args) {
@@ -126,7 +126,7 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
         }
     };
     util::set_quiet(true);
-    eprintln!("thinclone: npm ci with clones from the store (THINCLONE=0 npm ci for plain npm)");
+    eprintln!("matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm)");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::inject::run(&opts)));
     let outcome = match outcome {
         Ok(o) => o,
@@ -136,7 +136,7 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
         Ok(s) => {
             let by_npm = s.inject.as_ref().and_then(|i| i["fallbacks"].as_object()).map(|m| m.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);
             eprintln!(
-                "thinclone: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})",
+                "matchapack: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})",
                 s.placed, s.secs
             );
             log(
@@ -157,13 +157,13 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
         }
         Err(InstallError::Scripts(e)) | Err(InstallError::Broke(e)) => {
             log("broke", json!({ "engine": "inject", "reason": one_line(&e) }));
-            eprintln!("thinclone: failed while npm was running ({}); running npm ci to rebuild node_modules", one_line(&e));
+            eprintln!("matchapack: failed while npm was running ({}); running npm ci to rebuild node_modules", one_line(&e));
             exec_npm(args)
         }
     }
 }
 
-/// What thinclone must know before npm starts, for the inject engine. npm's
+/// What matchapack must know before npm starts, for the inject engine. npm's
 /// flags and settings are npm's to read: whatever they make it install, the
 /// hook replaces only extractions it can reproduce exactly.
 fn decide_inject(args: &[String]) -> Result<crate::inject::InjectOpts, String> {
@@ -185,7 +185,7 @@ fn decide_inject(args: &[String]) -> Result<crate::inject::InjectOpts, String> {
     // directory. Without a lockfile here either `npm ci` refuses, or this is
     // a workspace of a monorepo and npm installs into the root's
     // node_modules, outside this directory: nothing could be cloned
-    // (grimmerk/thinclone#36 for doing better).
+    // (grimmerk/matchapack-private#36 for doing better).
     if !cwd.join("package.json").is_file() {
         return Err("no package.json in this directory".into());
     }
@@ -201,15 +201,15 @@ fn decide_inject(args: &[String]) -> Result<crate::inject::InjectOpts, String> {
     })
 }
 
-/// thinclone will not handle this install and nothing has been changed. Run
-/// plain npm, unless THINCLONE_NO_FALLBACK=1 (scripts/convert-existing.sh):
+/// matchapack will not handle this install and nothing has been changed. Run
+/// plain npm, unless MATCHAPACK_NO_FALLBACK=1 (scripts/convert-existing.sh):
 /// then report and exit 3, leaving the existing node_modules as it is.
 fn decline(args: &[String], reason: &str) -> i32 {
-    if std::env::var("THINCLONE_NO_FALLBACK").as_deref() == Ok("1") {
-        eprintln!("thinclone: not handled, left unchanged ({reason})");
+    if std::env::var("MATCHAPACK_NO_FALLBACK").as_deref() == Ok("1") {
+        eprintln!("matchapack: not handled, left unchanged ({reason})");
         return 3;
     }
-    eprintln!("thinclone: running plain npm instead ({reason})");
+    eprintln!("matchapack: running plain npm instead ({reason})");
     exec_npm(args)
 }
 
@@ -223,12 +223,12 @@ fn one_line(e: &anyhow::Error) -> String {
     }
 }
 
-/// Replace this process with the real npm. `THINCLONE=0` keeps any wrapper
+/// Replace this process with the real npm. `MATCHAPACK=0` keeps any wrapper
 /// from routing back here.
 fn exec_npm(args: &[String]) -> i32 {
     util::remove_run_dir();
-    let err = Command::new("npm").args(args).env("THINCLONE", "0").exec();
-    eprintln!("thinclone: could not start npm: {err}");
+    let err = Command::new("npm").args(args).env("MATCHAPACK", "0").exec();
+    eprintln!("matchapack: could not start npm: {err}");
     127
 }
 
@@ -240,7 +240,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
             ignore_scripts = true;
         } else if a == "--legacy-peer-deps" {
             // Changes npm's ideal tree (peer dependencies are not installed);
-            // every npm thinclone starts gets it, so the dry-run follows it.
+            // every npm matchapack starts gets it, so the dry-run follows it.
             util::set_npm_config("legacy-peer-deps", "true");
         } else if a == "--loglevel" {
             it.next();
@@ -275,7 +275,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         .collect();
     if !unknown.is_empty() {
         unknown.sort();
-        return Err(format!("npm config not on thinclone's list of settings known to be safe: {}", unknown.join(", ")));
+        return Err(format!("npm config not on matchapack's list of settings known to be safe: {}", unknown.join(", ")));
     }
     // Second gate: the effective values, defaults included (NODE_ENV=production
     // makes `omit` default to dev without any setting being changed).
@@ -293,7 +293,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
     // runs applies it (measured: an engines mismatch fails it with EBADENGINE,
     // which hands over to npm; a project whose engines match is installed).
     // legacy-peer-deps is not refused: npm's own dry-run builds the ideal tree
-    // with it (from .npmrc, the environment or the flag above), and thinclone
+    // with it (from .npmrc, the environment or the flag above), and matchapack
     // installs that tree.
     for k in ["global-style", "legacy-bundling", "strict-peer-deps", "force", "dry-run", "global", "install-links"] {
         if is_true(k) {
@@ -322,7 +322,7 @@ fn decide(args: &[String]) -> Result<InstallOpts, String> {
         return Err("npm config strict-allow-scripts=true".into());
     }
     // Source policies: npm refuses (or leaves out) packages from these sources
-    // when restricted; thinclone does not apply them.
+    // when restricted; matchapack does not apply them.
     for k in ["allow-remote", "allow-directory", "allow-file", "allow-git"] {
         if get(k).as_str().is_some_and(|v| v != "all") {
             return Err(format!("npm config {k}={}", get(k)));
@@ -365,7 +365,7 @@ pub fn process_umask() -> u32 {
 }
 
 /// npm settings that, changed from their default, leave `npm ci`'s result as
-/// thinclone reproduces it. Anything else npm defines hands over to npm.
+/// matchapack reproduces it. Anything else npm defines hands over to npm.
 const SAFE_CONFIG: &[&str] = &[
     // registry, network, credentials, cache
     "registry", "scope", "_auth", "auth-type", "otp", "cache", "cache-max", "cache-min", "prefer-offline",
@@ -375,7 +375,7 @@ const SAFE_CONFIG: &[&str] = &[
     // output only
     "loglevel", "logs-dir", "logs-max", "progress", "color", "unicode", "timing", "heading", "audit",
     "audit-level", "fund", "update-notifier", "foreground-scripts", "usage", "yes",
-    // handled: thinclone follows npm (its own dry-run, npm rebuild, npm's
+    // handled: matchapack follows npm (its own dry-run, npm rebuild, npm's
     // script runner): scripts on or off, peer handling, engines, release age
     "ignore-scripts", "legacy-peer-deps", "engine-strict", "min-release-age", "min-release-age-exclude",
     "script-shell", "node-gyp", "shell",
@@ -421,10 +421,10 @@ fn npm_config(cwd: &std::path::Path) -> Result<Value, String> {
 
 /// The npm on PATH must be a version the harness was run against. Checked
 /// here first (before reading npm's config) and again in `prepare`, so a
-/// direct `thinclone install` is held to the same rule.
+/// direct `matchapack install` is held to the same rule.
 pub fn npm_version_gate() -> Result<(), String> {
     let version = util::npm_version().ok_or("could not determine the npm version")?;
-    let allowed = std::env::var("THINCLONE_NPM_VERSIONS").ok();
+    let allowed = std::env::var("MATCHAPACK_NPM_VERSIONS").ok();
     let ok = match allowed.as_deref() {
         Some("any") => true,
         Some(list) => list.split(',').any(|v| version_matches(&version, v.trim())),
@@ -446,17 +446,17 @@ pub fn npm_version_gate() -> Result<(), String> {
 /// install under a new pacote/tar version compares every store entry it uses
 /// with pacote's extraction; npm placing packages the hook never saw is
 /// reported). A major is listed once the inject harness has run on it
-/// (`THINCLONE_ENGINE=inject scripts/verify-npm.sh`, `scripts/test-inject.sh`):
+/// (`MATCHAPACK_ENGINE=inject scripts/verify-npm.sh`, `scripts/test-inject.sh`):
 /// 10 (10.8.2 and 10.9.2, also a 3-workspace project; NOTES), 11 (11.17–11.20
 /// in use), 12 (12.2.2).
 pub const INJECT_NPM_MAJORS: &[u32] = &[10, 11, 12];
 
-/// The inject engine's version gate: THINCLONE_NPM_VERSIONS when set (`any`, or
+/// The inject engine's version gate: MATCHAPACK_NPM_VERSIONS when set (`any`, or
 /// a list as for the classic engine), otherwise the majors above. Separate
 /// from the classic engine's list of verified minors, which it does not need.
 pub fn inject_npm_version_gate() -> Result<(), String> {
     let version = util::npm_version().ok_or("could not determine the npm version")?;
-    inject_version_allowed(&version, std::env::var("THINCLONE_NPM_VERSIONS").ok().as_deref())
+    inject_version_allowed(&version, std::env::var("MATCHAPACK_NPM_VERSIONS").ok().as_deref())
 }
 
 fn inject_version_allowed(version: &str, allowed: Option<&str>) -> Result<(), String> {
@@ -468,10 +468,10 @@ fn inject_version_allowed(version: &str, allowed: Option<&str>) -> Result<(), St
     if ok {
         Ok(())
     } else if let Some(list) = allowed {
-        Err(format!("npm {version} is not in THINCLONE_NPM_VERSIONS ({list})"))
+        Err(format!("npm {version} is not in MATCHAPACK_NPM_VERSIONS ({list})"))
     } else {
         let majors: Vec<String> = INJECT_NPM_MAJORS.iter().map(u32::to_string).collect();
-        Err(format!("npm {version}: the inject engine runs on npm {} (THINCLONE_NPM_VERSIONS=any to try another)", majors.join(", ")))
+        Err(format!("npm {version}: the inject engine runs on npm {} (MATCHAPACK_NPM_VERSIONS=any to try another)", majors.join(", ")))
     }
 }
 
@@ -501,7 +501,7 @@ mod tests {
         assert!(inject_version_allowed("13.0.0", Some("any")).is_ok());
         assert!(inject_version_allowed("13.1.0", Some("13.1")).is_ok());
         let e = inject_version_allowed("11.20.0", Some("13.1")).unwrap_err();
-        assert!(e.contains("not in THINCLONE_NPM_VERSIONS (13.1)"), "an explicit list replaces the majors, and says so: {e}");
+        assert!(e.contains("not in MATCHAPACK_NPM_VERSIONS (13.1)"), "an explicit list replaces the majors, and says so: {e}");
     }
 
     #[test]

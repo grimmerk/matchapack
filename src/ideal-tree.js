@@ -45,7 +45,7 @@ process.on('exit', (code) => {
     return
   }
   if (!tree) {
-    process.stderr.write('thinclone ideal-tree helper: npm built no ideal tree\n')
+    process.stderr.write('matchapack ideal-tree helper: npm built no ideal tree\n')
     process.exitCode = 1
     return
   }

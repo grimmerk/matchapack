@@ -1,9 +1,9 @@
 //! Trial-period bookkeeping, all outside any repository:
-//!   ~/.cache/thinclone/log.jsonl     one line per `thinclone npm ci` decision
-//!   ~/.cache/thinclone/verify.jsonl  one line per sampled verification
+//!   ~/.cache/matchapack/log.jsonl     one line per `matchapack npm ci` decision
+//!   ~/.cache/matchapack/verify.jsonl  one line per sampled verification
 //!                                    (scripts/verify-sample.sh)
-//!   ~/.config/thinclone/paths        optional trial scope: path prefixes
-//! `thinclone report` summarises the two logs.
+//!   ~/.config/matchapack/paths        optional trial scope: path prefixes
+//! `matchapack report` summarises the two logs.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn cache_dir() -> PathBuf {
-    std::env::var_os("THINCLONE_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::home().join(".cache/thinclone"))
+    std::env::var_os("MATCHAPACK_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::home().join(".cache/matchapack"))
 }
 
 pub fn log_path() -> PathBuf {
@@ -26,17 +26,17 @@ pub fn now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// Append one record; never fails the install (THINCLONE_LOG=0 disables).
+/// Append one record; never fails the install (MATCHAPACK_LOG=0 disables).
 pub fn append(mut rec: Value) {
-    if std::env::var("THINCLONE_LOG").as_deref() == Ok("0") {
+    if std::env::var("MATCHAPACK_LOG").as_deref() == Ok("0") {
         return;
     }
     if let Value::Object(m) = &mut rec {
         m.insert("ts".into(), json!(now()));
-        m.insert("thinclone".into(), json!(env!("CARGO_PKG_VERSION")));
+        m.insert("matchapack".into(), json!(env!("CARGO_PKG_VERSION")));
         // The git commit of this binary (build.rs): trial numbers from two
         // builds must not be mixed.
-        m.insert("build".into(), json!(env!("THINCLONE_BUILD")));
+        m.insert("build".into(), json!(env!("MATCHAPACK_BUILD")));
     }
     let p = log_path();
     let _ = std::fs::create_dir_all(p.parent().unwrap());
@@ -45,10 +45,10 @@ pub fn append(mut rec: Value) {
     }
 }
 
-/// Trial scope: if ~/.config/thinclone/paths (or THINCLONE_PATHS, `:`-separated)
-/// lists path prefixes, thinclone only handles projects under one of them.
+/// Trial scope: if ~/.config/matchapack/paths (or MATCHAPACK_PATHS, `:`-separated)
+/// lists path prefixes, matchapack only handles projects under one of them.
 pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
-    let list: Vec<String> = match std::env::var("THINCLONE_PATHS") {
+    let list: Vec<String> = match std::env::var("MATCHAPACK_PATHS") {
         Ok(v) => v.split(':').map(String::from).collect(),
         Err(_) => {
             let f = crate::util::config_dir().join("paths");
@@ -69,7 +69,7 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
             return Ok(());
         }
     }
-    Err("outside the trial scope (~/.config/thinclone/paths or THINCLONE_PATHS)".into())
+    Err("outside the trial scope (~/.config/matchapack/paths or MATCHAPACK_PATHS)".into())
 }
 
 fn read_jsonl(p: &Path, since: f64) -> Vec<Value> {
@@ -94,7 +94,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     let since = days.map(|d| now() - d * 86400.0).unwrap_or(0.0);
     let runs = read_jsonl(&log_path(), since);
     let window = days.map(|d| format!("last {d} days")).unwrap_or_else(|| "all time".into());
-    println!("thinclone report ({window}; {})", log_path().display());
+    println!("matchapack report ({window}; {})", log_path().display());
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
     println!(
         "runs {}: installed {}, plain npm {}, script failed {}, failed then npm {}{}",
@@ -133,7 +133,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             list.join(", ")
         );
     }
-    // One line per thinclone build, in order of first use, so numbers from
+    // One line per matchapack build, in order of first use, so numbers from
     // different binaries are never read as one series.
     let mut builds: Vec<(String, usize, Vec<f64>)> = vec![];
     for r in &runs {
@@ -287,12 +287,12 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         println!("verification samples: {} run, {ok} identical", ver.len());
         for v in ver.iter().rev().take(5) {
             println!(
-                "  {}  {:<17} {}  (npm ci {} s, thinclone {} s, build {})",
+                "  {}  {:<17} {}  (npm ci {} s, matchapack {} s, build {})",
                 when(v["ts"].as_f64().unwrap_or(0.0)),
                 v["result"].as_str().unwrap_or("?"),
                 v["dir"].as_str().unwrap_or("?"),
                 v["npm_ci_secs"],
-                v["thinclone_secs"],
+                v["matchapack_secs"],
                 v["build"].as_str().unwrap_or("not recorded")
             );
         }

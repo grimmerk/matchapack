@@ -1,5 +1,5 @@
 //! Verification harness: compare two project trees (an `npm ci` result and a
-//! thinclone result). "Identical" means: same set of paths, and per path the
+//! matchapack result). "Identical" means: same set of paths, and per path the
 //! same type, permission bits, file content (blake3) and symlink target.
 //! `node_modules/.package-lock.json` is compared as parsed JSON (and also
 //! byte-for-byte, reported separately).

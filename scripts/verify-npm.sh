@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # The npm upgrade routine (#11): run the harness on the npm on PATH, and when
 # every case is identical to `npm ci`, record its major.minor in
-# <config dir>/npm-verified (~/.config/thinclone, or $THINCLONE_CONFIG_DIR),
-# which thinclone's version gate reads next to the built-in VERIFIED_NPM.
+# <config dir>/npm-verified (~/.config/matchapack, or $MATCHAPACK_CONFIG_DIR),
+# which matchapack's version gate reads next to the built-in VERIFIED_NPM.
 #   verify-npm.sh [--no-record] <work-dir> [extra project dir...]
 # Cases: the fixtures (hidden lockfile byte-identical), script-env through the
 # shell function, legacy-peer with legacy-peer-deps, then each extra project
 # (a real repository is worth adding: the fixtures are small). CI runs it with
 # --no-record.
-# THINCLONE_ENGINE=inject runs the same cases with the inject engine, plus the
+# MATCHAPACK_ENGINE=inject runs the same cases with the inject engine, plus the
 # cases only it handles (dep-event), requires every case to have cloned
 # something, and never records: npm-verified is the classic engine's gate.
 set -uo pipefail
@@ -16,24 +16,24 @@ record=1
 if [ "${1-}" = --no-record ]; then record=0; shift; fi
 work=${1:?usage: verify-npm.sh [--no-record] <work-dir> [extra project dir...]}; shift
 here=$(cd "$(dirname "$0")/.." && pwd)
-bin=$here/target/release/thinclone
+bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 mkdir -p "$work"
 npm_version=$(npm -v) || { echo "no npm on PATH" >&2; exit 2; }
 mm=$(echo "$npm_version" | cut -d. -f1-2)
-cfg=${THINCLONE_CONFIG_DIR:-$HOME/.config/thinclone}
+cfg=${MATCHAPACK_CONFIG_DIR:-$HOME/.config/matchapack}
 # What is certified is fixed here, never inherited: a caller's settings that
 # loosen the comparison (ignored paths, noise filtering, another baseline,
 # mtime handling) or route the install differently do not apply.
-unset THINCLONE_VERIFY_IGNORE THINCLONE_VERIFY_NOISE THINCLONE_VERIFY_BASELINE THINCLONE_VERIFY_MTIME THINCLONE_VERIFY_VIA THINCLONE_VERIFY_BYTES THINCLONE_VERIFY_CLONES
-engine=${THINCLONE_ENGINE:-classic}
+unset MATCHAPACK_VERIFY_IGNORE MATCHAPACK_VERIFY_NOISE MATCHAPACK_VERIFY_BASELINE MATCHAPACK_VERIFY_MTIME MATCHAPACK_VERIFY_VIA MATCHAPACK_VERIFY_BYTES MATCHAPACK_VERIFY_CLONES
+engine=${MATCHAPACK_ENGINE:-classic}
 case $engine in
   classic) ;;
   inject)
-    if [ $record = 1 ]; then echo "THINCLONE_ENGINE=inject: nothing is recorded (npm-verified is the classic engine's gate)"; record=0; fi
+    if [ $record = 1 ]; then echo "MATCHAPACK_ENGINE=inject: nothing is recorded (npm-verified is the classic engine's gate)"; record=0; fi
     # A run in which the hook never fired would pass without testing it.
-    export THINCLONE_VERIFY_CLONES=some ;;
-  *) echo "THINCLONE_ENGINE=$engine is not an engine (classic, inject)" >&2; exit 2 ;;
+    export MATCHAPACK_VERIFY_CLONES=some ;;
+  *) echo "MATCHAPACK_ENGINE=$engine is not an engine (classic, inject)" >&2; exit 2 ;;
 esac
 echo "npm $npm_version, node $(node -v), $("$bin" --version), $engine engine"
 
@@ -47,14 +47,14 @@ fi
 trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
 
 fail=0
-case_() { # name env-assignments... -- source [thinclone install args...]
+case_() { # name env-assignments... -- source [matchapack install args...]
   local name=$1; shift
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done
   shift
   local out="$work/$name.txt"
   local src=$1; shift
-  if env THINCLONE_VERIFY_BYTES=1 ${envs[@]+"${envs[@]}"} "$here/scripts/verify.sh" "$src" "$work/$name" "$@" > "$out" 2>&1; then
+  if env MATCHAPACK_VERIFY_BYTES=1 ${envs[@]+"${envs[@]}"} "$here/scripts/verify.sh" "$src" "$work/$name" "$@" > "$out" 2>&1; then
     echo "ok    $name ($(grep -m1 '^npm ci:' "$out"))"
   else
     fail=1; echo "FAIL  $name (log: $out)"; tail -15 "$out" | sed 's/^/      /'
@@ -78,8 +78,8 @@ if [ $engine = inject ]; then
   case_ odd-tarballs -- "$here/fixtures/odd-tarballs"
 fi
 # script-env records the npm environment scripts see; the user's flags
-# (--no-audit) reach thinclone only through the shell function.
-case_ script-env THINCLONE_VERIFY_VIA=wrapper -- "$here/fixtures/script-env"
+# (--no-audit) reach matchapack only through the shell function.
+case_ script-env MATCHAPACK_VERIFY_VIA=wrapper -- "$here/fixtures/script-env"
 case_ legacy-peer-on npm_config_legacy_peer_deps=true -- "$here/fixtures/legacy-peer"
 for p in "$@"; do
   case_ "project-$(basename "$p")" -- "$p"
@@ -135,7 +135,7 @@ if [ $fail != 0 ]; then
     r=$(update remove) || { echo "could NOT take $mm back out of $cfg/npm-verified: remove that line by hand" >&2; exit 3; }
     [ "$r" = removed ] && echo "removed $mm from $cfg/npm-verified (recorded by an earlier run)"
   fi
-  echo "npm $npm_version: NOT verified; thinclone keeps handing npm ci to npm on it"
+  echo "npm $npm_version: NOT verified; matchapack keeps handing npm ci to npm on it"
   exit 1
 fi
 if [ $record = 0 ]; then
