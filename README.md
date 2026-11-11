@@ -128,8 +128,10 @@ set `THINCLONE_NPM_VERSIONS=any`, and only together with
 `THINCLONE_ENGINE=inject`: that variable opens the gate for the classic engine
 too, which does not support npm 12), the umask is not 022, the project's
 `node_modules` is a symlink, the project is outside the trial scope,
-`--prefix` / `--global` point npm at another directory, or the command
-installs nothing (`--dry-run`, `--help`).
+`--prefix` / `--global` point npm at another directory, the directory has no
+`package-lock.json` or `npm-shrinkwrap.json` (inside a workspace of a
+monorepo, `npm ci` installs into the root's `node_modules`; #36), or the
+command installs nothing (`--dry-run`, `--help`).
 
 `thinclone report` shows a line for this engine: packages cloned, packages npm
 extracted and why, and a second line when npm placed packages that never
