@@ -182,9 +182,15 @@ fn decide_inject(args: &[String]) -> Result<crate::inject::InjectOpts, String> {
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     // Without a package.json here npm looks for the project in a parent
-    // directory.
+    // directory. Without a lockfile here either `npm ci` refuses, or this is
+    // a workspace of a monorepo and npm installs into the root's
+    // node_modules, outside this directory: nothing could be cloned
+    // (grimmerk/thinclone#36 for doing better).
     if !cwd.join("package.json").is_file() {
         return Err("no package.json in this directory".into());
+    }
+    if !cwd.join("package-lock.json").is_file() && !cwd.join("npm-shrinkwrap.json").is_file() {
+        return Err("no package-lock.json or npm-shrinkwrap.json in this directory (npm would install elsewhere, or refuse)".into());
     }
     trial::in_scope(&cwd)?;
     Ok(crate::inject::InjectOpts {

@@ -253,6 +253,13 @@ pub struct Server<'a> {
     incomplete: AtomicU64,
     /// Directories handed out for pacote's extraction, and for which entry.
     issued: Mutex<HashMap<PathBuf, Integrity>>,
+    /// Integrities being filled by pacote in this run, with the requests
+    /// for the same package that wait for that fill (id, destination): a
+    /// package installed at several paths is extracted once.
+    filling: Mutex<HashMap<Integrity, Vec<(Value, PathBuf)>>>,
+    /// Entries filled in this run: their files have just been extracted, so
+    /// a clone of them needs no touch.
+    filled_now: Mutex<std::collections::HashSet<Integrity>>,
     rng: AtomicU64,
     pub stats: Mutex<Stats>,
 }
@@ -304,6 +311,38 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
     std::fs::remove_dir(from).with_context(|| format!("removing {}", from.display()))
 }
 
+/// Rename `from` to `to` only if `to` does not exist: a plain rename(2)
+/// replaces an existing empty directory. Where the system has no such rename
+/// (or the filesystem refuses it), an existence check and a plain rename.
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let (f, t) = (c(from)?, c(to)?);
+    #[cfg(target_os = "macos")]
+    let r = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    let r: libc::c_int = {
+        let _ = (&f, &t);
+        unsafe { *libc::__errno_location() = libc::ENOSYS };
+        -1
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            std::fs::rename(from, to)
+        }
+        _ => Err(e),
+    }
+}
+
 /// The error means "the path already exists" (a destination that reappeared
 /// between the check and the clone).
 fn already_exists(e: &anyhow::Error) -> bool {
@@ -337,6 +376,8 @@ impl<'a> Server<'a> {
             policy,
             incomplete: AtomicU64::new(0),
             issued: Mutex::new(HashMap::new()),
+            filling: Mutex::new(HashMap::new()),
+            filled_now: Mutex::new(std::collections::HashSet::new()),
             rng: AtomicU64::new(seed | 1),
             stats: Mutex::new(Stats::default()),
         })
@@ -350,6 +391,11 @@ impl<'a> Server<'a> {
     /// The pacote and tar versions the check rules used.
     pub fn key(&self) -> String {
         self.ks().key.clone()
+    }
+
+    /// Whether `p` (absolute) is this project's root, symlinks resolved.
+    fn is_root(&self, p: &Path) -> bool {
+        p == self.root || (p.is_absolute() && std::fs::canonicalize(p).is_ok_and(|c| c == self.root))
     }
 
     /// Whether every entry is compared in this run.
@@ -366,9 +412,14 @@ impl<'a> Server<'a> {
     /// extraction (module comment).
     fn should_check(&self, made_by: Option<&str>) -> bool {
         let CheckPolicy::OneIn(n) = self.policy else { return self.policy == CheckPolicy::All };
+        let key = &self.ks().key;
         match made_by {
             None => return true,
-            Some(k) if k != self.ks().key && self.ks().strict.load(Ordering::Relaxed) => return true,
+            Some(k) if k != key && self.ks().strict.load(Ordering::Relaxed) => return true,
+            // Made, or already found the same, by this very pacote and tar
+            // (earlier in this install, typically: a package installed at
+            // several paths): comparing it again proves nothing new.
+            Some(k) if k == key && !key.contains('?') => {}
             _ if self.ks().check_all => return true,
             _ => {}
         }
@@ -498,44 +549,101 @@ impl<'a> Server<'a> {
     /// Serve one request: validate, find the entry, place it, set the times
     /// of every placed path to now. A missing entry, or one picked for a
     /// check, is answered with a directory for pacote's extraction instead.
+    #[cfg(test)]
     pub fn place_entry(&self, sri: &str, dest: &Path) -> Outcome {
+        self.place_or_wait(&Value::Null, sri, dest).pop().map(|(_, o)| o).unwrap_or_else(|| refused("bad-request", "deferred"))
+    }
+
+    /// A request without `extracted`: place the entry, or hand out a
+    /// directory for pacote, or (the entry being filled right now by
+    /// another request of this install) answer later, when that fill is
+    /// done: an empty list.
+    fn place_or_wait(&self, id: &Value, sri: &str, dest: &Path) -> Vec<(Value, Outcome)> {
+        let one = |o: Outcome| vec![(id.clone(), o)];
         if self.unsupported.load(Ordering::Relaxed) {
-            return Outcome::Refused { reason: "clone-unsupported", message: "this filesystem cannot clone".into(), fatal: true };
+            return one(Outcome::Refused { reason: "clone-unsupported", message: "this filesystem cannot clone".into(), fatal: true });
         }
         let dst = match self.check_dest(dest) {
             Ok(d) => d,
-            Err(m) => return refused("rejected-dest", m),
+            Err(m) => return one(refused("rejected-dest", m)),
         };
         let i = match Integrity::parse(sri) {
             Ok(i) => i,
-            Err(e) => return refused("rejected-source", format!("{e:#}")),
+            Err(e) => return one(refused("rejected-source", format!("{e:#}"))),
         };
         let dir = self.store.dir_for(&i);
         match std::fs::symlink_metadata(&dir) {
             Ok(m) if m.file_type().is_dir() => {
                 if self.should_check(self.store.made_by(&i).as_deref()) {
-                    return self.issue(i, "check");
+                    return one(self.issue(i, "check"));
                 }
-                self.finish(i, &dir, &dst, false, false, None)
+                let fresh = self.filled_now.lock().unwrap().contains(&i);
+                one(self.finish(i, &dir, &dst, false, false, None, fresh))
             }
-            Ok(_) => refused("rejected-source", format!("store entry {} is not a directory", dir.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.issue(i, "fill"),
-            Err(e) => refused("store-error", format!("{}: {e}", dir.display())),
+            Ok(_) => one(refused("rejected-source", format!("store entry {} is not a directory", dir.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                {
+                    let mut f = self.filling.lock().unwrap();
+                    if let Some(waiting) = f.get_mut(&i) {
+                        waiting.push((id.clone(), dst));
+                        return vec![];
+                    }
+                    f.insert(i.clone(), vec![]);
+                }
+                let o = self.issue(i.clone(), "fill");
+                if matches!(o, Outcome::Extract { .. }) {
+                    return one(o);
+                }
+                let mut v = one(o);
+                v.extend(self.release(&i));
+                v
+            }
+            Err(e) => one(refused("store-error", format!("{}: {e}", dir.display()))),
         }
+    }
+
+    /// The fill of `i` is over (made, failed, or given up): answer the
+    /// requests that waited for it, from the entry if there is one now.
+    fn release(&self, i: &Integrity) -> Vec<(Value, Outcome)> {
+        let waiting = self.filling.lock().unwrap().remove(i).unwrap_or_default();
+        let entry = self.store.dir_for(i);
+        let fresh = self.filled_now.lock().unwrap().contains(i);
+        waiting
+            .into_iter()
+            .map(|(id, dst)| {
+                let o = if is_real_dir(&entry) {
+                    self.finish(i.clone(), &entry, &dst, false, false, None, fresh)
+                } else {
+                    refused("store-miss", "the fill this package waited for did not complete")
+                };
+                (id, o)
+            })
+            .collect()
     }
 
     /// The hook has run pacote's extract into `extracted` (handed out by
     /// `issue` for this integrity): fill the store with it, or compare the
     /// entry with it, then place.
+    #[cfg(test)]
     pub fn place_extracted(&self, sri: &str, dest: &Path, extracted: &Path) -> Outcome {
-        let o = self.place_extracted_inner(sri, dest, extracted);
+        self.extracted(&Value::Null, sri, dest, extracted, false).swap_remove(0).1
+    }
+
+    /// `place_extracted`, or (`failed`) pacote's extraction into the
+    /// directory failed; then the requests waiting for this fill.
+    fn extracted(&self, id: &Value, sri: &str, dest: &Path, extracted: &Path, failed: bool) -> Vec<(Value, Outcome)> {
+        let o = self.place_extracted_inner(sri, dest, extracted, failed);
         if matches!(o, Outcome::Refused { .. }) {
             self.incomplete.fetch_add(1, Ordering::Relaxed);
         }
-        o
+        let mut v = vec![(id.clone(), o)];
+        if let Ok(i) = Integrity::parse(sri) {
+            v.extend(self.release(&i));
+        }
+        v
     }
 
-    fn place_extracted_inner(&self, sri: &str, dest: &Path, extracted: &Path) -> Outcome {
+    fn place_extracted_inner(&self, sri: &str, dest: &Path, extracted: &Path, failed: bool) -> Outcome {
         let i = match Integrity::parse(sri) {
             Ok(i) => i,
             Err(e) => return refused("rejected-source", format!("{e:#}")),
@@ -549,6 +657,10 @@ impl<'a> Server<'a> {
         let discard = || {
             let _ = std::fs::remove_dir_all(extracted);
         };
+        if failed {
+            discard();
+            return refused("pacote-extract-failed", "pacote could not extract the package into thinclone's directory");
+        }
         if self.unsupported.load(Ordering::Relaxed) {
             discard();
             return Outcome::Refused { reason: "clone-unsupported", message: "this filesystem cannot clone".into(), fatal: true };
@@ -567,9 +679,10 @@ impl<'a> Server<'a> {
     }
 
     /// Fill the entry with pacote's extraction, or compare the entry with it.
-    /// Every package that went through pacote's extraction is placed from
-    /// that extraction, never from the entry's path: another install, under
-    /// another pacote, may replace the entry at any moment.
+    /// What reaches the project is either pacote's extraction itself, or a
+    /// clone of the entry that was compared with it, never the entry's path
+    /// read again after the comparison: another install, under another
+    /// pacote, may replace the entry at any moment.
     fn adopt(&self, i: Integrity, dst: &Path, extracted: &Path) -> Outcome {
         let discard = || {
             let _ = std::fs::remove_dir_all(extracted);
@@ -577,17 +690,53 @@ impl<'a> Server<'a> {
         let entry = self.store.dir_for(&i);
         let ino = |p: &Path| std::fs::symlink_metadata(p).ok().filter(|m| m.is_dir()).map(|m| std::os::unix::fs::MetadataExt::ino(&m));
         if let Some(ino_before) = ino(&entry) {
-            // A check, or a fill that another install made first: compare.
+            // A check, or a fill that another install made first. The entry
+            // is cloned into a private candidate first; the candidate is what
+            // is compared and then moved into the project: it shares blocks
+            // with the store, and a replacement of the entry during the clone
+            // shows up as a difference, never in the project.
             let made_by = self.store.made_by(&i);
-            let differs = match crate::store::compare_trees(extracted, &entry) {
+            let cand = self.tmp.path.join(format!("c{}", self.seq.fetch_add(1, Ordering::Relaxed)));
+            let drop_cand = || {
+                let _ = std::fs::remove_dir_all(&cand);
+            };
+            if let Err(e) = clone::clone_tree(&entry, &cand, self.mode) {
+                drop_cand();
+                discard();
+                if clone::unsupported(&e) {
+                    self.unsupported.store(true, Ordering::Relaxed);
+                    return Outcome::Refused { reason: "clone-unsupported", message: format!("{e:#}"), fatal: true };
+                }
+                return refused("clone-error", format!("{e:#}"));
+            }
+            let differs = match crate::store::compare_trees(extracted, &cand) {
                 Ok(d) => d,
                 Err(e) => {
+                    drop_cand();
                     discard();
                     return refused("store-error", format!("comparing with {}: {e:#}", entry.display()));
                 }
             };
             let Some(d) = differs else {
-                let o = self.finish(i.clone(), extracted, dst, false, true, None);
+                let t0 = Instant::now();
+                let kind = match self.place_move(&cand, dst) {
+                    Ok(k) => k,
+                    Err(o) => {
+                        drop_cand();
+                        discard();
+                        return o;
+                    }
+                };
+                let t1 = Instant::now();
+                // The candidate carries the entry's times; pacote's
+                // extraction has the same paths (just compared).
+                let paths = match clone::touch_placed(extracted, dst) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        discard();
+                        return refused("clone-error", format!("{e:#}"));
+                    }
+                };
                 discard();
                 // The record says this pacote extracts the entry to the same
                 // tree; written only if the entry is still the one compared
@@ -600,8 +749,18 @@ impl<'a> Server<'a> {
                 {
                     self.mark_made_by(&i);
                 }
-                return o;
+                return Outcome::Placed {
+                    kind,
+                    filled: false,
+                    checked: true,
+                    differs: None,
+                    entry: i,
+                    place_secs: t1.duration_since(t0).as_secs_f64(),
+                    touch_secs: t1.elapsed().as_secs_f64(),
+                    paths,
+                };
             };
+            drop_cand();
             let kind = differs_kind(made_by.as_deref(), &self.ks().key);
             if kind == "pacote" && !self.ks().strict.swap(true, Ordering::Relaxed) {
                 let note = format!("{} (made by {}): {d}", i.key(), made_by.as_deref().unwrap_or("?"));
@@ -609,14 +768,14 @@ impl<'a> Server<'a> {
                     crate::info!("could not record {} in {STRICT_FILE}: {e:#}", self.ks().key);
                 }
             }
-            let o = self.finish(i.clone(), extracted, dst, false, true, Some((kind, d)));
+            let o = self.finish(i.clone(), extracted, dst, false, true, Some((kind, d)), true);
             // Then the entry is replaced by pacote's extraction (module
             // comment). The record goes first: whatever happens next, an
             // entry left here is never taken for this pacote's without a
             // new record.
             self.store.forget_made_by(&i);
             let aside = self.tmp.path.join(format!("q{}", self.seq.fetch_add(1, Ordering::Relaxed)));
-            let healed = std::fs::rename(&entry, &aside).is_ok() && std::fs::rename(extracted, &entry).is_ok();
+            let healed = std::fs::rename(&entry, &aside).is_ok() && rename_noreplace(extracted, &entry).is_ok();
             self.store.forget_size(&i);
             if healed {
                 self.mark_made_by(&i);
@@ -626,19 +785,21 @@ impl<'a> Server<'a> {
             }
             return o;
         }
-        let mut o = self.finish(i.clone(), extracted, dst, false, false, None);
+        // pacote's extraction was made just now: placed without a touch.
+        let mut o = self.finish(i.clone(), extracted, dst, false, false, None, true);
         let parent = entry.parent().unwrap();
         if let Err(e) = std::fs::create_dir_all(parent) {
             discard();
             crate::info!("inject: could not create {}: {e}", parent.display());
             return o;
         }
-        // Rename-if-absent: a directory renamed onto an existing, non-empty
-        // one fails, so concurrent installs fill an entry once.
-        match std::fs::rename(extracted, &entry) {
+        // Rename-if-absent (a no-replace rename: a plain rename would replace
+        // an empty directory), so concurrent installs fill an entry once.
+        match rename_noreplace(extracted, &entry) {
             Ok(()) => {
                 self.store.forget_size(&i);
                 self.mark_made_by(&i);
+                self.filled_now.lock().unwrap().insert(i.clone());
                 // Counted here: the entry is in the store now, whatever
                 // became of the placement.
                 self.stats.lock().unwrap().filled.push(i);
@@ -653,14 +814,59 @@ impl<'a> Server<'a> {
         o
     }
 
+    /// Move `cand` (a private clone of the entry) into `dst`, as `place`
+    /// clones: renamed in whole when the destination is absent or empty,
+    /// its entries moved in when the destination holds `node_modules`.
+    fn place_move(&self, cand: &Path, dst: &Path) -> std::result::Result<Kind, Outcome> {
+        let err = |e: String| refused("clone-error", e);
+        match dest_state(dst).map_err(|e| err(format!("reading {}: {e}", dst.display())))? {
+            DestState::Missing => {}
+            DestState::Empty => {
+                let _ = std::fs::remove_dir(dst);
+            }
+            DestState::OnlyNodeModules => {
+                if !is_real_dir(dst) {
+                    return Err(refused("rejected-dest", format!("{} is no longer a directory", dst.display())));
+                }
+                merge_into(cand, dst).map_err(|e| err(format!("{e:#}")))?;
+                return Ok(Kind::Merge);
+            }
+            DestState::Other(name) => return Err(refused("dest-not-empty", format!("{} already holds {name}", dst.display()))),
+        }
+        match rename_noreplace(cand, dst) {
+            Ok(()) => Ok(Kind::Fast),
+            // Made again in between (npm's sparse tree): merge.
+            Err(_) if is_real_dir(dst) => match dest_state(dst) {
+                Ok(DestState::Empty | DestState::OnlyNodeModules) => {
+                    merge_into(cand, dst).map_err(|e| err(format!("{e:#}")))?;
+                    Ok(Kind::Merge)
+                }
+                _ => Err(refused("dest-not-empty", format!("{} is not empty", dst.display()))),
+            },
+            Err(e) => Err(err(format!("moving into {}: {e}", dst.display()))),
+        }
+    }
+
     fn mark_made_by(&self, i: &Integrity) {
         if let Err(e) = self.store.set_made_by(i, &self.ks().key) {
             crate::info!("could not record which pacote made {}: {e:#}", i.key());
         }
     }
 
-    /// Clone `src` (the entry, or pacote's extraction) to `dst` and touch it.
-    fn finish(&self, entry: Integrity, src: &Path, dst: &Path, filled: bool, checked: bool, differs: Option<(&'static str, String)>) -> Outcome {
+    /// Clone `src` (the entry, or pacote's extraction) to `dst`, and touch
+    /// it unless `fresh` (`src` was extracted in this install, so its times
+    /// are already the install's).
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        entry: Integrity,
+        src: &Path,
+        dst: &Path,
+        filled: bool,
+        checked: bool,
+        differs: Option<(&'static str, String)>,
+        fresh: bool,
+    ) -> Outcome {
         let t0 = Instant::now();
         let kind = match self.place(src, dst) {
             Ok(k) => k,
@@ -671,9 +877,13 @@ impl<'a> Server<'a> {
         // extracts with noMtime); a clone carries the store's. Done here, per
         // package and before the answer, so every touch is over before npm
         // runs an install script, whose files must keep their later times.
-        let paths = match clone::touch_placed(src, dst) {
-            Ok(n) => n,
-            Err(e) => return refused("clone-error", format!("{e:#}")),
+        let paths = if fresh {
+            0
+        } else {
+            match clone::touch_placed(src, dst) {
+                Ok(n) => n,
+                Err(e) => return refused("clone-error", format!("{e:#}")),
+            }
         };
         Outcome::Placed {
             kind,
@@ -744,54 +954,65 @@ impl<'a> Server<'a> {
             // A reason is a short word chosen by the hook; keep the log sane
             // whatever arrives.
             let key: String = note.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
-            if key == "pacote-extract-failed" {
-                self.incomplete.fetch_add(1, Ordering::Relaxed);
-            }
             *self.stats.lock().unwrap().fallbacks.entry(key).or_default() += 1;
             return true;
         }
         false
     }
 
-    /// One line from the hook; the answer line, if the line was a request.
-    fn handle_line(&self, line: &str) -> Option<String> {
+    /// One line from the hook; the answer lines it produces: its own (none
+    /// when it waits for a fill), and those of requests that waited for it.
+    fn handle_line(&self, line: &str) -> Vec<String> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return None;
+            return vec![];
         };
         if self.record_message(&v) {
-            return None;
+            return vec![];
         }
-        let id = v.get("id")?.clone();
+        let Some(id) = v.get("id").cloned() else { return vec![] };
         {
             let mut s = self.stats.lock().unwrap();
             s.first.get_or_insert_with(Instant::now);
         }
         let str_of = |k: &str| v.get(k).and_then(|x| x.as_str());
-        let outcome = match (str_of("integrity"), str_of("dest")) {
+        let answers: Vec<(Value, Outcome)> = match (str_of("integrity"), str_of("dest")) {
+            // npm installs into another project root than this one (npm ci
+            // run inside a workspace of a monorepo, or a --prefix the wrapper
+            // did not recognise): every destination would be refused anyway;
+            // said as what it is, so the log does not read like a dead hook.
+            // Diagnosis only: the destination check never uses this value.
+            (Some(_), Some(_)) if str_of("npm_root").is_some_and(|r| !self.is_root(Path::new(r))) => vec![(
+                id.clone(),
+                refused("npm-root-elsewhere", format!("npm installs into {}, not {}", str_of("npm_root").unwrap_or(""), self.root.display())),
+            )],
             (Some(sri), Some(dest)) => {
                 // A panic in one placement must not take the answer with it:
                 // the hook would wait for ever.
+                let failed = v.get("failed").and_then(|f| f.as_bool()) == Some(true);
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match str_of("extracted") {
-                    Some(x) => self.place_extracted(sri, Path::new(dest), Path::new(x)),
-                    None => self.place_entry(sri, Path::new(dest)),
+                    Some(x) => self.extracted(&id, sri, Path::new(dest), Path::new(x), failed),
+                    None => self.place_or_wait(&id, sri, Path::new(dest)),
                 }))
-                .unwrap_or_else(|_| refused("clone-error", "internal error (panic)"))
+                .unwrap_or_else(|_| vec![(id.clone(), refused("clone-error", "internal error (panic)"))])
             }
-            _ => refused("bad-request", "integrity and dest are required"),
+            _ => vec![(id.clone(), refused("bad-request", "integrity and dest are required"))],
         };
-        self.tally(&outcome);
-        Some(
-            match outcome {
-                Outcome::Placed { kind, filled, checked, .. } => {
-                    json!({ "id": id, "ok": true, "kind": self.kind_name(kind), "filled": filled, "checked": checked })
+        answers
+            .into_iter()
+            .map(|(id, outcome)| {
+                self.tally(&outcome);
+                match outcome {
+                    Outcome::Placed { kind, filled, checked, .. } => {
+                        json!({ "id": id, "ok": true, "kind": self.kind_name(kind), "filled": filled, "checked": checked })
+                    }
+                    Outcome::Extract { to, why } => json!({ "id": id, "ok": false, "extract_to": to, "why": why }),
+                    Outcome::Refused { reason, message, fatal } => {
+                        json!({ "id": id, "ok": false, "reason": reason, "message": message, "fatal": fatal })
+                    }
                 }
-                Outcome::Extract { to, why } => json!({ "id": id, "ok": false, "extract_to": to, "why": why }),
-                Outcome::Refused { reason, message, fatal } => {
-                    json!({ "id": id, "ok": false, "reason": reason, "message": message, "fatal": fatal })
-                }
-            }
-            .to_string(),
-        )
+                .to_string()
+            })
+            .collect()
     }
 
     /// Tell the workers to drop what is still queued (the node child is gone).
@@ -817,7 +1038,7 @@ impl<'a> Server<'a> {
                     if self.stopping.load(Ordering::Relaxed) {
                         continue;
                     }
-                    if let Some(mut answer) = self.handle_line(&line) {
+                    for mut answer in self.handle_line(&line) {
                         answer.push('\n');
                         // The peer may be gone; nothing to do about it here.
                         let _ = writer.lock().unwrap().write_all(answer.as_bytes());
@@ -1285,11 +1506,12 @@ mod tests {
     }
 
     #[test]
-    fn a_match_is_placed_from_pacotes_extraction_not_from_the_entry_path() {
+    fn a_match_is_placed_from_the_compared_clone_of_the_entry() {
         // Directory modes are not compared, so an entry and an extraction can
         // match while differing there: the placed directory shows which was
-        // cloned. The extraction is the tree just compared; the entry's path
-        // may be replaced by another install meanwhile.
+        // placed. It is the entry's (blocks shared with the store), by way of
+        // the private clone that was compared, so a replacement of the entry
+        // meanwhile would have shown as a difference.
         let fx = Fx::new("serve-match-source");
         if !fx.can_clone() {
             return;
@@ -1306,7 +1528,9 @@ mod tests {
         let to = extract_to(s.place_entry(&sri, &dst), "check");
         fx.pacote_extract(&i, &to);
         assert_eq!(placed_full(s.place_extracted(&sri, &dst, &to)).3, None, "a match");
-        assert_eq!(fs::metadata(dst.join("lib")).unwrap().mode() & 0o777, 0o755, "cloned from the extraction");
+        assert_eq!(fs::metadata(dst.join("lib")).unwrap().mode() & 0o777, 0o700, "the entry's tree");
+        assert_eq!(fs::metadata(fx.store.dir_for(&i).join("lib")).unwrap().mode() & 0o777, 0o700, "the entry itself untouched");
+        assert!(fs::read_dir(&s.tmp.path).unwrap().next().is_none(), "no candidate or extraction left behind");
     }
 
     #[test]
@@ -1325,7 +1549,10 @@ mod tests {
         placed_full(s.place_extracted(&sri, &fx.root.join("node_modules/a"), &to));
         assert!(s.checks_complete());
         // pacote's extraction failed in the hook.
-        assert!(s.record_message(&json!({ "note": "pacote-extract-failed" })));
+        let to = extract_to(s.place_entry(&sri, &fx.root.join("node_modules/b")), "check");
+        let (_, o) = s.extracted(&Value::Null, &sri, &fx.root.join("node_modules/b"), &to, true).swap_remove(0);
+        assert_eq!(refusal(o).0, "pacote-extract-failed");
+        assert!(!to.exists(), "its directory is removed");
         assert!(!s.checks_complete());
         // A placement refused after the extraction.
         let t = Fx::new("serve-complete-2");
@@ -1400,13 +1627,101 @@ mod tests {
         assert!(checks(&never()), "strict: every entry an earlier pacote made");
         fx.store.set_made_by(&i, KEY).unwrap();
         assert!(!checks(&never()), "strict does not touch this key's own entries");
-        // A key not in inject-checked: every entry, its own included.
+        // A key not in inject-checked: every entry another key made; its own
+        // (made earlier in this very install, typically) are sampled.
         let fresh = Fx::new("serve-policy-fresh");
         let (j, sri_j) = fresh.entry(PKG);
-        fresh.store.set_made_by(&j, KEY).unwrap();
+        fresh.store.set_made_by(&j, "pacote@0.9.0 tar@1.0.0").unwrap();
         let s = fresh.server_with(clone::Mode::File, CheckPolicy::OneIn(1_000_000));
         assert!(s.checks_all());
         assert!(matches!(s.place_entry(&sri_j, &fresh.root.join("node_modules/p")), Outcome::Extract { why: "check", .. }));
+        fresh.store.set_made_by(&j, KEY).unwrap();
+        assert!(matches!(s.place_entry(&sri_j, &fresh.root.join("node_modules/q")), Outcome::Placed { .. }), "its own: sampled");
+        drop(s);
+        // An unknown key gets no such exemption.
+        let unknown = Server::new(&fresh.store, fresh.root.clone(), clone::Mode::File, Some("pacote@? tar@?".into()), CheckPolicy::OneIn(1_000_000)).unwrap();
+        fresh.store.set_made_by(&j, "pacote@? tar@?").unwrap();
+        assert!(matches!(unknown.place_entry(&sri_j, &fresh.root.join("node_modules/r")), Outcome::Extract { why: "check", .. }));
+    }
+
+    #[test]
+    fn a_request_from_npm_installing_into_another_root_is_named_as_such() {
+        let fx = Fx::new("serve-npm-root");
+        let s = fx.server(clone::Mode::File);
+        let req = |root: &Path| {
+            let line = json!({ "id": 1, "integrity": "sha512-x", "dest": fx.root.join("node_modules/p"), "npm_root": root }).to_string();
+            serde_json::from_str::<Value>(&s.handle_line(&line)[0]).unwrap()
+        };
+        let elsewhere = req(&fx.dir);
+        assert_eq!(elsewhere["reason"], "npm-root-elsewhere", "{elsewhere}");
+        // The project's own root, also through a symlink: the request is
+        // judged on its own (here: a malformed integrity).
+        assert_eq!(req(&fx.root)["reason"], "rejected-source");
+        let link = fx.dir.join("root-link");
+        std::os::unix::fs::symlink(&fx.root, &link).unwrap();
+        assert_eq!(req(&link)["reason"], "rejected-source");
+    }
+
+    /// Answer lines from `handle_line`, by id.
+    fn answers(s: &Server, req: Value) -> BTreeMap<String, Value> {
+        s.handle_line(&req.to_string())
+            .iter()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .map(|v| (v["id"].to_string(), v))
+            .collect()
+    }
+
+    #[test]
+    fn a_package_at_several_paths_is_filled_once_and_the_others_wait_for_it() {
+        let fx = Fx::new("serve-coalesce");
+        if !fx.can_clone() {
+            return;
+        }
+        let i = cached_tarball(&fx.cacache, PKG);
+        let sri = sri_of(&i);
+        let s = fx.server_with(clone::Mode::File, CheckPolicy::All);
+        let dst = |n: &str| fx.root.join(format!("node_modules/{n}"));
+        let first = answers(&s, json!({ "id": 1, "integrity": sri, "dest": dst("a") }));
+        let to = PathBuf::from(first["1"]["extract_to"].as_str().expect("the first fills"));
+        assert!(answers(&s, json!({ "id": 2, "integrity": sri, "dest": dst("b") })).is_empty(), "the second waits");
+        assert!(answers(&s, json!({ "id": 3, "integrity": sri, "dest": dst("c") })).is_empty(), "the third too");
+        fx.pacote_extract(&i, &to);
+        let done = answers(&s, json!({ "id": 4, "integrity": sri, "dest": dst("a"), "extracted": to }));
+        assert_eq!(done.len(), 3, "{done:?}");
+        for id in ["4", "2", "3"] {
+            assert_eq!(done[id]["ok"], true, "{id}: {:?}", done[id]);
+        }
+        assert_eq!(done["4"]["filled"], true);
+        let want = listing(&fx.store.dir_for(&i));
+        for n in ["a", "b", "c"] {
+            assert_eq!(listing(&dst(n)), want, "{n}");
+        }
+        let st = s.stats.lock().unwrap();
+        assert_eq!((st.filled.len(), st.cloned, st.checked), (1, 3, 0), "one extraction; nothing compared with itself");
+        // Just extracted: placed without a touch.
+        assert_eq!(st.paths_touched, 0);
+    }
+
+    #[test]
+    fn requests_waiting_for_a_fill_that_fails_go_to_pacote() {
+        let fx = Fx::new("serve-coalesce-fail");
+        if !fx.can_clone() {
+            return;
+        }
+        let i = cached_tarball(&fx.cacache, PKG);
+        let sri = sri_of(&i);
+        let s = fx.server(clone::Mode::File);
+        let dst = |n: &str| fx.root.join(format!("node_modules/{n}"));
+        let first = answers(&s, json!({ "id": 1, "integrity": sri, "dest": dst("a") }));
+        let to = first["1"]["extract_to"].as_str().unwrap().to_string();
+        assert!(answers(&s, json!({ "id": 2, "integrity": sri, "dest": dst("b") })).is_empty());
+        let done = answers(&s, json!({ "id": 3, "integrity": sri, "dest": dst("a"), "extracted": to, "failed": true }));
+        assert_eq!(done["3"]["reason"], "pacote-extract-failed");
+        assert_eq!(done["2"]["reason"], "store-miss", "{done:?}");
+        assert!(!s.checks_complete());
+        // The next request for it fills again.
+        let again = answers(&s, json!({ "id": 5, "integrity": sri, "dest": dst("b") }));
+        assert!(again["5"]["extract_to"].is_string(), "{again:?}");
     }
 
     #[test]

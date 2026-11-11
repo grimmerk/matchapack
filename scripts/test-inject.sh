@@ -290,6 +290,29 @@ install "$p"; rc=$?
   && grep -q '"version":"2.0.0"' "$work/outside-ws/node_modules/lc-s/package.json" && grep -q '"version":"1.0.0"' "$p/node_modules/lc-s/package.json" \
   && ok "a workspace symlinked out of the project: its dependency is refused by the clone server and extracted by npm" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
 
+# 11b. `npm ci` inside a workspace of a monorepo: npm installs into the
+#      root's node_modules (the workspace's subset), outside the directory
+#      thinclone started in, so nothing could be cloned (#36). Without a
+#      lockfile there the wrapper hands it to npm up front; with a stray one
+#      the run is logged as npm installing elsewhere, not as a dead hook.
+ws=$work/ws-src; rm -rf "${ws:?}"; mkdir -p "$ws/packages/a"
+printf '{"name":"ws-root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-r":"http://127.0.0.1:48321/lc-r-1.0.0.tgz"}}\n' > "$ws/package.json"
+printf '{"name":"a","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}\n' > "$ws/packages/a/package.json"
+(cd "$ws" && npm install --package-lock-only --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "workspace lockfile"
+wscopy() { local d=$work/$1; rm -rf "${d:?}"; cp -R "$ws" "$d"; echo "$d"; }
+ref_ws=$(wscopy ws-ref); (cd "$ref_ws/packages/a" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci in a workspace"
+p=$(wscopy ws-plain)
+wrapped "$p/packages/a" "npm ci --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && last_log "r['reason']" | grep -q 'no package-lock.json' \
+  && same "$ref_ws" "$p" \
+  && ok "npm ci in a workspace directory: handed to npm up front (no lockfile there), tree identical" || bad "workspace: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
+p=$(wscopy ws-stray); cp "$p/package-lock.json" "$p/packages/a/"
+wrapped "$p/packages/a" "npm ci --no-audit --no-fund"; rc=$?
+rm -f "$p/packages/a/package-lock.json"; rm -f "$ref_ws/packages/a/package-lock.json"
+[ $rc = 0 ] && [ "$(last_log "r['outcome']")" = installed ] && [ "$(last_log "r['inject']['cloned']")" = 0 ] \
+  && [ "$(last_log "r['inject']['fallbacks'].get('npm-root-elsewhere', 0) > 0")" = True ] && same "$ref_ws" "$p" \
+  && ok "with a stray lockfile there: npm installs at the root, logged as npm-root-elsewhere, tree identical" || bad "workspace stray lockfile: rc=$rc ($(last_log "r['inject']['fallbacks']"))"
+
 # 12. The report counts the inject runs.
 "$bin" report > "$work/out" 2>&1 && grep -Eq 'inject engine: [0-9]+ runs, [0-9]+ packages cloned' "$work/out" && grep -q 'npm failed 1' "$work/out" \
   && ok "report: inject runs, clones and npm failures are counted" || bad "report"

@@ -181,20 +181,29 @@ function main () {
       send({ note: why })
       return origExtract.call(this, dest)
     }
-    const req = { integrity: String(this.integrity), dest: path.resolve(dest) }
+    // npm's own project root, as it passes it to pacote (ci.js builds the
+    // Arborist with `path: npm.prefix`; reify spreads its options into
+    // pacote's): for diagnosis only, thinclone never widens its checks with
+    // it (grimmerk/thinclone#36).
+    const npmRoot = this.opts && typeof this.opts.path === 'string' && path.isAbsolute(this.opts.path) ? this.opts.path : undefined
+    const req = { integrity: String(this.integrity), dest: path.resolve(dest), npm_root: npmRoot }
     let answer
     try {
       answer = await request(req)
       if (!answer.ok && answer.extract_to) {
         // pacote's own extraction, with this fetcher (its tarball, its
         // integrity check, its rules), into thinclone's directory.
+        let failed = false
         try {
           await origExtract.call(this, answer.extract_to)
         } catch {
-          send({ note: 'pacote-extract-failed' })
+          failed = true
+        }
+        // Also on failure: thinclone releases what waited for this fill.
+        answer = await request({ ...req, extracted: answer.extract_to, failed })
+        if (failed) {
           return origExtract.call(this, dest)
         }
-        answer = await request({ ...req, extracted: answer.extract_to })
       }
     } catch {
       return origExtract.call(this, dest)
