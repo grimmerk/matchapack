@@ -1424,6 +1424,24 @@ mod tests {
     }
 
     #[test]
+    fn a_fill_replaces_a_record_left_by_an_earlier_entry() {
+        // The entry went (removed by hand, or an interrupted replacement) but
+        // its record stayed: the tree pacote makes now is this version's only.
+        let fx = Fx::new("serve-fill-stale-record");
+        if !fx.can_clone() {
+            return;
+        }
+        let i = cached_tarball(&fx.cacache, PKG);
+        fx.store.set_made_by(&i, OLD).unwrap();
+        let s = fx.server(clone::Mode::File);
+        let dst = fx.root.join("node_modules/p");
+        let to = extract_to(s.place_entry(&sri_of(&i), &dst), "fill");
+        fx.pacote_extract(&i, &to);
+        placed_full(s.place_extracted(&sri_of(&i), &dst, &to));
+        assert_eq!(fx.store.made_by(&i), vec![KEY.to_string()]);
+    }
+
+    #[test]
     fn an_entry_filled_meanwhile_by_another_install_is_compared_not_replaced() {
         let fx = Fx::new("serve-fill-race");
         if !fx.can_clone() {
