@@ -9,7 +9,11 @@
 // For a package the hook can reproduce exactly (see `ineligible`), it asks
 // the thinclone process that started this one to place the package's store
 // entry at the destination (clone, then set every placed path's time to now)
-// and resolves when that is done. For anything else, and whenever thinclone
+// and resolves when that is done. When the package is not in the store yet,
+// or is picked to be checked against pacote, thinclone answers with a
+// directory instead: the hook runs pacote's own extract into it and asks
+// again, and thinclone makes that extraction the store entry, or compares
+// the entry with it (src/serve.rs). For anything else, and whenever thinclone
 // answers with an error, it calls pacote's own extract, unchanged. So the
 // worst case is plain `npm ci`: slower, never different.
 //
@@ -177,20 +181,27 @@ function main () {
       send({ note: why })
       return origExtract.call(this, dest)
     }
+    const req = { integrity: String(this.integrity), dest: path.resolve(dest) }
     let answer
     try {
-      answer = await request({
-        integrity: String(this.integrity),
-        dest: path.resolve(dest),
-        resolved: this.resolved || undefined,
-        cache: this.cache || undefined,
-      })
+      answer = await request(req)
+      if (!answer.ok && answer.extract_to) {
+        // pacote's own extraction, with this fetcher (its tarball, its
+        // integrity check, its rules), into thinclone's directory.
+        try {
+          await origExtract.call(this, answer.extract_to)
+        } catch {
+          send({ note: 'pacote-extract-failed' })
+          return origExtract.call(this, dest)
+        }
+        answer = await request({ ...req, extracted: answer.extract_to })
+      }
     } catch {
       return origExtract.call(this, dest)
     }
     if (!answer.ok) {
       if (answer.fatal) {
-        down = down || 'clone-unsupported'
+        down = down || answer.reason || 'fatal'
       }
       // pacote empties the directory (never its node_modules) and extracts.
       return origExtract.call(this, dest)

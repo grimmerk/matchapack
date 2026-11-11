@@ -72,6 +72,10 @@ if [ $engine = inject ]; then
   case_ optional-script-fail -- "$here/fixtures/optional-script-fail"
   # The same package placed by per-file clones (the Linux placement).
   case_ small-file-clones -- "$here/fixtures/small" --clone-mode file
+  # Tarballs where an extractor other than pacote's can give another tree
+  # (a path listed twice; .gitignore next to .npmignore): the store is
+  # filled through pacote.
+  case_ odd-tarballs -- "$here/fixtures/odd-tarballs"
 fi
 # script-env records the npm environment scripts see; the user's flags
 # (--no-audit) reach thinclone only through the shell function.
