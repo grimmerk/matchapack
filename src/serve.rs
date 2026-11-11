@@ -567,12 +567,16 @@ impl<'a> Server<'a> {
     }
 
     /// Fill the entry with pacote's extraction, or compare the entry with it.
+    /// Every package that went through pacote's extraction is placed from
+    /// that extraction, never from the entry's path: another install, under
+    /// another pacote, may replace the entry at any moment.
     fn adopt(&self, i: Integrity, dst: &Path, extracted: &Path) -> Outcome {
         let discard = || {
             let _ = std::fs::remove_dir_all(extracted);
         };
         let entry = self.store.dir_for(&i);
-        if is_real_dir(&entry) {
+        let ino = |p: &Path| std::fs::symlink_metadata(p).ok().filter(|m| m.is_dir()).map(|m| std::os::unix::fs::MetadataExt::ino(&m));
+        if let Some(ino_before) = ino(&entry) {
             // A check, or a fill that another install made first: compare.
             let made_by = self.store.made_by(&i);
             let differs = match crate::store::compare_trees(extracted, &entry) {
@@ -583,14 +587,19 @@ impl<'a> Server<'a> {
                 }
             };
             let Some(d) = differs else {
-                if made_by.as_deref() != Some(self.ks().key.as_str()) {
+                let o = self.finish(i.clone(), extracted, dst, false, true, None);
+                discard();
+                // The record says this pacote extracts the entry to the same
+                // tree; written only if the entry is still the one compared
+                // (a replacement by another install changes its inode and
+                // its record). A replacement between this check and the write
+                // is not excluded (NOTES).
+                if made_by.as_deref() != Some(self.ks().key.as_str())
+                    && ino(&entry) == Some(ino_before)
+                    && self.store.made_by(&i) == made_by
+                {
                     self.mark_made_by(&i);
                 }
-                // Cloned from pacote's extraction, the tree just compared,
-                // not from the entry's path: another install may replace
-                // the entry meanwhile.
-                let o = self.finish(i, extracted, dst, false, true, None);
-                discard();
                 return o;
             };
             let kind = differs_kind(made_by.as_deref(), &self.ks().key);
@@ -600,27 +609,29 @@ impl<'a> Server<'a> {
                     crate::info!("could not record {} in {STRICT_FILE}: {e:#}", self.ks().key);
                 }
             }
-            // The entry is replaced by pacote's extraction (module comment).
-            // The record goes first: whatever happens next, an entry left
-            // here is never taken for this pacote's without a new record.
+            let o = self.finish(i.clone(), extracted, dst, false, true, Some((kind, d)));
+            // Then the entry is replaced by pacote's extraction (module
+            // comment). The record goes first: whatever happens next, an
+            // entry left here is never taken for this pacote's without a
+            // new record.
             self.store.forget_made_by(&i);
             let aside = self.tmp.path.join(format!("q{}", self.seq.fetch_add(1, Ordering::Relaxed)));
             let healed = std::fs::rename(&entry, &aside).is_ok() && std::fs::rename(extracted, &entry).is_ok();
             self.store.forget_size(&i);
             if healed {
                 self.mark_made_by(&i);
-                return self.finish(i, &entry, dst, false, true, Some((kind, d)));
+            } else {
+                // Someone else moved the entry meanwhile.
+                discard();
             }
-            // Someone else moved the entry meanwhile: place pacote's own
-            // extraction from where it is.
-            let o = self.finish(i, extracted, dst, false, true, Some((kind, d)));
-            discard();
             return o;
         }
+        let mut o = self.finish(i.clone(), extracted, dst, false, false, None);
         let parent = entry.parent().unwrap();
         if let Err(e) = std::fs::create_dir_all(parent) {
             discard();
-            return refused("store-error", format!("creating {}: {e}", parent.display()));
+            crate::info!("inject: could not create {}: {e}", parent.display());
+            return o;
         }
         // Rename-if-absent: a directory renamed onto an existing, non-empty
         // one fails, so concurrent installs fill an entry once.
@@ -629,18 +640,17 @@ impl<'a> Server<'a> {
                 self.store.forget_size(&i);
                 self.mark_made_by(&i);
                 // Counted here: the entry is in the store now, whatever
-                // becomes of the placement.
-                self.stats.lock().unwrap().filled.push(i.clone());
-                self.finish(i, &entry, dst, true, false, None)
+                // became of the placement.
+                self.stats.lock().unwrap().filled.push(i);
+                if let Outcome::Placed { filled, .. } = &mut o {
+                    *filled = true;
+                }
             }
-            // Another install filled it while pacote extracted here: compare
-            // with theirs, as a check would.
-            Err(_) if is_real_dir(&entry) => self.adopt(i, dst, extracted),
-            Err(e) => {
-                discard();
-                refused("store-error", format!("moving {} into the store: {e}", extracted.display()))
-            }
+            // Another install filled it while pacote extracted here (theirs
+            // is compared when its maker calls for it, decision 4 in NOTES).
+            Err(_) => discard(),
         }
+        o
     }
 
     fn mark_made_by(&self, i: &Integrity) {
