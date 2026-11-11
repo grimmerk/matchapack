@@ -480,7 +480,7 @@ impl Store {
         let fresh = TmpDir::create(self.root.join("tmp").join(format!("{}-v{seq}-{}", process_tag(), &i.hex[..16])), 0o755)?;
         let r = extract(&data, &fresh.path)
             .with_context(|| format!("extracting {}", tgz.display()))
-            .and_then(|()| Ok(match compare_trees(&fresh.path, &dir)? {
+            .and_then(|()| Ok(match compare_trees(&fresh.path, &dir, false)? {
                 Some(d) => Check::Differs(d),
                 None => Check::Match,
             }));
@@ -519,9 +519,12 @@ impl Store {
 /// The first difference between two extracted trees, `want` the reference
 /// (what the tarball extracts to) and `got` the one checked: the same files
 /// (contents, modes), the same directories and nothing else. Directory modes
-/// are not compared (see `verify_entry`). None when they are the same.
-pub fn compare_trees(want: &Path, got: &Path) -> Result<Option<String>> {
-    let (want, got) = (tree(want)?, tree(got)?);
+/// are compared only with `dir_modes`: `verify_entry` leaves them out (they
+/// follow the umask of whoever extracted), the inject engine compares them
+/// (its umask is gated to 022, and a clone carries them into the project).
+/// None when they are the same.
+pub fn compare_trees(want: &Path, got: &Path, dir_modes: bool) -> Result<Option<String>> {
+    let (want, got) = (tree(want, dir_modes)?, tree(got, dir_modes)?);
     Ok(match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
         Some((w, g)) => Some(describe(w, g)),
         None if want.len() != got.len() => {
@@ -533,16 +536,17 @@ pub fn compare_trees(want: &Path, got: &Path) -> Result<Option<String>> {
     })
 }
 
-/// One path in a tree: its kind, and for a file its mode and contents' hash.
+/// One path in a tree: its kind, its mode (a directory's only when compared),
+/// and for a file its contents' hash.
 #[derive(PartialEq, Eq)]
 enum Node {
-    Dir,
+    Dir(Option<u32>),
     File(u32, blake3::Hash),
     Other,
 }
 
 /// Every path under `root` (`root` itself as ""), sorted, symlinks not followed.
-fn tree(root: &Path) -> Result<Vec<(PathBuf, Node)>> {
+fn tree(root: &Path, dir_modes: bool) -> Result<Vec<(PathBuf, Node)>> {
     let mut v = vec![];
     for e in walkdir::WalkDir::new(root).follow_links(false).follow_root_links(false).sort_by_file_name() {
         let e = e?;
@@ -550,7 +554,7 @@ fn tree(root: &Path) -> Result<Vec<(PathBuf, Node)>> {
         let ft = e.file_type();
         let mode = e.metadata()?.permissions().mode() & 0o7777;
         let n = if ft.is_dir() {
-            Node::Dir
+            Node::Dir(dir_modes.then_some(mode))
         } else if ft.is_file() {
             let mut h = blake3::Hasher::new();
             std::io::copy(&mut fs::File::open(e.path())?, &mut h)?;
@@ -577,8 +581,9 @@ fn describe(w: &(PathBuf, Node), g: &(PathBuf, Node)) -> String {
     match (&w.1, &g.1) {
         (Node::File(wm, _), Node::File(gm, _)) if wm != gm => format!("{p}: mode {gm:o}, the tarball gives {wm:o}"),
         (Node::File(..), Node::File(..)) => format!("{p}: contents differ"),
+        (Node::Dir(Some(wm)), Node::Dir(Some(gm))) => format!("{p}: directory mode {gm:o}, the tarball gives {wm:o}"),
         (_, Node::Other) => format!("{p}: not a regular file or directory"),
-        (Node::Dir, _) => format!("{p}: a file where the tarball has a directory"),
+        (Node::Dir(_), _) => format!("{p}: a file where the tarball has a directory"),
         _ => format!("{p}: a directory where the tarball has a file"),
     }
 }

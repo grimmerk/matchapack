@@ -603,18 +603,20 @@ impl<'a> Server<'a> {
     }
 
     /// The fill of `i` is over (made, failed, or given up): answer the
-    /// requests that waited for it, from the entry if there is one now.
+    /// requests that waited for it, from the entry if this server made it
+    /// (pacote's extraction in this install). An entry another install
+    /// published first is not given to them unchecked: they go to pacote.
     fn release(&self, i: &Integrity) -> Vec<(Value, Outcome)> {
         let waiting = self.filling.lock().unwrap().remove(i).unwrap_or_default();
         let entry = self.store.dir_for(i);
-        let fresh = self.filled_now.lock().unwrap().contains(i);
+        let ours = self.filled_now.lock().unwrap().contains(i);
         waiting
             .into_iter()
             .map(|(id, dst)| {
-                let o = if is_real_dir(&entry) {
-                    self.finish(i.clone(), &entry, &dst, false, false, None, fresh)
+                let o = if ours && is_real_dir(&entry) {
+                    self.finish(i.clone(), &entry, &dst, false, false, None, true)
                 } else {
-                    refused("store-miss", "the fill this package waited for did not complete")
+                    refused("store-miss", "the fill this package waited for did not complete here")
                 };
                 (id, o)
             })
@@ -709,7 +711,7 @@ impl<'a> Server<'a> {
                 }
                 return refused("clone-error", format!("{e:#}"));
             }
-            let differs = match crate::store::compare_trees(extracted, &cand) {
+            let differs = match crate::store::compare_trees(extracted, &cand, true) {
                 Ok(d) => d,
                 Err(e) => {
                     drop_cand();
@@ -993,7 +995,16 @@ impl<'a> Server<'a> {
                     Some(x) => self.extracted(&id, sri, Path::new(dest), Path::new(x), failed),
                     None => self.place_or_wait(&id, sri, Path::new(dest)),
                 }))
-                .unwrap_or_else(|_| vec![(id.clone(), refused("clone-error", "internal error (panic)"))])
+                .unwrap_or_else(|_| {
+                    // The requests waiting for this fill must not wait for ever.
+                    let mut v = vec![(id.clone(), refused("clone-error", "internal error (panic)"))];
+                    // (Also when this request was only waiting: the waiters then
+                    // go to pacote early, which is always safe.)
+                    if let Ok(i) = Integrity::parse(sri) {
+                        v.extend(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.release(&i))).unwrap_or_default());
+                    }
+                    v
+                })
             }
             _ => vec![(id.clone(), refused("bad-request", "integrity and dest are required"))],
         };
@@ -1506,30 +1517,60 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_mode_changed_in_the_store_is_a_difference() {
+        // A directory clone (macOS) carries directory modes into the
+        // project, so the inject engine compares them (its umask is gated to
+        // 022). Per-file clones make every directory anew: nothing to carry.
+        let fx = Fx::new("serve-dir-mode");
+        if !fx.can_clone() || crate::default_clone_mode() != clone::Mode::Dir {
+            return;
+        }
+        let (i, _) = fx.entry(PKG);
+        fx.store.set_made_by(&i, KEY).unwrap();
+        fs::set_permissions(fx.store.dir_for(&i).join("lib"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let s = fx.server_with(clone::Mode::Dir, CheckPolicy::All);
+        let dst = fx.root.join("node_modules/p");
+        let (d, _) = check_once(&fx, &s, &i, &dst, |_| {});
+        assert!(d.as_ref().is_some_and(|(k, m)| *k == "changed" && m.contains("lib: directory mode 700")), "{d:?}");
+        assert_eq!(fs::metadata(dst.join("lib")).unwrap().mode() & 0o777, 0o755);
+    }
+
+    /// An extended attribute (not compared) marks where a placed file came from.
+    #[cfg(target_os = "macos")]
+    fn xattr(p: &Path, set: Option<&str>) -> Option<String> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        let name = std::ffi::CString::new("user.thinclone-test").unwrap();
+        unsafe {
+            if let Some(v) = set {
+                assert_eq!(libc::setxattr(path.as_ptr(), name.as_ptr(), v.as_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW), 0);
+                return None;
+            }
+            let mut buf = [0u8; 64];
+            let n = libc::getxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, libc::XATTR_NOFOLLOW);
+            (n >= 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn a_match_is_placed_from_the_compared_clone_of_the_entry() {
-        // Directory modes are not compared, so an entry and an extraction can
-        // match while differing there: the placed directory shows which was
-        // placed. It is the entry's (blocks shared with the store), by way of
-        // the private clone that was compared, so a replacement of the entry
+        // The placed file is the entry's (blocks shared with the store, and
+        // its extended attribute, which a directory clone keeps), by way of
+        // the private clone that was compared: a replacement of the entry
         // meanwhile would have shown as a difference.
         let fx = Fx::new("serve-match-source");
         if !fx.can_clone() {
             return;
         }
-        // Directory clones keep directory modes; per-file clones make the
-        // directories anew, so there is nothing to see on Linux.
-        if crate::default_clone_mode() != clone::Mode::Dir {
-            return;
-        }
         let (i, sri) = fx.entry(PKG);
-        fs::set_permissions(fx.store.dir_for(&i).join("lib"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        xattr(&fx.store.dir_for(&i).join("lib/index.js"), Some("from-the-entry"));
         let s = fx.server_with(clone::Mode::Dir, CheckPolicy::All);
         let dst = fx.root.join("node_modules/p");
         let to = extract_to(s.place_entry(&sri, &dst), "check");
         fx.pacote_extract(&i, &to);
         assert_eq!(placed_full(s.place_extracted(&sri, &dst, &to)).3, None, "a match");
-        assert_eq!(fs::metadata(dst.join("lib")).unwrap().mode() & 0o777, 0o700, "the entry's tree");
-        assert_eq!(fs::metadata(fx.store.dir_for(&i).join("lib")).unwrap().mode() & 0o777, 0o700, "the entry itself untouched");
+        assert_eq!(xattr(&dst.join("lib/index.js"), None).as_deref(), Some("from-the-entry"));
         assert!(fs::read_dir(&s.tmp.path).unwrap().next().is_none(), "no candidate or extraction left behind");
     }
 
@@ -1700,6 +1741,29 @@ mod tests {
         assert_eq!((st.filled.len(), st.cloned, st.checked), (1, 3, 0), "one extraction; nothing compared with itself");
         // Just extracted: placed without a touch.
         assert_eq!(st.paths_touched, 0);
+    }
+
+    #[test]
+    fn requests_waiting_for_a_fill_another_install_published_first_go_to_pacote() {
+        // The entry they would be cloned from was not made by this install's
+        // pacote, and they were not compared with it.
+        let fx = Fx::new("serve-coalesce-lost");
+        if !fx.can_clone() {
+            return;
+        }
+        let i = cached_tarball(&fx.cacache, PKG);
+        let sri = sri_of(&i);
+        let s = fx.server(clone::Mode::File);
+        let dst = |n: &str| fx.root.join(format!("node_modules/{n}"));
+        let first = answers(&s, json!({ "id": 1, "integrity": sri, "dest": dst("a") }));
+        let to = PathBuf::from(first["1"]["extract_to"].as_str().unwrap());
+        assert!(answers(&s, json!({ "id": 2, "integrity": sri, "dest": dst("b") })).is_empty());
+        fx.pacote_extract(&i, &to);
+        assert!(matches!(fx.store.ensure(&i, "http://x/p.tgz").unwrap(), Ensure::Extracted), "another install publishes first");
+        let done = answers(&s, json!({ "id": 3, "integrity": sri, "dest": dst("a"), "extracted": to }));
+        assert_eq!(done["3"]["ok"], true, "{done:?}");
+        assert_eq!(done["2"]["reason"], "store-miss", "{done:?}");
+        assert!(!dst("b").join("package.json").exists());
     }
 
     #[test]
