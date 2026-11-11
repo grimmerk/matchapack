@@ -440,6 +440,38 @@ pub fn npm_version_gate() -> Result<(), String> {
     Ok(())
 }
 
+/// npm major versions the inject engine runs on. It has no code per npm
+/// version: what keeps it right on a new release is checked at run time (the
+/// hook installs itself only when pacote has the expected shape; the first
+/// install under a new pacote/tar version compares every store entry it uses
+/// with pacote's extraction; npm placing packages the hook never saw is
+/// reported). A major is listed once the inject harness has run on it
+/// (`THINCLONE_ENGINE=inject scripts/verify-npm.sh`, `scripts/test-inject.sh`):
+/// 11 (11.17–11.20 in use), 12 (12.2.2).
+pub const INJECT_NPM_MAJORS: &[u32] = &[11, 12];
+
+/// The inject engine's version gate: THINCLONE_NPM_VERSIONS when set (`any`, or
+/// a list as for the classic engine), otherwise the majors above. Separate
+/// from the classic engine's list of verified minors, which it does not need.
+pub fn inject_npm_version_gate() -> Result<(), String> {
+    let version = util::npm_version().ok_or("could not determine the npm version")?;
+    inject_version_allowed(&version, std::env::var("THINCLONE_NPM_VERSIONS").ok().as_deref())
+}
+
+fn inject_version_allowed(version: &str, allowed: Option<&str>) -> Result<(), String> {
+    let ok = match allowed {
+        Some("any") => true,
+        Some(list) => list.split(',').any(|v| version_matches(version, v.trim())),
+        None => version.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| INJECT_NPM_MAJORS.contains(&m)),
+    };
+    if ok {
+        Ok(())
+    } else {
+        let majors: Vec<String> = INJECT_NPM_MAJORS.iter().map(u32::to_string).collect();
+        Err(format!("npm {version}: the inject engine runs on npm {} (THINCLONE_NPM_VERSIONS=any to try another)", majors.join(" and ")))
+    }
+}
+
 /// "11.19" matches 11.19.x; "11" matches 11.x; an exact version matches itself.
 fn version_matches(version: &str, pattern: &str) -> bool {
     version == pattern || version.starts_with(&format!("{pattern}."))
@@ -453,7 +485,20 @@ fn verified_lines(text: &str) -> impl Iterator<Item = &str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{verified_lines, version_matches};
+    use super::{inject_version_allowed, verified_lines, version_matches};
+
+    #[test]
+    fn inject_engine_npm_majors() {
+        for v in ["11.0.0", "11.17.0", "11.20.0", "12.2.2"] {
+            assert!(inject_version_allowed(v, None).is_ok(), "{v}");
+        }
+        for v in ["9.9.9", "13.0.0", "110.0.0", "", "x"] {
+            assert!(inject_version_allowed(v, None).is_err(), "{v}");
+        }
+        assert!(inject_version_allowed("13.0.0", Some("any")).is_ok());
+        assert!(inject_version_allowed("13.1.0", Some("13.1")).is_ok());
+        assert!(inject_version_allowed("11.20.0", Some("13.1")).is_err(), "an explicit list replaces the majors");
+    }
 
     #[test]
     fn npm_verified_file_lines() {

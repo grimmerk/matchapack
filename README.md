@@ -122,11 +122,11 @@ What differs from the classic engine:
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
   Docker, `scripts/linux-test.sh`).
 
-thinclone still runs plain npm instead, before anything starts, when: the npm
-version is not one the harness was run against (same list as above; for npm 12
-set `THINCLONE_NPM_VERSIONS=any`, and only together with
-`THINCLONE_ENGINE=inject`: that variable opens the gate for the classic engine
-too, which does not support npm 12), the umask is not 022, the project's
+thinclone still runs plain npm instead, before anything starts, when: npm is
+not a major version this engine has been run on (11 and 12; it has no code per
+npm version, so every 11.x and 12.x is taken, unlike the classic engine's list
+of verified minors; `THINCLONE_NPM_VERSIONS` overrides it as for the classic
+engine), the umask is not 022, the project's
 `node_modules` is a symlink, the project is outside the trial scope,
 `--prefix` / `--global` point npm at another directory, the directory has no
 `package-lock.json` or `npm-shrinkwrap.json` (inside a workspace of a

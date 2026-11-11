@@ -56,7 +56,7 @@ const HELPER_DECLINED: i32 = 90;
 /// the project, so the caller can run plain npm.
 fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy)> {
     let root = std::fs::canonicalize(&o.dir).with_context(|| format!("resolving {}", o.dir.display()))?;
-    wrapper::npm_version_gate().map_err(|e| anyhow!(e))?;
+    wrapper::inject_npm_version_gate().map_err(|e| anyhow!(e))?;
     // Clones carry the modes the store was extracted with under umask 022;
     // npm's files follow the process umask. (The hook checks it again per
     // package; here it also guards what this process extracts into the store.)

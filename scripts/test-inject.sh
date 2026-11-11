@@ -240,6 +240,24 @@ wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
 [ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
   && ok "lockfile out of sync through the shell function: status $rc, npm not run again, logged as npm_failed" || bad "out of sync wrapper: rc=$rc ($(last_log "r['outcome']"))"
 
+# 10a. The inject engine's version gate is by npm major, not the classic
+#      engine's list of verified minors: this npm (11 or 12) is taken with no
+#      override and no npm-verified file; an npm 13 is handed to plain npm.
+p=$(project gate-ok small)
+(unset THINCLONE_NPM_VERSIONS; THINCLONE_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "installed inject" ] \
+  && ok "version gate: npm $(npm -v) taken by its major, no override, no npm-verified" || bad "version gate ok: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
+real_npm13=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd -P)
+fake13=$work/fake-npm13; rm -rf "${fake13:?}"; mkdir -p "$fake13/bin" "$fake13/npm/bin"
+python3 -c "import json;d=json.load(open('$real_npm13/package.json'));d['version']='13.0.0';json.dump(d,open('$fake13/npm/package.json','w'))"
+cp "$real_npm13/bin/npm-cli.js" "$fake13/npm/bin/"; ln -s "$real_npm13/lib" "$fake13/npm/lib"; ln -s "$real_npm13/node_modules" "$fake13/npm/node_modules"
+ln -s ../npm/bin/npm-cli.js "$fake13/bin/npm"
+p=$(project gate-13 small)
+(unset THINCLONE_NPM_VERSIONS; PATH=$fake13/bin:$PATH; THINCLONE_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && last_log "r['reason']" | grep -q 'npm 13.0.0: the inject engine runs on npm' \
+  && same "$ref_small" "$p" \
+  && ok "version gate: npm 13 handed to plain npm, tree identical" || bad "version gate 13: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
+
 # 10b. The helper stops before npm starts (here: an npm whose pacote has no
 # fetchers): status 90, nothing changed, so the wrapper declines and runs
 # plain npm, once. The fake npm is the real one except for a stub pacote.
