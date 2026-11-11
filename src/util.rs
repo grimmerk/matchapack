@@ -26,10 +26,10 @@ pub fn phases() -> serde_json::Value {
     serde_json::Value::Object(m)
 }
 
-/// Quiet mode (used when thinclone stands in for `npm ci`): per-step timings
-/// and counts are hidden unless THINCLONE_VERBOSE is set.
+/// Quiet mode (used when matchapack stands in for `npm ci`): per-step timings
+/// and counts are hidden unless MATCHAPACK_VERBOSE is set.
 pub fn set_quiet(q: bool) {
-    QUIET.store(q && std::env::var_os("THINCLONE_VERBOSE").is_none(), Ordering::Relaxed);
+    QUIET.store(q && std::env::var_os("MATCHAPACK_VERBOSE").is_none(), Ordering::Relaxed);
 }
 
 pub fn quiet() -> bool {
@@ -40,32 +40,32 @@ pub fn quiet() -> bool {
 macro_rules! info {
     ($($arg:tt)*) => {
         if !$crate::util::quiet() {
-            eprintln!("[thinclone] {}", format!($($arg)*));
+            eprintln!("[matchapack] {}", format!($($arg)*));
         }
     };
 }
 
-/// Every npm that thinclone starts goes through here. `THINCLONE=0` tells any
+/// Every npm that matchapack starts goes through here. `MATCHAPACK=0` tells any
 /// npm wrapper (shell function, PATH shim) to pass straight through, so a
-/// wrapper can never recurse into thinclone.
+/// wrapper can never recurse into matchapack.
 pub fn npm_cmd() -> Command {
     let mut c = Command::new("npm");
-    c.env("THINCLONE", "0").envs(npm_env());
+    c.env("MATCHAPACK", "0").envs(npm_env());
     c
 }
 
-/// `node` for thinclone's helpers that load npm's own modules, with the same
+/// `node` for matchapack's helpers that load npm's own modules, with the same
 /// environment as `npm_cmd`.
 pub fn node_cmd() -> Command {
     let mut c = Command::new("node");
-    c.env("THINCLONE", "0").envs(npm_env());
+    c.env("MATCHAPACK", "0").envs(npm_env());
     c
 }
 
 static NPM_ENV: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 /// npm settings given on the command line (`--legacy-peer-deps`), passed to
-/// every npm thinclone starts as npm_config_* variables, the way npm itself
+/// every npm matchapack starts as npm_config_* variables, the way npm itself
 /// hands its config to the scripts it runs.
 pub fn set_npm_config(key: &str, value: &str) {
     if let Ok(mut e) = NPM_ENV.lock() {
@@ -139,16 +139,16 @@ pub fn remove_run_dir() {
     }
 }
 
-/// thinclone's settings directory: $THINCLONE_CONFIG_DIR, else
-/// ~/.config/thinclone (trial scope `paths`, `npm-verified`).
+/// matchapack's settings directory: $MATCHAPACK_CONFIG_DIR, else
+/// ~/.config/matchapack (trial scope `paths`, `npm-verified`).
 pub fn config_dir() -> std::path::PathBuf {
-    std::env::var_os("THINCLONE_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| crate::home().join(".config/thinclone"))
+    std::env::var_os("MATCHAPACK_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| crate::home().join(".config/matchapack"))
 }
 
 /// A path from the lockfile is used under the project root only if it is
 /// relative and made of plain names: no `..`, no root, no `.`. Path::join with
 /// an absolute path would REPLACE the root, so this guards every delete, clone
-/// and symlink thinclone does inside the project.
+/// and symlink matchapack does inside the project.
 pub fn safe_relative(p: &str) -> bool {
     !p.is_empty() && std::path::Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }

@@ -5,12 +5,12 @@
 //! and the mtime touch happen here.
 //!
 //! Protocol: one JSON object per line, both ways, over one socket.
-//!   node → thinclone
+//!   node → matchapack
 //!     {"hello":true,"pacote":"21.5.1","hook":"on"}   once, before npm starts
 //!     {"id":7,"integrity":"sha512-…","dest":"/abs/dir"}
 //!     {"id":8,"integrity":"sha512-…","dest":"/abs/dir","extracted":"/…/tmp/…/x3"}
 //!     {"note":"type-FileFetcher"}                    a package the hook left to npm, and why
-//!   thinclone → node
+//!   matchapack → node
 //!     {"id":7,"ok":true,"kind":"fast","filled":false,"checked":false}
 //!     {"id":7,"ok":false,"extract_to":"/…/tmp/…/x3","why":"fill"}
 //!     {"id":7,"ok":false,"reason":"rejected-dest","message":"…","fatal":false}
@@ -18,7 +18,7 @@
 //! answers come back in any order. `fatal` means no later request can succeed
 //! (the filesystem cannot clone): the hook stops asking.
 //!
-//! The store is filled by pacote, never by thinclone's own extractor: for a
+//! The store is filled by pacote, never by matchapack's own extractor: for a
 //! package not in the store the answer is `extract_to`, a fresh directory in
 //! this server's temporary directory; the hook runs pacote's own extract into
 //! it (the very fetcher npm made for that package) and sends the request
@@ -31,9 +31,9 @@
 //! `pacote@21.5.1 tar@7.5.22`): the one that made it, and each one that later
 //! extracted it to the same tree. An entry is compared before use **once per
 //! key**: whenever the npm that is running (its pacote and tar) is not in the
-//! record yet (thinclone's own extractor, the classic engine's, records
+//! record yet (matchapack's own extractor, the classic engine's, records
 //! nothing), and then added to it; an entry whose record has this key is
-//! compared one time in THINCLONE_INJECT_CHECK (default 50), at random, to
+//! compared one time in MATCHAPACK_INJECT_CHECK (default 50), at random, to
 //! catch an entry changed since. pacote or tar extract differently across
 //! versions for odd tarballs (tar 6 extracts a file named `a\..\b` that tar 7
 //! refuses), and no install under one version can vouch for entries it did
@@ -41,7 +41,7 @@
 //! A difference places pacote's extraction and replaces the entry with it
 //! (renamed aside first: an install cloning from it at that moment gets the
 //! whole old entry or an error, never a mix); the record is then this key
-//! only. Its kind: `extractor` (nothing recorded: thinclone's extractor made
+//! only. Its kind: `extractor` (nothing recorded: matchapack's extractor made
 //! it; expected for odd tarballs), `changed` (this key recorded: the entry was
 //! changed since), `pacote` (only other keys recorded: their rules differ
 //! from this one's for this tarball).
@@ -173,7 +173,7 @@ impl Stats {
 }
 
 /// How many store entries are compared with pacote's extraction before
-/// being placed (THINCLONE_INJECT_CHECK).
+/// being placed (MATCHAPACK_INJECT_CHECK).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckPolicy {
     /// Every entry, in every install.
@@ -189,13 +189,13 @@ impl CheckPolicy {
     pub const DEFAULT_RATE: u64 = 50;
 
     pub fn from_env() -> std::result::Result<CheckPolicy, String> {
-        match std::env::var("THINCLONE_INJECT_CHECK").as_deref() {
+        match std::env::var("MATCHAPACK_INJECT_CHECK").as_deref() {
             Err(_) | Ok("") => Ok(CheckPolicy::OneIn(Self::DEFAULT_RATE)),
             Ok("all") => Ok(CheckPolicy::All),
             Ok("off") => Ok(CheckPolicy::Off),
             Ok(n) => match n.parse::<u64>() {
                 Ok(n) if n > 0 => Ok(CheckPolicy::OneIn(n)),
-                _ => Err(format!("THINCLONE_INJECT_CHECK={n} is not all, off or a number above 0")),
+                _ => Err(format!("MATCHAPACK_INJECT_CHECK={n} is not all, off or a number above 0")),
             },
         }
     }
@@ -618,7 +618,7 @@ impl<'a> Server<'a> {
         };
         if failed {
             discard();
-            return refused("pacote-extract-failed", "pacote could not extract the package into thinclone's directory");
+            return refused("pacote-extract-failed", "pacote could not extract the package into matchapack's directory");
         }
         if self.unsupported.load(Ordering::Relaxed) {
             discard();
@@ -1114,7 +1114,7 @@ mod tests {
             Server::new(&self.store, self.root.clone(), mode, Some("pacote@1.0.0 tar@2.0.0".into()), policy).unwrap()
         }
 
-        /// What the hook does with an `extract_to` answer, with thinclone's own
+        /// What the hook does with an `extract_to` answer, with matchapack's own
         /// extractor standing in for pacote: the tarball of `i` from the fake
         /// npm cache, extracted into `to`.
         fn pacote_extract(&self, i: &Integrity, to: &Path) {
@@ -1550,14 +1550,14 @@ mod tests {
         let (i, _) = fx.entry(PKG);
         let s = fx.server_with(clone::Mode::File, CheckPolicy::All);
         // The same tree: kept, and now known to be this pacote's.
-        assert!(fx.store.made_by(&i).is_empty(), "made by thinclone's extractor");
+        assert!(fx.store.made_by(&i).is_empty(), "made by matchapack's extractor");
         let (d, _) = check_once(&fx, &s, &i, &fx.root.join("node_modules/a"), |_| {});
         assert_eq!(d, None);
         assert_eq!(fx.store.made_by(&i), vec![KEY.to_string()]);
         // Known to this same pacote, and different now: changed since.
         let (d, _) = check_once(&fx, &s, &i, &fx.root.join("node_modules/b"), chmod_644);
         assert!(d.as_ref().is_some_and(|(k, m)| *k == "changed" && m.contains("bin/cli")), "{d:?}");
-        // Made by thinclone's extractor: replaced.
+        // Made by matchapack's extractor: replaced.
         let (j, _) = fx.entry(&[("package.json", 0o644, "{\"name\":\"j\"}\n"), ("bin/cli", 0o755, "x\n")]);
         let (d, _) = check_once(&fx, &s, &j, &fx.root.join("node_modules/c"), chmod_644);
         assert_eq!(d.map(|x| x.0), Some("extractor"));
@@ -1606,7 +1606,7 @@ mod tests {
     fn xattr(p: &Path, set: Option<&str>) -> Option<String> {
         use std::os::unix::ffi::OsStrExt;
         let path = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
-        let name = std::ffi::CString::new("user.thinclone-test").unwrap();
+        let name = std::ffi::CString::new("user.matchapack-test").unwrap();
         unsafe {
             if let Some(v) = set {
                 assert_eq!(libc::setxattr(path.as_ptr(), name.as_ptr(), v.as_ptr().cast(), v.len(), 0, libc::XATTR_NOFOLLOW), 0);
@@ -1670,7 +1670,7 @@ mod tests {
         let (i, _) = fx.entry(PKG);
         fx.store.set_made_by(&i, KEY).unwrap();
         // The entry goes (an interrupted replacement, a hand removal) and
-        // thinclone's extractor makes it again.
+        // matchapack's extractor makes it again.
         fs::remove_dir_all(fx.store.dir_for(&i)).unwrap();
         assert!(matches!(fx.store.ensure(&i, "http://x/p.tgz").unwrap(), Ensure::Extracted));
         assert!(fx.store.made_by(&i).is_empty());
@@ -1699,7 +1699,7 @@ mod tests {
         // Off: none, whoever made the entry.
         assert!(!checks(&fx.server_with(clone::Mode::File, CheckPolicy::Off)));
         let never = || fx.server_with(clone::Mode::File, CheckPolicy::OneIn(1_000_000));
-        // Nothing recorded (thinclone's extractor made it): compared.
+        // Nothing recorded (matchapack's extractor made it): compared.
         assert!(checks(&never()), "an entry no pacote made");
         // Known to this key: sampled.
         fx.store.set_made_by(&i, KEY).unwrap();

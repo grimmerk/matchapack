@@ -1,4 +1,4 @@
-//! `thinclone store gc`: remove the store entries no existing project uses.
+//! `matchapack store gc`: remove the store entries no existing project uses.
 //!
 //! Reference-based, not age-based. Removing an entry never breaks an installed
 //! node_modules (clones are independent files), but while a node_modules still

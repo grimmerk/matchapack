@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Inject engine tests (THINCLONE_ENGINE=inject), end to end with the release
+# Inject engine tests (MATCHAPACK_ENGINE=inject), end to end with the release
 # binary and the npm on PATH:   test-inject.sh <work-dir>
 # What the fixture harness cannot show: that the hook really cloned, that a
 # disabled hook and a store miss still give npm ci's tree, the gates before
@@ -7,12 +7,12 @@
 # project record, and the hook's eligibility rules (test-inject-hook.js).
 # Uses its own store and log directory, never the real ones.
 set -uo pipefail
-work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/thinclone
+work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
-export THINCLONE_NPM_VERSIONS=any THINCLONE_STORE=$work/store THINCLONE_LOG_DIR=$work/logs THINCLONE_PATHS=$work
-export THINCLONE_ENGINE=inject
-unset THINCLONE_INJECT_HOOK THINCLONE_INJECT_THREADS THINCLONE
+export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs MATCHAPACK_PATHS=$work
+export MATCHAPACK_ENGINE=inject
+unset MATCHAPACK_INJECT_HOOK MATCHAPACK_INJECT_THREADS MATCHAPACK
 store=$work/store
 rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/store-classic" "${work:?}/store-odd"
 pass=0; fail=0
@@ -38,7 +38,7 @@ project() { # name fixture [python statement on the package.json dict d]
   if [ -n "${3-}" ]; then python3 -c "import json;p='$d/package.json';d=json.load(open(p));$3;json.dump(d,open(p,'w'),indent=2)"; fi
   echo "$d"
 }
-# thinclone install <dir> [args]: output in $work/out.
+# matchapack install <dir> [args]: output in $work/out.
 install() { local d=$1; shift; "$bin" install "$d" "$@" -- --no-audit --no-fund > "$work/out" 2>&1; }
 cloned() { grep -Eo 'inject: cloned [0-9]+' "$work/out" | grep -Eo '[0-9]+$'; }
 filled() { grep -Eo '[0-9]+ new in the store' "$work/out" | grep -Eo '^[0-9]+'; }
@@ -49,7 +49,7 @@ same() { "$bin" diff "$1" "$2" > "$work/diff" 2>&1 && grep -q 'hidden lockfile b
 # The shell function, as a user's shell would have it.
 wrapped() { # dir command...
   local d=$1; shift
-  (cd "$d" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/thinclone.sh'; $*" > "$work/out" 2>&1)
+  (cd "$d" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/matchapack.sh'; $*" > "$work/out" 2>&1)
 }
 last_log() { tail -1 "$work/logs/log.jsonl" | python3 -c "import json,sys;r=json.load(sys.stdin);print($1)"; }
 
@@ -78,7 +78,7 @@ const tar = require(require.resolve('tar/package.json', { paths: [pacoteDir] }))
 console.log('pacote@' + require(path.join(pacoteDir, 'package.json')).version + ' tar@' + tar)" "$npm_dir")
 
 # 1. A first install with an empty store: pacote extracts every package into
-#    the store (thinclone's own extractor is not used), then it is cloned.
+#    the store (matchapack's own extractor is not used), then it is cloned.
 #    The hook fired.
 p=$(project small1 small)
 install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(filled)" = "$d_small" ] && [ "$(by_npm)" = 0 ] && same "$ref_small" "$p" \
@@ -99,49 +99,49 @@ install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(filled)" = 0 ] && [ ! -e "$
 # 3. The hook installed but switched off: npm extracts everything itself and
 #    the tree is the same.
 p=$(project hookoff small)
-THINCLONE_INJECT_HOOK=off install "$p" && [ "$(cloned)" = 0 ] && grep -q "hook-off $n_small" "$work/out" && same "$ref_small" "$p" \
+MATCHAPACK_INJECT_HOOK=off install "$p" && [ "$(cloned)" = 0 ] && grep -q "hook-off $n_small" "$work/out" && same "$ref_small" "$p" \
   && ok "hook off: 0 cloned, $n_small extracted by npm, tree identical" || bad "hook off: cloned $(cloned)"
 
 # 3b. No hook at all (what an npm that no longer extracts through the
-#     patched method would look like): the tree is npm's, and thinclone says
+#     patched method would look like): the tree is npm's, and matchapack says
 #     that npm placed packages its hook never saw.
 p=$(project nohook small)
-THINCLONE_INJECT_HOOK=none install "$p" && [ "$(cloned)" = 0 ] && [ "$(by_npm)" = 0 ] \
-  && grep -q "npm installed $n_small packages, but only 0 went through thinclone's hook" "$work/out" && same "$ref_small" "$p" \
+MATCHAPACK_INJECT_HOOK=none install "$p" && [ "$(cloned)" = 0 ] && [ "$(by_npm)" = 0 ] \
+  && grep -q "npm installed $n_small packages, but only 0 went through matchapack's hook" "$work/out" && same "$ref_small" "$p" \
   && ok "no hook: tree identical, and the $n_small packages the hook never saw are reported" || bad "no hook: cloned $(cloned)"
 
 # 4. A package in neither the store nor npm's cache: pacote fetches it into
 #    the store, and it is cloned in the same install.
 p=$(project miss bundled)
-THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 3 ] && [ "$(filled)" = 3 ] && same "$ref_local" "$p" \
+MATCHAPACK_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 3 ] && [ "$(filled)" = 3 ] && same "$ref_local" "$p" \
   && ok "store and npm cache empty: pacote fetches all 3 into the store, all 3 cloned, tree identical" || bad "store miss: cloned $(cloned), filled $(filled)"
-THINCLONE_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 3 ] && [ "$(filled)" = 0 ] && same "$ref_local" "$p" \
+MATCHAPACK_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p" && [ "$(cloned)" = 3 ] && [ "$(filled)" = 0 ] && same "$ref_local" "$p" \
   && ok "the next install: 0 new in the store, all 3 cloned" || bad "after a miss: cloned $(cloned), filled $(filled)"
 
-# 4b. Store entries that thinclone's own extractor made (the classic
+# 4b. Store entries that matchapack's own extractor made (the classic
 #     engine's) are compared with pacote's extraction before their first
 #     use, and then recorded as known to this pacote and tar.
 cs=$work/store-classic
 p=$(project classic-fill small)
-THINCLONE_STORE=$cs env -u THINCLONE_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1 && [ -z "$(ls "$cs/made-by" 2>/dev/null)" ] || bad "classic fill"
+MATCHAPACK_STORE=$cs env -u MATCHAPACK_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1 && [ -z "$(ls "$cs/made-by" 2>/dev/null)" ] || bad "classic fill"
 p=$(project classic-then-inject small)
-THINCLONE_STORE=$cs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] \
+MATCHAPACK_STORE=$cs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] \
   && [ "$(cat "$cs/made-by/sha512/"*/* | sort -u)" = "$want_key" ] && same "$ref_small" "$p" \
   && ok "entries made by the classic engine: all $n_small compared before use, then recorded for this pacote/tar, tree identical" \
   || bad "classic then inject: cloned $(cloned), checked $(checked)"
 # Now known to this pacote/tar: sampled (one in a million here).
 p=$(project sampled small)
-THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
+MATCHAPACK_STORE=$cs MATCHAPACK_INJECT_CHECK=1000000 install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
   && ok "the next install: sampled, nothing compared at one in a million" || bad "sampled: checked $(checked)"
 
 # 4c. An entry changed since pacote made it: a check finds it, pacote's
-#     extraction is placed and replaces the entry, and thinclone says so.
+#     extraction is placed and replaces the entry, and matchapack says so.
 lp=$(python3 -c "import json;print(json.load(open('$ref_small/node_modules/.package-lock.json'))['packages']['node_modules/lodash']['integrity'])")
 lhex=$(python3 -c "import base64;a,b='$lp'.split('-',1);print(base64.b64decode(b).hex())")
 lentry=$cs/v2/sha512/${lhex:0:2}/${lhex:2}
 chmod 600 "$lentry/package.json"
 p=$(project changed small)
-THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=all install "$p" && [ "$(cloned)" = "$n_small" ] && grep -q '1 store entries had changed since' "$work/out" \
+MATCHAPACK_STORE=$cs MATCHAPACK_INJECT_CHECK=all install "$p" && [ "$(cloned)" = "$n_small" ] && grep -q '1 store entries had changed since' "$work/out" \
   && [ "$(stat -f %Lp "$lentry/package.json" 2>/dev/null || stat -c %a "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
   && ok "a store entry changed since it was made: found, replaced by pacote's extraction, tree identical" || bad "changed entry: $(grep -c 'had changed' "$work/out")"
 
@@ -153,7 +153,7 @@ old="pacote@0.0.1 tar@0.0.1"
 for f in "$cs"/made-by/sha512/*/*; do echo "$old" > "$f"; done
 chmod 600 "$lentry/package.json"
 p=$(project other-version small)
-THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = "$n_small" ] \
+MATCHAPACK_STORE=$cs MATCHAPACK_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = "$n_small" ] \
   && grep -q "extracts 1 package(s) differently from what another pacote/tar version put in the store" "$work/out" \
   && [ "$(stat -f %Lp "$lentry/package.json" 2>/dev/null || stat -c %a "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
   && ok "entries of another pacote/tar version: all $n_small compared once under this one, the differing one replaced, tree identical" \
@@ -167,7 +167,7 @@ both, only_new = sum(r == [old, new] for r in recs), sum(r == [new] for r in rec
 sys.exit(0 if both + only_new == len(recs) and only_new >= 1 and both >= 1 else 1)
 PY
 p=$(project both-versions small)
-THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
+MATCHAPACK_STORE=$cs MATCHAPACK_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
   && ok "known to this version too: nothing compared again" || bad "both versions: checked $(checked)"
 
 # 4e. A tarball whose path is listed twice: the classic engine's extractor
@@ -176,11 +176,11 @@ THINCLONE_STORE=$cs THINCLONE_INJECT_CHECK=1000000 install "$p" && [ "$(checked)
 os=$work/store-odd
 ref_odd=$(project ref-odd odd-tarballs); (cd "$ref_odd" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci on odd-tarballs"
 p=$(project odd-classic odd-tarballs)
-THINCLONE_STORE=$os env -u THINCLONE_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1
+MATCHAPACK_STORE=$os env -u MATCHAPACK_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1
 ! same "$ref_odd" "$p" || bad "odd-tarballs: the classic engine was expected to differ (lc-dup/run.sh)"
 p=$(project odd-inject odd-tarballs)
-THINCLONE_STORE=$os install "$p" && [ "$(cloned)" = 2 ] && same "$ref_odd" "$p" \
-  && grep -q "1 store entries made by thinclone's extractor differed from npm's extraction and were replaced (first: .*run.sh: mode 644, the tarball gives 755)" "$work/out" \
+MATCHAPACK_STORE=$os install "$p" && [ "$(cloned)" = 2 ] && same "$ref_odd" "$p" \
+  && grep -q "1 store entries made by matchapack's extractor differed from npm's extraction and were replaced (first: .*run.sh: mode 644, the tarball gives 755)" "$work/out" \
   && ok "a path listed twice: the classic engine's entry is replaced by pacote's before use, tree identical" || bad "odd-tarballs inject: cloned $(cloned)"
 
 # 5. The project is recorded with the entries it cloned, so gc keeps them.
@@ -215,7 +215,7 @@ p=$(project umask small); mkdir -p "$p/node_modules/sentinel"
 [ $rc != 0 ] && grep -q 'umask is 002' "$work/out" && [ -d "$p/node_modules/sentinel" ] \
   && ok "umask 002: refused before npm starts, node_modules untouched" || bad "umask 002: rc=$rc"
 (umask 002; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
-[ $rc = 0 ] && grep -q 'running plain npm instead (umask is 002' "$work/out" && ! grep -q 'thinclone: added' "$work/out" && [ ! -e "$p/node_modules/sentinel" ] && [ -d "$p/node_modules/lodash" ] \
+[ $rc = 0 ] && grep -q 'running plain npm instead (umask is 002' "$work/out" && ! grep -q 'matchapack: added' "$work/out" && [ ! -e "$p/node_modules/sentinel" ] && [ -d "$p/node_modules/lodash" ] \
   && ok "umask 002 through the shell function: plain npm ci installs" || bad "umask 002 wrapper: rc=$rc"
 
 p=$(project nmlink small); mkdir -p "$work/outside-nm/sentinel"; ln -s "$work/outside-nm" "$p/node_modules"
@@ -224,21 +224,21 @@ install "$p"; rc=$?
   && ok "node_modules symlink: refused, the link's target untouched" || bad "node_modules symlink: rc=$rc"
 
 p=$(project badengine small)
-THINCLONE_ENGINE=bogus "$bin" install "$p" > "$work/out" 2>&1; rc=$?
-[ $rc != 0 ] && grep -q 'THINCLONE_ENGINE=bogus is not an engine' "$work/out" && [ ! -e "$p/node_modules" ] \
+MATCHAPACK_ENGINE=bogus "$bin" install "$p" > "$work/out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'MATCHAPACK_ENGINE=bogus is not an engine' "$work/out" && [ ! -e "$p/node_modules" ] \
   && ok "an unknown engine name is an error, not a default" || bad "unknown engine: rc=$rc"
-THINCLONE_ENGINE=bogus wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
-[ $rc = 0 ] && grep -q 'running plain npm instead (THINCLONE_ENGINE=bogus' "$work/out" && [ -d "$p/node_modules/lodash" ] \
+MATCHAPACK_ENGINE=bogus wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && grep -q 'running plain npm instead (MATCHAPACK_ENGINE=bogus' "$work/out" && [ -d "$p/node_modules/lodash" ] \
   && ok "an unknown engine name through the shell function: plain npm" || bad "unknown engine wrapper: rc=$rc"
 
 # 9. Options of the other engine are refused, not ignored.
 p=$(project flags small)
 "$bin" install "$p" --no-rebuild > "$work/out" 2>&1; rc=$?
-[ $rc != 0 ] && grep -q 'not available with THINCLONE_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "--no-rebuild is refused with the inject engine" || bad "--no-rebuild: rc=$rc"
-env -u THINCLONE_ENGINE "$bin" install "$p" -- --no-audit > "$work/out" 2>&1; rc=$?
-[ $rc != 0 ] && grep -q 'need THINCLONE_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "npm arguments are refused by the classic engine" || bad "classic with npm args: rc=$rc"
-env -u THINCLONE_ENGINE "$bin" install "$p" > "$work/out" 2>&1; rc=$?
-[ $rc = 0 ] && ! grep -q 'inject:' "$work/out" && grep -q 'post-install' "$work/out" && ok "without THINCLONE_ENGINE the classic engine installs" || bad "default engine: rc=$rc"
+[ $rc != 0 ] && grep -q 'not available with MATCHAPACK_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "--no-rebuild is refused with the inject engine" || bad "--no-rebuild: rc=$rc"
+env -u MATCHAPACK_ENGINE "$bin" install "$p" -- --no-audit > "$work/out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'need MATCHAPACK_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "npm arguments are refused by the classic engine" || bad "classic with npm args: rc=$rc"
+env -u MATCHAPACK_ENGINE "$bin" install "$p" > "$work/out" 2>&1; rc=$?
+[ $rc = 0 ] && ! grep -q 'inject:' "$work/out" && grep -q 'post-install' "$work/out" && ok "without MATCHAPACK_ENGINE the classic engine installs" || bad "default engine: rc=$rc"
 
 # 10. npm's failures are npm's: same status, said once, nothing retried.
 p=$(project outofsync small "d['dependencies']['left-pad']='1.3.0'"); mkdir -p "$p/node_modules/sentinel"
@@ -257,7 +257,7 @@ wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
 # case is skipped, since the gate rightly hands that npm to plain npm.)
 if grep -q "pub const INJECT_NPM_MAJORS: &\[u32\] = &\[.*\b$npm_major\b" "$here/src/wrapper.rs"; then
   p=$(project gate-ok small)
-  (unset THINCLONE_NPM_VERSIONS; THINCLONE_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+  (unset MATCHAPACK_NPM_VERSIONS; MATCHAPACK_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
   [ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "installed inject" ] \
     && ok "version gate: npm $(npm -v) taken by its major, no override, no npm-verified" || bad "version gate ok: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
 else
@@ -269,7 +269,7 @@ python3 -c "import json;d=json.load(open('$real_npm13/package.json'));d['version
 cp "$real_npm13/bin/npm-cli.js" "$fake13/npm/bin/"; ln -s "$real_npm13/lib" "$fake13/npm/lib"; ln -s "$real_npm13/node_modules" "$fake13/npm/node_modules"
 ln -s ../npm/bin/npm-cli.js "$fake13/bin/npm"
 p=$(project gate-13 small)
-(unset THINCLONE_NPM_VERSIONS; PATH=$fake13/bin:$PATH; THINCLONE_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+(unset MATCHAPACK_NPM_VERSIONS; PATH=$fake13/bin:$PATH; MATCHAPACK_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
 [ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && last_log "r['reason']" | grep -q 'npm 13.0.0: the inject engine runs on npm' \
   && same "$ref_small" "$p" \
   && ok "version gate: npm 13 handed to plain npm, tree identical" || bad "version gate 13: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
@@ -297,21 +297,21 @@ install "$p"; rc=$?
 #     classic engine hands to plain npm is handled, and logged.
 p=$(project omit small)
 wrapped "$p" "npm ci --omit=dev --no-audit --no-fund"; rc=$?
-[ $rc = 0 ] && grep -q 'thinclone: added' "$work/out" && [ ! -d "$p/node_modules/jest" ] && [ -d "$p/node_modules/lodash" ] \
+[ $rc = 0 ] && grep -q 'matchapack: added' "$work/out" && [ ! -d "$p/node_modules/jest" ] && [ -d "$p/node_modules/lodash" ] \
   && [ "$(last_log "r['outcome'], r['engine'], r['inject']['cloned'] > 0, r['inject']['cloned'] < $n_small, '--omit=dev' in r['args'], r['inject']['installed'] == r['inject']['cloned'], r['inject']['unseen']")" = "installed inject True True True True 0" ] \
   && ok "npm ci --omit=dev through the shell function: cloned, dev dependencies absent, logged with the counts" || bad "omit wrapper: rc=$rc"
 mkdir -p "$work/elsewhere"; cp "$here/fixtures/bundled/package.json" "$here/fixtures/bundled/package-lock.json" "$work/elsewhere/"
 wrapped "$p" "npm ci --prefix '$work/elsewhere' --no-audit --no-fund"; rc=$?
-[ $rc = 0 ] && grep -q 'moves the install out of this directory' "$work/out" && ! grep -q 'thinclone: added' "$work/out" && [ -d "$work/elsewhere/node_modules/lc-s" ] \
+[ $rc = 0 ] && grep -q 'moves the install out of this directory' "$work/out" && ! grep -q 'matchapack: added' "$work/out" && [ -d "$work/elsewhere/node_modules/lc-s" ] \
   && ok "npm ci --prefix: plain npm (the project is not this directory)" || bad "prefix: rc=$rc"
 
 wrapped "$p" "npm ci --dry-run --no-audit --no-fund"; rc=$?
-[ $rc = 0 ] && grep -q 'running plain npm instead (option --dry-run installs nothing' "$work/out" && ! grep -q 'thinclone: added' "$work/out" \
+[ $rc = 0 ] && grep -q 'running plain npm instead (option --dry-run installs nothing' "$work/out" && ! grep -q 'matchapack: added' "$work/out" \
   && ok "npm ci --dry-run: plain npm (not an install)" || bad "dry-run: rc=$rc"
 
 # 11b. A workspace directory that is a symlink to a directory outside the
 #      project: npm installs the workspace's own dependency there, as npm ci
-#      does; thinclone refuses to clone outside the project (rejected-dest),
+#      does; matchapack refuses to clone outside the project (rejected-dest),
 #      so that package is npm's own extraction.
 p=$work/wslink; rm -rf "${p:?}" "${work:?}/outside-ws"; mkdir -p "$p/packages" "$work/outside-ws"
 echo '{"name":"wsroot","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}' > "$p/package.json"
@@ -320,13 +320,13 @@ ln -s "$work/outside-ws" "$p/packages/ws"
 (cd "$p" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$work/out" 2>&1)
 install "$p"; rc=$?
 [ $rc = 0 ] && [ "$(cloned)" = 1 ] && grep -q 'rejected-dest 1' "$work/out" && grep -q 'outside the project' "$work/out" \
-  && ! grep -q "went through thinclone's hook" "$work/out" \
+  && ! grep -q "went through matchapack's hook" "$work/out" \
   && grep -q '"version":"2.0.0"' "$work/outside-ws/node_modules/lc-s/package.json" && grep -q '"version":"1.0.0"' "$p/node_modules/lc-s/package.json" \
   && ok "a workspace symlinked out of the project: its dependency is refused by the clone server and extracted by npm" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
 
 # 11b. `npm ci` inside a workspace of a monorepo: npm installs into the
 #      root's node_modules (the workspace's subset), outside the directory
-#      thinclone started in, so nothing could be cloned (#36). Without a
+#      matchapack started in, so nothing could be cloned (#36). Without a
 #      lockfile there the wrapper hands it to npm up front; with a stray one
 #      the run is logged as npm installing elsewhere, not as a dead hook.
 ws=$work/ws-src; rm -rf "${ws:?}"; mkdir -p "$ws/packages/a"

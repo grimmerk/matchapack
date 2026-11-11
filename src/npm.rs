@@ -486,7 +486,7 @@ pub fn build_plan(lf: &Lockfile, ideal: Option<&HashSet<String>>) -> Result<Plan
     // npm ci empties node_modules only in the root and in the DECLARED
     // workspaces (ci.js: getWorkspaces). Other in-project link targets
     // (`file:./lib`) keep their node_modules; if one has anything in it, the
-    // tree npm ci leaves is not one thinclone reproduces, so hand over.
+    // tree npm ci leaves is not one matchapack reproduces, so hand over.
     let ws_globs = workspace_globs(lf);
     for e in &lf.entries {
         if e.link {
@@ -591,7 +591,7 @@ impl NpmRebuild {
                 let mut v = v.clone();
                 if let Value::Object(entry) = &mut v {
                     // npm re-serializes every entry (it does not keep the
-                    // lockfile's key order), so neither may thinclone.
+                    // lockfile's key order), so neither may matchapack.
                     npm_key_order(entry);
                 }
                 pk.insert(k.clone(), v);

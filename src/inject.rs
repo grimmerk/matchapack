@@ -1,5 +1,5 @@
-//! The inject engine (`THINCLONE_ENGINE=inject`; NOTES "Inject engine",
-//! grimmerk/thinclone#33): npm runs its own `npm ci`, in a node child started
+//! The inject engine (`MATCHAPACK_ENGINE=inject`; NOTES "Inject engine",
+//! grimmerk/matchapack-private#33): npm runs its own `npm ci`, in a node child started
 //! here, and only the per-package extraction is replaced by a clone from the
 //! store. This process keeps what must be decided before anything starts
 //! (npm version gate, umask, where the project's node_modules really is),
@@ -20,7 +20,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// Which engine installs. The classic engine (thinclone orders every step of
+/// Which engine installs. The classic engine (matchapack orders every step of
 /// `npm ci` itself) stays the default until the inject engine replaces it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
@@ -28,13 +28,13 @@ pub enum Engine {
     Inject,
 }
 
-/// From THINCLONE_ENGINE: unset, empty or `classic` → Classic; `inject`.
+/// From MATCHAPACK_ENGINE: unset, empty or `classic` → Classic; `inject`.
 /// Anything else is an error, never a silent default.
 pub fn engine() -> std::result::Result<Engine, String> {
-    match std::env::var("THINCLONE_ENGINE").as_deref() {
+    match std::env::var("MATCHAPACK_ENGINE").as_deref() {
         Err(_) | Ok("") | Ok("classic") => Ok(Engine::Classic),
         Ok("inject") => Ok(Engine::Inject),
-        Ok(other) => Err(format!("THINCLONE_ENGINE={other} is not an engine (classic, inject)")),
+        Ok(other) => Err(format!("MATCHAPACK_ENGINE={other} is not an engine (classic, inject)")),
     }
 }
 
@@ -67,7 +67,7 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy)> {
     // npm ci replaces a node_modules that is a symlink; every clone into it
     // would be refused one by one (its real path is outside the project).
     if std::fs::symlink_metadata(root.join("node_modules")).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!("the project directory's node_modules is a symlink; npm ci replaces it, thinclone does not");
+        bail!("the project directory's node_modules is a symlink; npm ci replaces it, matchapack does not");
     }
     let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
     for m in ["lib/cli.js", "bin/npm-cli.js", "node_modules/pacote/package.json"] {
@@ -108,7 +108,7 @@ fn installed_packages(root: &std::path::Path) -> Option<usize> {
 }
 
 fn threads() -> usize {
-    std::env::var("THINCLONE_INJECT_THREADS")
+    std::env::var("MATCHAPACK_INJECT_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
@@ -144,9 +144,9 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
 
     // Not util::node_cmd: npm runs here as the user's `npm ci`, and the
     // scripts it starts must see the user's environment, without a
-    // THINCLONE=0 of ours. (The helper removes THINCLONE_INJECT_FD.)
+    // MATCHAPACK=0 of ours. (The helper removes MATCHAPACK_INJECT_FD.)
     let mut cmd = std::process::Command::new("node");
-    cmd.arg(&helper).arg(&npm_dir).args(&o.npm_args).current_dir(&root).env("THINCLONE_INJECT_FD", CHILD_FD.to_string());
+    cmd.arg(&helper).arg(&npm_dir).args(&o.npm_args).current_dir(&root).env("MATCHAPACK_INJECT_FD", CHILD_FD.to_string());
     let theirs_fd = theirs.as_raw_fd();
     // The child's end of the socket becomes its fd 3. Only async-signal-safe
     // calls between fork and exec. dup2 clears close-on-exec on the new fd;
@@ -210,7 +210,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // exit status. gc cannot run before this record is written: it needs the
     // store's exclusive lock, which `store` still holds shared.
     if let Err(e) = store.record_project(&root, &stats.used) {
-        crate::info!("could not record the project for `thinclone store gc`: {e:#}");
+        crate::info!("could not record the project for `matchapack store gc`: {e:#}");
     }
     util::record("npm", npm_secs);
     util::record("clone requests (first to last)", stats.wall_secs());
@@ -234,28 +234,28 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     for e in &stats.errors {
         crate::info!("inject: {e}");
     }
-    // Not an error, but not what the user set thinclone up for: say it even
+    // Not an error, but not what the user set matchapack up for: say it even
     // when the per-step lines are hidden.
     if stats.fallbacks.contains_key("clone-unsupported") {
         let why = stats.errors.iter().find(|e| e.starts_with("clone-unsupported")).map(String::as_str).unwrap_or("clone-unsupported");
-        eprintln!("thinclone: no clones from the store here, npm extracted the packages itself ({why})");
+        eprintln!("matchapack: no clones from the store here, npm extracted the packages itself ({why})");
     }
     // Entries that differed from pacote's extraction were replaced and the
     // packages placed from pacote's: this install is right. What it says
     // about the store depends on who made them (serve.rs).
     for (kind, (n, first)) in &stats.differs {
         match kind.as_str() {
-            // Expected: thinclone's own extractor (the classic engine's)
+            // Expected: matchapack's own extractor (the classic engine's)
             // differs from pacote for some odd tarballs.
-            "extractor" => crate::info!("inject: {n} store entries made by thinclone's extractor differed from npm's extraction and were replaced (first: {})", first[0]),
+            "extractor" => crate::info!("inject: {n} store entries made by matchapack's extractor differed from npm's extraction and were replaced (first: {})", first[0]),
             "changed" => eprintln!(
-                "thinclone: {n} store entries had changed since npm's pacote made them; replaced with npm's extraction (first: {})",
+                "matchapack: {n} store entries had changed since npm's pacote made them; replaced with npm's extraction (first: {})",
                 first[0]
             ),
             // Every entry is compared once under each pacote/tar version before
             // it is cloned, so nothing that differs was placed unchecked.
             _ => eprintln!(
-                "thinclone: npm's {key} extracts {n} package(s) differently from what another pacote/tar version put in the store \
+                "matchapack: npm's {key} extracts {n} package(s) differently from what another pacote/tar version put in the store \
                  (first: {}); replaced with npm's extraction",
                 first[0]
             ),
@@ -272,7 +272,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // The hook is a patch of a method npm does not promise to keep calling.
     // If a future npm extracts some other way, installs stay correct and
     // nothing here fails: the only sign is npm having placed packages the
-    // hook never saw. Said out loud and logged (`thinclone report` counts it).
+    // hook never saw. Said out loud and logged (`matchapack report` counts it).
     if let Some(installed) = installed_packages(&root) {
         let seen = stats.cloned + stats.fallback_total();
         let unseen = installed.saturating_sub(seen);
@@ -280,7 +280,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         inject["unseen"] = serde_json::json!(unseen);
         if unseen > 0 {
             eprintln!(
-                "thinclone: npm installed {installed} packages, but only {seen} went through thinclone's hook: \
+                "matchapack: npm installed {installed} packages, but only {seen} went through matchapack's hook: \
                  this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)"
             );
         }

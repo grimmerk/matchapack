@@ -1,4 +1,4 @@
-// The inject engine's node side (THINCLONE_ENGINE=inject; NOTES "Inject
+// The inject engine's node side (MATCHAPACK_ENGINE=inject; NOTES "Inject
 // engine"). Runs npm's REAL command in this process, the way bin/npm-cli.js
 // does, with one method replaced: pacote's FetcherBase.prototype.extract, the
 // single place where npm puts a package's files into a directory. It is
@@ -7,25 +7,25 @@
 // exists), so npm's refusals stay npm's.
 //
 // For a package the hook can reproduce exactly (see `ineligible`), it asks
-// the thinclone process that started this one to place the package's store
+// the matchapack process that started this one to place the package's store
 // entry at the destination (clone, then set every placed path's time to now)
 // and resolves when that is done. When the package is not in the store yet,
-// or is picked to be checked against pacote, thinclone answers with a
+// or is picked to be checked against pacote, matchapack answers with a
 // directory instead: the hook runs pacote's own extract into it and asks
-// again, and thinclone makes that extraction the store entry, or compares
-// the entry with it (src/serve.rs). For anything else, and whenever thinclone
+// again, and matchapack makes that extraction the store entry, or compares
+// the entry with it (src/serve.rs). For anything else, and whenever matchapack
 // answers with an error, it calls pacote's own extract, unchanged. So the
 // worst case is plain `npm ci`: slower, never different.
 //
 // argv: <npm install dir> <npm args...>   (e.g. ci --no-audit)
-// env:  THINCLONE_INJECT_FD    the socket to thinclone (protocol: src/serve.rs)
-//       THINCLONE_INJECT_HOOK  `off`: install the hook but let pacote extract
+// env:  MATCHAPACK_INJECT_FD    the socket to matchapack (protocol: src/serve.rs)
+//       MATCHAPACK_INJECT_HOOK  `off`: install the hook but let pacote extract
 //                              every package (tests, and to rule the hook out);
 //                              `none`: do not install it at all (tests: what
 //                              an npm that no longer calls the method looks
-//                              like to thinclone)
+//                              like to matchapack)
 // Exit status: npm's. 90 before npm starts: the hook could not be installed
-// (thinclone then runs plain npm), also on an unexpected error up to there.
+// (matchapack then runs plain npm), also on an unexpected error up to there.
 'use strict'
 const path = require('path')
 
@@ -68,20 +68,20 @@ function ineligible (pacote, f, processUmask) {
 }
 
 function fail (message) {
-  process.stderr.write(`thinclone inject helper: ${message}\n`)
+  process.stderr.write(`matchapack inject helper: ${message}\n`)
   process.exit(90)
 }
 
 function main () {
   const [npmDir, ...npmArgs] = process.argv.slice(2)
-  const fd = Number(process.env.THINCLONE_INJECT_FD)
-  const hookMode = process.env.THINCLONE_INJECT_HOOK
+  const fd = Number(process.env.MATCHAPACK_INJECT_FD)
+  const hookMode = process.env.MATCHAPACK_INJECT_HOOK
   const hookOff = hookMode === 'off'
   // Not for the scripts npm runs.
-  delete process.env.THINCLONE_INJECT_FD
-  delete process.env.THINCLONE_INJECT_HOOK
+  delete process.env.MATCHAPACK_INJECT_FD
+  delete process.env.MATCHAPACK_INJECT_HOOK
   if (!npmDir || !Number.isInteger(fd) || fd < 3) {
-    fail('usage: THINCLONE_INJECT_FD=<fd> node inject.js <npm dir> <npm args...>')
+    fail('usage: MATCHAPACK_INJECT_FD=<fd> node inject.js <npm dir> <npm args...>')
   }
 
   // The pacote that npm's arborist loads: one copy, in npm's node_modules.
@@ -109,7 +109,7 @@ function main () {
   try {
     sock = new net.Socket({ fd, readable: true, writable: true })
   } catch (e) {
-    fail(`cannot open the socket to thinclone: ${e.message}`)
+    fail(`cannot open the socket to matchapack: ${e.message}`)
   }
   sock.setEncoding('utf8')
   // The socket keeps this process alive only while an answer is awaited.
@@ -148,7 +148,7 @@ function main () {
   const gone = () => {
     down = down || 'server-gone'
     for (const id of [...pending.keys()]) {
-      settle(id, p => p.reject(new Error('thinclone is gone')))
+      settle(id, p => p.reject(new Error('matchapack is gone')))
     }
   }
   sock.on('error', gone)
@@ -160,7 +160,7 @@ function main () {
   }
   const request = (req) => new Promise((resolve, reject) => {
     if (sock.destroyed || !sock.writable) {
-      return reject(new Error('thinclone is gone'))
+      return reject(new Error('matchapack is gone'))
     }
     const id = nextId++
     if (pending.size === 0) {
@@ -183,8 +183,8 @@ function main () {
     }
     // npm's own project root, as it passes it to pacote (ci.js builds the
     // Arborist with `path: npm.prefix`; reify spreads its options into
-    // pacote's): for diagnosis only, thinclone never widens its checks with
-    // it (grimmerk/thinclone#36).
+    // pacote's): for diagnosis only, matchapack never widens its checks with
+    // it (grimmerk/matchapack-private#36).
     const npmRoot = this.opts && typeof this.opts.path === 'string' && path.isAbsolute(this.opts.path) ? this.opts.path : undefined
     const req = { integrity: String(this.integrity), dest: path.resolve(dest), npm_root: npmRoot }
     let answer
@@ -192,14 +192,14 @@ function main () {
       answer = await request(req)
       if (!answer.ok && answer.extract_to) {
         // pacote's own extraction, with this fetcher (its tarball, its
-        // integrity check, its rules), into thinclone's directory.
+        // integrity check, its rules), into matchapack's directory.
         let failed = false
         try {
           await origExtract.call(this, answer.extract_to)
         } catch {
           failed = true
         }
-        // Also on failure: thinclone releases what waited for this fill.
+        // Also on failure: matchapack releases what waited for this fill.
         answer = await request({ ...req, extracted: answer.extract_to, failed })
         if (failed) {
           return origExtract.call(this, dest)
@@ -223,7 +223,7 @@ function main () {
     FetcherBase.prototype.extract = hook
   }
 
-  // The pacote and tar this process really loaded: thinclone keys its
+  // The pacote and tar this process really loaded: matchapack keys its
   // checks of the store on them (src/serve.rs).
   let pacoteVersion = null
   let tarVersion = null
@@ -236,7 +236,7 @@ function main () {
   } catch {
     // unknown: every entry is compared, as under a new version
   }
-  // From here on npm is running: thinclone reports its exit status as npm's.
+  // From here on npm is running: matchapack reports its exit status as npm's.
   npmStarted = true
   send({ hello: true, pacote: pacoteVersion, tar: tarVersion, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'on' })
   process.argv = [process.argv[0], path.join(npmDir, 'bin', 'npm-cli.js'), ...npmArgs]

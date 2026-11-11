@@ -2,15 +2,15 @@
 # Sampled verification during the trial.
 #   verify-sample.sh [N] [project-dir...]
 # With no directories: takes the N (default 2) most recent distinct projects
-# that thinclone installed (from ~/.cache/thinclone/log.jsonl). For each, on
-# copy-on-write copies of the project: npm ci twice (A, A2) and thinclone once
+# that matchapack installed (from ~/.cache/matchapack/log.jsonl). For each, on
+# copy-on-write copies of the project: npm ci twice (A, A2) and matchapack once
 # (B); paths that differ between A and A2 are build noise and ignored; then the
 # harness compares A with B. One JSON line per project goes to
-# ~/.cache/thinclone/verify.jsonl, shown by `thinclone report`.
+# ~/.cache/matchapack/verify.jsonl, shown by `matchapack report`.
 # Costs a real npm ci twice per project, so run it now and then, not per install.
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
-logdir=${THINCLONE_LOG_DIR_REAL:-$HOME/.cache/thinclone}
+logdir=${MATCHAPACK_LOG_DIR_REAL:-$HOME/.cache/matchapack}
 n=2
 if [[ "${1-}" =~ ^[0-9]+$ ]]; then n=$1; shift; fi
 dirs=("$@")
@@ -37,23 +37,23 @@ print("\n".join(out))
 EOF
 )
 fi
-[ ${#dirs[@]} -gt 0 ] || { echo "nothing to verify: no thinclone installs in $logdir/log.jsonl yet"; exit 0; }
+[ ${#dirs[@]} -gt 0 ] || { echo "nothing to verify: no matchapack installs in $logdir/log.jsonl yet"; exit 0; }
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/thinclone-verify.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/matchapack-verify.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 for d in "${dirs[@]}"; do
   echo "######## $d"
-  out=$(THINCLONE_VERIFY_NOISE=1 THINCLONE_LOG_DIR="$work/logs" "$here/scripts/verify.sh" "$d" "$work/v" 2>&1)
+  out=$(MATCHAPACK_VERIFY_NOISE=1 MATCHAPACK_LOG_DIR="$work/logs" "$here/scripts/verify.sh" "$d" "$work/v" 2>&1)
   printf '%s\n' "$out" | grep -E 'RESULT|npm ci:|noise|npm ls:|stale in B|^  ' | head -20
   printf '%s\n' "$out" > "$work/out.txt"
   # The build verify.sh ran (target/release), which may differ from the one on PATH.
-  build=$("$here/target/release/thinclone" --version 2>/dev/null | sed -n 's/.*(\(.*\)).*/\1/p')
+  build=$("$here/target/release/matchapack" --version 2>/dev/null | sed -n 's/.*(\(.*\)).*/\1/p')
   python3 -I - "$logdir/verify.jsonl" "$d" "$work/out.txt" "${build:-unknown}" <<'EOF'
 import json, re, sys, time
 log, d, outfile, build = sys.argv[1:5]
 out = open(outfile, errors="replace").read()
 m = re.search(r"RESULT: (\w+)", out)
-t = re.search(r"npm ci: ([\d.]+)s\s+thinclone: ([\d.]+)s", out)
+t = re.search(r"npm ci: ([\d.]+)s\s+matchapack: ([\d.]+)s", out)
 n = re.search(r"noise .*?: (\d+) paths", out)
 ls = re.search(r"npm ls: (.*)", out)
 result = m.group(1) if m else "ERROR"
@@ -64,7 +64,7 @@ paths = re.findall(r"^  ([^ :]+)(?::|$)", out.split("== diff A B")[-1].split("==
 if result == "DIFFERENT" and paths and all(not (p.startswith("node_modules/") or "/node_modules/" in p) for p in paths):
     result = "BUILD-OUTPUT-ONLY"
 rec = {"ts": time.time(), "build": build, "dir": d, "result": result, "differing": paths[:20],
-       "npm_ci_secs": float(t.group(1)) if t else None, "thinclone_secs": float(t.group(2)) if t else None,
+       "npm_ci_secs": float(t.group(1)) if t else None, "matchapack_secs": float(t.group(2)) if t else None,
        "noise_paths": int(n.group(1)) if n else None, "npm_ls": ls.group(1).strip() if ls else None}
 open(log, "a").write(json.dumps(rec) + "\n")
 print("recorded:", rec["result"])
