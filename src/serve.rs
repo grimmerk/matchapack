@@ -297,38 +297,6 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
     std::fs::remove_dir(from).with_context(|| format!("removing {}", from.display()))
 }
 
-/// Rename `from` to `to` only if `to` does not exist: a plain rename(2)
-/// replaces an existing empty directory. Where the system has no such rename
-/// (or the filesystem refuses it), an existence check and a plain rename.
-fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
-    let (f, t) = (c(from)?, c(to)?);
-    #[cfg(target_os = "macos")]
-    let r = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
-    let r: libc::c_int = {
-        let _ = (&f, &t);
-        unsafe { *libc::__errno_location() = libc::ENOSYS };
-        -1
-    };
-    if r == 0 {
-        return Ok(());
-    }
-    let e = std::io::Error::last_os_error();
-    match e.raw_os_error() {
-        Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
-            if std::fs::symlink_metadata(to).is_ok() {
-                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-            }
-            std::fs::rename(from, to)
-        }
-        _ => Err(e),
-    }
-}
-
 /// The error means "the path already exists" (a destination that reappeared
 /// between the check and the clone).
 fn already_exists(e: &anyhow::Error) -> bool {
@@ -542,14 +510,21 @@ impl<'a> Server<'a> {
         let dir = self.store.dir_for(&i);
         match std::fs::symlink_metadata(&dir) {
             Ok(m) if m.file_type().is_dir() => {
-                if self.should_check(&self.store.made_by(&i)) {
-                    return one(self.issue(i, "check"));
-                }
-                // Shared: no replacement of the entry while it is cloned.
-                let _shared = match self.store.entry_lock(&i, false) {
+                // Shared: no replacement of the entry while its record is
+                // read and it is cloned, so the tree cloned is the one the
+                // record speaks for.
+                let shared = match self.store.entry_lock(&i, false) {
                     Ok(l) => l,
                     Err(e) => return one(refused("store-error", format!("{e:#}"))),
                 };
+                if self.should_check(&self.store.made_by(&i)) {
+                    drop(shared);
+                    return one(self.issue(i, "check"));
+                }
+                if !is_real_dir(&dir) {
+                    // Replaced away before the lock: decided again by npm.
+                    return one(refused("store-miss", "the entry went while it was looked at"));
+                }
                 let fresh = self.ours(&i);
                 one(self.finish(i, &dir, &dst, false, false, None, fresh))
             }
@@ -589,8 +564,8 @@ impl<'a> Server<'a> {
                 // others unanswered.
                 let o = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // Shared, and the entry checked to be ours under it.
-                    let _shared = self.store.entry_lock(i, false);
-                    if self.ours(i) {
+                    let shared = self.store.entry_lock(i, false);
+                    if shared.is_ok() && self.ours(i) {
                         self.finish(i.clone(), &entry, &dst, false, false, None, true)
                     } else {
                         refused("store-miss", "the fill this package waited for did not complete here")
@@ -770,10 +745,12 @@ impl<'a> Server<'a> {
             // Exclusive: nobody clones the entry or writes its record while
             // it is replaced.
             let excl = self.store.entry_lock(&i, true);
-            self.store.forget_made_by(&i);
             let aside = self.tmp.path.join(format!("q{}", self.seq.fetch_add(1, Ordering::Relaxed)));
-            let healed = excl.is_ok() && std::fs::rename(&entry, &aside).is_ok() && rename_noreplace(extracted, &entry).is_ok();
-            self.store.forget_size(&i);
+            let healed = excl.is_ok() && {
+                self.store.forget_made_by(&i);
+                self.store.forget_size(&i);
+                std::fs::rename(&entry, &aside).is_ok() && crate::store::rename_noreplace(extracted, &entry).is_ok()
+            };
             if healed {
                 self.mark_made_by(&i);
             }
@@ -799,7 +776,11 @@ impl<'a> Server<'a> {
         let published = std::fs::symlink_metadata(extracted).map(|m| std::os::unix::fs::MetadataExt::ino(&m)).ok();
         // Exclusive: the entry and its record appear together.
         let excl = self.store.entry_lock(&i, true);
-        let renamed = rename_noreplace(extracted, &entry);
+        let renamed = match &excl {
+            Ok(_) => crate::store::rename_noreplace(extracted, &entry),
+            // Not published without the lock (the package is placed already).
+            Err(e) => Err(std::io::Error::other(format!("{e:#}"))),
+        };
         if renamed.is_ok() {
             self.mark_made_by(&i);
         }
@@ -844,7 +825,7 @@ impl<'a> Server<'a> {
             }
             DestState::Other(name) => return Err(refused("dest-not-empty", format!("{} already holds {name}", dst.display()))),
         }
-        match rename_noreplace(cand, dst) {
+        match crate::store::rename_noreplace(cand, dst) {
             Ok(()) => Ok(Kind::Fast),
             // Made again in between (npm's sparse tree): merge.
             Err(_) if is_real_dir(dst) => match dest_state(dst) {
@@ -1474,6 +1455,29 @@ mod tests {
             assert_eq!(t.join().unwrap().0, Kind::Fast);
         });
         assert!(dst.join("package.json").exists());
+    }
+
+    #[test]
+    fn whether_to_check_is_decided_under_the_entry_lock() {
+        // A replacement in progress (exclusive) changes the record; a request
+        // waiting for the lock decides on the record it finds after it, not
+        // on the one before.
+        let fx = Fx::new("serve-decide-under-lock");
+        if !fx.can_clone() {
+            return;
+        }
+        let (i, sri) = fx.entry(PKG);
+        fx.store.set_made_by(&i, KEY).unwrap();
+        let s = fx.server_with(clone::Mode::File, CheckPolicy::OneIn(1_000_000));
+        let dst = fx.root.join("node_modules/p");
+        let excl = fx.store.entry_lock(&i, true).unwrap();
+        std::thread::scope(|sc| {
+            let t = sc.spawn(|| s.place_entry(&sri, &dst));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            fx.store.set_made_by(&i, OLD).unwrap();
+            drop(excl);
+            assert!(matches!(t.join().unwrap(), Outcome::Extract { why: "check", .. }), "decided after the lock");
+        });
     }
 
     #[test]

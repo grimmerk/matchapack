@@ -386,6 +386,26 @@ impl Store {
     /// seen half-deleted, which would read as present), then deleted. A crash
     /// mid-way leaves an unlocked directory in tmp/ for Store::new to remove.
     /// Only on a store opened with `exclusive`.
+    /// Remove the entry locks (`locks/`) whose entry is gone (left by an
+    /// interrupted replacement). Only on a store opened with `exclusive`:
+    /// no install holds any entry lock then. Returns how many.
+    pub fn remove_orphan_locks(&self) -> usize {
+        let base = self.root.join("locks");
+        let mut n = 0;
+        for e in walkdir::WalkDir::new(&base).min_depth(3).max_depth(3).into_iter().flatten() {
+            let rel = e.path().strip_prefix(&base).unwrap();
+            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            let gone = match parts.as_slice() {
+                [algo, a, b] => Integrity::from_key(&format!("{algo}-{a}{b}")).is_some_and(|i| fs::symlink_metadata(self.dir_for(&i)).is_err()),
+                _ => false,
+            };
+            if gone && fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn remove_entry(&self, i: &Integrity) -> Result<()> {
         let src = self.dir_for(i);
         let f = fs::File::open(&src).with_context(|| format!("opening {}", src.display()))?;
@@ -475,13 +495,19 @@ impl Store {
         let tmp = TmpDir::create(self.root.join("tmp").join(format!("{}-x{seq}-{}", process_tag(), &i.hex[..16])), 0o755)?;
         extract(&data, &tmp.path).with_context(|| format!("extracting {url}"))?;
         fs::create_dir_all(dest.parent().unwrap())?;
-        match fs::rename(&tmp.path, &dest) {
-            Ok(()) => {
-                // Made by thinclone's extractor: a record left by an entry
-                // that was here before is not about this one.
-                self.forget_made_by(i);
-                Ok(Ensure::Extracted)
-            }
+        // The inject engine's entry lock, exclusive: the entry and the
+        // removal of a stale record happen together (serve.rs). A no-replace
+        // rename: a plain one would replace an empty directory.
+        let excl = self.entry_lock(i, true)?;
+        let renamed = rename_noreplace(&tmp.path, &dest);
+        if renamed.is_ok() {
+            // Made by thinclone's extractor: a record left by an entry that
+            // was here before is not about this one.
+            self.forget_made_by(i);
+        }
+        drop(excl);
+        match renamed {
+            Ok(()) => Ok(Ensure::Extracted),
             Err(_) if dest.is_dir() => {
                 // Another process won the race; its copy is equally valid.
                 let _ = fs::remove_dir_all(&tmp.path);
@@ -710,6 +736,38 @@ pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Rename `from` to `to` only if `to` does not exist: a plain rename(2)
+/// replaces an existing empty directory. Where the system has no such rename
+/// (or the filesystem refuses it), an existence check and a plain rename.
+pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let (f, t) = (c(from)?, c(to)?);
+    #[cfg(target_os = "macos")]
+    let r = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    let r: libc::c_int = {
+        let _ = (&f, &t);
+        unsafe { *libc::__errno_location() = libc::ENOSYS };
+        -1
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            std::fs::rename(from, to)
+        }
+        _ => Err(e),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -861,6 +919,23 @@ pub(crate) mod tests {
         assert!(fresh.is_dir(), "a directory younger than the grace period is kept");
         drop(held);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn locks_of_entries_that_are_gone_are_removed() {
+        let d = scratch("store-orphan-locks");
+        let cacache = d.join("cacache");
+        let kept = cached_tarball(&cacache, &[("package.json", 0o644, "{}")]);
+        let store = Store::new(d.join("store"), cacache.clone()).unwrap();
+        store.ensure(&kept, "http://x/k.tgz").unwrap();
+        drop(store.entry_lock(&kept, false).unwrap());
+        let gone = Integrity { algo: "sha512".into(), hex: "ab".repeat(64) };
+        drop(store.entry_lock(&gone, true).unwrap());
+        drop(store);
+        let store = Store::exclusive(d.join("store"), cacache).unwrap();
+        assert_eq!(store.remove_orphan_locks(), 1);
+        let lock = |i: &Integrity| d.join("store/locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]);
+        assert!(lock(&kept).exists() && !lock(&gone).exists());
     }
 
     #[test]

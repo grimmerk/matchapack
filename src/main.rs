@@ -376,7 +376,11 @@ fn place(
                 match &e.kind {
                     Kind::Package { integrity, .. } => {
                         let integrity = integrity.as_deref().context("unresolved package in plan")?;
-                        let src = store.dir_for(&Integrity::parse(integrity)?);
+                        let i = Integrity::parse(integrity)?;
+                        let src = store.dir_for(&i);
+                        // Shared, as the inject engine's clones: no
+                        // replacement of the entry while it is cloned.
+                        let _shared = store.entry_lock(&i, false)?;
                         clone::clone_tree(&src, &dst, mode)
                     }
                     Kind::Link { target } => {
