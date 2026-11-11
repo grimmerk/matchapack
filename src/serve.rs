@@ -1284,9 +1284,14 @@ mod tests {
         if !fx.can_clone() {
             return;
         }
+        // Directory clones keep directory modes; per-file clones make the
+        // directories anew, so there is nothing to see on Linux.
+        if crate::default_clone_mode() != clone::Mode::Dir {
+            return;
+        }
         let (i, sri) = fx.entry(PKG);
         fs::set_permissions(fx.store.dir_for(&i).join("lib"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-        let s = fx.server_with(clone::Mode::File, CheckPolicy::All);
+        let s = fx.server_with(clone::Mode::Dir, CheckPolicy::All);
         let dst = fx.root.join("node_modules/p");
         let to = extract_to(s.place_entry(&sri, &dst), "check");
         fx.pacote_extract(&i, &to);
