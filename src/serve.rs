@@ -1029,7 +1029,7 @@ impl<'a> Server<'a> {
     /// worker threads. Returns when the stream is at its end (the peer closed
     /// it, or someone shut it down) and every started request is answered.
     pub fn serve(&self, stream: UnixStream, threads: usize) -> Result<()> {
-        serve_lines(stream, threads, &self.stopping, &|v| self.record_message(v), &|l, _| self.handle_line(l))
+        serve_lines(stream, threads, &self.stopping, &|v| self.record_message(v), &|l| self.handle_line(l))
     }
 }
 
@@ -1037,32 +1037,31 @@ impl<'a> Server<'a> {
 /// and the Yarn 1 engine's, src/yarn1.rs): read lines from `stream` until it
 /// ends; a line `record` accepts (a message that needs no answer) is handled
 /// at once on the reading thread, every other line by one of `threads`
-/// workers, which write the answer lines `handle` returns (it is given the
-/// line and when it was read). Once `stopping` is set (the node child is
-/// gone), queued lines are dropped. Returns when the
+/// workers, which write the answer lines `handle` returns. Once `stopping` is
+/// set (the node child is gone), queued lines are dropped. Returns when the
 /// stream is at its end and every started line is handled.
 pub fn serve_lines(
     stream: UnixStream,
     threads: usize,
     stopping: &AtomicBool,
     record: &(dyn Fn(&Value) -> bool + Sync),
-    handle: &(dyn Fn(&str, Instant) -> Vec<String> + Sync),
+    handle: &(dyn Fn(&str) -> Vec<String> + Sync),
 ) -> Result<()> {
     let reader = BufReader::new(stream.try_clone().context("cloning the socket")?);
     let writer = Mutex::new(stream);
-    let (tx, rx) = std::sync::mpsc::channel::<(String, Instant)>();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
     let rx = Mutex::new(rx);
     std::thread::scope(|s| {
         for _ in 0..threads.max(1) {
             s.spawn(|| loop {
-                let (line, read_at) = match rx.lock().unwrap().recv() {
+                let line = match rx.lock().unwrap().recv() {
                     Ok(l) => l,
                     Err(_) => return,
                 };
                 if stopping.load(Ordering::Relaxed) {
                     continue;
                 }
-                for mut answer in handle(&line, read_at) {
+                for mut answer in handle(&line) {
                     answer.push('\n');
                     // The peer may be gone; nothing to do about it here.
                     let _ = writer.lock().unwrap().write_all(answer.as_bytes());
@@ -1078,7 +1077,7 @@ pub fn serve_lines(
                     if serde_json::from_str::<Value>(&l).is_ok_and(|v| record(&v)) {
                         continue;
                     }
-                    if tx.send((l, Instant::now())).is_err() {
+                    if tx.send(l).is_err() {
                         break;
                     }
                 }

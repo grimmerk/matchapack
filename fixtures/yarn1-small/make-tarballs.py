@@ -14,6 +14,8 @@ network.
                   times, which flips Yarn's time probe (NOTES "Yarn 1
                   harness")
   y1-script 1.0.0 an install script that writes built.txt
+  y1-execpath 1.0.0  an install script that records $npm_execpath and runs
+                  `node "$npm_execpath" --version` (execpath.txt)
   y1-many 1.0.0/2.0.0  300 files and a bin: more than the 128 first copies
                   of Yarn's link step, which the Yarn 1 engine leaves to Node
 
@@ -82,6 +84,20 @@ tarball("y1-script-1.0.0.tgz", [
         name="y1-script", version="1.0.0",
         scripts={"install": "node -e \"require('fs').writeFileSync('built.txt','x')\""})),
     ("index.js", 0o644, b"module.exports = 1\n"),
+])
+
+# Records what Yarn gives its lifecycle scripts as npm_execpath (Yarn's own
+# entry, process.mainModule.filename) and runs it, as tools such as
+# node-gyp's callers do: under the Yarn 1 engine it must be Yarn, not the hook.
+tarball("y1-execpath-1.0.0.tgz", [
+    ("package.json", 0o644, manifest(
+        name="y1-execpath", version="1.0.0",
+        scripts={"install": "node record.js"})),
+    ("record.js", 0o644, b"""const cp = require('child_process')
+const p = process.env.npm_execpath
+const v = cp.execFileSync(process.execPath, [p, '--version']).toString()
+require('fs').writeFileSync('execpath.txt', p + '\\n' + v)
+"""),
 ])
 
 

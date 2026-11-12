@@ -28,6 +28,8 @@
 //       MATCHAPACK_YARN_HOOK       tests: `off` patches but copies every file;
 //                                  `none` installs nothing (what a Yarn that
 //                                  no longer calls the hook looks like)
+//       MATCHAPACK_YARN_TIMEOUT_MS tests: when an answer counts as slow
+//                                  (default 30000)
 //       MATCHAPACK_YARN_SIMULATE   tests: `copy-keeps-times` makes the probe's
 //                                  copies keep the source's times, as a libuv
 //                                  that sets times after writing would
@@ -120,8 +122,9 @@ async function main () {
   const probeDir = process.env.MATCHAPACK_YARN_PROBE_DIR
   const hookMode = process.env.MATCHAPACK_YARN_HOOK || 'on'
   const simulate = process.env.MATCHAPACK_YARN_SIMULATE || ''
+  const timeoutMs = Number(process.env.MATCHAPACK_YARN_TIMEOUT_MS) || 30000
   // Not for the scripts Yarn runs.
-  for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE']) {
+  for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE', 'MATCHAPACK_YARN_TIMEOUT_MS']) {
     delete process.env[k]
   }
   if (!yarnJs || !Number.isInteger(fd) || fd < 3 || !probeDir) {
@@ -178,10 +181,13 @@ async function main () {
   }
   sock.on('error', gone('server-gone'))
   sock.on('close', gone('server-gone'))
-  // An answer that does not come is a copy, never a wait for ever. matchapack
-  // answers a request that waited in its queue for seconds without cloning
-  // (src/yarn1.rs), so a late clone cannot land after this copy.
-  const TIMEOUT_MS = 30000
+  // A slow answer: later copies are Node's, but this request still waits for
+  // its own answer. Copying it now could race matchapack's worker, which may
+  // be between its clone and the clone's fix-up (or its removal) on this very
+  // path. Only a closed socket ends the wait (matchapack is gone, and its
+  // workers with it); a hung matchapack hangs the install, as a hung parent
+  // would.
+  const TIMEOUT_MS = timeoutMs
   const request = (req) => new Promise((resolve) => {
     if (sock.destroyed || !sock.writable) {
       return resolve({ ok: false, reason: 'server-gone' })
@@ -191,8 +197,7 @@ async function main () {
       sock.ref()
     }
     const timer = setTimeout(() => {
-      down = down || 'server-timeout'
-      settle(id, { ok: false, reason: 'server-timeout' })
+      down = down || 'server-slow'
     }, TIMEOUT_MS)
     timer.unref()
     pending.set(id, { resolve, timer })
@@ -270,7 +275,7 @@ async function main () {
         down = down || answer.reason || 'fatal'
       }
       // Counted by matchapack when it refused; here when it never answered.
-      if (answer.reason === 'server-gone' || answer.reason === 'server-timeout') {
+      if (answer.reason === 'server-gone') {
         note(answer.reason)
       }
       // Node's own copy, as Yarn asked; it opens and truncates whatever is
@@ -301,9 +306,13 @@ async function main () {
 
   yarnStarted = true
   send({ hello: true, yarn: yarnVersion, node: process.version, first: firstN, facts: p.facts, hook: hookMode })
-  // Run Yarn's CLI the way its bin/yarn.js is run: argv as if invoked directly.
+  // Run Yarn's bin/yarn.js as the main module, as `node yarn.js` (or the
+  // `yarn` symlink, which Node resolves to it) would, and as corepack starts
+  // it: argv[1] and process.mainModule are Yarn's own. Yarn gives its
+  // lifecycle scripts `npm_execpath = process.mainModule.filename`, so a
+  // script running `node "$npm_execpath" …` must reach Yarn, not this hook.
   process.argv = [process.argv[0], yarnJs, ...yarnArgs]
-  require(yarnJs)
+  require('module').runMain(yarnJs)
 }
 
 if (require.main === module) {

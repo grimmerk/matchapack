@@ -6,6 +6,7 @@
     "y1-a": "http://127.0.0.1:48321/y1-a-1.0.0.tgz",
     "y1-b": "http://127.0.0.1:48321/y1-b-2.0.0.tgz",
     "y1-c": "http://127.0.0.1:48321/y1-c-1.0.0.tgz",
+    "y1-execpath": "http://127.0.0.1:48321/y1-execpath-1.0.0.tgz",
     "y1-many": "http://127.0.0.1:48321/y1-many-2.0.0.tgz"
   },
   "devDependencies": {
