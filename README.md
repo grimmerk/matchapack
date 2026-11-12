@@ -69,6 +69,9 @@ Bypass for one command: `MATCHAPACK=0 npm ci`, or `command npm ci`.
 Remove: delete the line. Installed node_modules keep working without the store
 (clones are independent files); the store is `~/.cache/matchapack/store`.
 
+On macOS the same line also routes a bare `yarn` / `yarn install` in Yarn 1
+projects (see "Yarn 1: `matchapack yarn`").
+
 ## The inject engine (try it with `MATCHAPACK_ENGINE=inject`)
 
 A second way to install, built to replace the one above (grimmerk/matchapack-private#33;
@@ -163,8 +166,31 @@ matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)
 matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node, in 25.2s
 ```
 
-(A shell function that routes a bare `yarn` here, like the one for `npm ci`,
-comes with `matchapack init` in a later version.)
+**Typing `yarn` (macOS).** The line from "Use" (`eval "$(matchapack
+init)"`, or fish's) also defines a `yarn` function on macOS. Nothing else
+needs to change: a startup file that already has the line gets the function
+with the next `cargo install`, in a new terminal. Then:
+
+- a bare `yarn`, `yarn install …`, and `yarn` with a flag first (`yarn
+  --frozen-lockfile`) go to `matchapack yarn`;
+- every other command (`yarn add`, `yarn run`, `yarn --version`, `yarn
+  --help`) runs Yarn directly and never starts matchapack;
+- in a Yarn 2+ project (a `.yarnrc.yml`, `packageManager: yarn@2` or later,
+  a Yarn 2+ lockfile) `matchapack yarn` runs plain Yarn at once, decided from
+  those files only (node is not started; it adds about 5 ms to a `yarn
+  install`), and prints and logs nothing;
+- bypass for one command: `MATCHAPACK=0 yarn`, or `command yarn`.
+
+On Linux no `yarn` function is defined. From a checkout, source
+`shell/matchapack-yarn.sh` (fish: `shell/matchapack-yarn.fish`) after
+`shell/matchapack.sh`.
+
+**corepack.** When `yarn` is corepack's (`corepack enable`; corepack comes
+with Node 24 and earlier, and is installed with `npm i -g corepack` from Node
+25 on), corepack chooses the project's Yarn as it always does (the
+`packageManager` field, its defaults, its cache and downloads), and
+matchapack takes over when corepack starts that Yarn, if it is Yarn 1's
+package.
 
 - Each clone is made to look exactly like the copy Node would have made:
   what Node's copy keeps (file times, the group) is measured when each
@@ -178,11 +204,11 @@ comes with `matchapack init` in a later version.)
   there (btrfs, XFS).
 
 matchapack runs plain Yarn instead, before Yarn starts, and says why when: the
-`yarn` on PATH is not Yarn 1's npm package (a corepack shim, Yarn 2+, another
-launcher; `MATCHAPACK_YARN_JS` names a `yarn.js` instead), there is no
-`yarn.lock` in the directory or above, the project is a Yarn 2+ one
-(`.yarnrc.yml`, a `packageManager` other than `yarn@1.x`, a Yarn 2+
-lockfile), a `.yarnrc` sets `yarn-path` (Yarn would run another file),
+`yarn` on PATH is neither Yarn 1's npm package nor corepack's launcher (Yarn
+2+ installed globally, another launcher; `MATCHAPACK_YARN_JS` names a
+`yarn.js` instead), corepack chose a Yarn that is not Yarn 1's package, there
+is no `yarn.lock` in the directory or above, `packageManager` names another
+package manager, a `.yarnrc` sets `yarn-path` (Yarn would run another file),
 `node_modules` is a symlink, the project is outside the trial scope,
 `--modules-folder` / `--cwd` / `--global-folder` move the install, Yarn's code
 does not have the shape the hook needs, or Node's own copy has changed (it
@@ -229,8 +255,14 @@ scripts/convert-existing.sh ~/git            # lists what it would do
 scripts/convert-existing.sh --apply ~/git    # re-installs each project via matchapack
 ```
 
-Skips projects matchapack would not handle and projects a running process has
-its working directory in.
+npm projects (`package-lock.json`) are re-installed with `matchapack npm ci`.
+Yarn 1 projects (`yarn.lock`, macOS) have their `node_modules` (the root's
+and each workspace's) removed and re-installed with `matchapack yarn install
+--frozen-lockfile`; install scripts run again. Each `node_modules` is backed
+up as a copy-on-write copy first and put back if matchapack declines or the
+install fails. Skips projects matchapack would not handle, Yarn 2+ projects,
+projects with packages the lockfile does not list (`npm link`, `yarn link`),
+and projects a running process has its working directory in.
 
 ## After an npm upgrade
 
