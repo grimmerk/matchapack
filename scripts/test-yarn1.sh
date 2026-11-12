@@ -656,7 +656,7 @@ if [ "$(uname)" = Darwin ]; then
   ws=$(cproj ws yarn1-workspaces); echo keep > "$ws/packages/w1/node_modules/y1-b/SENTINEL"
   # Workspace patterns Yarn expands itself: `**` (any depth) and `{x,y}`.
   wg=$cv/wsglob; mkdir -p "$wg/group/sub/deep" "$wg/x" "$wg/y"
-  printf '{"name":"wsglob","private":true,"workspaces":["group/**","{x,y}"],"dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-2.0.0.tgz"}}' > "$wg/package.json"
+  printf '{"name":"wsglob","private":true,"workspaces":["group/**","{x,y}"],"dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-2.0.0.tgz","y1-many":"http://127.0.0.1:48321/y1-many-1.0.0.tgz"}}' > "$wg/package.json"
   printf '{"name":"deep","version":"1.0.0","dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-1.0.0.tgz"}}' > "$wg/group/sub/deep/package.json"
   printf '{"name":"wx","version":"1.0.0","dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-1.0.0.tgz"}}' > "$wg/x/package.json"
   printf '{"name":"wy","version":"1.0.0"}' > "$wg/y/package.json"
@@ -676,9 +676,9 @@ if [ "$(uname)" = Darwin ]; then
   echo keep > "$nbn/node_modules/lodash/UNREADABLE"; chmod 000 "$nbn/node_modules/lodash/UNREADABLE"
   y4=$cv/yarn4; mkdir -p "$y4/node_modules/x"; printf '{"name":"y4","packageManager":"yarn@4.5.0"}' > "$y4/package.json"; printf '__metadata:\n  version: 8\n' > "$y4/yarn.lock"
   y1ino=$(ls -di "$y1/node_modules" | awk '{print $1}')
-  conv() { # conv <root> [script args]
+  conv() { # conv <root> [script args]   (CONV_PREFIX: a directory put first on PATH)
     local r=$1; shift
-    (cd "$work" && env -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK -u GITHUB_TOKEN PATH="$rt/bin:$PATH" \
+    (cd "$work" && env -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK -u GITHUB_TOKEN PATH="${CONV_PREFIX:+$CONV_PREFIX:}$rt/bin:$PATH" \
       HOME="$work/convhome" YARN_CACHE_FOLDER="$work/e-many/cache" YARN_DISABLE_SELF_UPDATE_CHECK=true MATCHAPACK_STORE="$work/y1/store" \
       MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" "$here/scripts/convert-existing.sh" "$@" "$r") > "$work/out" 2>&1
   }
@@ -723,6 +723,82 @@ if [ "$(uname)" = Darwin ]; then
     && [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; then
     ok "convert-existing --apply interrupted during the install: previous node_modules put back, exit 130"
   else bad "convert-existing interrupted (started $started, exit $rc)"; fi
+  # Review round 2. croot <name>: a fresh root of its own for one conv run.
+  croot() { local r=$work/conv-$1; rm -rf "${r:?}"; mkdir -p "$r"; echo "$r"; }
+  nobackups() { [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; }
+  # (1) Workspace planning reads Yarn's JSON from stdout only, and a plan that
+  # cannot be made skips the project. A Yarn 1 package whose bin/yarn
+  # launcher (a Homebrew-like layout) prints a warning on stderr for every
+  # command and, with FAKE_WS_JSON=bad, prints something that is not JSON
+  # for `workspaces info`; installs run its bin/yarn.js directly.
+  fy=$work/fake-yarn; rm -rf "${fy:?}"; mkdir -p "$fy/bin"; cp -R "$(dirname "$(dirname "$yarnjs")")/." "$fy/"
+  printf '#!/bin/sh\necho "warning: a warning from Yarn" >&2\ncase "$FAKE_WS_JSON $*" in "bad "*workspaces*) echo "{not json"; exit 0 ;; esac\nexec node "%s/bin/yarn.js" "$@"\n' "$fy" > "$fy/bin/yarn"
+  chmod +x "$fy/bin/yarn"; mkdir -p "$work/fybin"; ln -sf "$fy/bin/yarn" "$work/fybin/yarn"
+  r=$(croot warn); w1=$(cproj ws yarn1-workspaces "$r"); echo keep > "$w1/packages/w1/node_modules/y1-b/SENTINEL"
+  CONV_PREFIX=$work/fybin conv "$r" --apply; rc=$?
+  if [ $rc = 0 ] && grep -q "^CONVERTED *$w1 " "$work/out" && [ ! -e "$w1/packages/w1/node_modules/y1-b/SENTINEL" ]; then
+    ok "convert-existing: Yarn's warnings on stderr do not reach the workspace list (workspace node_modules rebuilt)"
+  else bad "convert-existing: workspace list with warnings (exit $rc)"; fi
+  r=$(croot badjson); w2=$(cproj ws yarn1-workspaces "$r"); echo keep > "$w2/node_modules/y1-b/SENTINEL"
+  CONV_PREFIX=$work/fybin FAKE_WS_JSON=bad conv "$r" --apply; rc=$?
+  if grep -q "^SKIP no plan *$w2 " "$work/out" && [ -f "$w2/node_modules/y1-b/SENTINEL" ] && nobackups; then
+    ok "convert-existing: a workspace list that is not JSON skips the project before anything changes"
+  else bad "convert-existing: bad workspace list (exit $rc)"; fi
+  # (2) A signal while a failed install is being rolled back (between two
+  # put-backs): each node_modules goes back exactly once.
+  r=$(croot rollback); w3=$(cproj ws yarn1-workspaces "$r"); rootfail "$w3"
+  echo keep > "$w3/node_modules/y1-b/SENTINEL"; echo keep > "$w3/packages/w1/node_modules/y1-b/SENTINEL"
+  set -m; MATCHAPACK_CONVERT_TEST_PAUSE_RESTORE=3 conv "$r" --apply & pid=$!; set +m
+  for _ in $(seq 600); do [ -f "$w3/node_modules/y1-b/SENTINEL" ] && [ ! -e "$w3/packages/w1/node_modules/y1-b/SENTINEL" ] && break; sleep 0.05; done
+  kill -INT -- -"$pid" 2>/dev/null; wait "$pid"; rc=$?
+  if grep -q "^FAILED (rc=7) *$w3 .*previous node_modules restored" "$work/out" && [ -f "$w3/node_modules/y1-b/SENTINEL" ] \
+    && [ -f "$w3/packages/w1/node_modules/y1-b/SENTINEL" ] && nobackups; then
+    ok "convert-existing: a signal during a rollback does not undo what was put back (both node_modules restored)"
+  else bad "convert-existing: signal during rollback (exit $rc)"; fi
+  # (3) The tree a failed install left cannot be removed (an immutable file):
+  # the backup is kept where it is, never moved inside that tree.
+  r=$(croot stuck); w4=$(cproj stuck yarn1-many "$r"); echo keep > "$w4/node_modules/y1-a/SENTINEL"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"mkdir -p node_modules/stuck && touch node_modules/stuck/f && chflags uchg node_modules/stuck/f && exit 7"}; json.dump(d, open(p,"w"))' "$w4/package.json"
+  conv "$r" --apply; rc=$?
+  kept=$(sed -n 's/.*could not remove .*: its previous node_modules is kept at \(.*\)$/\1/p' "$work/out" | head -1)
+  chflags nouchg "$w4/node_modules/stuck/f" 2>/dev/null
+  if grep -q "^FAILED (rc=7) *$w4 .*NOT fully restored" "$work/out" && [ -n "$kept" ] && [ -f "$kept/y1-a/SENTINEL" ] && [ ! -e "$w4/node_modules/0" ]; then
+    ok "convert-existing: a tree that cannot be removed keeps the backup in place (said where), not moved inside it"
+  else bad "convert-existing: unremovable tree (exit $rc)"; fi
+  rm -rf "${work:?}/convhome/.cache/matchapack/backup"
+  # (4) A process enters a project after the start: checked again just before
+  # its node_modules is removed. Project a waits for `go`; meanwhile a
+  # process starts in project b.
+  r=$(croot inuse); wa=$(cproj a yarn1-many "$r"); wb=$(cproj b yarn1-many "$r"); echo keep > "$wb/node_modules/y1-a/SENTINEL"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"const fs=require(\x27fs\x27); fs.writeFileSync(\x27started\x27,\x27\x27); const t=setInterval(()=>{ if (fs.existsSync(\x27go\x27)) clearInterval(t) }, 50)\""}; json.dump(d, open(p,"w"))' "$wa/package.json"
+  conv "$r" --apply & pid=$!
+  for _ in $(seq 600); do [ -e "$wa/started" ] && break; sleep 0.1; done
+  (cd "$wb" && exec sleep 60) & sp=$!
+  sleep 0.5; touch "$wa/go"; wait "$pid"; rc=$?; kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  if [ $rc = 0 ] && grep -q "^CONVERTED *$wa " "$work/out" && grep -q "^SKIP in use *$wb .*entered it during this run" "$work/out" && [ -f "$wb/node_modules/y1-a/SENTINEL" ] && nobackups; then
+    ok "convert-existing: a project a process entered during the run is skipped just before removal, untouched"
+  else bad "convert-existing: in use during the run (exit $rc)"; fi
+  # (5) A file whose group differs from the backup folder's: a clone takes
+  # the folder's group; the backup must keep the file's, so the rollback of a
+  # failed install restores it.
+  g=$(groups_other "$work")
+  r=$(croot group); w5=$(cproj grp yarn1-many "$r"); rootfail "$w5"
+  if [ -z "$g" ]; then echo "SKIP convert-existing groups: the user has only one group"
+  else
+    chgrp "$g" "$w5/node_modules/y1-a/package.json"
+    conv "$r" --apply; rc=$?
+    if grep -q "^FAILED (rc=7) *$w5 .*previous node_modules restored" "$work/out" && [ "$(stat -f %g "$w5/node_modules/y1-a/package.json")" = "$g" ]; then
+      ok "convert-existing: the backup keeps each file's group (a clone takes its folder's); restored with it"
+    else bad "convert-existing: group in the backup (exit $rc, group $(stat -f %g "$w5/node_modules/y1-a/package.json"), want $g)"; fi
+  fi
+  # (6) An install that cloned nothing (every file a Node copy; the hook in
+  # `off` mode, as when Yarn's cache is on another volume) is not a
+  # conversion: the previous node_modules is put back.
+  r=$(croot noclone); w6=$(cproj nc yarn1-many "$r"); echo keep > "$w6/node_modules/y1-a/SENTINEL"
+  MATCHAPACK_YARN_HOOK=off conv "$r" --apply; rc=$?
+  if [ $rc = 0 ] && grep -q "^NOT CONVERTED *$w6 .*nothing was cloned.*previous node_modules restored" "$work/out" && [ -f "$w6/node_modules/y1-a/SENTINEL" ] && nobackups; then
+    ok "convert-existing: an install that cloned nothing is reported as not converted, previous node_modules put back"
+  else bad "convert-existing: zero clones (exit $rc)"; fi
 fi
 
 # Two volumes: the project on a disk image, Yarn's cache on the data volume.
