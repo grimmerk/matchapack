@@ -1727,6 +1727,40 @@ mod tests {
         assert!(took < Duration::from_millis(1500), "{took:?}");
     }
 
+    /// Under corepack `yarn cache dir` is started only once the hello has
+    /// named the Yarn corepack chose (the install's spawn has finished by
+    /// then): `chosen_yarn` does not return before it, returns that Yarn when
+    /// it is Yarn 1's package, and gives up when the install ends first.
+    #[test]
+    fn under_corepack_the_cache_folder_is_asked_only_after_the_hello() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("y1-chosen")).unwrap();
+        let js = d.join("v1/yarn/1.22.22/bin/yarn.js");
+        std::fs::create_dir_all(js.parent().unwrap()).unwrap();
+        std::fs::write(&js, "").unwrap();
+        std::fs::write(d.join("v1/yarn/1.22.22/package.json"), r#"{"name":"yarn","version":"1.22.22"}"#).unwrap();
+        let f = fx("y1-chosen-fx");
+        let s = Server::new(f.root.clone()).unwrap();
+        let ended = AtomicBool::new(false);
+        let (got, early) = std::thread::scope(|sc| {
+            let h = sc.spawn(|| s.chosen_yarn(&ended));
+            std::thread::sleep(Duration::from_millis(300));
+            let early = h.is_finished();
+            assert!(s.record_message(&json!({ "hello": true, "first": 128, "yarn_js": js.to_str().unwrap(), "facts": {} })));
+            (h.join().unwrap(), early)
+        });
+        assert!(!early, "returned before the hello");
+        assert_eq!(got, Ok(js.clone()));
+        // Not Yarn 1's package: refused.
+        let s2 = Server::new(f.root.clone()).unwrap();
+        std::fs::write(d.join("v1/yarn/1.22.22/package.json"), r#"{"name":"@yarnpkg/cli-dist","version":"4.5.0"}"#).unwrap();
+        assert!(s2.record_message(&json!({ "hello": true, "first": 128, "yarn_js": js.to_str().unwrap(), "facts": {} })));
+        assert!(s2.chosen_yarn(&ended).is_err());
+        // The install ended without a hello (corepack failed, or a decline).
+        let s3 = Server::new(f.root.clone()).unwrap();
+        ended.store(true, Ordering::Relaxed);
+        assert_eq!(s3.chosen_yarn(&ended).unwrap_err(), "the install ended first");
+    }
+
     /// Once the node child is gone (`stop`), a worker waiting for Yarn's
     /// cache folder stops waiting: matchapack ends with the install, not at
     /// the cache folder's deadline.
