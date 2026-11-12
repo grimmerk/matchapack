@@ -530,13 +530,14 @@ impl Server {
             }
             return Outcome::Copy { reason: format!("clone-errno-{no}"), fatal: false, message: Some(format!("clonefile {}: {e}", dest.display())) };
         }
-        let fixed = fix_up(dest, &meta, facts).and_then(|()| {
-            if self.test.fail_fixup_every > 0 && n % self.test.fail_fixup_every == 0 {
-                Err(std::io::Error::from_raw_os_error(libc::EIO))
-            } else {
-                Ok(())
-            }
-        });
+        // (The test switch fails the fix-up before it starts: the clone still
+        // has the cache file's xattrs and group, which a copy made over it
+        // would keep.)
+        let fixed = if self.test.fail_fixup_every > 0 && n % self.test.fail_fixup_every == 0 {
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        } else {
+            fix_up(dest, &meta, facts)
+        };
         if let Err(e) = fixed {
             // Not a copy's result: remove it; Node's copy makes the file.
             let _ = std::fs::remove_file(dest);
