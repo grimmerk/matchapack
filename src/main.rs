@@ -110,6 +110,10 @@ enum Cmd {
         /// Print only the differing paths, one per line (for scripts).
         #[arg(long)]
         paths: bool,
+        /// Print each difference as `<class>\t<path>` (for scripts; with
+        /// --meta the classes of the report, otherwise only-a, only-b, differ).
+        #[arg(long, conflicts_with = "paths")]
+        classes: bool,
         /// Also compare, per path: mtime to the nanosecond, uid, gid and
         /// extended attribute names; report each class of difference.
         #[arg(long)]
@@ -683,7 +687,7 @@ fn main() -> Result<()> {
                 println!("skip {p}: {why}");
             }
         }
-        Cmd::Diff { a, b, ignore, limit, paths, meta, a_run, b_run, a_cache, b_cache } => {
+        Cmd::Diff { a, b, ignore, limit, paths, classes, meta, a_run, b_run, a_cache, b_cache } => {
             let opts = if meta {
                 let parse = |s: Option<String>| {
                     s.as_deref().map(diff::Run::parse).transpose().unwrap_or_else(|e| {
@@ -708,7 +712,9 @@ fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             };
-            if paths {
+            if classes {
+                r.print_classes();
+            } else if paths {
                 r.print_paths();
             } else {
                 r.print(limit);

@@ -406,6 +406,38 @@ impl Report {
         }
     }
 
+    /// Every difference as one `<class>\t<path>` line: `only-a`, `only-b`,
+    /// and with --meta the classes of the report (type, content, file-mode,
+    /// dir-mode, symlink-target, mtime, uid, gid, xattr-names); without it,
+    /// `differ`. A path with several kinds of difference has several lines.
+    pub fn print_classes(&self) {
+        for p in &self.only_a {
+            println!("only-a\t{p}");
+        }
+        for p in &self.only_b {
+            println!("only-b\t{p}");
+        }
+        match &self.meta {
+            None => {
+                for (p, _) in &self.differ {
+                    println!("differ\t{p}");
+                }
+            }
+            Some(m) => {
+                for (class, v) in [("type", &m.type_), ("content", &m.content), ("file-mode", &m.file_mode), ("dir-mode", &m.dir_mode), ("symlink-target", &m.symlink_target)] {
+                    for p in v {
+                        println!("{class}\t{p}");
+                    }
+                }
+                for (class, v) in [("mtime", &m.mtime), ("uid", &m.uid), ("gid", &m.gid), ("xattr-names", &m.xattr_names)] {
+                    for (p, _) in v {
+                        println!("{class}\t{p}");
+                    }
+                }
+            }
+        }
+    }
+
     pub fn print(&self, limit: usize) {
         println!("scanned {} paths in A", self.files);
         let show = |title: &str, v: &Vec<String>| {
