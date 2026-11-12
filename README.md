@@ -258,11 +258,15 @@ scripts/convert-existing.sh --apply ~/git    # re-installs each project via matc
 npm projects (`package-lock.json`) are re-installed with `matchapack npm ci`.
 Yarn 1 projects (`yarn.lock`, macOS) have their `node_modules` (the root's
 and each workspace's) removed and re-installed with `matchapack yarn install
---frozen-lockfile`; install scripts run again. Each `node_modules` is backed
-up as a copy-on-write copy first and put back if matchapack declines or the
-install fails. Skips projects matchapack would not handle, Yarn 2+ projects,
-projects with packages the lockfile does not list (`npm link`, `yarn link`),
-and projects a running process has its working directory in.
+--frozen-lockfile`; install scripts run again (workspaces as `yarn
+workspaces info` lists them). Each `node_modules` is backed up as a
+copy-on-write copy and the copy checked against it before anything is
+removed; it is put back if matchapack declines, the install fails, or the
+script is interrupted (Ctrl-C). Skips projects whose backup cannot be made,
+projects matchapack would not handle, Yarn 2+ projects, projects with
+packages the lockfile does not list (`npm link`) or that are symlinks other
+than workspaces (`yarn link`), and projects a running process has its
+working directory in.
 
 ## After an npm upgrade
 
