@@ -91,8 +91,12 @@ const MOVING_OPTIONS: &[&str] = &["--modules-folder", "--cwd", "--global-folder"
 /// Options that decide where Yarn's cache is: passed to `yarn cache dir`.
 const CACHE_OPTIONS: &[&str] = &["--cache-folder", "--preferred-cache-folder", "--use-yarnrc", "--no-default-rc"];
 
-/// How long a request waits for Yarn's cache folder (`yarn cache dir`, run in
-/// parallel with the install) before it is answered "copy". Measured: with a
+/// How long requests wait for Yarn's cache folder (`yarn cache dir`, run in
+/// parallel with the install), counted once from the server's start, not per
+/// request: after that, while it is still unknown, every request is answered
+/// "copy" at once (per request, a slow `yarn cache dir` held each worker for
+/// the full wait, backed the queue up and set off the hook's slow-answer
+/// rule; CI run 43306715867). Measured: with a
 /// warm cache a small install reaches its link step before `yarn cache dir`
 /// answers, and answering "copy" at once cloned nothing (yarn1-emptyfirst:
 /// 314 of 314 files).
@@ -312,6 +316,8 @@ pub struct Stats {
     pub link_steps: u64,
     pub link_step_ends: u64,
     pub cache: Option<String>,
+    /// When `yarn cache dir` answered (or failed), seconds after the start.
+    pub cache_secs: Option<f64>,
     pub errors: Vec<String>,
     first: Option<Instant>,
     last: Option<Instant>,
@@ -336,6 +342,7 @@ impl Stats {
             "first": self.hello.as_ref().and_then(|h| h.get("first")).cloned().unwrap_or(Value::Null),
             "facts": self.hello.as_ref().and_then(|h| h.get("facts")).cloned().unwrap_or(Value::Null),
             "cache": self.cache,
+            "cache_secs": self.cache_secs,
             "serve_wall_secs": (wall * 100.0).round() / 100.0,
             "errors": self.errors,
         })
@@ -378,6 +385,7 @@ pub struct Server {
     cache: Mutex<Cache>,
     cache_known: std::sync::Condvar,
     cache_wait: Duration,
+    started: Instant,
     facts: OnceLock<Facts>,
     /// Set once a clone failed because the filesystem pair cannot clone.
     unsupported: AtomicBool,
@@ -408,6 +416,7 @@ impl Server {
             cache: Mutex::new(Cache::Pending),
             cache_known: std::sync::Condvar::new(),
             cache_wait: CACHE_WAIT,
+            started: Instant::now(),
             facts: OnceLock::new(),
             unsupported: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -431,11 +440,15 @@ impl Server {
             },
             Err(e) => Cache::Unusable(e),
         };
-        self.stats.lock().unwrap().cache = Some(match &state {
-            Cache::Known(d) => d.display().to_string(),
-            Cache::Unusable(why) => format!("unusable: {why}"),
-            Cache::Pending => "pending".into(),
-        });
+        {
+            let mut st = self.stats.lock().unwrap();
+            st.cache = Some(match &state {
+                Cache::Known(d) => d.display().to_string(),
+                Cache::Unusable(why) => format!("unusable: {why}"),
+                Cache::Pending => "pending".into(),
+            });
+            st.cache_secs = Some((self.started.elapsed().as_secs_f64() * 100.0).round() / 100.0);
+        }
         *self.cache.lock().unwrap() = state;
         self.cache_known.notify_all();
     }
@@ -493,7 +506,7 @@ impl Server {
         let Some(facts) = self.facts.get().copied() else { return copy("no-hello") };
         let cache = {
             let g = self.cache.lock().unwrap();
-            let (g, _) = self.cache_known.wait_timeout_while(g, self.cache_wait, |c| matches!(c, Cache::Pending)).unwrap();
+            let (g, _) = self.cache_known.wait_timeout_while(g, (self.started + self.cache_wait).saturating_duration_since(Instant::now()), |c| matches!(c, Cache::Pending)).unwrap();
             g.clone()
         };
         let cache = match cache {
@@ -796,19 +809,37 @@ fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], dead
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("yarn cache dir: {e}"))?;
-    // Its output is a line; read it on a thread so a full pipe cannot stall
-    // the child while it is waited for here.
-    let mut stdout = child.stdout.take();
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(o) = stdout.as_mut() {
-            let _ = o.read_to_string(&mut text);
-        }
-        text
-    });
+    // Read on threads, so a full pipe cannot stall the child while it is
+    // waited for here; collected with a bound, so a process that inherited
+    // the pipe (and outlives the child) cannot stall this one.
+    fn drain(r: Option<impl Read + Send + 'static>) -> (std::sync::Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<()>) {
+        let buf = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b = buf.clone();
+        std::thread::spawn(move || {
+            if let Some(mut o) = r {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = o.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    b.lock().unwrap().extend_from_slice(&chunk[..n]);
+                }
+            }
+            let _ = tx.send(());
+        });
+        (buf, rx)
+    }
+    // What was read until the pipe closed, or 2 s after the child ended.
+    fn collect((buf, done): (std::sync::Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<()>)) -> String {
+        let _ = done.recv_timeout(Duration::from_secs(2));
+        String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
+    }
+    let reader = drain(child.stdout.take());
+    let errors = drain(child.stderr.take());
     let t0 = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -823,10 +854,12 @@ fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], dead
         let _ = child.kill();
         let _ = child.wait();
     }
-    let text = reader.join().unwrap_or_default();
-    let status = status?;
+    let text = collect(reader);
+    let err_text = collect(errors);
+    let last_err = err_text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("");
+    let status = status.map_err(|e| if last_err.is_empty() { e } else { format!("{e} (it said: {last_err})") })?;
     if !status.success() {
-        return Err(format!("yarn cache dir exited with {status}"));
+        return Err(format!("yarn cache dir exited with {status}{}", if last_err.is_empty() { String::new() } else { format!(": {last_err}") }));
     }
     let line = text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("");
     if !Path::new(line).is_absolute() {
@@ -1189,6 +1222,25 @@ mod tests {
         assert_eq!(st.cloned, 0);
     }
 
+    /// The wait for the cache folder is one deadline for the whole install:
+    /// once it has passed, a request is answered at once.
+    #[test]
+    fn the_cache_wait_is_one_deadline_not_one_per_request() {
+        let f = fx("y1-deadline");
+        let mut s = Server::new(f.root.clone()).unwrap();
+        s.cache_wait = Duration::from_millis(400);
+        hello(&s, json!({ "empty_atime": true, "empty_mtime": true, "atime": true, "mtime": false, "group": null }));
+        let dest = f.root.join("node_modules/a/index.js");
+        let t = Instant::now();
+        assert_eq!(ask(&s, &src(&f), &dest)["reason"], "cache-dir-pending");
+        assert!(t.elapsed() >= Duration::from_millis(300), "the first request waits");
+        let t = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(ask(&s, &src(&f), &dest)["reason"], "cache-dir-pending");
+        }
+        assert!(t.elapsed() < Duration::from_millis(200), "later ones do not: {:?}", t.elapsed());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_request_waits_for_the_cache_folder() {
@@ -1313,6 +1365,13 @@ mod tests {
         assert!(e.contains("install ended"), "{e}");
         assert!(t.elapsed() < Duration::from_secs(10));
         assert!(pid().is_some_and(gone), "killed and reaped");
+        // An answer, with a process left behind that inherited the pipe:
+        // read without waiting for that process.
+        let held = d.join("held.js");
+        std::fs::write(&held, "require('child_process').spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }).unref(); console.log('/held/cache/v6')\n").unwrap();
+        let t = Instant::now();
+        assert_eq!(yarn_cache_dir(Path::new("node"), &held, &d, &[], Duration::from_secs(30), &AtomicBool::new(false)).unwrap(), PathBuf::from("/held/cache/v6"));
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
         // A real answer is read.
         let ok = d.join("ok.js");
         std::fs::write(&ok, "console.log('warning line'); console.log('/some/cache/v6')\n").unwrap();

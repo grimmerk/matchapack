@@ -230,10 +230,12 @@ import json, sys
 r = json.load(open(sys.argv[1]))
 y = r.get("yarn1") or {}
 copied = ", ".join(f"{k} {v}" for k, v in sorted((y.get("copied") or {}).items())) or "-"
-print(r.get("outcome"), y.get("cloned", 0), y.get("cloned_bytes", 0), y.get("copied_total", 0), y.get("link_steps", 0), y.get("unseen"), copied, sep="\t")
+cache = "%s after %s s, install %.1f s" % (y.get("cache"), y.get("cache_secs"), r.get("secs", 0))
+print(r.get("outcome"), y.get("cloned", 0), y.get("cloned_bytes", 0), y.get("copied_total", 0), y.get("link_steps", 0), y.get("unseen"), copied, cache, sep="\t")
 ' "$work/engine.json" 2>/dev/null) || { echo "engine: no log line ($work/mp/log/log.jsonl)"; exit 1; }
-IFS=$'\t' read -r outcome cloned cbytes copied steps unseen why <<< "$stats"
+IFS=$'\t' read -r outcome cloned cbytes copied steps unseen why cache <<< "$stats"
 echo "engine: $outcome, cloned $cloned files ($(( cbytes / 1048576 )) MiB), copied by Node $copied ($why), link steps $steps, unseen $unseen"
+echo "engine: Yarn's cache folder: $cache"
 [ "$outcome" = installed ] || { echo "engine: did not install ($outcome)"; exit 1; }
 if [ "$min_clones" = 0 ]; then
   [ "$cloned" = 0 ] || { echo "engine: cloned $cloned files, expected none"; exit 1; }
