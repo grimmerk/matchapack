@@ -636,6 +636,46 @@ status 4" ] && [ ! -e "$rt/nodes" ] && [ "$(wc -l < "$work/y1/log/log.jsonl")" =
   fi
 fi
 
+# --- scripts/convert-existing.sh on Yarn 1 projects (macOS) -------------------
+# Scratch projects installed by plain Yarn; the backups go to a scratch HOME.
+if [ "$(uname)" = Darwin ]; then
+  cv=$work/conv; rm -rf "${cv:?}"; mkdir -p "$cv"
+  # cproj <name> <fixture>: a copy installed by plain Yarn.
+  cproj() {
+    local d=$cv/$1; mkdir -p "$d"; cp -R "$here/fixtures/$2/." "$d/"; rm -f "$d/README.md"
+    (cd "$d" && y1env "$node" "$yarnjs" install --frozen-lockfile --non-interactive --ignore-scripts --cache-folder "$work/e-many/cache") > /dev/null 2>&1
+    echo "$d"
+  }
+  y1=$(cproj y1 yarn1-many)
+  ws=$(cproj ws yarn1-workspaces); echo keep > "$ws/packages/w1/node_modules/y1-b/SENTINEL"
+  lk=$(cproj linked yarn1-many); ln -s "$work" "$lk/node_modules/linked-elsewhere"
+  fl=$(cproj fail yarn1-many); rootfail "$fl"; echo keep > "$fl/node_modules/y1-a/SENTINEL"
+  dc=$(cproj declined yarn1-many); printf 'yarn-path "%s"\n' "$yarnjs" > "$dc/.yarnrc"; echo keep > "$dc/node_modules/y1-a/SENTINEL"
+  y4=$cv/yarn4; mkdir -p "$y4/node_modules/x"; printf '{"name":"y4","packageManager":"yarn@4.5.0"}' > "$y4/package.json"; printf '__metadata:\n  version: 8\n' > "$y4/yarn.lock"
+  y1ino=$(ls -di "$y1/node_modules" | awk '{print $1}')
+  conv() {
+    (cd "$work" && env -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK -u GITHUB_TOKEN PATH="$rt/bin:$PATH" \
+      HOME="$work/convhome" YARN_CACHE_FOLDER="$work/e-many/cache" YARN_DISABLE_SELF_UPDATE_CHECK=true MATCHAPACK_STORE="$work/y1/store" \
+      MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" "$here/scripts/convert-existing.sh" "$@" "$cv") > "$work/out" 2>&1; rc=$?
+  }
+  conv
+  if [ $rc = 0 ] && grep -q "^CANDIDATE yarn *$y1\$" "$work/out" && grep -q "^CANDIDATE yarn *$ws\$" "$work/out" \
+    && grep -q "^SKIP Yarn 2+ *$y4 " "$work/out" && grep -q "^SKIP not in lock $lk .*linked-elsewhere" "$work/out" \
+    && [ "$(ls -di "$y1/node_modules" | awk '{print $1}')" = "$y1ino" ] && [ -f "$ws/packages/w1/node_modules/y1-b/SENTINEL" ]; then
+    ok "convert-existing (dry run): Yarn 1 candidates listed, Yarn 2+ and linked packages skipped, nothing changed"
+  else bad "convert-existing dry run (exit $rc)"; fi
+  n0=$(wc -l < "$work/y1/log/log.jsonl")
+  conv --apply
+  inst=$(tail -n +$((n0+1)) "$work/y1/log/log.jsonl" | grep -c '"outcome":"installed"')
+  if grep -q "^CONVERTED *$y1 .*files cloned from Yarn" "$work/out" && grep -q "^CONVERTED *$ws " "$work/out" && [ "$inst" = 2 ] \
+    && [ ! -e "$ws/packages/w1/node_modules/y1-b/SENTINEL" ] && [ -f "$ws/packages/w1/node_modules/y1-b/package.json" ] \
+    && grep -q "^FAILED (rc=7) *$fl " "$work/out" && [ -f "$fl/node_modules/y1-a/SENTINEL" ] \
+    && grep -q "^SKIP not handled $dc .*yarn-path" "$work/out" && [ -f "$dc/node_modules/y1-a/SENTINEL" ] \
+    && [ -d "$y4/node_modules/x" ] && [ -L "$lk/node_modules/linked-elsewhere" ] && [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; then
+    ok "convert-existing --apply: Yarn 1 root and workspace node_modules rebuilt with clones; a failed and a declined install put back; no backup left"
+  else bad "convert-existing --apply (exit $rc)"; fi
+fi
+
 # Two volumes: the project on a disk image, Yarn's cache on the data volume.
 # Nothing can be cloned; the install is plain Yarn's copies.
 # The work directory (trees) on the image, the cache given with --cache-dir.
