@@ -296,9 +296,13 @@ else bad "npm_execpath under the engine ($(head -1 "$x" 2>/dev/null))"; fi
 # than the hook waits): later copies go to Node, but the slow request is
 # answered, never copied over while its clone is being fixed up.
 MATCHAPACK_YARN_SLOW_FIXUP_EVERY=40 MATCHAPACK_YARN_SLOW_FIXUP_MS=3000 MATCHAPACK_YARN_TIMEOUT_MS=500 everify e-slow "$here/fixtures/yarn1-many"
-n=$(copied e-slow server-slow)
-if [ $rc = 0 ] && same && [ "${n:-0}" -gt 0 ]; then ok "slow answers: the slow request waits for its clone, $n later files copied by Node, tree identical"
-else bad "slow answers (exit $rc, server-slow ${n:-?})"; fi
+# (Yarn's other copies are already in flight when the first slow answer is
+# due, so usually none is left for Node: the slow ones themselves must end as
+# clones, and the tree as plain's. Copying over them instead leaves the
+# late fix-up's times on Node's copies: red.)
+n=$(ejson e-slow "y['copied_total'] - y['first']")
+if [ $rc = 0 ] && same && [ "$(ejson e-slow "y['cloned']")" -gt 0 ] && [ "$n" = "$(copied e-slow server-slow)" ]; then ok "slow answers: each slow request waits for its own clone, tree identical"
+else bad "slow answers (exit $rc, copied beyond the first: ${n:-?})"; fi
 
 # The harness itself: an engine difference is plain's variation only on the
 # same path in the same class.
