@@ -35,16 +35,20 @@
 # one (NOTES "Yarn 1 shell route", decision 5):
 #   plan      read-only checks, the list of node_modules to replace;
 #             a failure: SKIP, nothing changed
-#   backing   each node_modules copied (copy-on-write) to
-#             ~/.cache/matchapack/backup and checked against the original
-#             (paths, types, sizes, link targets, owner, group, mode);
+#   backing   each node_modules copied (copy-on-write) to a new folder of
+#             ~/.cache/matchapack/backup (one per attempt; a backup an
+#             earlier run kept for the project: SKIP, it is never removed or
+#             overwritten) and checked against the original (paths, types,
+#             sizes, link targets, owner, group, mode); workspace
+#             node_modules that do not exist yet are recorded;
 #             a failure or a signal: the backups are removed, nothing changed
 #   armed     checked again that no process is in the project, then the
 #             node_modules removed (Yarn) and the install run; a signal
 #             (SIGINT, SIGTERM, SIGHUP): wait for the install's processes to
 #             leave the project, restore, exit 130
 #   outcome   cloned: the backups are removed; declined, failed or nothing
-#             cloned: restore
+#             cloned: restore (and remove the node_modules that did not
+#             exist before)
 #   restoring signals are ignored (also by `rm` and `mv`); each node_modules
 #             is put back at most once, only into a place that is empty; a
 #             backup that cannot be put back is kept, and its place said.
@@ -127,19 +131,22 @@ sys.exit(0 if scan(sys.argv[1]) == scan(sys.argv[2]) else 1)
 EOF
 }
 # Back up each of ${nms[@]} as $bk/<n>, its path as line n of $bk.paths,
-# each copy checked. On failure $why says what failed.
+# each copy checked; ${news[@]} (node_modules that do not exist yet) go to
+# $bk.new. On failure $why says what failed.
 make_backups() {
   local i
   mkdir -p "$bk" || { why="cannot create $bk"; return 1; }
   : > "$bk.paths" || { why="cannot write $bk.paths"; return 1; }
   : > "$bk.done" || { why="cannot write $bk.done"; return 1; }
+  : > "$bk.new" || { why="cannot write $bk.new"; return 1; }
+  for i in "${!news[@]}"; do printf '%s\n' "${news[$i]}" >> "$bk.new" || { why="cannot write $bk.new"; return 1; }; done
   for i in "${!nms[@]}"; do
     copy_tree "${nms[$i]}" "$bk/$i" || return 1
     printf '%s\n' "${nms[$i]}" >> "$bk.paths" || { why="cannot write $bk.paths"; return 1; }
   done
   [ "$(wc -l < "$bk.paths" | tr -d ' ')" = "${#nms[@]}" ] || { why="$bk.paths is incomplete"; return 1; }
 }
-discard_backups() { rm -rf "${bk:?}" "$bk.paths" "$bk.done"; }
+discard_backups() { rm -rf "${bk:?}" "$bk.paths" "$bk.done" "$bk.new"; }
 # Put every backed-up node_modules back, each at most once ($bk.done lists
 # the ones already back), and only into a place that is empty: if the
 # current tree cannot be removed completely, that backup is kept and its
@@ -164,6 +171,12 @@ restore() {
     fi
     i=$((i+1))
   done < "$bk.paths"
+  # node_modules the install made where there was none before.
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    rm -rf "${p:?}" 2>/dev/null
+    if [ -e "$p" ] || [ -L "$p" ]; then ok=0; echo "    could not remove $p (made by the install; there was none before)"; fi
+  done < "$bk.new"
   if [ $ok = 1 ]; then discard_backups; else echo "    (manifest: $bk.paths)"; fi
   state=idle
   trap on_signal INT TERM HUP
@@ -202,8 +215,15 @@ while IFS= read -r lock; do
     skip "SKIP yarn, not macOS $dir  (plain Yarn 1 already clones here)"; continue
   fi
   if in_use "$dir" "$cwds"; then skip "SKIP in use      $dir"; continue; fi
+  # A backup an earlier run kept (its rollback could not finish) is the
+  # only copy of that tree: the project waits until the owner has dealt
+  # with it, and nothing here removes or reuses it.
+  key=$(printf '%s' "$dir" | shasum | cut -c1-16)
+  old=$(ls -d "$HOME/.cache/matchapack/backup/$key"* 2>/dev/null | head -1)
+  if [ -n "$old" ]; then skip "SKIP old backup  $dir  (an earlier run kept a backup of it: $old; put it back or remove it by hand)"; continue; fi
 
   # --- plan (read-only; any failure: SKIP) ---
+  news=()
   if [ $kind = npm ]; then
   # Packages in node_modules that the lockfile does not list (`npm link`,
   # `npm install --no-save`) would be dropped by npm ci semantics: skip.
@@ -252,9 +272,11 @@ EOF
   # workspace's); any package in them that is neither in yarn.lock nor a
   # workspace (a manual copy), and any package that is a symlink other than
   # to a workspace (`yarn link`), either of which a reinstall would drop.
-  # Prints "LINKED <names>", "EXTRA <names>", or "PLAN" and one
-  # node_modules path per line; exits non-zero when it cannot plan (the
-  # workspace list is not Yarn's JSON, say).
+  # Prints "LINKED <names>", "EXTRA <names>", or "PLAN", one node_modules
+  # path per line, and "NEW <path>" for each workspace node_modules that
+  # does not exist yet (Yarn may make it; a rollback removes it); exits
+  # non-zero when it cannot plan (the workspace list is not Yarn's JSON,
+  # say).
   if ! yplan=$(WS_JSON=$ws_json python3 -I - "$dir" 2>"$errf" <<'EOF'
 import json, os, sys
 d = sys.argv[1]
@@ -279,9 +301,12 @@ for name, info in ws.items():
     dirs.append(w)
     names.add(name)
     ws_real.add(os.path.realpath(w))
-nms, extra, linked = [], [], []
+nms, extra, linked, new = [], [], [], []
 for w in dirs:
     nm = os.path.join(w, "node_modules")
+    if not os.path.lexists(nm):
+        new.append(nm)
+        continue
     if not os.path.isdir(nm) or os.path.islink(nm):
         continue
     nms.append(nm)
@@ -306,13 +331,15 @@ if extra:
     sys.exit(print("EXTRA " + " ".join(sorted(set(extra)))))
 print("PLAN")
 print("\n".join(nms))
+print("\n".join("NEW " + n for n in new))
 EOF
 ); then skip "SKIP no plan     $dir  ($(tail -1 "$errf" | cut -c1-80))"; continue; fi
   extra=
   case $yplan in
     LINKED*) skip "SKIP linked      $dir  (${yplan#LINKED }: a symlink, not a workspace; yarn link?)"; continue ;;
     EXTRA*) extra=${yplan#EXTRA } ;;
-    PLAN*) nms=(); while IFS= read -r p; do [ -n "$p" ] && nms+=("$p"); done <<< "${yplan#PLAN}" ;;
+    PLAN*) nms=(); news=()
+      while IFS= read -r p; do case $p in "") ;; "NEW "*) news+=("${p#NEW }") ;; *) nms+=("$p") ;; esac; done <<< "${yplan#PLAN}" ;;
     *) skip "SKIP no plan     $dir  (unexpected plan output)"; continue ;;
   esac
   fi
@@ -323,10 +350,10 @@ EOF
     echo "CANDIDATE $kind $(printf '%*s' $((6 - ${#kind})) '')$dir"; continue
   fi
 
-  # --- backing ---
-  bk="$HOME/.cache/matchapack/backup/$(printf '%s' "$dir" | shasum | cut -c1-16)"
+  # --- backing (a backup of its own per attempt, never one that exists) ---
+  bk="$HOME/.cache/matchapack/backup/$key-$(date +%Y%m%d%H%M%S)-$$"
+  [ -e "$bk" ] && { skip "SKIP no backup   $dir  ($bk exists)"; continue; }
   state=backing
-  discard_backups
   why=
   if ! make_backups; then discard_backups; state=idle; skip "SKIP no backup   $dir  ($why)"; continue; fi
   # --- armed: checked again, just before the first change ---
@@ -337,11 +364,11 @@ EOF
     # hands over, exit 3, before changing anything).
     out=$(cd "$dir" && MATCHAPACK_NO_FALLBACK=1 matchapack npm ci --no-audit --no-fund 2>&1 < /dev/null); rc=$?
     done_line=$(printf '%s\n' "$out" | grep -o 'matchapack: added.*' | sed 's/^matchapack: //')
-    # Cloned: the classic engine places clones or hands over (a filesystem
-    # that cannot clone is a hand-over); the inject engine says how many
-    # packages npm extracted itself instead.
-    cloned=yes
-    if [[ $done_line =~ ^added\ ([0-9]+)\ .*npm\ extracted\ ([0-9]+) ]] && [ "${BASH_REMATCH[2]}" -ge "${BASH_REMATCH[1]}" ]; then cloned=no; fi
+    # Cloned: "added N packages from the store", where N is what was placed
+    # as clones (src/wrapper.rs: the classic engine's placed entries, the
+    # inject engine's stats.cloned; packages npm extracted itself are the
+    # separate "npm extracted E").
+    if [[ $done_line =~ ^added\ ([0-9]+)\ packages\ from\ the\ store ]] && [ "${BASH_REMATCH[1]}" -gt 0 ]; then cloned=yes; else cloned=no; fi
   else
     for p in "${nms[@]}"; do rm -rf "${p:?}"; done
     out=$(cd "$dir" && MATCHAPACK_NO_FALLBACK=1 matchapack yarn install --frozen-lockfile --non-interactive 2>&1 < /dev/null); rc=$?

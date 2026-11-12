@@ -765,6 +765,12 @@ if [ "$(uname)" = Darwin ]; then
   if grep -q "^FAILED (rc=7) *$w4 .*NOT fully restored" "$work/out" && [ -n "$kept" ] && [ -f "$kept/y1-a/SENTINEL" ] && [ ! -e "$w4/node_modules/0" ]; then
     ok "convert-existing: a tree that cannot be removed keeps the backup in place (said where), not moved inside it"
   else bad "convert-existing: unremovable tree (exit $rc)"; fi
+  # (round 3) The next run neither removes nor reuses a backup an earlier run
+  # kept: the project is skipped, pointing at it.
+  conv "$r" --apply; rc=$?
+  if [ -n "$kept" ] && grep -q "^SKIP old backup *$w4 .*$(dirname "$kept");" "$work/out" && [ -f "$kept/y1-a/SENTINEL" ]; then
+    ok "convert-existing: a backup kept by an earlier run is left alone and its project skipped, pointing at it"
+  else bad "convert-existing: kept backup on the next run (exit $rc)"; fi
   rm -rf "${work:?}/convhome/.cache/matchapack/backup"
   # (4) A process enters a project after the start: checked again just before
   # its node_modules is removed. Project a waits for `go`; meanwhile a
@@ -791,6 +797,29 @@ if [ "$(uname)" = Darwin ]; then
       ok "convert-existing: the backup keeps each file's group (a clone takes its folder's); restored with it"
     else bad "convert-existing: group in the backup (exit $rc, group $(stat -f %g "$w5/node_modules/y1-a/package.json"), want $g)"; fi
   fi
+  # (round 3) A workspace without node_modules at planning time: the failed
+  # install made one; the rollback removes it (it was not there before).
+  r=$(croot newnm); w7=$(cproj ws yarn1-workspaces "$r"); rootfail "$w7"; echo keep > "$w7/node_modules/y1-b/SENTINEL"
+  rm -rf "${w7:?}/packages/w1/node_modules"
+  conv "$r" --apply; rc=$?
+  if grep -q "^FAILED (rc=7) *$w7 .*previous node_modules restored" "$work/out" && [ -f "$w7/node_modules/y1-b/SENTINEL" ] && [ ! -e "$w7/packages/w1/node_modules" ] && nobackups; then
+    ok "convert-existing: a rollback removes a workspace node_modules the install made where there was none"
+  else bad "convert-existing: new workspace node_modules on rollback (exit $rc)"; fi
+  # (round 3) npm: "added N" is the number of clones (src/wrapper.rs), and
+  # only N = 0 is nothing cloned. A stand-in `matchapack` prints the inject
+  # engine's summary line (its format checked against the source).
+  if grep -qF '"matchapack: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})"' "$here/src/wrapper.rs"; then
+    mkdir -p "$work/fakemp"
+    printf '#!/bin/sh\ncase "$1 $2" in "npm ci") rm -rf node_modules; mkdir -p node_modules/lodash; echo new > node_modules/lodash/NEW\n  echo "matchapack: added $FAKE_ADDED packages from the store in 0.1s (inject engine; npm extracted $FAKE_EXTRACTED)" >&2; exit 0 ;; esac\nexit 9\n' > "$work/fakemp/matchapack"
+    chmod +x "$work/fakemp/matchapack"
+    npmproj() { local d=$1/n; mkdir -p "$d/node_modules/lodash"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo keep > "$d/node_modules/lodash/SENTINEL"; echo "$d"; }
+    r=$(croot npm-some); n1=$(npmproj "$r"); CONV_PREFIX=$work/fakemp FAKE_ADDED=2 FAKE_EXTRACTED=3 conv "$r" --apply; o1=$(cat "$work/out")
+    r=$(croot npm-none); n2=$(npmproj "$r"); CONV_PREFIX=$work/fakemp FAKE_ADDED=0 FAKE_EXTRACTED=5 conv "$r" --apply; o2=$(cat "$work/out")
+    if printf '%s\n' "$o1" | grep -q "^CONVERTED *$n1 " && [ -f "$n1/node_modules/lodash/NEW" ] \
+      && printf '%s\n' "$o2" | grep -q "^NOT CONVERTED *$n2 .*previous node_modules restored" && [ -f "$n2/node_modules/lodash/SENTINEL" ] && [ ! -e "$n2/node_modules/lodash/NEW" ] && nobackups; then
+      ok "convert-existing (npm, inject summary): 2 cloned and 3 extracted is a conversion; 0 cloned is not, and is rolled back"
+    else bad "convert-existing: npm clone count ($(printf '%s' "$o1$o2" | grep -E 'CONVERTED|FAILED|SKIP' | tr '\n' '|'))"; fi
+  else bad "convert-existing: the inject engine's summary line in src/wrapper.rs changed; update this test and the script"; fi
   # (6) An install that cloned nothing (every file a Node copy; the hook in
   # `off` mode, as when Yarn's cache is on another volume) is not a
   # conversion: the previous node_modules is put back.
