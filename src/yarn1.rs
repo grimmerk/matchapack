@@ -1325,8 +1325,13 @@ mod tests {
         let a = ask(&s, &src(&f), &dest);
         assert_eq!((a["ok"].clone(), a["reason"].clone()), (json!(false), json!("src-special-mode")));
         assert!(!dest.exists());
-        std::fs::set_permissions(src(&f), std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(ask(&s, &src(&f), &dest)["ok"], true);
+        // Without the bit the same file is cloned (macOS: the engine's clone
+        // exists there only).
+        #[cfg(target_os = "macos")]
+        {
+            std::fs::set_permissions(src(&f), std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(ask(&s, &src(&f), &dest)["ok"], true);
+        }
     }
 
     #[cfg(target_os = "macos")]
