@@ -25,6 +25,11 @@
 #   --cache-xattr      warm only: give every package file in the cache an
 #                      extra extended attribute: Node's copy drops it, a
 #                      clone keeps it
+#   --cache-dir DIR    warm only: use this existing Yarn cache instead of a
+#                      new one in the work directory (a large project's
+#                      packages need not be downloaded again; the prime run
+#                      still runs, so the compared runs fetch nothing). Not
+#                      with --cache-group / --cache-xattr, which change it.
 #   --prime-node NODE  warm only: fill the cache with this node binary (the
 #                      compared runs use MATCHAPACK_YARN_NODE): Yarn's times
 #                      then pass through two Node versions' conversions
@@ -54,13 +59,14 @@
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin=$here/target/release/matchapack
-work= cache_mode=warm cache_group= cache_xattr=0 engine= prime_node= then= min_clones=1
+work= cache_mode=warm cache_group= cache_xattr=0 engine= prime_node= then= min_clones=1 cache_dir=
 while [ $# -gt 0 ]; do
   case $1 in
     --work) work=${2:?--work needs a directory}; shift 2 ;;
     --cache) cache_mode=${2:?--cache needs warm or empty}; shift 2 ;;
     --cache-group) cache_group=${2:?--cache-group needs a group}; shift 2 ;;
     --cache-xattr) cache_xattr=1; shift ;;
+    --cache-dir) cache_dir=${2:?--cache-dir needs a directory}; shift 2 ;;
     --prime-node) prime_node=${2:?--prime-node needs a node binary}; shift 2 ;;
     --then) then=${2:?--then needs a directory}; shift 2 ;;
     --engine) engine=${2:?--engine needs a name}; shift 2 ;;
@@ -74,8 +80,8 @@ src=${1:?usage: verify-yarn1.sh [options] <project-dir> [yarn install args...]};
 [ -f "$src/package.json" ] && [ -f "$src/yarn.lock" ] || { echo "$src: needs package.json and yarn.lock" >&2; exit 2; }
 [ -e "$src/node_modules" ] && { echo "$src has a node_modules: give a clean copy" >&2; exit 2; }
 case $cache_mode in
-  warm) ;;
-  empty) [ -z "$cache_group" ] && [ $cache_xattr = 0 ] && [ -z "$prime_node" ] || { echo "--cache-group / --cache-xattr / --prime-node need --cache warm" >&2; exit 2; } ;;
+  warm) [ -z "$cache_dir" ] || { [ -z "$cache_group" ] && [ $cache_xattr = 0 ]; } || { echo "--cache-dir is not changed: no --cache-group / --cache-xattr" >&2; exit 2; } ;;
+  empty) [ -z "$cache_group" ] && [ $cache_xattr = 0 ] && [ -z "$prime_node" ] && [ -z "$cache_dir" ] || { echo "--cache-group / --cache-xattr / --prime-node / --cache-dir need --cache warm" >&2; exit 2; } ;;
   *) echo "--cache $cache_mode: warm or empty" >&2; exit 2 ;;
 esac
 case $engine in
@@ -155,7 +161,7 @@ yarn_run() {
 }
 
 if [ $cache_mode = warm ]; then
-  c1=$work/cache c2=$work/cache ce=$work/cache
+  c1=${cache_dir:-$work/cache}; c2=$c1 ce=$c1
   yarn_run prime "$c1" "${prime_node:-$node}" plain "$@"
   if [ -n "$cache_group" ]; then
     chgrp -R "$cache_group" "$c1" || { echo "chgrp $cache_group failed (is the user in that group?)"; exit 2; }
