@@ -529,6 +529,11 @@ impl Server {
         if sys::flags(&meta) != 0 {
             return copy("src-flags");
         }
+        // clonefile(2) clears setuid and setgid, which Node's copy keeps
+        // (libuv fchmods the source's mode): let Node copy such files.
+        if std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7000 != 0 {
+            return copy("src-special-mode");
+        }
         let n = self.requests.fetch_add(1, Ordering::Relaxed) + 1;
         if self.test.fail_every > 0 && n % self.test.fail_every == 0 {
             return copy("test-refused");
@@ -1304,6 +1309,24 @@ mod tests {
         assert_eq!(ask(&s2, &src(&f2).with_file_name("lib/empty.js"), &edest)["ok"], true);
         let m = std::fs::symlink_metadata(&edest).unwrap();
         assert!(m.accessed().unwrap() > old && m.modified().unwrap() > old);
+    }
+
+    /// clonefile(2) drops setuid/setgid; Node's copy keeps the source's mode.
+    #[test]
+    fn sources_with_special_mode_bits_are_left_to_node() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fx("y1-suid");
+        let s = server(&f);
+        hello(&s, json!({ "empty_atime": true, "empty_mtime": true, "atime": true, "mtime": false, "group": null }));
+        // The sticky bit is settable by the owner everywhere; setgid and
+        // setuid take the same path (any bit of 0o7000).
+        std::fs::set_permissions(src(&f), std::fs::Permissions::from_mode(0o1755)).unwrap();
+        let dest = f.root.join("node_modules/a/index.js");
+        let a = ask(&s, &src(&f), &dest);
+        assert_eq!((a["ok"].clone(), a["reason"].clone()), (json!(false), json!("src-special-mode")));
+        assert!(!dest.exists());
+        std::fs::set_permissions(src(&f), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(ask(&s, &src(&f), &dest)["ok"], true);
     }
 
     #[cfg(target_os = "macos")]
