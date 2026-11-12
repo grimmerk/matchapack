@@ -505,6 +505,9 @@ if grep -q "Yarn linked node_modules but the hook never saw its link step" "$wor
   ok "matchapack report: yarn lines (outcomes, clones, the unseen link step), none in the npm counts"
 else bad "matchapack report"; fi
 
+# TEST_YARN1_PART=engine: the engine's cases only (not corepack, the shell
+# route or convert-existing.sh).
+if [ "${TEST_YARN1_PART:-all}" != engine ]; then
 # --- corepack (`yarn` linked to corepack's dist/yarn.js) ----------------------
 # corepack chooses the project's Yarn and starts its bin/yarn.js in the same
 # process; the hook takes over at that start. A scratch COREPACK_HOME,
@@ -820,6 +823,41 @@ if [ "$(uname)" = Darwin ]; then
       ok "convert-existing (npm, inject summary): 2 cloned and 3 extracted is a conversion; 0 cloned is not, and is rolled back"
     else bad "convert-existing: npm clone count ($(printf '%s' "$o1$o2" | grep -E 'CONVERTED|FAILED|SKIP' | tr '\n' '|'))"; fi
   else bad "convert-existing: the inject engine's summary line in src/wrapper.rs changed; update this test and the script"; fi
+  # (round 4) Planning skips what it cannot back up or check as planned: a
+  # workspace node_modules that is a symlink; a nested linked package; a
+  # nested package not in yarn.lock.
+  r=$(croot odd); w8=$(cproj ws yarn1-workspaces "$r"); mkdir -p "$work/odd-target"
+  mv "$w8/packages/w1/node_modules" "$work/odd-target/nm"; ln -s "$work/odd-target/nm" "$w8/packages/w1/node_modules"
+  n9=$(cproj nestlink yarn1-many "$r"); mkdir -p "$n9/node_modules/y1-a/node_modules"; ln -s "$work/linked-src" "$n9/node_modules/y1-a/node_modules/linked-nested"
+  n10=$(cproj nestextra yarn1-many "$r"); mkdir -p "$n10/node_modules/y1-a/node_modules/not-in-lock"
+  conv "$r"; rc=$?
+  if [ $rc = 0 ] && grep -q "^SKIP odd *$w8 .*packages/w1/node_modules" "$work/out" && grep -q "^SKIP linked *$n9 .*node_modules/y1-a/node_modules/linked-nested" "$work/out" \
+    && grep -q "^SKIP not in lock $n10 .*node_modules/y1-a/node_modules/not-in-lock" "$work/out"; then
+    ok "convert-existing: a symlinked workspace node_modules, and a linked or unlisted package in a nested node_modules, skip the project"
+  else bad "convert-existing: odd and nested node_modules (exit $rc)"; fi
+  # (round 4) Interrupted while a process that ignores SIGINT stays in the
+  # project: no restore under it; the backup is kept and its place said.
+  # (Its output goes elsewhere: a process that keeps the install's output
+  # pipe open holds the script until it exits; NOTES, residual risk.)
+  r=$(croot stay); w11=$(cproj stay yarn1-many "$r"); echo keep > "$w11/node_modules/y1-a/SENTINEL"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"sh -c \"trap \x27\x27 INT; exec sleep 60\" </dev/null >/dev/null 2>&1 & echo $! > stayer.pid; touch started; sleep 60"}; json.dump(d, open(p,"w"))' "$w11/package.json"
+  set -m; MATCHAPACK_CONVERT_TEST_WAIT_TICKS=4 conv "$r" --apply & pid=$!; set +m
+  for _ in $(seq 600); do [ -e "$w11/started" ] && break; sleep 0.1; done
+  kill -INT -- -"$pid" 2>/dev/null; wait "$pid"; rc=$?
+  stayer=$(cat "$w11/stayer.pid" 2>/dev/null)
+  kb=$(sed -n 's/.*not restored automatically; the previous node_modules is kept at \([^,]*\),.*/\1/p' "$work/out")
+  if [ $rc = 130 ] && [ -n "$kb" ] && [ -f "$kb/0/y1-a/SENTINEL" ] && [ ! -f "$w11/node_modules/y1-a/SENTINEL" ]; then
+    ok "convert-existing: interrupted while a project process stays: not restored under it, the backup kept and named"
+  else bad "convert-existing: interrupt with a process staying (exit $rc)"; fi
+  [ -n "$stayer" ] && kill "$stayer" 2>/dev/null
+  rm -rf "${work:?}/convhome/.cache/matchapack/backup"
+  # (round 4) A root given through a symlink: the in-use check still matches
+  # lsof's physical working directories.
+  r=$(croot viasym); w12=$(cproj p yarn1-many "$r"); ln -sfn "$r" "$work/conv-viasym-link"
+  (cd "$w12" && exec sleep 60) & sp=$!
+  sleep 0.3; conv "$work/conv-viasym-link"; rc=$?; kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  if [ $rc = 0 ] && grep -q "^SKIP in use *$w12\$" "$work/out"; then ok "convert-existing: a root given through a symlink: a project in use is still seen as in use"
+  else bad "convert-existing: root through a symlink (exit $rc)"; fi
   # (6) An install that cloned nothing (every file a Node copy; the hook in
   # `off` mode, as when Yarn's cache is on another volume) is not a
   # conversion: the previous node_modules is put back.
@@ -829,6 +867,7 @@ if [ "$(uname)" = Darwin ]; then
     ok "convert-existing: an install that cloned nothing is reported as not converted, previous node_modules put back"
   else bad "convert-existing: zero clones (exit $rc)"; fi
 fi
+fi # TEST_YARN1_PART != engine
 
 # Two volumes: the project on a disk image, Yarn's cache on the data volume.
 # Nothing can be cloned; the install is plain Yarn's copies.

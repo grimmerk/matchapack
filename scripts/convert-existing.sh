@@ -184,7 +184,8 @@ restore() {
 }
 # A signal: in `backing`, remove the backups made so far; in `armed`, wait
 # (up to 20 s) for the processes of the install to leave the project, then
-# restore. Then stop.
+# restore; if some are still there, restoring under them is not safe: the
+# backups are kept and their place said. Then stop.
 state=idle
 on_signal() {
   trap '' INT TERM HUP
@@ -192,7 +193,11 @@ on_signal() {
     backing) discard_backups; echo "INTERRUPTED      $dir  (nothing changed)" ;;
     armed)
       local t=0
-      while [ $t -lt 40 ] && in_use "$dir"; do sleep 0.5; t=$((t+1)); done
+      while [ $t -lt "${MATCHAPACK_CONVERT_TEST_WAIT_TICKS:-40}" ] && in_use "$dir"; do sleep 0.5; t=$((t+1)); done
+      if in_use "$dir"; then
+        echo "INTERRUPTED      $dir  (processes are still in the project: not restored automatically; the previous node_modules is kept at $bk, manifest $bk.paths)"
+        exit 130
+      fi
       if restore; then echo "INTERRUPTED      $dir  (previous node_modules restored)"
       else echo "INTERRUPTED      $dir  (previous node_modules NOT fully restored: see above)"; fi
       trap '' INT TERM HUP ;;
@@ -206,7 +211,8 @@ n_conv=0; n_skip=0; n_fail=0
 skip() { echo "$1"; n_skip=$((n_skip+1)); }
 errf=$(mktemp "${TMPDIR:-/tmp}/convert-existing.XXXXXX") || exit 2
 while IFS= read -r lock; do
-  dir=$(dirname "$lock")
+  # Canonical (lsof reports physical paths), for every check below.
+  dir=$(cd "$(dirname "$lock")" 2>/dev/null && pwd -P) || continue
   case $lock in */yarn.lock) kind=yarn ;; *) kind=npm ;; esac
   [ -f "$dir/package.json" ] && [ -d "$dir/node_modules" ] || continue
   # A project with both lockfiles is converted as an npm one (as before).
@@ -272,7 +278,10 @@ EOF
   # workspace's); any package in them that is neither in yarn.lock nor a
   # workspace (a manual copy), and any package that is a symlink other than
   # to a workspace (`yarn link`), either of which a reinstall would drop.
-  # Prints "LINKED <names>", "EXTRA <names>", or "PLAN", one node_modules
+  # Nested node_modules (node_modules/<dep>/node_modules/…) are checked
+  # the same way. A workspace node_modules (or a nested one) that is a
+  # symlink or not a directory cannot be backed up as planned: "ODD".
+  # Prints "ODD <paths>", "LINKED <names>", "EXTRA <names>", or "PLAN", one node_modules
   # path per line, and "NEW <path>" for each workspace node_modules that
   # does not exist yet (Yarn may make it; a rollback removes it); exits
   # non-zero when it cannot plan (the workspace list is not Yarn's JSON,
@@ -301,15 +310,10 @@ for name, info in ws.items():
     dirs.append(w)
     names.add(name)
     ws_real.add(os.path.realpath(w))
-nms, extra, linked, new = [], [], [], []
-for w in dirs:
-    nm = os.path.join(w, "node_modules")
-    if not os.path.lexists(nm):
-        new.append(nm)
-        continue
-    if not os.path.isdir(nm) or os.path.islink(nm):
-        continue
-    nms.append(nm)
+nms, extra, linked, new, odd = [], [], [], [], []
+def check(nm):
+    # Each package of this node_modules, and of the node_modules nested in
+    # its packages (stat-level; package symlinks are not followed).
     entries = []
     for e in os.listdir(nm):
         if e.startswith("."):
@@ -321,10 +325,30 @@ for w in dirs:
             entries.append(e)
     for e in entries:
         p = os.path.join(nm, e)
-        if os.path.islink(p) and os.path.realpath(p) not in ws_real:
-            linked.append(e)
-        elif e not in names:
-            extra.append(e)
+        if os.path.islink(p):
+            if os.path.realpath(p) not in ws_real:
+                linked.append(os.path.relpath(p, d))
+            continue
+        if e not in names:
+            extra.append(os.path.relpath(p, d))
+        sub = os.path.join(p, "node_modules")
+        if os.path.islink(sub) or (os.path.lexists(sub) and not os.path.isdir(sub)):
+            odd.append(os.path.relpath(sub, d))
+        elif os.path.isdir(sub):
+            check(sub)
+for w in dirs:
+    nm = os.path.join(w, "node_modules")
+    if not os.path.lexists(nm):
+        new.append(nm)
+        continue
+    if os.path.islink(nm) or not os.path.isdir(nm):
+        if w != d:
+            odd.append(os.path.relpath(nm, d))
+        continue
+    nms.append(nm)
+    check(nm)
+if odd:
+    sys.exit(print("ODD " + " ".join(sorted(set(odd)))))
 if linked:
     sys.exit(print("LINKED " + " ".join(sorted(set(linked)))))
 if extra:
@@ -337,6 +361,7 @@ EOF
   extra=
   case $yplan in
     LINKED*) skip "SKIP linked      $dir  (${yplan#LINKED }: a symlink, not a workspace; yarn link?)"; continue ;;
+    ODD*) skip "SKIP odd         $dir  (${yplan#ODD }: a node_modules that is not a plain directory)"; continue ;;
     EXTRA*) extra=${yplan#EXTRA } ;;
     PLAN*) nms=(); news=()
       while IFS= read -r p; do case $p in "") ;; "NEW "*) news+=("${p#NEW }") ;; *) nms+=("$p") ;; esac; done <<< "${yplan#PLAN}" ;;
