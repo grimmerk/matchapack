@@ -927,11 +927,14 @@ fn decline(args: &[String], yarn_js: Option<&Path>, reason: &str) -> i32 {
 }
 
 /// Replace this process with plain Yarn: the yarn.js matchapack would have
-/// run, else the `yarn` on PATH. `MATCHAPACK=0` keeps any wrapper from routing
-/// back here.
+/// run (`yarn_js`), else MATCHAPACK_YARN_JS, else the `yarn` on PATH, the same
+/// order `find_yarn_js` uses, so an install and any other command (or the
+/// `MATCHAPACK=0` bypass) run the same Yarn. `MATCHAPACK=0` keeps any wrapper
+/// from routing back here.
 fn exec_yarn(args: &[String], yarn_js: Option<&Path>) -> i32 {
     util::remove_run_dir();
-    let mut cmd = match yarn_js {
+    let chosen = yarn_js.map(Path::to_path_buf).or_else(|| std::env::var_os("MATCHAPACK_YARN_JS").map(PathBuf::from));
+    let mut cmd = match chosen.as_deref() {
         Some(js) => {
             let mut c = std::process::Command::new("node");
             c.arg(js);
