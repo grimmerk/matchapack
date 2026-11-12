@@ -89,7 +89,7 @@ enum Cmd {
         #[arg(default_value = ".")]
         dir: PathBuf,
     },
-    /// Compare two project trees; exit 1 when they differ.
+    /// Compare two project trees. Exit status: 0 identical, 1 they differ, 2 an error (nothing was decided).
     Diff {
         a: PathBuf,
         b: PathBuf,
@@ -672,16 +672,29 @@ fn main() -> Result<()> {
         }
         Cmd::Diff { a, b, ignore, limit, paths, meta, a_run, b_run, a_cache, b_cache } => {
             let opts = if meta {
+                let parse = |s: Option<String>| {
+                    s.as_deref().map(diff::Run::parse).transpose().unwrap_or_else(|e| {
+                        eprintln!("matchapack diff: error: {e:#}");
+                        std::process::exit(2)
+                    })
+                };
                 Some(diff::MetaOpts {
-                    a_run: a_run.as_deref().map(diff::Run::parse).transpose()?,
-                    b_run: b_run.as_deref().map(diff::Run::parse).transpose()?,
+                    a_run: parse(a_run),
+                    b_run: parse(b_run),
                     a_cache,
                     b_cache,
                 })
             } else {
                 None
             };
-            let r = diff::diff_with(&a, &b, &ignore, opts.as_ref())?;
+            let r = match diff::diff_with(&a, &b, &ignore, opts.as_ref()) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Not 1: a script must never read an error as "the trees differ".
+                    eprintln!("matchapack diff: error: {e:#}");
+                    std::process::exit(2);
+                }
+            };
             if paths {
                 r.print_paths();
             } else {

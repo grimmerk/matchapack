@@ -150,33 +150,49 @@ fn mtime_ns(md: &std::fs::Metadata) -> i128 {
 /// `com.apple.provenance`, whose value records which app created the file, so
 /// a clone keeps the value of its source while a copy gets a new one, and
 /// nothing in user space can set it.
-fn xattr_names(p: &Path) -> Vec<String> {
+fn xattr_names(p: &Path) -> std::io::Result<Vec<String>> {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return vec![] };
-    #[cfg(target_os = "macos")]
-    let list = |buf: *mut libc::c_char, len: usize| unsafe { libc::listxattr(c.as_ptr(), buf, len, libc::XATTR_NOFOLLOW) };
-    #[cfg(not(target_os = "macos"))]
-    let list = |buf: *mut libc::c_char, len: usize| unsafe { libc::llistxattr(c.as_ptr(), buf, len) };
-    // The list can grow between the size query and the read: retry.
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes())?;
+    let list = |buf: Option<&mut [u8]>| {
+        let (ptr, len) = match buf {
+            Some(b) => (b.as_mut_ptr() as *mut libc::c_char, b.len()),
+            None => (std::ptr::null_mut(), 0),
+        };
+        #[cfg(target_os = "macos")]
+        let n = unsafe { libc::listxattr(c.as_ptr(), ptr, len, libc::XATTR_NOFOLLOW) };
+        #[cfg(not(target_os = "macos"))]
+        let n = unsafe { libc::llistxattr(c.as_ptr(), ptr, len) };
+        if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+    };
+    names_from(list).map_err(|e| std::io::Error::new(e.kind(), format!("listing the extended attributes of {}: {e}", p.display())))
+}
+
+/// The xattr-name list protocol over `list` (None: ask for the size; Some:
+/// read into the buffer): a filesystem without extended attributes
+/// (ENOTSUP) has none; ERANGE (the list grew between the two calls) is
+/// retried; every other error is returned.
+fn names_from(mut list: impl FnMut(Option<&mut [u8]>) -> std::io::Result<usize>) -> std::io::Result<Vec<String>> {
+    let unsupported = |e: &std::io::Error| e.raw_os_error() == Some(libc::ENOTSUP);
     for _ in 0..4 {
-        let n = list(std::ptr::null_mut(), 0);
-        if n <= 0 {
-            return vec![];
-        }
-        let mut buf = vec![0u8; n as usize];
-        let n = list(buf.as_mut_ptr() as *mut libc::c_char, buf.len());
-        if n < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ERANGE) {
-                continue;
-            }
-            return vec![];
-        }
+        let n = match list(None) {
+            Ok(0) => return Ok(vec![]),
+            Ok(n) => n,
+            Err(e) if unsupported(&e) => return Ok(vec![]),
+            Err(e) => return Err(e),
+        };
+        let mut buf = vec![0u8; n];
+        let n = match list(Some(&mut buf)) {
+            Ok(n) => n,
+            Err(e) if e.raw_os_error() == Some(libc::ERANGE) => continue,
+            Err(e) if unsupported(&e) => return Ok(vec![]),
+            Err(e) => return Err(e),
+        };
         let mut names: Vec<String> =
-            buf[..n as usize].split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect();
+            buf[..n].split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect();
         names.sort();
-        return names;
+        return Ok(names);
     }
-    vec!["<xattr list kept changing>".into()]
+    Err(std::io::Error::other("the extended attribute list kept changing"))
 }
 
 fn scan(root: &Path, meta: bool) -> Result<BTreeMap<String, (Node, Option<Meta>)>> {
@@ -186,9 +202,9 @@ fn scan(root: &Path, meta: bool) -> Result<BTreeMap<String, (Node, Option<Meta>)
         let rel = ent.path().strip_prefix(root).unwrap().to_string_lossy().into_owned();
         paths.push((rel, ent.path().to_path_buf(), ent.file_type()));
     }
-    let nodes: Vec<(String, (Node, Option<Meta>))> = paths
+    let nodes: Result<Vec<(String, (Node, Option<Meta>))>> = paths
         .into_par_iter()
-        .map(|(rel, p, ft)| {
+        .map(|(rel, p, ft)| -> Result<(String, (Node, Option<Meta>))> {
             let n = if ft.is_symlink() {
                 Node::Link { target: std::fs::read_link(&p).unwrap_or_default() }
             } else if ft.is_dir() {
@@ -205,20 +221,15 @@ fn scan(root: &Path, meta: bool) -> Result<BTreeMap<String, (Node, Option<Meta>)
                 Node::Other
             };
             let m = if meta {
-                let md = std::fs::symlink_metadata(&p).ok();
-                Some(md.map_or_else(Meta::default, |md| Meta {
-                    uid: md.uid(),
-                    gid: md.gid(),
-                    mtime_ns: mtime_ns(&md),
-                    xattrs: xattr_names(&p),
-                }))
+                let md = std::fs::symlink_metadata(&p).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+                Some(Meta { uid: md.uid(), gid: md.gid(), mtime_ns: mtime_ns(&md), xattrs: xattr_names(&p)? })
             } else {
                 None
             };
-            (rel, (n, m))
+            Ok((rel, (n, m)))
         })
         .collect();
-    Ok(nodes.into_iter().collect())
+    Ok(nodes?.into_iter().collect())
 }
 
 /// What `--meta` found, one list per class: (path, detail).
@@ -282,13 +293,23 @@ pub fn diff_with(a: &Path, b: &Path, ignore: &[String], meta: Option<&MetaOpts>)
             r.only_a.push(k.clone());
             continue;
         };
-        if k == HIDDEN {
+        if k == HIDDEN && matches!((va, vb), (Node::File { .. }, Node::File { .. })) {
             let ja: serde_json::Value = serde_json::from_slice(&std::fs::read(a.join(k))?)?;
             let jb: serde_json::Value = serde_json::from_slice(&std::fs::read(b.join(k))?)?;
-            r.hidden_bytes_equal = Some(va == vb);
+            r.hidden_bytes_equal = Some(same_content(va, vb));
+            let mut why = vec![];
             if ja != jb {
-                r.differ.push((k.clone(), "hidden lockfile JSON differs".into()));
+                why.push("hidden lockfile JSON differs".to_string());
                 m.content.push(k.clone());
+            }
+            if let (Node::File { mode: ma, .. }, Node::File { mode: mb, .. }) = (va, vb)
+                && ma != mb
+            {
+                why.push(format!("hidden lockfile mode a={ma:o} b={mb:o}"));
+                m.file_mode.push(k.clone());
+            }
+            if !why.is_empty() {
+                r.differ.push((k.clone(), why.join("; ")));
             }
         } else if va != vb {
             r.differ.push((k.clone(), format!("a={va:?} b={vb:?}")));
@@ -298,7 +319,7 @@ pub fn diff_with(a: &Path, b: &Path, ignore: &[String], meta: Option<&MetaOpts>)
             let (sa, sb) = (when(xa.mtime_ns, opts.a_run, &fa), when(xb.mtime_ns, opts.b_run, &fb));
             compare_meta(k, xa, xb, sa, sb, &mut m);
             if Path::new(k).file_name().is_some_and(|n| n == YARN_INTEGRITY) {
-                m.yarn_integrity.push((k.clone(), va == vb));
+                m.yarn_integrity.push((k.clone(), same_content(va, vb)));
             }
         }
     }
@@ -316,6 +337,12 @@ pub fn diff_with(a: &Path, b: &Path, ignore: &[String], meta: Option<&MetaOpts>)
         r.meta = Some(m);
     }
     Ok(r)
+}
+
+/// Same bytes: both regular files with the same hash and size (the mode is
+/// not part of it).
+fn same_content(va: &Node, vb: &Node) -> bool {
+    matches!((va, vb), (Node::File { hash: ha, size: sa, .. }, Node::File { hash: hb, size: sb, .. }) if ha == hb && sa == sb)
 }
 
 /// The `--meta` comparison of one path present in both trees.
@@ -663,6 +690,84 @@ mod tests {
         // An old file time on one side against an in-run time on the other.
         set_mtime(&b.join("node_modules/p/index.js"), OLD);
         assert!(!meta(&a, &b, &o).ok());
+    }
+
+    #[test]
+    fn yarn_integrity_bytes_ignore_the_mode() {
+        let (a, b) = pair("meta-integrity-mode");
+        fs::set_permissions(b.join("node_modules/.yarn-integrity"), fs::Permissions::from_mode(0o600)).unwrap();
+        let r = meta(&a, &b, &MetaOpts::default());
+        assert!(!r.ok());
+        let m = r.meta.unwrap();
+        assert_eq!(m.yarn_integrity, vec![("node_modules/.yarn-integrity".to_string(), true)], "same bytes");
+        assert_eq!(m.file_mode, ["node_modules/.yarn-integrity"]);
+        assert!(m.content.is_empty());
+    }
+
+    #[test]
+    fn a_hidden_lockfile_mode_difference_is_reported() {
+        let d = scratch("hidden-mode");
+        for t in ["A", "B"] {
+            fs::create_dir_all(d.join(t).join("node_modules")).unwrap();
+            fs::write(d.join(t).join(HIDDEN), "{\"lockfileVersion\": 3}\n").unwrap();
+        }
+        let (a, b) = (d.join("A"), d.join("B"));
+        assert!(diff(&a, &b, &[]).unwrap().ok());
+        fs::set_permissions(b.join(HIDDEN), fs::Permissions::from_mode(0o600)).unwrap();
+        let r = diff(&a, &b, &[]).unwrap();
+        assert!(!r.ok(), "without --meta too");
+        assert_eq!(r.differ.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), [HIDDEN]);
+        assert_eq!(r.hidden_bytes_equal, Some(true), "the bytes are the same");
+        let m = meta(&a, &b, &MetaOpts::default()).meta.unwrap();
+        assert_eq!(m.file_mode, [HIDDEN]);
+        assert!(m.content.is_empty());
+        // Different JSON and mode: one entry, both reasons.
+        fs::write(b.join(HIDDEN), "{\"lockfileVersion\": 2}\n").unwrap();
+        let r = diff(&a, &b, &[]).unwrap();
+        assert_eq!(r.differ.len(), 1);
+        assert!(r.differ[0].1.contains("JSON") && r.differ[0].1.contains("mode"), "{}", r.differ[0].1);
+    }
+
+    #[test]
+    fn xattr_list_errors_are_returned_not_swallowed() {
+        use std::io::Error;
+        let errno = |e: i32| move |_: Option<&mut [u8]>| -> std::io::Result<usize> { Err(Error::from_raw_os_error(e)) };
+        assert_eq!(names_from(errno(libc::ENOTSUP)).unwrap(), Vec::<String>::new(), "no xattr support: none");
+        assert_eq!(names_from(|_| Ok(0)).unwrap(), Vec::<String>::new());
+        let e = names_from(errno(libc::EACCES)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EACCES));
+        // The size query succeeds, the read fails.
+        let mut calls = 0;
+        let e = names_from(|b| {
+            calls += 1;
+            match b {
+                None => Ok(4),
+                Some(_) => Err(Error::from_raw_os_error(libc::EIO)),
+            }
+        })
+        .unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EIO));
+        assert_eq!(calls, 2);
+        // A list that keeps growing: retried, then an error.
+        let e = names_from(|b| match b {
+            None => Ok(4),
+            Some(_) => Err(Error::from_raw_os_error(libc::ERANGE)),
+        })
+        .unwrap_err();
+        assert!(e.to_string().contains("kept changing"), "{e}");
+        // A read that works.
+        let names = names_from(|b| match b {
+            None => Ok(6),
+            Some(buf) => {
+                buf.copy_from_slice(b"b\0a\0\0\0");
+                Ok(4)
+            }
+        })
+        .unwrap();
+        assert_eq!(names, ["a", "b"]);
+        // End to end: a path that does not exist is an error, not "no attributes".
+        let d = scratch("xattr-missing");
+        assert!(xattr_names(&d.join("gone")).is_err());
     }
 
     #[test]

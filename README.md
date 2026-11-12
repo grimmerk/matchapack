@@ -209,7 +209,8 @@ it records nothing and shows the log.
 - `matchapack install [dir]`: the install itself, with per-step timings (same
   npm version gate as `npm ci`).
 - `matchapack plan [dir]`: what would be placed and what is skipped, and why.
-- `matchapack diff A B`: the harness's tree comparison. `--meta` also
+- `matchapack diff A B`: the harness's tree comparison; exit 0 identical, 1
+  they differ, 2 an error (nothing was decided). `--meta` also
   compares each path's mtime to the nanosecond, uid, gid and extended
   attribute names (not their values: macOS gives every file a
   `com.apple.provenance` value that a clone keeps and a copy does not), and
