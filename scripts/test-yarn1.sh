@@ -284,6 +284,40 @@ if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && [ "$(copied e-many first-copi
   ok "yarn1-many: engine identical to plain (mtimes, gid, xattr names included); $n files cloned and sharing blocks, Yarn's first $(ejson e-many "y['first']") copies left to Node"
 else bad "yarn1-many engine (exit $rc, cloned ${n:-?})"; fi
 
+# Yarn hands its lifecycle scripts npm_execpath = its main module; under the
+# engine that must still be Yarn's bin/yarn.js (y1-execpath records it and
+# runs `node "$npm_execpath" --version`; compared above as file content).
+x=$work/e-many/engine/node_modules/y1-execpath/execpath.txt
+if [ -f "$x" ] && [ "$(head -1 "$x")" = "$yarnjs" ] && cmp -s "$x" "$work/e-many/plain1/node_modules/y1-execpath/execpath.txt"; then
+  ok "lifecycle scripts get npm_execpath = Yarn's own bin/yarn.js, and it runs Yarn"
+else bad "npm_execpath under the engine ($(head -1 "$x" 2>/dev/null))"; fi
+
+# A slow answer (the server sleeps between a clone and its fix-up, longer
+# than the hook waits): later copies go to Node, but the slow request is
+# answered, never copied over while its clone is being fixed up.
+MATCHAPACK_YARN_SLOW_FIXUP_EVERY=40 MATCHAPACK_YARN_SLOW_FIXUP_MS=3000 MATCHAPACK_YARN_TIMEOUT_MS=500 everify e-slow "$here/fixtures/yarn1-many"
+n=$(copied e-slow server-slow)
+if [ $rc = 0 ] && same && [ "${n:-0}" -gt 0 ]; then ok "slow answers: the slow request waits for its clone, $n later files copied by Node, tree identical"
+else bad "slow answers (exit $rc, server-slow ${n:-?})"; fi
+
+# The harness itself: an engine difference is plain's variation only on the
+# same path in the same class.
+printf 'mtime\tnode_modules/a/x.js\n' > "$work/cp.txt"
+printf 'content\tnode_modules/a/x.js\nmtime\tnode_modules/a/x.js\n' > "$work/ce.txt"
+own=$("$here/scripts/yarn1-own-diffs.sh" "$work/cp.txt" "$work/ce.txt")
+if [ "$own" = "$(printf 'content\tnode_modules/a/x.js')" ]; then ok "a content difference is the engine's even where plain varies by mtime"
+else bad "attribution by class (got '$own')"; fi
+# --engine-min-clones 0 means none.
+verify e-min0 --engine yarn1 --engine-min-clones 0 "$here/fixtures/yarn1-many"
+if [ $rc = 1 ] && grep -q 'expected none' "$work/out"; then ok "--engine-min-clones 0 fails a run that cloned"; else bad "--engine-min-clones 0 (exit $rc)"; fi
+# A relative --cache-dir is the caller's, not one per tree.
+(cd "$work" && "$v" --work "$work/e-rel" --cache-dir rel-cache --engine yarn1 "$here/fixtures/yarn1-many" > "$work/out" 2>&1); rc=$?
+if [ $rc = 0 ] && [ -d "$work/rel-cache/v6" ] && [ ! -e "$work/e-rel/plain1/rel-cache" ]; then ok "a relative --cache-dir is resolved once"; else bad "relative --cache-dir (exit $rc)"; fi
+# A --cache-dir inside the work directory is refused, never cleaned up.
+mkdir -p "$work/e-in/cache"; touch "$work/e-in/cache/keep"
+verify e-in --cache-dir "$work/e-in/cache" "$here/fixtures/yarn1-many"
+if [ $rc = 2 ] && [ -f "$work/e-in/cache/keep" ]; then ok "a --cache-dir inside --work is refused and left alone"; else bad "--cache-dir inside --work (exit $rc)"; fi
+
 for c in empty empty-empty; do
   if [ $c = empty ]; then everify e-$c "$here/fixtures/yarn1-emptyfirst"; else everify e-$c --cache empty "$here/fixtures/yarn1-emptyfirst"; fi
   n=$(ejson e-$c "y['cloned']")
@@ -336,7 +370,8 @@ if [ $rc = 0 ] && same && [ "$(ejson e-incr "y['cloned']")" -gt 0 ] && [ -f "$wo
   ok "incremental v1 -> v2 over the tree: engine identical; $(ejson e-incr "y['cloned']") files cloned in the second install"
 else bad "incremental engine (exit $rc)"; fi
 
-(umask 002; everify e-umask "$here/fixtures/yarn1-many")
+# (verify sets rc inside the subshell: pass it out)
+(umask 002; everify e-umask "$here/fixtures/yarn1-many"; exit $rc); rc=$?
 if [ $rc = 0 ] && same; then ok "umask 002: engine identical"; else bad "umask 002 engine (exit $rc)"; fi
 
 # The cache filled by another Node major (MATCHAPACK_YARN_PRIME_NODE): Yarn's
@@ -424,22 +459,22 @@ else bad "matchapack report"; fi
 
 # Two volumes: the project on a disk image, Yarn's cache on the data volume.
 # Nothing can be cloned; the install is plain Yarn's copies.
+# The work directory (trees) on the image, the cache given with --cache-dir.
 vol=$work/vol
-if [ "$(uname)" = Darwin ] && hdiutil create -quiet -size 64m -fs APFS -volname mpy1 "$work/vol.dmg" 2>/dev/null \
-  && mkdir -p "$vol" && hdiutil attach -quiet -nobrowse -mountpoint "$vol" "$work/vol.dmg" 2>/dev/null; then
-  mkdir -p "$vol/p" "$vol/q"
-  cp -p "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$vol/p/"
-  cp -p "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$vol/q/"
-  s=$(python3 -c 'import time; print(time.time_ns())'); myarn "$vol/p" --; e=$(python3 -c 'import time; print(time.time_ns())')
-  r=$rc; cache_note=$(lastlog 'r["yarn1"]["cache"]'); n=$(lastlog 'r["yarn1"]["cloned"]')
-  s2=$(python3 -c 'import time; print(time.time_ns())')
-  (cd "$vol/q" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true "$node" "$yarnjs" install --frozen-lockfile --non-interactive --cache-folder "$work/e-many/cache") > /dev/null 2>&1
-  e2=$(python3 -c 'import time; print(time.time_ns())')
-  "$bin" diff --meta "$vol/q" "$vol/p" --a-run "$s2:$e2" --b-run "$s:$e" > "$work/out" 2>&1; rc=$?
-  if [ $r = 0 ] && [ "$n" = 0 ] && [ "${cache_note#unusable: }" != "$cache_note" ] && [ $rc = 0 ]; then ok "two volumes: nothing cloned (${cache_note#unusable: }), tree identical to plain"
-  else bad "two volumes (exit $r, cloned ${n:-?}, cache '$cache_note', diff $rc)"; fi
+dmg=$work/vol.dmg
+if [ "$(uname)" != Darwin ]; then echo "SKIP two volumes: macOS only"
+elif ! hdiutil create -quiet -ov -size 64m -fs APFS -volname mpy1 "$dmg" 2>/dev/null; then echo "SKIP two volumes: no disk image could be made"
+elif ! { mkdir -p "$vol" && hdiutil attach -quiet -nobrowse -mountpoint "$vol" "$dmg" 2>/dev/null; }; then
+  rm -f "$dmg"; echo "SKIP two volumes: the disk image could not be attached"
+else
+  verify vol --work "$vol/w" --cache-dir "$work/e-many/cache" --engine yarn1 --engine-min-clones 0 "$here/fixtures/yarn1-many"
+  cp "$vol/w/engine.json" "$work/vol-engine.json" 2>/dev/null
+  cache_note=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["yarn1"]["cache"])' "$work/vol-engine.json" 2>/dev/null)
+  if [ $rc = 0 ] && same && [ "${cache_note#unusable: }" != "$cache_note" ]; then ok "two volumes: nothing cloned (${cache_note#unusable: }), tree identical to plain"
+  else bad "two volumes (exit $rc, cache '$cache_note')"; fi
   hdiutil detach -quiet "$vol" || hdiutil detach -quiet -force "$vol"
-else echo "SKIP two volumes: no disk image could be made and attached"; fi
+  rm -f "$dmg"
+fi
 mkdir -p "$work/withnm"; cp "$here/fixtures/yarn1-small/package.json" "$here/fixtures/yarn1-small/yarn.lock" "$work/withnm/"; mkdir -p "$work/withnm/node_modules"
 verify withnm "$work/withnm"
 if [ $rc = 2 ]; then ok "a source with node_modules is refused"; else bad "source with node_modules (exit $rc)"; fi

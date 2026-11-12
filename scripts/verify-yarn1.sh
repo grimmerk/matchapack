@@ -70,7 +70,8 @@ while [ $# -gt 0 ]; do
     --prime-node) prime_node=${2:?--prime-node needs a node binary}; shift 2 ;;
     --then) then=${2:?--then needs a directory}; shift 2 ;;
     --engine) engine=${2:?--engine needs a name}; shift 2 ;;
-    --engine-min-clones) min_clones=${2:?--engine-min-clones needs a number}; shift 2 ;;
+    --engine-min-clones) min_clones=${2:?--engine-min-clones needs a number}; shift 2
+      case $min_clones in ''|*[!0-9]*) echo "--engine-min-clones $min_clones: a number" >&2; exit 2 ;; esac ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) break ;;
   esac
@@ -96,7 +97,16 @@ if [ -z "$yarnjs" ]; then
   yarnjs=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$y")
 fi
 [ -x "$node" ] && [ -f "$yarnjs" ] || { echo "node ($node) or yarn.js ($yarnjs) not found" >&2; exit 2; }
-[ -z "$prime_node" ] || [ -x "$prime_node" ] || { echo "--prime-node $prime_node not found" >&2; exit 2; }
+# Absolute before anything changes directory (each run is started from its
+# own tree).
+if [ -n "$prime_node" ]; then
+  case $prime_node in */*) ;; *) prime_node=$(command -v "$prime_node") || { echo "--prime-node: no such command" >&2; exit 2; } ;; esac
+  [ -x "$prime_node" ] || { echo "--prime-node $prime_node not found" >&2; exit 2; }
+  prime_node=$(cd "$(dirname "$prime_node")" && pwd -P)/$(basename "$prime_node")
+fi
+if [ -n "$cache_dir" ]; then
+  mkdir -p "$cache_dir" && cache_dir=$(cd "$cache_dir" && pwd -P) || { echo "--cache-dir $cache_dir: cannot use it" >&2; exit 2; }
+fi
 yver=$("$node" "$yarnjs" --version 2>/dev/null) || { echo "$yarnjs does not run" >&2; exit 2; }
 case $yver in 1.*) ;; *) echo "yarn $yver is not Yarn 1" >&2; exit 2 ;; esac
 [ -n "$work" ] || work=$(mktemp -d "${TMPDIR:-/tmp}/verify-yarn1.XXXXXX")
@@ -106,6 +116,12 @@ mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 src_real=$(cd "$src" && pwd -P)
 case "$work/" in "$src_real/"*) echo "--work $work is inside the source $src_real" >&2; exit 2 ;; esac
 case "$src_real/" in "$work/"*) echo "the source $src_real is inside --work $work" >&2; exit 2 ;; esac
+# Nor may a cache given with --cache-dir: the cleanup would delete it, or
+# delete inside it.
+if [ -n "$cache_dir" ]; then
+  case "$cache_dir/" in "$work/"*) echo "--cache-dir $cache_dir is inside --work $work" >&2; exit 2 ;; esac
+  case "$work/" in "$cache_dir/"*) echo "--work $work is inside --cache-dir $cache_dir" >&2; exit 2 ;; esac
+fi
 rm -rf "${work:?}/prime" "${work:?}/plain1" "${work:?}/plain2" "${work:?}/engine" "${work:?}/cache" "${work:?}/cache-1" "${work:?}/cache-2" \
   "${work:?}/cache-e" "${work:?}/runs" "${work:?}/mp" "${work:?}/engine.json" "${work:?}/diff-engine.txt"
 echo "yarn $yver, node $("$node" -v), $("$bin" --version), $cache_mode cache, work $work"
@@ -219,7 +235,11 @@ print(r.get("outcome"), y.get("cloned", 0), y.get("cloned_bytes", 0), y.get("cop
 IFS=$'\t' read -r outcome cloned cbytes copied steps unseen why <<< "$stats"
 echo "engine: $outcome, cloned $cloned files ($(( cbytes / 1048576 )) MiB), copied by Node $copied ($why), link steps $steps, unseen $unseen"
 [ "$outcome" = installed ] || { echo "engine: did not install ($outcome)"; exit 1; }
-[ "$cloned" -ge "$min_clones" ] || { echo "engine: cloned $cloned files, expected at least $min_clones"; exit 1; }
+if [ "$min_clones" = 0 ]; then
+  [ "$cloned" = 0 ] || { echo "engine: cloned $cloned files, expected none"; exit 1; }
+else
+  [ "$cloned" -ge "$min_clones" ] || { echo "engine: cloned $cloned files, expected at least $min_clones"; exit 1; }
+fi
 [ "$min_clones" = 0 ] || [ "$unseen" = False ] || { echo "engine: Yarn linked but the hook saw no link step"; exit 1; }
 [ "$(uname)" = Darwin ] && echo "engine: $(python3 "$here/scripts/shared-blocks.py" "$work/engine" "$ce")"
 
@@ -232,16 +252,20 @@ if [ $rc = 0 ]; then
   [ $plain_rc = 0 ] && exit 0
   exit 3
 fi
-# A path that differs between plain1 and the engine but also between the two
-# plain runs is plain Yarn's own variation, not the engine's.
-"$bin" diff --meta "$work/plain1" "$work/plain2" --a-run "$run_plain1" --b-run "$run_plain2" --a-cache "$c1" --b-cache "$c2" --paths > "$work/paths-plain.txt" 2>/dev/null
-"$bin" diff --meta "$work/plain1" "$work/engine" --a-run "$run_plain1" --b-run "$run_engine" --a-cache "$c1" --b-cache "$ce" --paths > "$work/paths-engine.txt" 2>/dev/null
-own=$(LC_ALL=C comm -23 <(LC_ALL=C sort -u "$work/paths-engine.txt") <(LC_ALL=C sort -u "$work/paths-plain.txt"))
+# A difference between plain1 and the engine that the two plain runs also
+# have, on the same path and in the same class, is plain Yarn's own
+# variation, not the engine's (scripts/yarn1-own-diffs.sh).
+"$bin" diff --meta "$work/plain1" "$work/plain2" --a-run "$run_plain1" --b-run "$run_plain2" --a-cache "$c1" --b-cache "$c2" --classes > "$work/classes-plain.txt" 2>/dev/null
+r1=$?
+"$bin" diff --meta "$work/plain1" "$work/engine" --a-run "$run_plain1" --b-run "$run_engine" --a-cache "$c1" --b-cache "$ce" --classes > "$work/classes-engine.txt" 2>/dev/null
+r2=$?
+{ [ $r1 -le 1 ] && [ $r2 -le 1 ]; } || { echo "matchapack diff --classes failed (exit $r1, $r2)"; exit 1; }
+own=$("$here/scripts/yarn1-own-diffs.sh" "$work/classes-plain.txt" "$work/classes-engine.txt")
 if [ -z "$own" ]; then
-  echo "plain vs engine: differs only where plain varies ($(wc -l < "$work/paths-engine.txt" | tr -d ' ') paths; $work/diff-engine.txt)"
+  echo "plain vs engine: differs only where plain varies ($(wc -l < "$work/classes-engine.txt" | tr -d ' ') differences; $work/diff-engine.txt)"
   exit 3
 fi
-echo "plain vs engine: ENGINE DIFFERS ($(printf '%s\n' "$own" | wc -l | tr -d ' ') paths not explained by plain's variation; full list: $work/diff-engine.txt)"
+echo "plain vs engine: ENGINE DIFFERS ($(printf '%s\n' "$own" | wc -l | tr -d ' ') differences not explained by plain's variation; full list: $work/diff-engine.txt)"
 grep -v '^    ' "$work/diff-engine.txt" | grep -v '^  written during\|^  from each run' || true
 printf '%s\n' "$own" | head -20 | sed 's/^/    /'
 exit 1

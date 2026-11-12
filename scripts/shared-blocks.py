@@ -4,8 +4,9 @@
   shared-blocks.py <tree> <cache>
 
 Counts every regular file below a node_modules directory of <tree>: a file
-whose first extent's physical offset (macOS fcntl F_LOG2PHYS_EXT) is also the
-first extent of a regular file in <cache> shares it (a clone of that file).
+whose first extent (device and physical offset, macOS fcntl F_LOG2PHYS_EXT)
+is also the first extent of a regular file in <cache> shares it (a clone of
+that file).
 Empty files have no blocks and are counted apart. Prints one line:
 "shared <n> of <m> files, <x> of <y> MiB (<e> empty)". macOS only.
 """
@@ -15,10 +16,11 @@ F_LOG2PHYS_EXT = 65
 
 
 def first_block(p):
+    """(device, physical offset of the first block): offsets are per device."""
     fd = os.open(p, os.O_RDONLY)
     try:
         out = fcntl.fcntl(fd, F_LOG2PHYS_EXT, struct.pack("=Iqq", 0, 1, 0))
-        return struct.unpack("=Iqq", out)[2]
+        return os.fstat(fd).st_dev, struct.unpack("=Iqq", out)[2]
     finally:
         os.close(fd)
 
