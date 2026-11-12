@@ -209,7 +209,20 @@ it records nothing and shows the log.
 - `matchapack install [dir]`: the install itself, with per-step timings (same
   npm version gate as `npm ci`).
 - `matchapack plan [dir]`: what would be placed and what is skipped, and why.
-- `matchapack diff A B`: the harness's tree comparison.
+- `matchapack diff A B`: the harness's tree comparison. `--meta` also
+  compares each path's mtime to the nanosecond, uid, gid and extended
+  attribute names (not their values: macOS gives every file a
+  `com.apple.provenance` value that a clone keeps and a copy does not), and
+  reports each class of difference separately, with a line per
+  `.yarn-integrity`. Times written during an install differ between two runs:
+  `--a-run START:END` / `--b-run` (ns since the epoch) and `--a-cache` /
+  `--b-cache` let those through only when both sides wrote them the same way
+  (NOTES, "Yarn 1 harness").
+- `scripts/verify-yarn1.sh [--cache warm|empty] <project> [yarn args]`: plain
+  Yarn 1 twice on copies of a project with a scratch cache, compared with
+  `diff --meta`; exit 0 identical, 3 "plain varies" (with the paths). The
+  slot for a Yarn 1 engine, which does not exist yet. `scripts/test-yarn1.sh
+  <work>`: its tests on the `fixtures/yarn1-*` projects.
 - `scripts/verify.sh <project> <work>`: `npm ci` vs matchapack on copies of a
   project (`MATCHAPACK_VERIFY_VIA=wrapper` goes through the shell function). It
   runs on any npm version and ignores the trial scope file, since it is how a
@@ -218,8 +231,8 @@ it records nothing and shows the log.
   makes B (and `scripts/verify-npm.sh`'s whole list, plus the cases only that
   engine handles) use the inject engine; nothing is recorded then.
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
-  `test-shells.sh` on Linux; safety, routing, store, the inject engine's tests
-  and the fixture harness with both engines on macOS.
+  `test-shells.sh` on Linux; safety, routing, store, the inject engine's tests,
+  the fixture harness with both engines and the Yarn 1 harness tests on macOS.
 - `scripts/test-inject.sh <work>`: the inject engine end to end (the hook
   cloned, a disabled hook and a store miss give the same tree, the gates,
   npm's own failures, the store lock, the project record) and the hook's
