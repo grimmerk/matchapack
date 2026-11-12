@@ -2,6 +2,7 @@
 # Install: add to ~/.config/fish/config.fish (the binary prints this file)
 #     type -q matchapack; and matchapack init | source
 # Bypass for one command:  MATCHAPACK=0 npm ci     or     command npm ci
+# On macOS `matchapack init` also prints shell/matchapack-yarn.fish after this.
 function npm --wraps npm --description 'npm; a bare npm ci goes through matchapack'
     if contains -- "$argv[1]" ci clean-install ic install-clean isntall-clean
         and test "$MATCHAPACK" != 0

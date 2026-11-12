@@ -75,7 +75,7 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Print the shell integration for an rc file (routes a bare `npm ci` through matchapack)
+    /// Print the shell integration for an rc file (routes a bare `npm ci`, and on macOS a bare `yarn` / `yarn install`, through matchapack)
     ///
     /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts matchapack on
     /// PATH (otherwise the guard skips it silently):
@@ -522,6 +522,21 @@ fn show(base: &str) -> &str {
 
 const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
 
+/// What `matchapack init <shell>` prints: the `npm` function, and on macOS
+/// the `yarn` one after it (on Linux plain Yarn 1 already clones, so no
+/// `yarn` function is defined there). The files in shell/ are the one
+/// definition; the binary carries them so the rc line needs no checkout of
+/// this repository, and users who already have the line get the `yarn`
+/// function with the next `cargo install`.
+fn init_script(shell: &str, macos: bool) -> String {
+    let (npm, yarn) = if shell == "fish" {
+        (include_str!("../shell/matchapack.fish"), include_str!("../shell/matchapack-yarn.fish"))
+    } else {
+        (include_str!("../shell/matchapack.sh"), include_str!("../shell/matchapack-yarn.sh"))
+    };
+    if macos { format!("{npm}{yarn}") } else { npm.to_string() }
+}
+
 /// The shell `matchapack init` was started from: its parent process. In
 /// `eval "$(matchapack init)"` that is the zsh or bash reading the rc file, in
 /// `matchapack init | source` the fish. Not $SHELL, which names the login shell
@@ -662,9 +677,7 @@ fn main() -> Result<()> {
                     )
                 })?,
             };
-            // The files in shell/ are the one definition; the binary carries
-            // them so the rc line needs no checkout of this repository.
-            print!("{}", if shell == "fish" { include_str!("../shell/matchapack.fish") } else { include_str!("../shell/matchapack.sh") });
+            print!("{}", init_script(&shell, cfg!(target_os = "macos")));
         }
         Cmd::Plan { dir } => {
             let root = std::fs::canonicalize(&dir)?;
@@ -815,7 +828,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_from_comm;
+    use super::{init_script, shell_from_comm};
 
     #[test]
     fn shell_names_from_ps() {
@@ -827,5 +840,20 @@ mod tests {
         assert_eq!(shell_from_comm("sh"), None);
         assert_eq!(shell_from_comm("tmux"), None);
         assert_eq!(shell_from_comm(""), None);
+    }
+
+    /// The `yarn` function comes after the `npm` one on macOS only, in every
+    /// shell; this platform's binary prints what its platform calls for.
+    #[test]
+    fn init_defines_yarn_on_macos_only() {
+        for sh in ["zsh", "bash", "fish"] {
+            let (mac, linux) = (init_script(sh, true), init_script(sh, false));
+            let has = |t: &str, f: &str| t.lines().any(|l| l.starts_with(&format!("function {f} ")));
+            assert!(has(&mac, "npm") && has(&mac, "yarn"), "{sh} macOS");
+            assert!(has(&linux, "npm") && !has(&linux, "yarn"), "{sh} Linux");
+            assert!(mac.starts_with(&linux), "{sh}: the npm part is the same");
+            assert!(mac.contains("matchapack yarn"));
+            assert_eq!(has(&init_script(sh, cfg!(target_os = "macos")), "yarn"), cfg!(target_os = "macos"));
+        }
     }
 }
