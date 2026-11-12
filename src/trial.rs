@@ -90,11 +90,87 @@ fn when(ts: f64) -> String {
     out.ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("{ts:.0}"))
 }
 
+/// The `matchapack yarn` lines of the report (src/yarn1.rs): outcomes, why
+/// installs went to plain Yarn, what was cloned and what Node copied (by
+/// reason), and installs where Yarn linked but the hook saw no link step.
+/// Clones of Yarn's cache are not the store's: their bytes are not added to
+/// any "space" line.
+fn report_yarn1(runs: &[Value]) {
+    let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
+    println!(
+        "yarn: {} runs of `matchapack yarn`: installed {}, plain yarn {}, yarn failed {}, broke {}",
+        runs.len(),
+        count("installed"),
+        count("declined"),
+        count("yarn_failed"),
+        count("broke")
+    );
+    let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in runs.iter().filter(|r| r["outcome"] == "declined") {
+        let key: String = r["reason"].as_str().unwrap_or("?").chars().take(90).collect();
+        *reasons.entry(key).or_default() += 1;
+    }
+    let mut reasons: Vec<_> = reasons.into_iter().collect();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1));
+    for (why, n) in reasons.iter().take(6) {
+        println!("  plain yarn {n}×: {why}");
+    }
+    let done: Vec<&Value> = runs.iter().filter(|r| r["yarn1"].is_object()).collect();
+    if done.is_empty() {
+        return;
+    }
+    let sum = |k: &str| done.iter().filter_map(|r| r["yarn1"][k].as_u64()).sum::<u64>();
+    let mut copied: std::collections::BTreeMap<String, u64> = Default::default();
+    for r in &done {
+        if let Some(m) = r["yarn1"]["copied"].as_object() {
+            for (k, n) in m {
+                *copied.entry(k.clone()).or_default() += n.as_u64().unwrap_or(0);
+            }
+        }
+    }
+    let mut copied: Vec<(String, u64)> = copied.into_iter().collect();
+    copied.sort_by(|a, b| b.1.cmp(&a.1));
+    let list: Vec<String> = copied.iter().take(6).map(|(k, n)| format!("{k} {n}")).collect();
+    println!(
+        "yarn: {} files cloned from Yarn's cache ({} of file contents, held by Yarn's cache, not the store), {} copied by Node{}",
+        sum("cloned"),
+        gib(sum("cloned_bytes") as f64),
+        sum("copied_total"),
+        if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) }
+    );
+    let seen = done.iter().filter(|r| r["yarn1"]["link_steps"].as_u64().unwrap_or(0) > 0).count();
+    println!("yarn: link step seen by the hook in {seen} of {} runs that ran Yarn", done.len());
+    let unusable: Vec<&str> = done.iter().filter_map(|r| r["yarn1"]["cache"].as_str()).filter(|c| c.starts_with("unusable: ")).collect();
+    if !unusable.is_empty() {
+        println!("yarn: in {} runs nothing could be cloned from Yarn's cache (first: {})", unusable.len(), unusable[0].trim_start_matches("unusable: "));
+    }
+    // Yarn linked, but the hook never saw its link step: it no longer fits
+    // this Yarn (or another Yarn ran). Installs stay correct; this is the
+    // only sign.
+    let blind: Vec<&&Value> = done.iter().filter(|r| r["yarn1"]["unseen"] == true).collect();
+    if !blind.is_empty() {
+        let mut versions: Vec<&str> = blind.iter().filter_map(|r| r["yarn"].as_str()).collect();
+        versions.sort();
+        versions.dedup();
+        println!(
+            "yarn: in {} runs Yarn linked node_modules but the hook never saw its link step (yarn {}): the hook may no longer fit this Yarn",
+            blind.len(),
+            versions.join(", ")
+        );
+    }
+}
+
 pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     let since = days.map(|d| now() - d * 86400.0).unwrap_or(0.0);
-    let runs = read_jsonl(&log_path(), since);
+    let all = read_jsonl(&log_path(), since);
+    // `matchapack yarn` runs (src/yarn1.rs) are reported apart: they use no
+    // store entry, so none of the npm lines below (store, space) count them.
+    let (yruns, runs): (Vec<Value>, Vec<Value>) = all.iter().cloned().partition(|r| r["engine"] == "yarn1");
     let window = days.map(|d| format!("last {d} days")).unwrap_or_else(|| "all time".into());
     println!("matchapack report ({window}; {})", log_path().display());
+    if !yruns.is_empty() {
+        report_yarn1(&yruns);
+    }
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
     println!(
         "runs {}: installed {}, plain npm {}, script failed {}, failed then npm {}{}",
@@ -259,7 +335,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         }
     }
     println!("recent:");
-    for r in runs.iter().rev().take(6) {
+    for r in all.iter().rev().take(6) {
         let extra = match r["outcome"].as_str() {
             Some("installed") => {
                 let mut s = format!("{:.1} s, {} packages", r["secs"].as_f64().unwrap_or(0.0), r["packages"]);
@@ -272,6 +348,14 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
                 if r["engine"] == "inject" {
                     let by_npm: u64 = r["inject"]["fallbacks"].as_object().map(|m| m.values().filter_map(|n| n.as_u64()).sum()).unwrap_or(0);
                     s = format!("inject, {:.1} s, {} cloned, {by_npm} extracted by npm", r["secs"].as_f64().unwrap_or(0.0), r["inject"]["cloned"]);
+                }
+                if r["engine"] == "yarn1" {
+                    s = format!(
+                        "yarn, {:.1} s, {} files cloned, {} copied by Node",
+                        r["secs"].as_f64().unwrap_or(0.0),
+                        r["yarn1"]["cloned"],
+                        r["yarn1"]["copied_total"]
+                    );
                 }
                 s
             }
