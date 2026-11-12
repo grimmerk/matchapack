@@ -27,10 +27,97 @@ pub fn now() -> f64 {
 }
 
 /// Append one record; never fails the install (MATCHAPACK_LOG=0 disables).
+/// Options whose value is a secret, by a word in their name (npm's `--otp`,
+/// `--_auth`, `--//host/:_authToken=…`, `--password`; Yarn's `--otp`).
+fn secret_option(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["auth", "token", "password", "otp", "secret"].iter().any(|w| n.contains(w))
+}
+
+/// `scheme://user:pass@host…` → `scheme://***@host…` (proxy and registry
+/// URLs carry credentials that way).
+fn redact_userinfo(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail.find(|c: char| c == '/' || c.is_whitespace()).unwrap_or(tail.len());
+        match tail[..end].rfind('@') {
+            Some(at) => {
+                out.push_str("***");
+                out.push_str(&tail[at..end]);
+            }
+            None => out.push_str(&tail[..end]),
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A package manager's arguments as they may go into the log: the value of a
+/// secret option (`--otp 123456`, `--_auth=…`) replaced by `***`, credentials
+/// in a URL (`--proxy http://user:pass@host`) removed.
+pub fn redact_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut hide_next = false;
+    for a in args {
+        if std::mem::take(&mut hide_next) && !a.starts_with('-') {
+            out.push("***".to_string());
+            continue;
+        }
+        if a.starts_with('-') {
+            let (name, value) = match a.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (a.as_str(), None),
+            };
+            if secret_option(name) {
+                match value {
+                    Some(_) => out.push(format!("{name}=***")),
+                    None => {
+                        out.push(a.clone());
+                        hide_next = true;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(redact_userinfo(a));
+    }
+    out
+}
+
+/// What goes into the log carries no credentials: `args` arrays through
+/// `redact_args`, every other string through `redact_userinfo` (a reason
+/// can quote an argument).
+fn redact(v: &mut Value) {
+    match v {
+        Value::String(s) => *s = redact_userinfo(s),
+        Value::Array(a) => a.iter_mut().for_each(redact),
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                match x {
+                    Value::Array(a) if k == "args" => {
+                        let strs: Option<Vec<String>> = a.iter().map(|y| y.as_str().map(String::from)).collect();
+                        match strs {
+                            Some(v) => *x = json!(redact_args(&v)),
+                            None => redact(x),
+                        }
+                    }
+                    _ => redact(x),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn append(mut rec: Value) {
     if std::env::var("MATCHAPACK_LOG").as_deref() == Ok("0") {
         return;
     }
+    redact(&mut rec);
     if let Value::Object(m) = &mut rec {
         m.insert("ts".into(), json!(now()));
         m.insert("matchapack".into(), json!(env!("CARGO_PKG_VERSION")));
@@ -382,4 +469,29 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn credentials_never_reach_the_log() {
+        assert_eq!(
+            redact_args(&v(&["install", "--proxy", "http://u:p@proxy:8080", "--https-proxy=https://u%40x:p@h/", "--otp", "123456", "--cache-folder", "/c"])),
+            v(&["install", "--proxy", "http://***@proxy:8080", "--https-proxy=https://***@h/", "--otp", "***", "--cache-folder", "/c"])
+        );
+        assert_eq!(redact_args(&v(&["ci", "--_auth=dXNlcjpwYXNz", "--//r.example/:_authToken=abc", "--no-audit"])), v(&["ci", "--_auth=***", "--//r.example/:_authToken=***", "--no-audit"]));
+        // A secret option followed by another option: nothing hidden.
+        assert_eq!(redact_args(&v(&["--otp", "--frozen-lockfile"])), v(&["--otp", "--frozen-lockfile"]));
+        assert_eq!(redact_userinfo("option --registry=https://me:pw@r.example/x is not handled"), "option --registry=https://***@r.example/x is not handled");
+        assert_eq!(redact_userinfo("http://host:80/a@b"), "http://host:80/a@b", "an @ after the host is not userinfo");
+        let mut rec = json!({ "args": ["--proxy", "http://u:p@h"], "reason": "x http://a:b@h y", "yarn1": { "errors": ["https://c:d@e"] } });
+        redact(&mut rec);
+        assert_eq!(rec, json!({ "args": ["--proxy", "http://***@h"], "reason": "x http://***@h y", "yarn1": { "errors": ["https://***@e"] } }));
+    }
 }
