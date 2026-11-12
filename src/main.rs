@@ -89,7 +89,7 @@ enum Cmd {
         #[arg(default_value = ".")]
         dir: PathBuf,
     },
-    /// Compare two project trees; exit 1 when they differ.
+    /// Compare two project trees. Exit status: 0 identical, 1 they differ, 2 an error (nothing was decided).
     Diff {
         a: PathBuf,
         b: PathBuf,
@@ -101,6 +101,25 @@ enum Cmd {
         /// Print only the differing paths, one per line (for scripts).
         #[arg(long)]
         paths: bool,
+        /// Also compare, per path: mtime to the nanosecond, uid, gid and
+        /// extended attribute names; report each class of difference.
+        #[arg(long)]
+        meta: bool,
+        /// With --meta: A's install run, START:END in ns since the epoch. A
+        /// time inside it may differ from B's when B's is inside B's run and
+        /// of the same kind (see src/diff.rs, MetaOpts).
+        #[arg(long, value_name = "START:END", requires = "meta", requires = "b_run")]
+        a_run: Option<String>,
+        /// With --meta: B's install run (as --a-run).
+        #[arg(long, value_name = "START:END", requires = "meta", requires = "a_run")]
+        b_run: Option<String>,
+        /// With --a-run: the package manager cache A's run used; times its
+        /// run wrote into it are told apart from other in-run times.
+        #[arg(long, requires = "a_run")]
+        a_cache: Option<PathBuf>,
+        /// With --b-run: the cache B's run used.
+        #[arg(long, requires = "b_run")]
+        b_cache: Option<PathBuf>,
     },
     /// Summarise the trial logs: outcomes, reasons, time, space, verification samples.
     Report {
@@ -651,8 +670,31 @@ fn main() -> Result<()> {
                 println!("skip {p}: {why}");
             }
         }
-        Cmd::Diff { a, b, ignore, limit, paths } => {
-            let r = diff::diff(&a, &b, &ignore)?;
+        Cmd::Diff { a, b, ignore, limit, paths, meta, a_run, b_run, a_cache, b_cache } => {
+            let opts = if meta {
+                let parse = |s: Option<String>| {
+                    s.as_deref().map(diff::Run::parse).transpose().unwrap_or_else(|e| {
+                        eprintln!("matchapack diff: error: {e:#}");
+                        std::process::exit(2)
+                    })
+                };
+                Some(diff::MetaOpts {
+                    a_run: parse(a_run),
+                    b_run: parse(b_run),
+                    a_cache,
+                    b_cache,
+                })
+            } else {
+                None
+            };
+            let r = match diff::diff_with(&a, &b, &ignore, opts.as_ref()) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Not 1: a script must never read an error as "the trees differ".
+                    eprintln!("matchapack diff: error: {e:#}");
+                    std::process::exit(2);
+                }
+            };
             if paths {
                 r.print_paths();
             } else {

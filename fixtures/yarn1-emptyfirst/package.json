@@ -1,0 +1,8 @@
+{
+  "name": "matchapack-fixture-yarn1-emptyfirst",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "y1-empty": "http://127.0.0.1:48321/y1-empty-1.0.0.tgz"
+  }
+}
