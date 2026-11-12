@@ -506,7 +506,10 @@ impl Server {
         let Some(facts) = self.facts.get().copied() else { return copy("no-hello") };
         let cache = {
             let g = self.cache.lock().unwrap();
-            let (g, _) = self.cache_known.wait_timeout_while(g, (self.started + self.cache_wait).saturating_duration_since(Instant::now()), |c| matches!(c, Cache::Pending)).unwrap();
+            // Until it is known, the deadline has passed, or the node child is
+            // gone (`stop`: nobody is left to answer).
+            let left = (self.started + self.cache_wait).saturating_duration_since(Instant::now());
+            let (g, _) = self.cache_known.wait_timeout_while(g, left, |c| matches!(c, Cache::Pending) && !self.stopping.load(Ordering::Relaxed)).unwrap();
             g.clone()
         };
         let cache = match cache {
@@ -641,8 +644,13 @@ impl Server {
         vec![answer.to_string()]
     }
 
+    /// The node child is gone: queued requests are dropped, and a worker
+    /// waiting for Yarn's cache folder stops waiting (the lock is taken so
+    /// that a worker between its check and its wait is not missed).
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::Relaxed);
+        let _g = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        self.cache_known.notify_all();
     }
 
     pub fn serve(&self, stream: UnixStream, threads: usize) -> Result<()> {
@@ -796,16 +804,46 @@ fn now_mtime(p: &Path) -> Option<std::time::SystemTime> {
     std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok()
 }
 
-/// `yarn cache dir` as the user's Yarn answers it for this install.
-/// How long `yarn cache dir` may take (it took 0.2–0.45 s in the review).
-/// After that it is killed, and nothing in this install is cloned.
+/// How long `yarn cache dir` may take (it took 0.2–0.45 s in the review),
+/// counted from its start. After that it is killed, and nothing in this
+/// install is cloned.
 const CACHE_DIR_DEADLINE: Duration = Duration::from_secs(15);
 
-/// `yarn cache dir` as the user's Yarn answers it for this install. Killed
-/// (and reaped) after `deadline`, or as soon as `cancel` is set (the install
-/// has ended: its answer is no longer needed).
-fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], deadline: Duration, cancel: &AtomicBool) -> std::result::Result<PathBuf, String> {
+/// How long a killed `yarn cache dir` is given to go before it is left
+/// behind (SIGKILL cannot be refused, but a process stuck in the kernel is
+/// reaped only once it returns; waiting for it would hang the install).
+const REAP_WAIT: Duration = Duration::from_secs(2);
+
+/// A pipe read on a thread of its own: what was read so far, and a message
+/// when the pipe is at its end.
+type Drain = (std::sync::Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<()>);
+
+/// `yarn cache dir`, started (`start_yarn_cache_dir`): its process and the
+/// threads reading its pipes.
+struct CacheDirAsk {
+    child: std::process::Child,
+    out: Drain,
+    err: Drain,
+    started: Instant,
+}
+
+/// Start `yarn cache dir` as the user's Yarn answers it for this install
+/// (the same node, yarn.js, working directory, environment and cache
+/// arguments).
+///
+/// Call it on the thread that starts the install's node, before that node is
+/// started, never in parallel with it. On macOS a pipe is made and only then
+/// marked close-on-exec (two calls: there is no pipe2), so a process forked
+/// on another thread in between inherits the pipe and keeps it through its
+/// exec. With both spawns racing (as until 2026-11-13), the install's node
+/// could hold the write end of this pipe, whose reader then saw the end only
+/// when the install ended: the cache folder stayed unknown for the whole
+/// install (CI run 43306715867; NOTES "The cause"). The other way round,
+/// `yarn cache dir` could hold the pipe on which the install's node reports
+/// its exec, and the install started only when `yarn cache dir` ended.
+fn start_yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String]) -> std::result::Result<CacheDirAsk, String> {
     use std::io::Read;
+    let started = Instant::now();
     let mut child = std::process::Command::new(node)
         .arg(yarn_js)
         .arg("cache")
@@ -818,9 +856,11 @@ fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], dead
         .spawn()
         .map_err(|e| format!("yarn cache dir: {e}"))?;
     // Read on threads, so a full pipe cannot stall the child while it is
-    // waited for here; collected with a bound, so a process that inherited
-    // the pipe (and outlives the child) cannot stall this one.
-    fn drain(r: Option<impl Read + Send + 'static>) -> (std::sync::Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<()>) {
+    // waited for; collected with a bound (`collect`, PIPE_WAIT), so a process
+    // that inherited the pipe (and outlives the child) cannot stall this one.
+    // The threads are not joined: one whose pipe stays open ends with this
+    // process.
+    fn drain(r: Option<impl Read + Send + 'static>) -> Drain {
         let buf = std::sync::Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = std::sync::mpsc::channel();
         let b = buf.clone();
@@ -838,39 +878,75 @@ fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], dead
         });
         (buf, rx)
     }
-    // What was read until the pipe closed, or 2 s after the child ended.
-    fn collect((buf, done): (std::sync::Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<()>)) -> String {
-        let _ = done.recv_timeout(Duration::from_secs(2));
-        String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
-    }
-    let reader = drain(child.stdout.take());
-    let errors = drain(child.stderr.take());
-    let t0 = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break Ok(st),
-            Ok(None) if cancel.load(Ordering::Relaxed) => break Err("the install ended first".to_string()),
-            Ok(None) if t0.elapsed() > deadline => break Err(format!("yarn cache dir did not answer in {}s", deadline.as_secs())),
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => break Err(format!("yarn cache dir: {e}")),
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    Ok(CacheDirAsk { child, out, err, started })
+}
+
+/// How long a pipe of `yarn cache dir` is read after its process ended (a
+/// process that inherited the pipe keeps it open).
+const PIPE_WAIT: Duration = Duration::from_secs(2);
+
+/// What was read until the pipe closed, until PIPE_WAIT after the child
+/// ended, or until `cancel` is set (the install has ended).
+fn collect((buf, done): Drain, cancel: &AtomicBool) -> String {
+    use std::sync::mpsc::RecvTimeoutError::Timeout;
+    let t = Instant::now();
+    while t.elapsed() < PIPE_WAIT && !cancel.load(Ordering::Relaxed) && done.recv_timeout(Duration::from_millis(10)) == Err(Timeout) {}
+    String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
+}
+
+impl CacheDirAsk {
+    /// Kill the process and give it REAP_WAIT to go.
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let t = Instant::now();
+        while t.elapsed() < REAP_WAIT && matches!(self.child.try_wait(), Ok(None)) {
+            std::thread::sleep(Duration::from_millis(5));
         }
-    };
-    if status.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
     }
-    let text = collect(reader);
-    let err_text = collect(errors);
-    let last_err = err_text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("");
-    let status = status.map_err(|e| if last_err.is_empty() { e } else { format!("{e} (it said: {last_err})") })?;
-    if !status.success() {
-        return Err(format!("yarn cache dir exited with {status}{}", if last_err.is_empty() { String::new() } else { format!(": {last_err}") }));
+
+    /// The folder `yarn cache dir` printed. The process is killed `deadline`
+    /// after its start, or as soon as `cancel` is set (the install has
+    /// ended: the answer is no longer needed). No wait here is unbounded:
+    /// the process is polled; a killed one is given REAP_WAIT; a pipe is
+    /// read at most PIPE_WAIT after the process ended, and no longer once
+    /// the install has ended (the end of an install waits for this).
+    fn answer(mut self, deadline: Duration, cancel: &AtomicBool) -> std::result::Result<PathBuf, String> {
+        let last_line = |text: &str| text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("").to_string();
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(st)) => break st,
+                Ok(None) if cancel.load(Ordering::Relaxed) => {
+                    self.kill();
+                    return Err("the install ended first".to_string());
+                }
+                Ok(None) if self.started.elapsed() > deadline => {
+                    self.kill();
+                    let said = last_line(&collect(self.err, cancel));
+                    let e = format!("yarn cache dir did not answer in {}s", deadline.as_secs());
+                    return Err(if said.is_empty() { e } else { format!("{e} (it said: {said})") });
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) => {
+                    self.kill();
+                    return Err(format!("yarn cache dir: {e}"));
+                }
+            }
+        };
+        let text = collect(self.out, cancel);
+        if !status.success() {
+            let said = last_line(&collect(self.err, cancel));
+            return Err(format!("yarn cache dir exited with {status}{}", if said.is_empty() { String::new() } else { format!(": {said}") }));
+        }
+        let line = last_line(&text);
+        if !Path::new(&line).is_absolute() {
+            // (Its pipe may have been left before its line was read.)
+            let ended = cancel.load(Ordering::Relaxed);
+            return Err(if ended { "the install ended first".to_string() } else { format!("yarn cache dir printed {line:?}") });
+        }
+        Ok(PathBuf::from(line))
     }
-    let line = text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("");
-    if !Path::new(line).is_absolute() {
-        return Err(format!("yarn cache dir printed {line:?}"));
-    }
-    Ok(PathBuf::from(line))
 }
 
 fn run(cwd: &Path, root: &Path, yarn_js: &Path, args: &[String]) -> std::result::Result<Summary, RunError> {
@@ -914,10 +990,13 @@ fn run(cwd: &Path, root: &Path, yarn_js: &Path, args: &[String]) -> std::result:
         .env_remove("MATCHAPACK_YARN_SLOW_FIXUP_MS");
     let deadline = std::env::var("MATCHAPACK_YARN_CACHE_DIR_SECS").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs_f64).unwrap_or(CACHE_DIR_DEADLINE);
     let install_ended = AtomicBool::new(false);
+    // Yarn's cache folder, asked of the same Yarn: started here, before the
+    // install's node and not beside it (start_yarn_cache_dir says why), and
+    // answered in parallel with the install: requests wait for it
+    // (CACHE_WAIT).
+    let ask = start_yarn_cache_dir(&node, yarn_js, cwd, args);
     let status = std::thread::scope(|s| {
-        // Yarn's cache folder, asked of the same Yarn in parallel: requests
-        // wait for it (CACHE_WAIT).
-        s.spawn(|| server.set_cache(yarn_cache_dir(&node, yarn_js, cwd, args, deadline, &install_ended)));
+        s.spawn(|| server.set_cache(ask.and_then(|a| a.answer(deadline, &install_ended))));
         let serve = |sock| {
             let _ = server.serve(sock, crate::inject::threads());
         };
@@ -1363,6 +1442,10 @@ mod tests {
         assert!(s3.stats.lock().unwrap().cache.as_deref().is_some_and(|c| c.contains("another volume")));
     }
 
+    fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], deadline: Duration, cancel: &AtomicBool) -> std::result::Result<PathBuf, String> {
+        start_yarn_cache_dir(node, yarn_js, cwd, args)?.answer(deadline, cancel)
+    }
+
     /// A `yarn cache dir` that does not answer is killed at its deadline, or
     /// as soon as the install has ended; either way its process is reaped.
     #[test]
@@ -1404,6 +1487,78 @@ mod tests {
         let ok = d.join("ok.js");
         std::fs::write(&ok, "console.log('warning line'); console.log('/some/cache/v6')\n").unwrap();
         assert_eq!(yarn_cache_dir(Path::new("node"), &ok, &d, &[], Duration::from_secs(30), &AtomicBool::new(false)).unwrap(), PathBuf::from("/some/cache/v6"));
+    }
+
+    /// The end of an install does not wait for the pipes of a `yarn cache
+    /// dir` it no longer needs: a process that holds them (here a `sleep`
+    /// the child started) cannot hold the install's end back.
+    #[test]
+    fn a_cancelled_yarn_cache_dir_does_not_wait_for_its_pipes() {
+        if std::process::Command::new("node").arg("-v").output().is_err() {
+            eprintln!("skipped: no node");
+            return;
+        }
+        let d = crate::store::tests::scratch("y1-cachedir-cancel");
+        let held = d.join("held-slow.js");
+        let script = "const c = require('child_process').spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }); c.unref(); \
+            require('fs').writeFileSync(process.argv[1] + '.pid', String(c.pid)); setTimeout(() => {}, 60000)\n";
+        std::fs::write(&held, script).unwrap();
+        let pid_file = d.join("held-slow.js.pid");
+        let ask = start_yarn_cache_dir(Path::new("node"), &held, &d, &[]).unwrap();
+        let t = Instant::now();
+        while !pid_file.exists() && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(pid_file.exists(), "the child started its sleep");
+        let t = Instant::now();
+        let e = ask.answer(Duration::from_secs(60), &AtomicBool::new(true)).unwrap_err();
+        let took = t.elapsed();
+        if let Some(p) = std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse::<i32>().ok()) {
+            unsafe { libc::kill(p, libc::SIGKILL) };
+        }
+        assert!(e.contains("install ended"), "{e}");
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        // The same when `yarn cache dir` has already ended and only its
+        // pipe is held: what it printed is taken as it is.
+        let done = d.join("held-done.js");
+        let script = "const c = require('child_process').spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }); c.unref(); \
+            require('fs').writeFileSync(process.argv[1] + '.pid', String(c.pid)); console.log('/held/cache/v6')\n";
+        std::fs::write(&done, script).unwrap();
+        let mut ask = start_yarn_cache_dir(Path::new("node"), &done, &d, &[]).unwrap();
+        let t = Instant::now();
+        while matches!(ask.child.try_wait(), Ok(None)) && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let t = Instant::now();
+        let answer = ask.answer(Duration::from_secs(60), &AtomicBool::new(true));
+        let took = t.elapsed();
+        if let Some(p) = std::fs::read_to_string(d.join("held-done.js.pid")).ok().and_then(|p| p.trim().parse::<i32>().ok()) {
+            unsafe { libc::kill(p, libc::SIGKILL) };
+        }
+        assert_eq!(answer, Ok(PathBuf::from("/held/cache/v6")));
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+    }
+
+    /// Once the node child is gone (`stop`), a worker waiting for Yarn's
+    /// cache folder stops waiting: matchapack ends with the install, not at
+    /// the cache folder's deadline.
+    #[test]
+    fn a_request_waiting_for_the_cache_folder_ends_when_the_server_stops() {
+        let f = fx("y1-stop");
+        let s = Server::new(f.root.clone()).unwrap();
+        hello(&s, json!({ "empty_atime": true, "empty_mtime": true, "atime": true, "mtime": false, "group": null }));
+        let dest = f.root.join("node_modules/a/index.js");
+        let t = Instant::now();
+        let a = std::thread::scope(|sc| {
+            let h = sc.spawn(|| ask(&s, &src(&f), &dest));
+            std::thread::sleep(Duration::from_millis(300));
+            s.stop();
+            h.join().unwrap()
+        });
+        assert_eq!((a["ok"].clone(), a["reason"].clone()), (json!(false), json!("cache-dir-pending")));
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(!dest.exists());
     }
 
     #[test]
