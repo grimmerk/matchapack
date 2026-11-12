@@ -59,6 +59,37 @@ if [ "$(uname)" = Darwin ]; then cpp() { cp -p -R "$1" "$2"; }; else cpp() { cp 
 copy2() { local d=$work/$1-$2; rm -rf "${d:?}"; cpp "$work/$1/${3:-plain2}" "$d"; echo "$d"; }
 set_ns() { python3 -c 'import os,sys; t=int(sys.argv[2]); os.utime(sys.argv[1], ns=(t, t), follow_symlinks=False)' "$1" "$2"; }
 mtime_of() { python3 -c 'import os,sys; print(os.lstat(sys.argv[1]).st_mtime_ns)' "$1"; }
+# has_xattr <file> <name>: the macOS xattr tool; os.listxattr on Linux.
+if [ "$(uname)" = Darwin ]; then has_xattr() { xattr "$1" 2>/dev/null | grep -qx "$2"; }
+else has_xattr() { python3 -c 'import os,sys; sys.exit(0 if sys.argv[2] in os.listxattr(sys.argv[1], follow_symlinks=False) else 1)' "$1" "$2"; }; fi
+# probe_only <case> <B dir> <B window> <B cache>: does <case>'s plain1
+# differ from <B dir> ONLY the way Yarn's time probe makes two plain runs
+# differ (NOTES "Yarn 1 harness")? Mtime differences only (at least one),
+# every one on a file of the y1-empty package; no other class, no path only
+# on one side, every .yarn-integrity byte-identical. Sets $why when not.
+probe_only() {
+  local args=(--meta "$work/$1/plain1" "$2" --a-run "$(window "$1" plain1)" --b-run "$3" --a-cache "$(cachedir "$1" plain1)" --b-cache "$4")
+  why=
+  "$bin" diff "${args[@]}" > "$work/probe.txt" 2>&1; local r=$?
+  "$bin" diff "${args[@]}" --paths > "$work/probe-paths.txt" 2>/dev/null
+  [ $r = 1 ] || { why="diff exit $r"; return 1; }
+  grep -qx 'differ: 0' "$work/probe.txt" && grep -qx 'only in A: 0' "$work/probe.txt" && grep -qx 'only in B: 0' "$work/probe.txt" \
+    || { why="paths or contents differ"; return 1; }
+  local c n
+  for c in type content file-mode dir-mode symlink-target uid gid xattr-names; do
+    n=$(grep -E "^  $c: " "$work/probe.txt" | awk '{print $NF}')
+    [ "$n" = 0 ] || { why="class $c: ${n:-missing}"; return 1; }
+  done
+  grep -q 'yarn integrity byte-identical.*: false' "$work/probe.txt" && { why=".yarn-integrity differs"; return 1; }
+  n=$(grep -E '^  mtime: ' "$work/probe.txt" | awk '{print $NF}')
+  [ "${n:-0}" -gt 0 ] || { why="no mtime difference"; return 1; }
+  local q
+  while IFS= read -r q; do
+    case $q in node_modules/y1-empty/*/*) why="mtime outside the package's top level: $q"; return 1 ;; node_modules/y1-empty/?*) ;; *) why="mtime outside the package: $q"; return 1 ;; esac
+    [ -f "$work/$1/plain1/$q" ] && [ ! -L "$work/$1/plain1/$q" ] || { why="not a package file: $q"; return 1; }
+  done < "$work/probe-paths.txt"
+  return 0
+}
 groups_other() { # a group the user is in, other than the one of $1
   local g; g=$(stat -f %g "$1" 2>/dev/null || stat -c %g "$1")
   for x in $(id -G); do [ "$x" != "$g" ] && { echo "$x"; return; }; done
@@ -84,24 +115,49 @@ if [ $rc = 0 ] && [ -f "$work/script/plain1/node_modules/y1-script/built.txt" ] 
 else bad "yarn1-scriptpkg (exit $rc)"; fi
 
 # Under Node >= 22 plain Yarn's own result on this fixture depends on a race
-# (NOTES "Yarn 1 harness"): mostly identical, sometimes "plain varies". The
-# evidence of a varying run is kept as emptyfirst-varies-<case>.txt.
+# (NOTES "Yarn 1 harness"): mostly identical, sometimes "plain varies". A
+# varying run passes only when it varies the way the race does (probe_only);
+# its evidence is kept as emptyfirst-varies-<case>.txt.
 for c in empty empty-empty; do
   if [ $c = empty ]; then verify $c "$here/fixtures/yarn1-emptyfirst"; else verify $c --cache empty "$here/fixtures/yarn1-emptyfirst"; fi
   if [ $rc = 0 ]; then ok "yarn1-emptyfirst ($c), node $node_major: plain vs plain identical"
   elif [ $rc = 3 ] && [ "$node_major" -ge 22 ]; then
     cp "$work/$c/diff-plain.txt" "$work/emptyfirst-varies-$c.txt"
-    ok "yarn1-emptyfirst ($c), node $node_major: PLAIN VARIES (the probe race; $work/emptyfirst-varies-$c.txt)"
+    if probe_only "$c" "$work/$c/plain2" "$(window "$c" plain2)" "$(cachedir "$c" plain2)"; then
+      ok "yarn1-emptyfirst ($c), node $node_major: PLAIN VARIES, mtimes of package files only (the probe race; $work/emptyfirst-varies-$c.txt)"
+    else
+      bad "yarn1-emptyfirst ($c), node $node_major: plain varies beyond the probe race ($why)"; grep '^    ' "$work/probe.txt" | head -20
+    fi
   else bad "yarn1-emptyfirst ($c, exit $rc)"; fi
 done
+# The probe_only check itself, on changed copies of the empty case's plain1.
+if [ -d "$work/empty/plain1" ]; then
+  pw=$(window empty plain1); pc=$(cachedir empty plain1)
+  d=$(copy2 empty probe-a plain1); f=$d/node_modules/y1-empty/data00.txt; t=$(mtime_of "$f")
+  if [ $(( t % 1000000 )) -ge 500000 ]; then set_ns "$f" $(( t - 1000 )); else set_ns "$f" $(( t + 1000 )); fi
+  if probe_only empty "$d" "$pw" "$pc"; then ok "probe_only accepts an mtime-only difference on a package file"; else bad "probe_only rejected an mtime-only difference ($why)"; fi
+  if [ -n "$(groups_other "$f")" ]; then
+    chgrp -h "$(groups_other "$f")" "$d/node_modules/y1-empty/data01.txt"
+    if ! probe_only empty "$d" "$pw" "$pc" && [ "${why#class gid}" != "$why" ]; then ok "probe_only rejects a gid difference next to it"; else bad "probe_only accepted a gid difference (${why:-accepted})"; fi
+  fi
+  d=$(copy2 empty probe-b plain1); f=$d/node_modules/.yarn-integrity; set_ns "$f" 1700000000123456789
+  if ! probe_only empty "$d" "$pw" "$pc"; then ok "probe_only rejects an mtime difference outside the package ($why)"; else bad "probe_only accepted an mtime difference on .yarn-integrity"; fi
+  d=$(copy2 empty probe-c plain1); f=$d/node_modules/y1-empty/data02.txt; t=$(mtime_of "$f"); printf 'y' >> "$f"; set_ns "$f" "$t"
+  set_ns "$d/node_modules/y1-empty/data00.txt" $(( $(mtime_of "$d/node_modules/y1-empty/data00.txt") + 1000 ))
+  if ! probe_only empty "$d" "$pw" "$pc"; then ok "probe_only rejects a content difference ($why)"; else bad "probe_only accepted a content difference"; fi
+  # (the directory keeps its time, so only the missing file tells)
+  d=$(copy2 empty probe-d plain1); t=$(mtime_of "$d/node_modules/y1-empty"); rm "$d/node_modules/y1-empty/data03.txt"; set_ns "$d/node_modules/y1-empty" "$t"
+  set_ns "$d/node_modules/y1-empty/data00.txt" $(( $(mtime_of "$d/node_modules/y1-empty/data00.txt") + 1000 ))
+  if ! probe_only empty "$d" "$pw" "$pc"; then ok "probe_only rejects a package file missing on one side ($why)"; else bad "probe_only accepted a missing package file"; fi
+fi
 
 # An extra xattr on a cache file: Node's copy drops it, so plain is identical
 # (a clone would keep it; PR 2's engine must remove it).
 verify xattr --cache-xattr "$here/fixtures/yarn1-small"
 tagged=$(grep -o 'cache xattr: user.matchapack.verify on .*' "$work/out" | sed 's/.* on //')
 pkg=${tagged#*/node_modules/}   # <name>/package.json inside the cache entry
-if [ $rc = 0 ] && [ -n "$tagged" ] && xattr "$work/xattr/cache/$tagged" | grep -q user.matchapack.verify \
-  && ! xattr "$work/xattr/plain1/node_modules/$pkg" | grep -q user.matchapack.verify; then
+if [ $rc = 0 ] && [ -n "$tagged" ] && has_xattr "$work/xattr/cache/$tagged" user.matchapack.verify \
+  && ! has_xattr "$work/xattr/plain1/node_modules/$pkg" user.matchapack.verify; then
   ok "cache file with an extra xattr: plain copies drop it, plain vs plain identical"
 else bad "cache xattr case (exit $rc, tagged '$tagged')"; fi
 
@@ -181,6 +237,11 @@ if [ -n "$other" ]; then
 fi
 
 # --- The harness's own outcomes ------------------------------------------------
+# An error is exit 2, never 1 ("they differ"): verify-yarn1.sh must not turn
+# an unreadable tree into "plain varies".
+"$bin" diff "$work/no-such-a" "$work/no-such-b" > "$work/out" 2>&1; r1=$?
+"$bin" diff --meta "$work/small/plain1" "$work/small/plain2" --a-run 2:1 --b-run 1:2 > "$work/out" 2>&1; r2=$?
+if [ $r1 = 2 ] && [ $r2 = 2 ]; then ok "matchapack diff errors exit 2 (missing tree, bad run window)"; else bad "diff errors: exit $r1 and $r2, want 2"; fi
 # A build output that differs on every run: "plain varies", with the path.
 p=$work/varies-src; rm -rf "${p:?}"; mkdir -p "$p"
 cp "$here/fixtures/yarn1-scriptpkg/yarn.lock" "$p/"
