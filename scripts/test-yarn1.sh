@@ -183,7 +183,10 @@ d=$(copy2 small xattr); xattr -w user.matchapack.test 1 "$d/node_modules/y1-c/in
 meta small "$d"
 if [ $rc = 1 ] && [ "$(count xattr-names)" = 1 ]; then ok "an extra xattr name is reported (class xattr-names)"; else bad "xattr name (exit $rc)"; fi
 
-d=$(copy2 small dirmode); chmod 775 "$d/node_modules/y1-a/lib"; meta small "$d"
+d=$(copy2 small dirmode)
+# Toggle the group-write bit, so the mode changes whatever the umask made it.
+python3 -c 'import os,sys; p=sys.argv[1]; os.chmod(p, (os.stat(p).st_mode & 0o7777) ^ 0o020)' "$d/node_modules/y1-a/lib"
+meta small "$d"
 if [ $rc = 1 ] && [ "$(count dir-mode)" = 1 ]; then ok "a directory mode difference is reported (class dir-mode)"; else bad "directory mode (exit $rc)"; fi
 
 d=$(copy2 small integrity); f=$d/node_modules/.yarn-integrity; t=$(mtime_of "$f"); printf ' ' >> "$f"; set_ns "$f" "$t"; meta small "$d"

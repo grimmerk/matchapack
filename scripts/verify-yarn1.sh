@@ -75,6 +75,11 @@ yver=$("$node" "$yarnjs" --version 2>/dev/null) || { echo "$yarnjs does not run"
 case $yver in 1.*) ;; *) echo "yarn $yver is not Yarn 1" >&2; exit 2 ;; esac
 [ -n "$work" ] || work=$(mktemp -d "${TMPDIR:-/tmp}/verify-yarn1.XXXXXX")
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
+# The cleanup below deletes run directories inside $work, and each run copies
+# $src into $work: the two must not overlap.
+src_real=$(cd "$src" && pwd -P)
+case "$work/" in "$src_real/"*) echo "--work $work is inside the source $src_real" >&2; exit 2 ;; esac
+case "$src_real/" in "$work/"*) echo "the source $src_real is inside --work $work" >&2; exit 2 ;; esac
 rm -rf "${work:?}/prime" "${work:?}/plain1" "${work:?}/plain2" "${work:?}/cache" "${work:?}/cache-1" "${work:?}/cache-2" "${work:?}/runs"
 echo "yarn $yver, node $("$node" -v), $("$bin" --version), $cache_mode cache, work $work"
 
@@ -96,7 +101,8 @@ now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 yarn_run() {
   local name=$1 cache=$2 s e
   shift 2
-  cpp "$src" "$work/$name"
+  # A partial copy could still install and compare as identical: stop.
+  cpp "$src" "$work/$name" || { echo "copying $src to $work/$name failed"; exit 1; }
   s=$(now_ns)
   (cd "$work/$name" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true \
     "$node" "$yarnjs" install --frozen-lockfile --non-interactive --cache-folder "$cache" "$@") > "$work/$name.log" 2>&1
