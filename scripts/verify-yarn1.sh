@@ -260,7 +260,8 @@ r1=$?
 "$bin" diff --meta "$work/plain1" "$work/engine" --a-run "$run_plain1" --b-run "$run_engine" --a-cache "$c1" --b-cache "$ce" --classes > "$work/classes-engine.txt" 2>/dev/null
 r2=$?
 { [ $r1 -le 1 ] && [ $r2 -le 1 ]; } || { echo "matchapack diff --classes failed (exit $r1, $r2)"; exit 1; }
-own=$("$here/scripts/yarn1-own-diffs.sh" "$work/classes-plain.txt" "$work/classes-engine.txt")
+own=$("$here/scripts/yarn1-own-diffs.sh" "$work/classes-plain.txt" "$work/classes-engine.txt") \
+  || { echo "comparing the engine's differences with plain's failed (yarn1-own-diffs.sh)"; exit 1; }
 if [ -z "$own" ]; then
   echo "plain vs engine: differs only where plain varies ($(wc -l < "$work/classes-engine.txt" | tr -d ' ') differences; $work/diff-engine.txt)"
   exit 3

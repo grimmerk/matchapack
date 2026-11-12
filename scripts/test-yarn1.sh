@@ -311,6 +311,13 @@ printf 'content\tnode_modules/a/x.js\nmtime\tnode_modules/a/x.js\n' > "$work/ce.
 own=$("$here/scripts/yarn1-own-diffs.sh" "$work/cp.txt" "$work/ce.txt")
 if [ "$own" = "$(printf 'content\tnode_modules/a/x.js')" ]; then ok "a content difference is the engine's even where plain varies by mtime"
 else bad "attribution by class (got '$own')"; fi
+# An unreadable or missing classes file is an error, never "nothing of its own".
+"$here/scripts/yarn1-own-diffs.sh" "$work/no-such-classes.txt" "$work/ce.txt" > "$work/out" 2>&1; r1=$?
+cp "$work/cp.txt" "$work/cp-locked.txt"; chmod 000 "$work/cp-locked.txt"
+"$here/scripts/yarn1-own-diffs.sh" "$work/cp-locked.txt" "$work/ce.txt" > "$work/out2" 2>&1; r2=$?
+chmod 644 "$work/cp-locked.txt"
+if [ $r1 = 2 ] && [ $r2 = 2 ]; then ok "attribution: a missing or unreadable classes file fails (exit 2)"
+else bad "attribution on an unreadable file (exit $r1, $r2)"; fi
 # --engine-min-clones 0 means none.
 verify e-min0 --engine yarn1 --engine-min-clones 0 "$here/fixtures/yarn1-many"
 if [ $rc = 1 ] && grep -q 'expected none' "$work/out"; then ok "--engine-min-clones 0 fails a run that cloned"; else bad "--engine-min-clones 0 (exit $rc)"; fi
@@ -445,6 +452,17 @@ else bad "probe decline then plain yarn (exit $rc)"; fi
 d=$(project secret); myarn "$d" -- --otp 314159 --registry "http://u:hunter2@127.0.0.1:48321/"
 if [ $rc = 0 ] && ! grep -q '314159\|hunter2' "$work/y1/log/log.jsonl" && [ "$(lastlog 'r["args"][-1]')" = "http://***@127.0.0.1:48321/" ]; then ok "an --otp value and URL credentials are not logged"
 else bad "secrets in the log (exit $rc)"; fi
+# With MATCHAPACK_YARN_JS the only Yarn there is (no yarn on PATH), every
+# path runs it: other commands, --version, the MATCHAPACK=0 bypass.
+nodeonly=$work/nodeonly; mkdir -p "$nodeonly"; ln -sf "$node" "$nodeonly/node"
+d=$(project override); python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"hello":"node -e \"console.log(\x27hello-from-run\x27)\""}; json.dump(d, open(p,"w"))' "$d/package.json"
+o1=$(cd "$d" && env -u MATCHAPACK_ENGINE PATH="$nodeonly:/usr/bin:/bin" MATCHAPACK_YARN_JS="$yarnjs" MATCHAPACK_LOG_DIR="$work/y1/log" "$bin" yarn --version 2>&1); r1=$?
+o2=$(cd "$d" && env -u MATCHAPACK_ENGINE PATH="$nodeonly:/usr/bin:/bin" MATCHAPACK_YARN_JS="$yarnjs" MATCHAPACK_LOG_DIR="$work/y1/log" "$bin" yarn run hello 2>&1); r2=$?
+(cd "$d" && env -u MATCHAPACK_ENGINE -u GITHUB_TOKEN PATH="$nodeonly:/usr/bin:/bin" MATCHAPACK=0 MATCHAPACK_YARN_JS="$yarnjs" YARN_DISABLE_SELF_UPDATE_CHECK=true \
+  "$bin" yarn install --frozen-lockfile --non-interactive --cache-folder "$work/e-many/cache") > "$work/out" 2>&1; r3=$?
+if [ $r1 = 0 ] && [ "$o1" = "$("$node" "$yarnjs" --version)" ] && [ $r2 = 0 ] && printf '%s' "$o2" | grep -q hello-from-run && [ $r3 = 0 ] && [ -f "$d/node_modules/.yarn-integrity" ]; then
+  ok "MATCHAPACK_YARN_JS runs every command, --version and the MATCHAPACK=0 bypass included"
+else bad "override for passthrough commands (exit $r1, $r2, $r3; $o1)"; fi
 # Not installs: passed to Yarn as they are, not logged.
 n0=$(wc -l < "$work/y1/log/log.jsonl")
 (cd "$work" && y1env "$bin" yarn --version) > "$work/out" 2>&1; r1=$?
