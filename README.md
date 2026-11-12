@@ -140,6 +140,72 @@ extracted and why, and a second line when npm placed packages that never
 reached matchapack's hook (the sign that the hook no longer fits a new npm:
 installs stay correct, only slower; the install itself prints a line too).
 
+## Yarn 1: `matchapack yarn` (macOS)
+
+The same idea for Yarn 1 (classic) projects, without matchapack's store:
+Yarn's own cache is the source. `matchapack yarn <args>` runs the user's Yarn
+1, unchanged, and replaces one thing inside its link step: where Yarn would
+copy a file from its cache into `node_modules`, matchapack makes a
+copy-on-write clone of the cache file instead. Which files go where, the
+skipping of unchanged files, bin links, install scripts and
+`.yarn-integrity` are Yarn's own (design and measurements: `NOTES.md`, "Yarn
+1 engine").
+
+```sh
+matchapack yarn                                    # as `yarn` (an install)
+matchapack yarn install --frozen-lockfile          # any yarn install flags
+```
+
+```
+$ matchapack yarn install --frozen-lockfile
+matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)
+…Yarn's own output…
+matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node, in 25.2s
+```
+
+(A shell function that routes a bare `yarn` here, like the one for `npm ci`,
+comes with `matchapack init` in a later version.)
+
+- Each clone is made to look exactly like the copy Node would have made:
+  what Node's copy keeps (file times, the group) is measured when each
+  install starts, and extra extended attributes are removed. Yarn's first 128
+  copies (its own concurrency, read from Yarn's code) are left to Node, so
+  Yarn's one-time check of whether copies keep their times sees real copies;
+  those files do not share blocks.
+- Only `yarn` and `yarn install` are handled; every other command (`yarn add`,
+  `yarn run`, `yarn --version`) goes to Yarn as it is.
+- On Linux, `matchapack yarn` is plain Yarn: Yarn 1's copy already clones
+  there (btrfs, XFS).
+
+matchapack runs plain Yarn instead, before Yarn starts, and says why when: the
+`yarn` on PATH is not Yarn 1's npm package (a corepack shim, Yarn 2+, another
+launcher; `MATCHAPACK_YARN_JS` names a `yarn.js` instead), there is no
+`yarn.lock` in the directory or above, the project is a Yarn 2+ one
+(`.yarnrc.yml`, a `packageManager` other than `yarn@1.x`, a Yarn 2+
+lockfile), a `.yarnrc` sets `yarn-path` (Yarn would run another file),
+`node_modules` is a symlink, the project is outside the trial scope,
+`--modules-folder` / `--cwd` / `--global-folder` move the install, Yarn's code
+does not have the shape the hook needs, or Node's own copy has changed (it
+keeps a file's time, or clones). When Yarn's cache is on another volume than
+the project nothing can be cloned: Yarn installs with its own copies, and
+matchapack says so.
+
+**Yarn's cache now carries the shared blocks.** A cloned file shares its
+blocks with the cache file it came from. `yarn cache clean` breaks nothing (a
+clone is an independent file) and frees nothing while worktrees still share
+those blocks; the next install shares with the new cache entries only.
+Clones are not counted in the store's numbers (`matchapack store`, `store gc`
+and `store verify` do not involve Yarn's cache). An existing `node_modules` is
+not converted: Yarn skips files that are already in place, so remove
+`node_modules` once to share it. One detail differs from a copy and cannot be
+changed: macOS's `com.apple.provenance` attribute of a clone carries the value
+of its cache file.
+
+`matchapack report` shows a `yarn:` part: installs, why others went to plain
+Yarn, files cloned and files Node copied (by reason), and installs where Yarn
+linked but matchapack's hook never saw its link step (the sign that the hook no
+longer fits a Yarn; the install itself is Yarn's own and complete).
+
 ## Trial: logs, checks, scope
 
 - `matchapack report [--days N]`: what happened (installed / handed to npm and

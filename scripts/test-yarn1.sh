@@ -160,7 +160,7 @@ if [ -d "$work/empty/plain1" ]; then
 fi
 
 # An extra xattr on a cache file: Node's copy drops it, so plain is identical
-# (a clone would keep it; PR 2's engine must remove it).
+# (a clone would keep it; the engine removes it: its xattr case below).
 verify xattr --cache-xattr "$here/fixtures/yarn1-small"
 tagged=$(grep -o 'cache xattr: user.matchapack.verify on .*' "$work/out" | sed 's/.*, first //')
 pkg=${tagged#*/node_modules/}   # <name>/package.json inside the cache entry
