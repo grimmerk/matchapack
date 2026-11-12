@@ -427,9 +427,26 @@ gate() { # gate <name> <expected reason text> <dir> [VAR=value...] -- [yarn args
   else bad "gate $name (exit $rc)"; fi
 }
 d=$(project yarnpath); printf 'yarn-path "%s"\n' "$yarnjs" > "$d/.yarnrc"; gate yarn-path 'sets yarn-path' "$d" --
-d=$(project yarnrcyml); touch "$d/.yarnrc.yml"; gate .yarnrc.yml 'Yarn 2+ project' "$d" --
-d=$(project pm); python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["packageManager"]="yarn@4.5.0"; json.dump(d, open(p,"w"))' "$d/package.json"; gate packageManager 'packageManager is yarn@4.5.0' "$d" --
-d=$(project berry); printf '__metadata:\n  version: 8\n' > "$d/yarn.lock"; gate berry-lockfile 'Yarn 2+ lockfile' "$d" --
+# A Yarn 2+ project is told from its files before anything else, and is
+# plain Yarn unlogged (NOTES "Yarn 1 shell route"): exit 3 here, the reason
+# printed, no log line.
+yarn2() { # yarn2 <name> <expected reason text> <dir>
+  local n0; n0=$(wc -l < "$work/y1/log/log.jsonl" 2>/dev/null || echo 0)
+  myarn "$3" MATCHAPACK_NO_FALLBACK=1 --
+  if [ $rc = 3 ] && [ ! -e "$3/node_modules" ] && grep -q "not handled, left unchanged (.*$2" "$work/out" \
+    && [ "$(wc -l < "$work/y1/log/log.jsonl" 2>/dev/null || echo 0)" = "$n0" ]; then ok "Yarn 2+ $1: plain yarn ($2), not logged"
+  else bad "Yarn 2+ $1 (exit $rc)"; fi
+}
+setpm() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["packageManager"]=sys.argv[2]; json.dump(d, open(p,"w"))' "$1/package.json" "$2"; }
+d=$(project yarnrcyml); touch "$d/.yarnrc.yml"; yarn2 .yarnrc.yml 'Yarn 2+ project' "$d"
+d=$(project pm); setpm "$d" yarn@4.5.0; yarn2 packageManager 'packageManager is yarn@4.5.0' "$d"
+d=$(project berry); printf '__metadata:\n  version: 8\n' > "$d/yarn.lock"; yarn2 berry-lockfile 'Yarn 2+ lockfile' "$d"
+d=$(project nolockyml); rm "$d/yarn.lock"; touch "$d/.yarnrc.yml"; yarn2 no-yarn.lock-with-.yarnrc.yml 'Yarn 2+ project' "$d"
+# A ~/.yarnrc.yml-like file above the lockfile folder does not make it one.
+d=$(project ymlabove); mkdir -p "$d/sub"; mv "$d/package.json" "$d/yarn.lock" "$d/sub/"; touch "$d/.yarnrc.yml"; myarn "$d/sub" MATCHAPACK_NO_FALLBACK=1 --
+if [ $rc = 0 ] && [ -f "$d/sub/node_modules/.yarn-integrity" ]; then ok "a .yarnrc.yml above the lockfile folder: still Yarn 1, installed"; else bad ".yarnrc.yml above the project (exit $rc)"; fi
+# Another package manager's project: an ordinary gate (printed and logged).
+d=$(project pnpm); setpm "$d" pnpm@10.0.0; gate packageManager-pnpm 'packageManager is pnpm@10.0.0' "$d" --
 d=$(project nolock); rm "$d/yarn.lock"; gate no-yarn.lock 'no yarn.lock' "$d" --
 d=$(project nmlink); mkdir -p "$work/g-nm-target"; ln -s "$work/g-nm-target" "$d/node_modules"; gate node_modules-symlink 'node_modules is a symlink' "$d" --
 d=$(project modfolder); gate --modules-folder 'moves the install' "$d" -- --modules-folder "$d/elsewhere"
@@ -482,6 +499,142 @@ if grep -q "Yarn linked node_modules but the hook never saw its link step" "$wor
   && grep -q 'files cloned from Yarn' "$work/out" && grep -q 'runs 0: installed 0' "$work/out"; then
   ok "matchapack report: yarn lines (outcomes, clones, the unseen link step), none in the npm counts"
 else bad "matchapack report"; fi
+
+# --- corepack (`yarn` linked to corepack's dist/yarn.js) ----------------------
+# corepack chooses the project's Yarn and starts its bin/yarn.js in the same
+# process; the hook takes over at that start. A scratch COREPACK_HOME,
+# seeded from the Yarn 1 package under test (never the real one; no network:
+# COREPACK_ENABLE_NETWORK=0). MATCHAPACK_COREPACK_JS names corepack's
+# dist/yarn.js; default: the one bundled with $node (Node <= 24).
+cpjs=${MATCHAPACK_COREPACK_JS:-$(dirname "$node")/../lib/node_modules/corepack/dist/yarn.js}
+yv=$("$node" -p 'require(process.argv[1]).version' "$(dirname "$(dirname "$yarnjs")")/package.json")
+if [ ! -f "$cpjs" ]; then
+  echo "SKIP corepack: no corepack next to $node (Node >= 25 does not bundle it; set MATCHAPACK_COREPACK_JS to a userland one's dist/yarn.js)"
+else
+  cpjs=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$cpjs")
+  ch=$work/corepack-home
+  rm -rf "${ch:?}"; mkdir -p "$ch/v1/yarn/$yv"; cp -R "$(dirname "$(dirname "$yarnjs")")/." "$ch/v1/yarn/$yv/"
+  printf '{"locator":{"name":"yarn","reference":"%s"},"bin":{"yarn":"./bin/yarn.js","yarnpkg":"./bin/yarn.js"},"hash":"sha512.seeded-by-test-yarn1"}' "$yv" > "$ch/v1/yarn/$yv/.corepack"
+  printf '{"yarn":"%s"}' "$yv" > "$ch/lastKnownGood.json"
+  # A release corepack could choose that is not Yarn 1's package (the shape
+  # of a Yarn 2+ one: name @yarnpkg/cli-dist), with a bundle that would pass
+  # the hook's other checks.
+  fk=$ch/v1/yarn/1.99.0; mkdir -p "$fk/bin" "$fk/lib"
+  printf '{"locator":{"name":"yarn","reference":"1.99.0"},"bin":{"yarn":"./bin/yarn.js"},"hash":"sha512.fake"}' > "$fk/.corepack"
+  printf '{"name":"@yarnpkg/cli-dist","version":"4.5.0"}' > "$fk/package.json"
+  printf "#!/usr/bin/env node\nrequire('../lib/cli')\n" > "$fk/bin/yarn.js"
+  printf "const CONCURRENT_QUEUE_ITEMS = require('fs').copyFile ? 128 : 4;\nconsole.log('FAKE-YARN ' + process.argv.slice(2).join(' '))\n" > "$fk/lib/cli.js"
+  export COREPACK_ENABLE_NETWORK=0 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0
+  cpsrc=$work/cp-src; rm -rf "${cpsrc:?}"; mkdir -p "$cpsrc"; cp "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$cpsrc/"
+  setpm "$cpsrc" "yarn@$yv"
+  if [ "$(cd "$cpsrc" && COREPACK_HOME=$ch "$node" "$cpjs" --version 2>&1)" != "$yv" ]; then
+    bad "corepack does not run the seeded Yarn $yv offline: $(cd "$cpsrc" && COREPACK_HOME=$ch "$node" "$cpjs" --version 2>&1 | tail -1)"
+  else
+    # plain (through corepack) vs engine (through corepack), same cache.
+    COREPACK_HOME=$ch MATCHAPACK_YARN_JS=$cpjs everify cp-many "$cpsrc"
+    n=$(ejson cp-many "y['cloned']")
+    x=$work/cp-many/engine/node_modules/y1-execpath/execpath.txt
+    if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && [ "$(ejson cp-many "r.get('launcher')")" = corepack ] && [ "$(ejson cp-many "r['yarn']")" = "$yv" ] \
+      && [ "$(head -1 "$x" 2>/dev/null)" = "$ch/v1/yarn/$yv/bin/yarn.js" ]; then
+      ok "corepack: the Yarn it chose ($yv) runs with the hook, identical to plain corepack; $n files cloned; npm_execpath is corepack's copy"
+    else bad "corepack engine (exit $rc, cloned ${n:-?}, execpath $(head -1 "$x" 2>/dev/null))"; fi
+    # corepack chose a release that is not Yarn 1's package: declined before
+    # Yarn starts, then plain corepack runs it.
+    d=$(project cpfake); setpm "$d" yarn@1.99.0
+    myarn "$d" COREPACK_HOME="$ch" MATCHAPACK_YARN_JS="$cpjs" MATCHAPACK_NO_FALLBACK=1 --
+    if [ $rc = 3 ] && grep -q "not Yarn 1's npm package (corepack chose yarn 4.5.0)" "$work/out" && ! grep -q FAKE-YARN "$work/out" && [ "$(lastlog 'r["outcome"]')" = declined ]; then
+      myarn "$d" COREPACK_HOME="$ch" MATCHAPACK_YARN_JS="$cpjs" --
+      if [ $rc = 0 ] && grep -q 'running plain yarn instead' "$work/out" && grep -q '^FAKE-YARN install' "$work/out"; then ok "corepack chose a release that is not Yarn 1: declined, then plain corepack runs it"
+      else bad "corepack non-Yarn-1, plain run (exit $rc)"; fi
+    else bad "corepack non-Yarn-1 declined (exit $rc)"; fi
+  fi
+fi
+
+# --- The shell route: the `yarn` function `matchapack init` prints ------------
+# The real binary's init, in zsh and bash; `yarn` on PATH linked to Yarn 1's
+# bin/yarn.js as an npm-global install links it, no MATCHAPACK_YARN_JS. A
+# `matchapack` shim on PATH records every start, so "never started" is
+# proved, not assumed.
+rt=$work/route; rm -rf "${rt:?}"; mkdir -p "$rt/bin" "$rt/stub"
+ln -s "$yarnjs" "$rt/bin/yarn"; ln -s "$node" "$rt/bin/node"
+printf '#!/bin/sh\necho "$*" >> "%s/starts"\nexec "%s" "$@"\n' "$rt" "$bin" > "$rt/bin/matchapack"
+cp "$rt/bin/matchapack" "$rt/stub/matchapack"
+# The Yarn 4 case: a `yarn` that is not Yarn 1 and a `node` that must not run.
+printf '#!/bin/sh\nprintf STUB-YARN; for a in "$@"; do printf " [%%s]" "$a"; done; echo; exit "${STUB_RC:-0}"\n' > "$rt/stub/yarn"
+printf '#!/bin/sh\necho "$*" >> "%s/nodes"\nexit 99\n' "$rt" > "$rt/stub/node"
+chmod +x "$rt/bin/matchapack" "$rt/stub/matchapack" "$rt/stub/yarn" "$rt/stub/node"
+# rrun <dir> <zsh|bash> <PATH> <commands> [VAR=value...]: output in $work/out, exit in $rc.
+rrun() {
+  local d=$1 sh=$2 p=$3 c=$4; shift 4
+  local run; case $sh in zsh) run="zsh -f -c" ;; bash) run="bash --norc --noprofile -c" ;; esac
+  : > "$rt/starts"; rm -f "$rt/nodes"
+  (cd "$d" && env -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK -u GITHUB_TOKEN PATH="$p" \
+    YARN_CACHE_FOLDER="$work/e-many/cache" YARN_DISABLE_SELF_UPDATE_CHECK=true MATCHAPACK_STORE="$work/y1/store" \
+    MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" "$@" \
+    $run "command -v matchapack >/dev/null && eval \"\$(matchapack init $sh)\"; $c") > "$work/out" 2>&1; rc=$?
+}
+starts() { grep -c '^yarn' "$rt/starts"; }
+engine_ran() { grep -q "matchapack: yarn with clones of Yarn's cache" "$work/out"; }
+quiet() { ! grep -q '^matchapack' "$work/out"; }
+for sh in zsh bash; do
+  rrun "$work" $sh "$rt/bin:/usr/bin:/bin" 'type yarn'
+  case $(uname) in
+    Darwin) want='yarn is a .*function' ;;
+    *) want='yarn is /' ;;
+  esac
+  if [ $rc = 0 ] && head -1 "$work/out" | grep -q "$want"; then ok "route $sh: \`type yarn\` after the eval line: $(head -1 "$work/out")"
+  else bad "route $sh: type yarn (exit $rc)"; fi
+done
+if [ "$(uname)" != Darwin ]; then echo "SKIP the shell route's cases: no yarn function off macOS"
+else
+  d=$(project rbare); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn'
+  if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && grep -q 'files cloned from Yarn' "$work/out" && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route: bare yarn → matchapack yarn, cloned"
+  else bad "route: bare yarn (exit $rc, starts $(starts))"; fi
+  d=$(project rinstall); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn install --frozen-lockfile'
+  if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && [ "$(lastlog 'r["args"]')" = "['install', '--frozen-lockfile']" ]; then ok "route: yarn install --frozen-lockfile → matchapack yarn, arguments unchanged"
+  else bad "route: yarn install --frozen-lockfile (exit $rc, starts $(starts))"; fi
+  d=$(project rflag); rrun "$d" bash "$rt/bin:/usr/bin:/bin" 'yarn --frozen-lockfile'
+  if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route (bash): yarn --frozen-lockfile → matchapack yarn"
+  else bad "route (bash): yarn --frozen-lockfile (exit $rc, starts $(starts))"; fi
+  d=$(project radd); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn add http://127.0.0.1:48321/y1-c-1.0.0.tgz --non-interactive'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && quiet && grep -q '"y1-c"' "$d/package.json"; then ok "route: yarn add x → plain yarn, matchapack never started"
+  else bad "route: yarn add (exit $rc, starts $(starts))"; fi
+  rrun "$work" zsh "$rt/bin:/usr/bin:/bin" 'yarn --version'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && [ "$(cat "$work/out")" = "$yv" ]; then ok "route: yarn --version → plain yarn, matchapack never started"
+  else bad "route: yarn --version (exit $rc, starts $(starts))"; fi
+  d=$(project roptout); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'MATCHAPACK=0 yarn'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && quiet && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route: MATCHAPACK=0 yarn → plain yarn, matchapack never started"
+  else bad "route: MATCHAPACK=0 yarn (exit $rc, starts $(starts))"; fi
+  d=$(project rcommand); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'command yarn install --frozen-lockfile'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && quiet && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route: command yarn → plain yarn, matchapack never started"
+  else bad "route: command yarn (exit $rc, starts $(starts))"; fi
+  # A failing install (the root postinstall exits 7): Yarn's status comes
+  # back through the function, the same as plain Yarn's.
+  rootfail() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"process.exit(7)\""}; json.dump(d, open(p,"w"))' "$1/package.json"; }
+  d=$(project rfailplain); rootfail "$d"; rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'command yarn install --frozen-lockfile; echo "status $?"'
+  want=$(tail -1 "$work/out")
+  d=$(project rfail); rootfail "$d"; rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn install --frozen-lockfile; echo "status $?"'
+  if [ "$(starts)" = 1 ] && engine_ran && [ "$want" != "status 0" ] && [ "$(tail -1 "$work/out")" = "$want" ] && [ "$(lastlog 'r["outcome"]')" = yarn_failed ]; then ok "route: a failing install's status ($want) passes through the function, as plain Yarn's"
+  else bad "route: failing install (starts $(starts), plain $want, got $(tail -1 "$work/out"))"; fi
+  # A Yarn 4 project: told from its files; the `yarn` on PATH is not Yarn 1
+  # and `node` must not start. Plain yarn, with its status, nothing printed
+  # or logged.
+  d=$work/g-ryarn4; rm -rf "${d:?}"; mkdir -p "$d"; printf '{"name":"y4","packageManager":"yarn@4.5.0"}' > "$d/package.json"
+  printf 'nodeLinker: node-modules\n' > "$d/.yarnrc.yml"; printf '__metadata:\n  version: 8\n' > "$d/yarn.lock"
+  n0=$(wc -l < "$work/y1/log/log.jsonl")
+  rrun "$d" zsh "$rt/stub:/usr/bin:/bin" 'yarn install; echo "status $?"' STUB_RC=4
+  if [ "$(starts)" = 1 ] && [ "$(cat "$work/out")" = "STUB-YARN [install]
+status 4" ] && [ ! -e "$rt/nodes" ] && [ "$(wc -l < "$work/y1/log/log.jsonl")" = "$n0" ]; then ok "route: a Yarn 4 project → plain yarn from its files (no node start, no yarn.js lookup, unlogged), status 4 passed"
+  else bad "route: Yarn 4 project ($(tr '\n' '|' < "$work/out"); node: $(cat "$rt/nodes" 2>/dev/null))"; fi
+  # corepack, as `corepack enable` links it: `yarn` → corepack's dist/yarn.js.
+  if [ -n "${ch-}" ] && [ -f "$cpjs" ]; then
+    mkdir -p "$rt/cpbin"; ln -sf "$cpjs" "$rt/cpbin/yarn"; ln -sf "$node" "$rt/cpbin/node"; cp "$rt/bin/matchapack" "$rt/cpbin/"
+    d=$(project rcorepack); setpm "$d" "yarn@$yv"
+    rrun "$d" zsh "$rt/cpbin:/usr/bin:/bin" 'yarn' COREPACK_HOME="$ch"
+    if [ $rc = 0 ] && [ "$(starts)" = 1 ] && grep -q 'files cloned from Yarn' "$work/out" && [ "$(lastlog 'r.get("launcher")')" = corepack ]; then ok "route: bare yarn with yarn linked to corepack → matchapack yarn through corepack, cloned"
+    else bad "route: corepack (exit $rc, starts $(starts))"; fi
+  fi
+fi
 
 # Two volumes: the project on a disk image, Yarn's cache on the data volume.
 # Nothing can be cloned; the install is plain Yarn's copies.

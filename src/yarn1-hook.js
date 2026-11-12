@@ -22,7 +22,10 @@
 // from the bundle that runs, are left to Node, and that decision is plain
 // Yarn's.
 //
-// argv: <yarn's bin/yarn.js> <yarn args...>
+// argv: <yarn's bin/yarn.js> <yarn args...>, or with
+//       MATCHAPACK_YARN_LAUNCHER=corepack: <corepack's dist/yarn.js> <yarn
+//       args...> (corepack chooses Yarn and starts it in this process; the
+//       hook takes over at that start, Module.runMain)
 // env:  MATCHAPACK_YARN_FD         the socket to matchapack (src/yarn1.rs)
 //       MATCHAPACK_YARN_PROBE_DIR  a private directory for the start-up probe
 //       MATCHAPACK_YARN_HOOK       tests: `off` patches but copies every file;
@@ -117,17 +120,18 @@ function probe (dir, simulate) {
 }
 
 async function main () {
-  const [yarnJs, ...yarnArgs] = process.argv.slice(2)
+  const [target, ...yarnArgs] = process.argv.slice(2)
+  const launcher = process.env.MATCHAPACK_YARN_LAUNCHER || ''
   const fd = Number(process.env.MATCHAPACK_YARN_FD)
   const probeDir = process.env.MATCHAPACK_YARN_PROBE_DIR
   const hookMode = process.env.MATCHAPACK_YARN_HOOK || 'on'
   const simulate = process.env.MATCHAPACK_YARN_SIMULATE || ''
   const timeoutMs = Number(process.env.MATCHAPACK_YARN_TIMEOUT_MS) || 30000
   // Not for the scripts Yarn runs.
-  for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE', 'MATCHAPACK_YARN_TIMEOUT_MS']) {
+  for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE', 'MATCHAPACK_YARN_TIMEOUT_MS', 'MATCHAPACK_YARN_LAUNCHER']) {
     delete process.env[k]
   }
-  if (!yarnJs || !Number.isInteger(fd) || fd < 3 || !probeDir) {
+  if (!target || !Number.isInteger(fd) || fd < 3 || !probeDir) {
     return decline('usage: MATCHAPACK_YARN_FD=<fd> MATCHAPACK_YARN_PROBE_DIR=<dir> node yarn1-hook.js <yarn.js> <args...>')
   }
 
@@ -204,125 +208,157 @@ async function main () {
     send({ id, ...req })
   })
 
-  // The bundle bin/yarn.js loads (`require(__dirname + '/../lib/cli')`).
-  let bundle
-  let yarnVersion = null
-  try {
-    bundle = require.resolve(path.join(path.dirname(yarnJs), '..', 'lib', 'cli'))
-    yarnVersion = JSON.parse(fs.readFileSync(path.join(path.dirname(yarnJs), '..', 'package.json'), 'utf8')).version
-  } catch (e) {
-    return decline(`cannot find Yarn's bundle next to ${yarnJs}: ${e.message}`)
-  }
-  let firstN
-  try {
-    firstN = copyConcurrency(bundle)
-  } catch (e) {
-    return decline(`cannot read ${bundle}: ${e.message}`)
-  }
-  if (firstN === null) {
-    return decline(`${bundle} does not define CONCURRENT_QUEUE_ITEMS as expected (fs.copyFile ? N : M): this Yarn is not handled`)
-  }
+  // Starts Yarn 1 from its bin/yarn.js, with the hook installed.
+  const start = async (yarnJs) => {
+    // The bundle bin/yarn.js loads (`require(__dirname + '/../lib/cli')`).
+    let bundle
+    let pkg = {}
+    try {
+      pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(yarnJs), '..', 'package.json'), 'utf8'))
+    } catch {}
+    const yarnVersion = typeof pkg.version === 'string' ? pkg.version : null
+    // matchapack checked this for a Yarn it found itself; corepack's choice
+    // is checked here (a Yarn 2+ release is a single file, no package.json).
+    if (pkg.name !== 'yarn' || !/^1\./.test(yarnVersion || '')) {
+      return decline(`${yarnJs} is not Yarn 1's npm package (${launcher ? `${launcher} chose ` : ''}yarn ${yarnVersion || 'of an unknown version'})`)
+    }
+    try {
+      bundle = require.resolve(path.join(path.dirname(yarnJs), '..', 'lib', 'cli'))
+    } catch (e) {
+      return decline(`cannot find Yarn's bundle next to ${yarnJs}: ${e.message}`)
+    }
+    let firstN
+    try {
+      firstN = copyConcurrency(bundle)
+    } catch (e) {
+      return decline(`cannot read ${bundle}: ${e.message}`)
+    }
+    if (firstN === null) {
+      return decline(`${bundle} does not define CONCURRENT_QUEUE_ITEMS as expected (fs.copyFile ? N : M): this Yarn is not handled`)
+    }
 
-  let p
-  try {
-    p = probe(probeDir, simulate)
-  } catch (e) {
-    return decline(`the start-up probe of Node's copy failed: ${e.message}`)
-  }
-  try {
-    if (p.facts.mtime) {
-      return decline(`Node ${process.version}'s fs.copyFile kept a non-empty file's mtime: its copy has changed (a libuv that clones or keeps times); plain Yarn`)
+    let p
+    try {
+      p = probe(probeDir, simulate)
+    } catch (e) {
+      return decline(`the start-up probe of Node's copy failed: ${e.message}`)
     }
-    const answer = await request({ probe: [p.src, p.dst] })
-    if (answer.shares) {
-      return decline(`Node ${process.version}'s fs.copyFile shares blocks with its source: plain Yarn already clones here`)
-    }
-  } finally {
-    fs.rmSync(p.dir, { recursive: true, force: true })
-  }
-
-  // Counted here, sent at the end of each link step.
-  const counts = {}
-  const note = (why) => { counts[why] = (counts[why] || 0) + 1 }
-  const FICLONE = fs.constants.COPYFILE_FICLONE
-  const origCopyFile = fs.copyFile
-  let active = false
-  let linkCopies = 0
-
-  const hooked = function copyFile (src, dest, flags, cb) {
-    if (!active || typeof flags === 'function' || typeof cb !== 'function') {
-      return origCopyFile.apply(this, arguments)
-    }
-    linkCopies++
-    if (linkCopies <= firstN) {
-      note('first-copies')
-      return origCopyFile.apply(this, arguments)
-    }
-    if (flags !== FICLONE || typeof src !== 'string' || typeof dest !== 'string' ||
-        !path.isAbsolute(src) || !path.isAbsolute(dest)) {
-      note('not-eligible')
-      return origCopyFile.apply(this, arguments)
-    }
-    if (down) {
-      note(down)
-      return origCopyFile.apply(this, arguments)
-    }
-    request({ src, dest }).then((answer) => {
-      if (answer.ok) {
-        return cb(null)
+    try {
+      if (p.facts.mtime) {
+        return decline(`Node ${process.version}'s fs.copyFile kept a non-empty file's mtime: its copy has changed (a libuv that clones or keeps times); plain Yarn`)
       }
-      if (answer.fatal) {
-        down = down || answer.reason || 'fatal'
+      const answer = await request({ probe: [p.src, p.dst] })
+      if (answer.shares) {
+        return decline(`Node ${process.version}'s fs.copyFile shares blocks with its source: plain Yarn already clones here`)
       }
-      // Counted by matchapack when it refused; here when it never answered.
-      if (answer.reason === 'server-gone') {
-        note(answer.reason)
-      }
-      // Node's own copy, as Yarn asked; it opens and truncates whatever is
-      // at dest.
-      origCopyFile.call(fs, src, dest, flags, cb)
-    })
-  }
+    } finally {
+      fs.rmSync(p.dir, { recursive: true, force: true })
+    }
 
-  // Yarn 1's own extension point (src/util/hooks.js): each install step runs
-  // through hook(fn). Scopes the patch to the link step and tells "the hook
-  // never fired" apart from "nothing to copy".
-  const prev = global.experimentalYarnHooks
-  const hooks = Object.assign({}, prev, {
-    linkStep (fn, context) {
-      send({ link_step: 'start' })
-      active = true
-      const run = prev && typeof prev.linkStep === 'function' ? prev.linkStep(fn, context) : fn()
-      return Promise.resolve(run).finally(() => {
-        active = false
-        send({ link_step: 'end', counts })
+    // Counted here, sent at the end of each link step.
+    const counts = {}
+    const note = (why) => { counts[why] = (counts[why] || 0) + 1 }
+    const FICLONE = fs.constants.COPYFILE_FICLONE
+    const origCopyFile = fs.copyFile
+    let active = false
+    let linkCopies = 0
+
+    const hooked = function copyFile (src, dest, flags, cb) {
+      if (!active || typeof flags === 'function' || typeof cb !== 'function') {
+        return origCopyFile.apply(this, arguments)
+      }
+      linkCopies++
+      if (linkCopies <= firstN) {
+        note('first-copies')
+        return origCopyFile.apply(this, arguments)
+      }
+      if (flags !== FICLONE || typeof src !== 'string' || typeof dest !== 'string' ||
+          !path.isAbsolute(src) || !path.isAbsolute(dest)) {
+        note('not-eligible')
+        return origCopyFile.apply(this, arguments)
+      }
+      if (down) {
+        note(down)
+        return origCopyFile.apply(this, arguments)
+      }
+      request({ src, dest }).then((answer) => {
+        if (answer.ok) {
+          return cb(null)
+        }
+        if (answer.fatal) {
+          down = down || answer.reason || 'fatal'
+        }
+        // Counted by matchapack when it refused; here when it never answered.
+        if (answer.reason === 'server-gone') {
+          note(answer.reason)
+        }
+        // Node's own copy, as Yarn asked; it opens and truncates whatever is
+        // at dest.
+        origCopyFile.call(fs, src, dest, flags, cb)
       })
-    },
-  })
-  if (hookMode !== 'none') {
-    fs.copyFile = hooked
-    global.experimentalYarnHooks = hooks
+    }
+
+    // Yarn 1's own extension point (src/util/hooks.js): each install step runs
+    // through hook(fn). Scopes the patch to the link step and tells "the hook
+    // never fired" apart from "nothing to copy".
+    const prev = global.experimentalYarnHooks
+    const hooks = Object.assign({}, prev, {
+      linkStep (fn, context) {
+        send({ link_step: 'start' })
+        active = true
+        const run = prev && typeof prev.linkStep === 'function' ? prev.linkStep(fn, context) : fn()
+        return Promise.resolve(run).finally(() => {
+          active = false
+          send({ link_step: 'end', counts })
+        })
+      },
+    })
+    if (hookMode !== 'none') {
+      fs.copyFile = hooked
+      global.experimentalYarnHooks = hooks
+    }
+
+    yarnStarted = true
+    send({ hello: true, yarn: yarnVersion, yarn_js: yarnJs, node: process.version, first: firstN, facts: p.facts, hook: hookMode })
+    // Run Yarn's bin/yarn.js as the main module, as `node yarn.js` (or the
+    // `yarn` symlink, which Node resolves to it) would, and as corepack starts
+    // it: argv[1] and process.mainModule are Yarn's own. Yarn gives its
+    // lifecycle scripts `npm_execpath = process.mainModule.filename`, so a
+    // script running `node "$npm_execpath" …` must reach Yarn, not this hook.
+    process.argv = [process.argv[0], yarnJs, ...yarnArgs]
+    require('module').runMain(yarnJs)
   }
 
-  yarnStarted = true
-  send({ hello: true, yarn: yarnVersion, node: process.version, first: firstN, facts: p.facts, hook: hookMode })
-  // Run Yarn's bin/yarn.js as the main module, as `node yarn.js` (or the
-  // `yarn` symlink, which Node resolves to it) would, and as corepack starts
-  // it: argv[1] and process.mainModule are Yarn's own. Yarn gives its
-  // lifecycle scripts `npm_execpath = process.mainModule.filename`, so a
-  // script running `node "$npm_execpath" …` must reach Yarn, not this hook.
-  process.argv = [process.argv[0], yarnJs, ...yarnArgs]
-  require('module').runMain(yarnJs)
+  if (launcher !== 'corepack') {
+    return start(target)
+  }
+  // corepack's launcher (dist/yarn.js) picks the project's Yarn
+  // (packageManager, its defaults), installs it into its cache when needed,
+  // and starts it in this process: `process.nextTick(Module.runMain, <the
+  // chosen Yarn's bin/yarn.js>)` after setting process.argv. That call is
+  // where the hook takes over, with the Yarn corepack chose; a corepack
+  // error before it is corepack's own (its message, its exit status), as
+  // with plain corepack.
+  const Module = require('module')
+  const runMain = Module.runMain
+  Module.runMain = function (chosen) {
+    Module.runMain = runMain
+    start(String(chosen)).catch(beforeYarn)
+  }
+  process.argv = [process.argv[0], target, ...yarnArgs]
+  runMain.call(Module, target)
+}
+
+function beforeYarn (e) {
+  if (yarnStarted) {
+    throw e
+  }
+  process.stderr.write(`matchapack yarn hook: before Yarn started: ${e && e.stack ? e.stack : e}\n`)
+  process.exit(90)
 }
 
 if (require.main === module) {
-  main().catch((e) => {
-    if (yarnStarted) {
-      throw e
-    }
-    process.stderr.write(`matchapack yarn hook: before Yarn started: ${e && e.stack ? e.stack : e}\n`)
-    process.exit(90)
-  })
+  main().catch(beforeYarn)
 } else {
   module.exports = { copyConcurrency, probe }
 }

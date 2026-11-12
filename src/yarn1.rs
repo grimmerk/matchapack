@@ -148,12 +148,54 @@ fn cache_args(args: &[String]) -> Vec<String> {
     out
 }
 
-/// The `yarn.js` the user's `yarn` runs: MATCHAPACK_YARN_JS, or `yarn` on PATH
+/// The Yarn the user's `yarn` runs, as matchapack starts it (`node <js>`).
+#[derive(Debug, Clone)]
+pub struct YarnBin {
+    /// Yarn 1's `bin/yarn.js`, or corepack's `dist/yarn.js`.
+    pub js: PathBuf,
+    /// Yarn's version; empty for corepack until it has chosen (the hello).
+    pub version: String,
+    /// `js` is corepack's launcher (`corepack enable` links `yarn` to it):
+    /// corepack picks the project's Yarn (`packageManager`, its defaults),
+    /// installs it into its cache when needed, and starts that Yarn's
+    /// `bin/yarn.js` in the same process, where the hook takes over.
+    pub corepack: bool,
+}
+
+/// The version of Yarn 1's npm package whose `bin/yarn.js` is `js`, or why
+/// it is not one.
+fn yarn1_package(js: &Path) -> std::result::Result<String, String> {
+    let pkg = js.parent().and_then(|b| b.parent()).map(|d| d.join("package.json"));
+    let v: Option<Value> = pkg.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
+    let name = v.as_ref().and_then(|v| v["name"].as_str());
+    let version = v.as_ref().and_then(|v| v["version"].as_str()).unwrap_or("").to_string();
+    if !js.is_file() || name != Some("yarn") {
+        return Err(format!("{} is not Yarn 1's npm package", js.display()));
+    }
+    if !version.starts_with("1.") {
+        return Err(format!("yarn {version} at {} is not Yarn 1", js.display()));
+    }
+    Ok(version)
+}
+
+/// corepack's launcher for `yarn`: `dist/yarn.js` of the package named
+/// corepack (bundled with Node <= 24; `npm i -g corepack` from Node 25 on).
+fn is_corepack_launcher(real: &Path) -> bool {
+    let dist = real.parent();
+    real.file_name().is_some_and(|n| n == "yarn.js")
+        && dist.and_then(Path::file_name).is_some_and(|n| n == "dist")
+        && dist
+            .and_then(Path::parent)
+            .and_then(|d| std::fs::read(d.join("package.json")).ok())
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .is_some_and(|v| v["name"] == "corepack")
+}
+
+/// The Yarn the user's `yarn` runs: MATCHAPACK_YARN_JS, or `yarn` on PATH,
 /// resolved to a file of Yarn 1's npm package (an npm-global or Homebrew
-/// install: `…/yarn/bin/yarn.js`, or the `bin/yarn` sh launcher beside it).
-/// Returns it with the package's version. A corepack shim, Yarn 2+ or another
-/// launcher is not handled here (yet).
-pub fn find_yarn_js() -> std::result::Result<(PathBuf, String), String> {
+/// install: `…/yarn/bin/yarn.js`, or the `bin/yarn` sh launcher beside it)
+/// or to corepack's launcher. Yarn 2+ or another launcher is not handled.
+pub fn find_yarn_js() -> std::result::Result<YarnBin, String> {
     let p = match std::env::var_os("MATCHAPACK_YARN_JS") {
         Some(p) => PathBuf::from(p),
         None => {
@@ -162,18 +204,55 @@ pub fn find_yarn_js() -> std::result::Result<(PathBuf, String), String> {
         }
     };
     let real = std::fs::canonicalize(&p).map_err(|e| format!("resolving {}: {e}", p.display()))?;
+    if is_corepack_launcher(&real) {
+        return Ok(YarnBin { js: real, version: String::new(), corepack: true });
+    }
     let js = if real.file_name().is_some_and(|n| n == "yarn.js") { real.clone() } else { real.with_file_name("yarn.js") };
-    let pkg = js.parent().and_then(|b| b.parent()).map(|d| d.join("package.json"));
-    let v: Option<Value> = pkg.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
-    let name = v.as_ref().and_then(|v| v["name"].as_str());
-    let version = v.as_ref().and_then(|v| v["version"].as_str()).unwrap_or("").to_string();
-    if !js.is_file() || name != Some("yarn") {
-        return Err(format!("{} is not Yarn 1's npm package (a corepack shim, Yarn 2+ or another launcher is not handled)", real.display()));
+    let version = yarn1_package(&js).map_err(|e| {
+        if e.ends_with("npm package") {
+            format!("{} is neither Yarn 1's npm package nor corepack's launcher (Yarn 2+ or another launcher is not handled)", real.display())
+        } else {
+            e
+        }
+    })?;
+    Ok(YarnBin { js, version, corepack: false })
+}
+
+/// Whether the project at `cwd` is a Yarn 2+ one, decided from files only:
+/// a few `stat` calls and small reads, no node and no yarn.js lookup (the
+/// owner runs `yarn install` in Yarn 4 worktrees far more often than in Yarn
+/// 1 ones; design review 2026-11-13 §4 item 8). Yarn 2+: a `.yarnrc.yml`
+/// between `cwd` and the lockfile folder (not above it: a user's
+/// `~/.yarnrc.yml` does not make a Yarn 1 project a Yarn 4 one; Yarn 1.22
+/// runs a `yarnPath` from it itself), a `packageManager` of `yarn@` other
+/// than `yarn@1.`, or a Yarn 2+ lockfile (`__metadata:`). Without a
+/// `yarn.lock` only `cwd` itself is looked at.
+fn yarn2_project(cwd: &Path) -> Option<String> {
+    let root = lockfile_root(cwd);
+    for d in cwd.ancestors() {
+        if d.join(".yarnrc.yml").exists() {
+            return Some(format!("{} has a .yarnrc.yml (a Yarn 2+ project)", d.display()));
+        }
+        if root.as_deref().is_none_or(|r| d == r) {
+            break;
+        }
     }
-    if !version.starts_with("1.") {
-        return Err(format!("yarn {version} at {} is not Yarn 1", js.display()));
+    let dirs = [Some(cwd), root.as_deref()];
+    for d in dirs.into_iter().flatten() {
+        if let Some(pm) = package_manager(d) {
+            if pm.starts_with("yarn@") && !pm.starts_with("yarn@1.") {
+                return Some(format!("packageManager is {pm} (a Yarn 2+ project)"));
+            }
+        }
     }
-    Ok((js, version))
+    let lock = std::fs::read_to_string(root?.join("yarn.lock")).ok()?;
+    lock.lines().any(|l| l.starts_with("__metadata:")).then(|| "yarn.lock is a Yarn 2+ lockfile".into())
+}
+
+/// The `packageManager` field of `dir/package.json`.
+fn package_manager(dir: &Path) -> Option<String> {
+    let text = std::fs::read(dir.join("package.json")).ok()?;
+    serde_json::from_slice::<Value>(&text).ok().and_then(|v| v["packageManager"].as_str().map(String::from))
 }
 
 /// Yarn's lockfile folder: the nearest directory at or above `cwd` that holds
@@ -202,25 +281,10 @@ fn gates(cwd: &Path, args: &[String]) -> std::result::Result<PathBuf, String> {
         }
     }
     let root = lockfile_root(cwd).ok_or("no yarn.lock in this directory or above")?;
-    // Yarn 2 and later: their own linker, not this hook. (A `.yarnrc.yml`
-    // above the project, such as a user's ~/.yarnrc.yml, does not make it
-    // one.) Yarn 1.22 runs a `yarnPath` from `.yarnrc.yml` itself.
-    for d in cwd.ancestors() {
-        if d.join(".yarnrc.yml").exists() {
-            return Err(format!("{} has a .yarnrc.yml (a Yarn 2+ project)", d.display()));
-        }
-        if d == root {
-            break;
-        }
-    }
-    let lock = std::fs::read_to_string(root.join("yarn.lock")).map_err(|e| format!("reading yarn.lock: {e}"))?;
-    if lock.lines().any(|l| l.starts_with("__metadata:")) {
-        return Err("yarn.lock is a Yarn 2+ lockfile".into());
-    }
+    // A Yarn 2+ project never gets here (`yarn2_project`, before anything
+    // else); another package manager's project does.
     for d in [cwd, root.as_path()] {
-        let Ok(text) = std::fs::read(d.join("package.json")) else { continue };
-        let pm = serde_json::from_slice::<Value>(&text).ok().and_then(|v| v["packageManager"].as_str().map(String::from));
-        if let Some(pm) = pm {
+        if let Some(pm) = package_manager(d) {
             if !pm.starts_with("yarn@1.") {
                 return Err(format!("packageManager is {pm}"));
             }
@@ -339,6 +403,7 @@ impl Stats {
             "copied": self.copied,
             "copied_total": self.copied_total(),
             "link_steps": self.link_steps,
+            "yarn": self.hello.as_ref().and_then(|h| h.get("yarn")).cloned().unwrap_or(Value::Null),
             "first": self.hello.as_ref().and_then(|h| h.get("first")).cloned().unwrap_or(Value::Null),
             "facts": self.hello.as_ref().and_then(|h| h.get("facts")).cloned().unwrap_or(Value::Null),
             "cache": self.cache,
@@ -426,6 +491,25 @@ impl Server {
             requests: AtomicU64::new(0),
             stats: Mutex::new(Stats::default()),
         })
+    }
+
+    /// Under corepack: the `bin/yarn.js` corepack chose, as the hook's hello
+    /// names it (checked to be Yarn 1's npm package), once it has arrived;
+    /// an error when the install ends first (corepack failed, or the hook
+    /// declined).
+    fn chosen_yarn(&self, install_ended: &AtomicBool) -> std::result::Result<PathBuf, String> {
+        loop {
+            let named = self.stats.lock().unwrap().hello.as_ref().map(|h| h["yarn_js"].as_str().map(PathBuf::from));
+            match named {
+                Some(Some(js)) => {
+                    yarn1_package(&js)?;
+                    return Ok(js);
+                }
+                Some(None) => return Err("the hook's hello names no yarn.js".into()),
+                None if install_ended.load(Ordering::Relaxed) => return Err("the install ended first".into()),
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
     }
 
     /// Yarn's cache folder as `yarn cache dir` printed it, or why it is not
@@ -873,7 +957,7 @@ fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], dead
     Ok(PathBuf::from(line))
 }
 
-fn run(cwd: &Path, root: &Path, yarn_js: &Path, args: &[String]) -> std::result::Result<Summary, RunError> {
+fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result::Result<Summary, RunError> {
     let t0 = Instant::now();
     let node = PathBuf::from("node");
     let prepared = (|| -> Result<_> {
@@ -903,7 +987,7 @@ fn run(cwd: &Path, root: &Path, yarn_js: &Path, args: &[String]) -> std::result:
     // scripts it starts see the user's environment.
     let mut cmd = std::process::Command::new(&node);
     cmd.arg(&helper)
-        .arg(yarn_js)
+        .arg(&yarn.js)
         .args(args)
         .current_dir(cwd)
         .env("MATCHAPACK_YARN_FD", crate::inject::CHILD_FD.to_string())
@@ -912,12 +996,23 @@ fn run(cwd: &Path, root: &Path, yarn_js: &Path, args: &[String]) -> std::result:
         .env_remove("MATCHAPACK_YARN_FAIL_FIXUP_EVERY")
         .env_remove("MATCHAPACK_YARN_SLOW_FIXUP_EVERY")
         .env_remove("MATCHAPACK_YARN_SLOW_FIXUP_MS");
+    if yarn.corepack {
+        cmd.env("MATCHAPACK_YARN_LAUNCHER", "corepack");
+    } else {
+        cmd.env_remove("MATCHAPACK_YARN_LAUNCHER");
+    }
     let deadline = std::env::var("MATCHAPACK_YARN_CACHE_DIR_SECS").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs_f64).unwrap_or(CACHE_DIR_DEADLINE);
     let install_ended = AtomicBool::new(false);
     let status = std::thread::scope(|s| {
         // Yarn's cache folder, asked of the same Yarn in parallel: requests
         // wait for it (CACHE_WAIT).
-        s.spawn(|| server.set_cache(yarn_cache_dir(&node, yarn_js, cwd, args, deadline, &install_ended)));
+        // Under corepack, asked of the Yarn corepack chose, once the hook
+        // has said which (running the launcher again could resolve, download
+        // or prompt a second time).
+        s.spawn(|| {
+            let js = if yarn.corepack { server.chosen_yarn(&install_ended) } else { Ok(yarn.js.clone()) };
+            server.set_cache(js.and_then(|js| yarn_cache_dir(&node, &js, cwd, args, deadline, &install_ended)))
+        });
         let serve = |sock| {
             let _ = server.serve(sock, crate::inject::threads());
         };
@@ -1001,18 +1096,40 @@ pub fn cli(args: Vec<String>) -> i32 {
         Ok(d) => d,
         Err(_) => return exec_yarn(&args, None),
     };
+    // First, and from files only: a Yarn 2+ project is plain Yarn, unlogged
+    // and silent like a command that is not an install (no node start, no
+    // yarn.js lookup; NOTES "Yarn 1 shell route").
+    if let Some(why) = yarn2_project(&cwd) {
+        if std::env::var("MATCHAPACK_NO_FALLBACK").as_deref() == Ok("1") {
+            eprintln!("matchapack: not handled, left unchanged ({why})");
+            return 3;
+        }
+        return exec_yarn(&args, None);
+    }
     let found = find_yarn_js();
-    let yarn_js = found.as_ref().ok().map(|(js, _)| js.clone());
-    let yarn_version = found.as_ref().map(|(_, v)| v.clone()).unwrap_or_default();
+    let yarn_js = found.as_ref().ok().map(|y| y.js.clone());
+    let yarn_version = found.as_ref().map(|y| y.version.clone()).unwrap_or_default();
+    let corepack = found.as_ref().is_ok_and(|y| y.corepack);
     let log = |outcome: &str, extra: Value| {
         let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args });
+        if corepack {
+            rec["launcher"] = json!("corepack");
+        }
         if let (Value::Object(m), Value::Object(x)) = (&mut rec, extra) {
             m.extend(x);
         }
         trial::append(rec);
     };
-    let checked = found.and_then(|(js, _)| gates(&cwd, &args).map(|root| (js, root)));
-    let (yarn_js_path, root) = match checked {
+    // Under corepack the version is known once it has chosen (the hello).
+    let chosen = |stats: &Value| if corepack { json!({ "yarn": stats["yarn"] }) } else { json!({}) };
+    let with = |mut a: Value, b: Value| {
+        if let (Value::Object(m), Value::Object(x)) = (&mut a, b) {
+            m.extend(x);
+        }
+        a
+    };
+    let checked = found.and_then(|y| gates(&cwd, &args).map(|root| (y, root)));
+    let (yarn, root) = match checked {
         Ok(x) => x,
         Err(reason) => {
             log("declined", json!({ "reason": reason }));
@@ -1021,7 +1138,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     };
     util::set_quiet(true);
     eprintln!("matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)");
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&cwd, &root, &yarn_js_path, &args)));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&cwd, &root, &yarn, &args)));
     util::remove_run_dir();
     match outcome {
         Ok(Ok(s)) => {
@@ -1044,17 +1161,17 @@ pub fn cli(args: Vec<String>) -> i32 {
                      this Yarn may run another way (the install is Yarn's own and complete; nothing was cloned)"
                 );
             }
-            log("installed", json!({ "secs": s.secs, "yarn1": s.stats }));
+            log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats }), chosen(&s.stats)));
             0
         }
         Ok(Err(RunError::Declined(reason))) => {
             log("declined", json!({ "reason": reason }));
-            decline(&args, Some(&yarn_js_path), &reason)
+            decline(&args, Some(&yarn.js), &reason)
         }
         // Yarn ran and failed, and has said why: its status is the answer
         // (plain Yarn would have failed the same way; nothing is retried).
         Ok(Err(RunError::Yarn { code, stats })) => {
-            log("yarn_failed", json!({ "code": code, "reason": format!("yarn exited with status {code}"), "yarn1": stats }));
+            log("yarn_failed", with(json!({ "code": code, "reason": format!("yarn exited with status {code}"), "yarn1": stats }), chosen(&stats)));
             code
         }
         Err(_) => {
@@ -1099,6 +1216,63 @@ mod tests {
         assert_eq!(cache_args(&s(&["--cache-folder=/c", "--no-default-rc", "--use-yarnrc", "r"])), s(&["--cache-folder=/c", "--no-default-rc", "--use-yarnrc", "r"]));
         assert_eq!(cache_args(&s(&["--preferred-cache-folder", "/p", "--offline"])), s(&["--preferred-cache-folder", "/p"]));
         assert!(cache_args(&s(&["--frozen-lockfile"])).is_empty());
+    }
+
+    /// Yarn 2+ is told from files: `.yarnrc.yml` up to the lockfile folder
+    /// (not above it), `packageManager: yarn@2+`, a berry lockfile; nothing
+    /// else (another package manager, Yarn 1) is.
+    #[test]
+    fn yarn2_projects_are_told_from_files() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("y2-files")).unwrap();
+        let p = d.join("repo/pkg");
+        std::fs::create_dir_all(&p).unwrap();
+        let w = |f: &str, t: &str| std::fs::write(d.join(f), t).unwrap();
+        w("repo/yarn.lock", "# yarn lockfile v1\n");
+        w("repo/package.json", "{}");
+        assert_eq!(yarn2_project(&p), None);
+        w(".yarnrc.yml", "");
+        assert_eq!(yarn2_project(&p), None, "a .yarnrc.yml above the lockfile folder");
+        w("repo/pkg/package.json", r#"{"packageManager":"pnpm@10.0.0"}"#);
+        assert_eq!(yarn2_project(&p), None, "another package manager: a gate's business");
+        w("repo/pkg/package.json", r#"{"packageManager":"yarn@1.22.22"}"#);
+        assert_eq!(yarn2_project(&p), None);
+        w("repo/package.json", r#"{"packageManager":"yarn@4.5.0"}"#);
+        assert!(yarn2_project(&p).unwrap().contains("yarn@4.5.0"), "the lockfile folder's packageManager");
+        w("repo/package.json", "{}");
+        w("repo/yarn.lock", "# comment\n\n__metadata:\n  version: 8\n");
+        assert!(yarn2_project(&p).unwrap().contains("Yarn 2+ lockfile"));
+        w("repo/yarn.lock", "# yarn lockfile v1\n");
+        w("repo/.yarnrc.yml", "");
+        assert!(yarn2_project(&p).unwrap().contains(".yarnrc.yml"));
+        // No yarn.lock anywhere: only the working directory is looked at.
+        let q = d.join("other/sub");
+        std::fs::create_dir_all(&q).unwrap();
+        w("other/.yarnrc.yml", "");
+        assert_eq!(yarn2_project(&q), None);
+        w("other/sub/.yarnrc.yml", "");
+        assert!(yarn2_project(&q).is_some());
+    }
+
+    /// corepack's `dist/yarn.js` is recognized by its package's name; a
+    /// `dist/yarn.js` of another package is not.
+    #[test]
+    fn corepack_launcher() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("y1-corepack")).unwrap();
+        let js = d.join("corepack/dist/yarn.js");
+        std::fs::create_dir_all(js.parent().unwrap()).unwrap();
+        std::fs::write(&js, "").unwrap();
+        std::fs::write(d.join("corepack/package.json"), r#"{"name":"corepack","version":"0.36.0"}"#).unwrap();
+        assert!(is_corepack_launcher(&js));
+        std::fs::write(d.join("corepack/package.json"), r#"{"name":"not-corepack"}"#).unwrap();
+        assert!(!is_corepack_launcher(&js));
+        let bin = d.join("yarn/bin/yarn.js");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "").unwrap();
+        std::fs::write(d.join("yarn/package.json"), r#"{"name":"yarn","version":"1.22.22"}"#).unwrap();
+        assert!(!is_corepack_launcher(&bin));
+        assert_eq!(yarn1_package(&bin).unwrap(), "1.22.22");
+        std::fs::write(d.join("yarn/package.json"), r#"{"name":"yarn","version":"4.5.0"}"#).unwrap();
+        assert!(yarn1_package(&bin).unwrap_err().contains("not Yarn 1"));
     }
 
     #[test]
