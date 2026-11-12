@@ -150,7 +150,7 @@ fn mtime_ns(md: &std::fs::Metadata) -> i128 {
 /// `com.apple.provenance`, whose value records which app created the file, so
 /// a clone keeps the value of its source while a copy gets a new one, and
 /// nothing in user space can set it.
-fn xattr_names(p: &Path) -> std::io::Result<Vec<String>> {
+pub(crate) fn xattr_names(p: &Path) -> std::io::Result<Vec<String>> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes())?;
     let list = |buf: Option<&mut [u8]>| {

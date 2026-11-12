@@ -12,6 +12,7 @@ mod store;
 mod trial;
 mod util;
 mod wrapper;
+mod yarn1;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -63,6 +64,14 @@ enum Cmd {
     /// is safe to, otherwise run the real npm with the same arguments. Meant to
     /// be called by the shell wrapper (shell/matchapack.sh).
     Npm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stand in for `yarn <args>` (Yarn 1, macOS): a bare `yarn` or `yarn
+    /// install` runs the user's Yarn with each file of its link step cloned
+    /// from Yarn's cache; anything else, and every install matchapack
+    /// declines, runs plain Yarn with the same arguments.
+    Yarn {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -631,6 +640,10 @@ fn main() -> Result<()> {
         Cmd::Npm { args } => {
             let code = wrapper::run(args);
             util::remove_run_dir();
+            std::process::exit(code);
+        }
+        Cmd::Yarn { args } => {
+            let code = yarn1::cli(args);
             std::process::exit(code);
         }
         Cmd::Init { shell } => {
