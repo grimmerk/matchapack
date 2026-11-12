@@ -437,6 +437,10 @@ else bad "decline then plain yarn (exit $rc)"; fi
 d=$(project keepsplain); myarn "$d" MATCHAPACK_YARN_SIMULATE=copy-keeps-times --
 if [ $rc = 0 ] && grep -q 'running plain yarn instead' "$work/out" && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "the probe's decline runs plain yarn, which installs"
 else bad "probe decline then plain yarn (exit $rc)"; fi
+# Secrets in the arguments never reach the log.
+d=$(project secret); myarn "$d" -- --otp 314159 --registry "http://u:hunter2@127.0.0.1:48321/"
+if [ $rc = 0 ] && ! grep -q '314159\|hunter2' "$work/y1/log/log.jsonl" && [ "$(lastlog 'r["args"][-1]')" = "http://***@127.0.0.1:48321/" ]; then ok "an --otp value and URL credentials are not logged"
+else bad "secrets in the log (exit $rc)"; fi
 # Not installs: passed to Yarn as they are, not logged.
 n0=$(wc -l < "$work/y1/log/log.jsonl")
 (cd "$work" && y1env "$bin" yarn --version) > "$work/out" 2>&1; r1=$?
