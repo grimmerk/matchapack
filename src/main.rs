@@ -12,6 +12,7 @@ mod store;
 mod trial;
 mod util;
 mod wrapper;
+mod yarn1;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -66,6 +67,14 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Stand in for `yarn <args>` (Yarn 1, macOS): a bare `yarn` or `yarn
+    /// install` runs the user's Yarn with each file of its link step cloned
+    /// from Yarn's cache; anything else, and every install matchapack
+    /// declines, runs plain Yarn with the same arguments.
+    Yarn {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print the shell integration for an rc file (routes a bare `npm ci` through matchapack)
     ///
     /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts matchapack on
@@ -101,6 +110,10 @@ enum Cmd {
         /// Print only the differing paths, one per line (for scripts).
         #[arg(long)]
         paths: bool,
+        /// Print each difference as `<class>\t<path>` (for scripts; with
+        /// --meta the classes of the report, otherwise only-a, only-b, differ).
+        #[arg(long, conflicts_with = "paths")]
+        classes: bool,
         /// Also compare, per path: mtime to the nanosecond, uid, gid and
         /// extended attribute names; report each class of difference.
         #[arg(long)]
@@ -633,6 +646,10 @@ fn main() -> Result<()> {
             util::remove_run_dir();
             std::process::exit(code);
         }
+        Cmd::Yarn { args } => {
+            let code = yarn1::cli(args);
+            std::process::exit(code);
+        }
         Cmd::Init { shell } => {
             let shell = match shell {
                 Some(s) => s,
@@ -670,7 +687,7 @@ fn main() -> Result<()> {
                 println!("skip {p}: {why}");
             }
         }
-        Cmd::Diff { a, b, ignore, limit, paths, meta, a_run, b_run, a_cache, b_cache } => {
+        Cmd::Diff { a, b, ignore, limit, paths, classes, meta, a_run, b_run, a_cache, b_cache } => {
             let opts = if meta {
                 let parse = |s: Option<String>| {
                     s.as_deref().map(diff::Run::parse).transpose().unwrap_or_else(|e| {
@@ -695,7 +712,9 @@ fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             };
-            if paths {
+            if classes {
+                r.print_classes();
+            } else if paths {
                 r.print_paths();
             } else {
                 r.print(limit);

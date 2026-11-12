@@ -60,9 +60,11 @@ jobs:
         # optional-script-fail, per-file clones, odd-tarballs); every case
         # must have cloned.
         run: MATCHAPACK_ENGINE=inject scripts/verify-npm.sh --no-record "$RUNNER_TEMP/vi"
-      - name: Yarn 1 harness (plain vs plain, diff --meta catches what it must)
+      - name: Yarn 1 harness and engine (plain vs plain, diff --meta, matchapack yarn vs plain)
         # Yarn 1.22.22 into a scratch prefix, not the global npm; the
-        # fixtures install from the local tarball server.
+        # fixtures install from the local tarball server. The engine's
+        # cross-Node case needs a second node (MATCHAPACK_YARN_PRIME_NODE)
+        # and is skipped here; the two-volume case makes a disk image.
         run: |
           npm install --prefix "$RUNNER_TEMP/yarn1" --ignore-scripts --no-audit --no-fund yarn@1.22.22
           MATCHAPACK_YARN_JS="$RUNNER_TEMP/yarn1/node_modules/yarn/bin/yarn.js" scripts/test-yarn1.sh "$RUNNER_TEMP/y1"

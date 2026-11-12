@@ -1,0 +1,15 @@
+{
+  "name": "matchapack-fixture-yarn1-many",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "y1-a": "http://127.0.0.1:48321/y1-a-1.0.0.tgz",
+    "y1-b": "http://127.0.0.1:48321/y1-b-2.0.0.tgz",
+    "y1-execpath": "http://127.0.0.1:48321/y1-execpath-1.0.0.tgz",
+    "y1-many": "http://127.0.0.1:48321/y1-many-1.0.0.tgz"
+  },
+  "devDependencies": {
+    "@y1/scoped": "http://127.0.0.1:48321/y1-scoped-1.0.0.tgz",
+    "y1-script": "http://127.0.0.1:48321/y1-script-1.0.0.tgz"
+  }
+}

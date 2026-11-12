@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Write the tarballs of the Yarn 1 fixtures (yarn1-small, yarn1-emptyfirst,
-yarn1-scriptpkg) into fixtures/optional-upward/tarballs, where the local
-tarball server (127.0.0.1:48321) serves from, so that the fixtures install
-without a network.
+yarn1-scriptpkg, yarn1-many, yarn1-workspaces) into
+fixtures/optional-upward/tarballs, where the local tarball server
+(127.0.0.1:48321) serves from, so that the fixtures install without a
+network.
 
   y1-a 1.0.0      a bin (bin/cli.js, 0755), nested directories, and two
                   dependencies: y1-b 1.0.0 (nested under y1-a, since the root
@@ -13,6 +14,10 @@ without a network.
                   times, which flips Yarn's time probe (NOTES "Yarn 1
                   harness")
   y1-script 1.0.0 an install script that writes built.txt
+  y1-execpath 1.0.0  an install script that records $npm_execpath and runs
+                  `node "$npm_execpath" --version` (execpath.txt)
+  y1-many 1.0.0/2.0.0  300 files and a bin: more than the 128 first copies
+                  of Yarn's link step, which the Yarn 1 engine leaves to Node
 
 No package has an empty file except y1-empty. Deterministic: fixed times,
 owner, order, gzip header without a name or time. Re-run after a change, then
@@ -80,3 +85,43 @@ tarball("y1-script-1.0.0.tgz", [
         scripts={"install": "node -e \"require('fs').writeFileSync('built.txt','x')\""})),
     ("index.js", 0o644, b"module.exports = 1\n"),
 ])
+
+# Records what Yarn gives its lifecycle scripts as npm_execpath (Yarn's own
+# entry, process.mainModule.filename) and runs it, as tools such as
+# node-gyp's callers do: under the Yarn 1 engine it must be Yarn, not the hook.
+tarball("y1-execpath-1.0.0.tgz", [
+    ("package.json", 0o644, manifest(
+        name="y1-execpath", version="1.0.0",
+        scripts={"install": "node record.js"})),
+    ("record.js", 0o644, b"""const cp = require('child_process')
+const p = process.env.npm_execpath
+const v = cp.execFileSync(process.execPath, [p, '--version']).toString()
+require('fs').writeFileSync('execpath.txt', p + '\\n' + v)
+"""),
+])
+
+
+def many(v):
+    """y1-many: enough files that Yarn's link step goes past its first
+    CONCURRENT_QUEUE_ITEMS (128) copies, which the Yarn 1 engine leaves to
+    Node: 300 files in 15 directories, a 256 KiB file, a bin. 2.0.0 changes
+    some files, drops a directory and adds a file."""
+    entries = [
+        ("package.json", 0o644, manifest(name="y1-many", version=v, main="index.js", bin={"y1many": "bin/many.js"})),
+        ("bin/many.js", 0o755, b"#!/usr/bin/env node\nconsole.log(require('../index.js'))\n"),
+        ("index.js", 0o644, f"module.exports = '{v}'\n".encode()),
+        ("data/big.bin", 0o644, bytes((i * 7 + 3) % 251 for i in range(256 * 1024))),
+    ]
+    for d in range(15 if v == "1.0.0" else 14):
+        for f in range(20):
+            body = f"// {d}/{f}\nmodule.exports = {d * 20 + f}\n".encode() + b"x" * ((d * 20 + f) * 37 % 3000)
+            if v != "1.0.0" and f % 7 == 0:
+                body += b"// changed in 2.0.0\n"
+            entries.append((f"lib/d{d:02d}/f{f:02d}.js", 0o644, body))
+    if v != "1.0.0":
+        entries.append(("lib/new.js", 0o644, b"module.exports = 'new'\n"))
+    return entries
+
+
+for v in ("1.0.0", "2.0.0"):
+    tarball(f"y1-many-{v}.tgz", many(v))

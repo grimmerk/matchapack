@@ -1,0 +1,8 @@
+{
+  "name": "w1",
+  "version": "1.0.0",
+  "dependencies": {
+    "y1-b": "http://127.0.0.1:48321/y1-b-1.0.0.tgz",
+    "y1-many": "http://127.0.0.1:48321/y1-many-1.0.0.tgz"
+  }
+}

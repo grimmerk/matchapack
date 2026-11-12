@@ -150,7 +150,7 @@ fn mtime_ns(md: &std::fs::Metadata) -> i128 {
 /// `com.apple.provenance`, whose value records which app created the file, so
 /// a clone keeps the value of its source while a copy gets a new one, and
 /// nothing in user space can set it.
-fn xattr_names(p: &Path) -> std::io::Result<Vec<String>> {
+pub(crate) fn xattr_names(p: &Path) -> std::io::Result<Vec<String>> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes())?;
     let list = |buf: Option<&mut [u8]>| {
@@ -402,6 +402,38 @@ impl Report {
         for p in base.chain(meta) {
             if seen.insert(p) {
                 println!("{p}");
+            }
+        }
+    }
+
+    /// Every difference as one `<class>\t<path>` line: `only-a`, `only-b`,
+    /// and with --meta the classes of the report (type, content, file-mode,
+    /// dir-mode, symlink-target, mtime, uid, gid, xattr-names); without it,
+    /// `differ`. A path with several kinds of difference has several lines.
+    pub fn print_classes(&self) {
+        for p in &self.only_a {
+            println!("only-a\t{p}");
+        }
+        for p in &self.only_b {
+            println!("only-b\t{p}");
+        }
+        match &self.meta {
+            None => {
+                for (p, _) in &self.differ {
+                    println!("differ\t{p}");
+                }
+            }
+            Some(m) => {
+                for (class, v) in [("type", &m.type_), ("content", &m.content), ("file-mode", &m.file_mode), ("dir-mode", &m.dir_mode), ("symlink-target", &m.symlink_target)] {
+                    for p in v {
+                        println!("{class}\t{p}");
+                    }
+                }
+                for (class, v) in [("mtime", &m.mtime), ("uid", &m.uid), ("gid", &m.gid), ("xattr-names", &m.xattr_names)] {
+                    for (p, _) in v {
+                        println!("{class}\t{p}");
+                    }
+                }
             }
         }
     }

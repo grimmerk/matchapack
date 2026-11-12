@@ -47,10 +47,11 @@ pub struct InjectOpts {
 }
 
 /// The fd number the node child finds the socket at.
-const CHILD_FD: i32 = 3;
+pub(crate) const CHILD_FD: i32 = 3;
 
-/// The helper's exit status when it stops before npm starts (src/inject.js).
-const HELPER_DECLINED: i32 = 90;
+/// The helper's exit status when it stops before npm starts (src/inject.js;
+/// the Yarn 1 hook, src/yarn1-hook.js, uses the same).
+pub(crate) const HELPER_DECLINED: i32 = 90;
 
 /// The checks that must hold before npm starts. A refusal changes nothing in
 /// the project, so the caller can run plain npm.
@@ -107,12 +108,61 @@ fn installed_packages(root: &std::path::Path) -> Option<usize> {
     Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| is_package_key(k) && !flag(p, "link") && !flag(p, "inBundle")).count())
 }
 
-fn threads() -> usize {
+pub(crate) fn threads() -> usize {
     std::env::var("MATCHAPACK_INJECT_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+}
+
+/// Start `cmd` with `theirs` (one end of a socket pair) as the child's fd 3,
+/// and serve `ours` on a thread while it runs (`serve`). When the child has
+/// exited: `stop` (drop what is still queued), shut the socket down (a
+/// process the child started may still hold its end) and wait for `serve`.
+/// The outer error: the child could not be started. Shared by the npm inject
+/// engine and the Yarn 1 engine (src/yarn1.rs).
+pub(crate) fn run_serving(
+    cmd: &mut std::process::Command,
+    ours: UnixStream,
+    theirs: UnixStream,
+    serve: impl FnOnce(UnixStream) + Send,
+    stop: impl FnOnce(),
+) -> std::io::Result<std::io::Result<std::process::ExitStatus>> {
+    let theirs_fd = theirs.as_raw_fd();
+    // The child's end of the socket becomes its fd 3. Only async-signal-safe
+    // calls between fork and exec. dup2 clears close-on-exec on the new fd;
+    // when the socket already is fd 3, the flag is cleared instead.
+    unsafe {
+        cmd.pre_exec(move || {
+            if theirs_fd == CHILD_FD {
+                let flags = libc::fcntl(theirs_fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(theirs_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(theirs_fd, CHILD_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn()?;
+    // Only the child holds its end now: when it exits, the server sees the
+    // end of the stream.
+    drop(theirs);
+    let closer = ours.try_clone();
+    Ok(std::thread::scope(|s| {
+        let serving = s.spawn(move || serve(ours));
+        let status = child.wait();
+        // The child is gone: drop what is still queued and end the stream,
+        // also when a process the child started still holds the socket.
+        stop();
+        if let Ok(c) = &closer {
+            let _ = c.shutdown(std::net::Shutdown::Both);
+        }
+        let _ = serving.join();
+        status
+    }))
 }
 
 pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
@@ -147,48 +197,17 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // MATCHAPACK=0 of ours. (The helper removes MATCHAPACK_INJECT_FD.)
     let mut cmd = std::process::Command::new("node");
     cmd.arg(&helper).arg(&npm_dir).args(&o.npm_args).current_dir(&root).env("MATCHAPACK_INJECT_FD", CHILD_FD.to_string());
-    let theirs_fd = theirs.as_raw_fd();
-    // The child's end of the socket becomes its fd 3. Only async-signal-safe
-    // calls between fork and exec. dup2 clears close-on-exec on the new fd;
-    // when the socket already is fd 3, the flag is cleared instead.
-    unsafe {
-        cmd.pre_exec(move || {
-            if theirs_fd == CHILD_FD {
-                let flags = libc::fcntl(theirs_fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(theirs_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            } else if libc::dup2(theirs_fd, CHILD_FD) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let t_npm = Instant::now();
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    let serve = |sock| {
+        let _ = server.serve(sock, threads());
+    };
+    let status = match run_serving(&mut cmd, ours, theirs, serve, || server.stop()) {
+        Ok(status) => status,
         Err(e) => {
             let _ = std::fs::remove_file(&helper);
             return Err(InstallError::Declined(anyhow!("could not start node: {e}")));
         }
     };
-    // Only the child holds its end now: when it exits, the server sees the
-    // end of the stream.
-    drop(theirs);
-    let closer = ours.try_clone();
-    let status = std::thread::scope(|s| {
-        let srv = &server;
-        let serving = s.spawn(move || srv.serve(ours, threads()));
-        let status = child.wait();
-        // The child is gone: drop what is still queued and end the stream,
-        // also when a process the child started still holds the socket.
-        server.stop();
-        if let Ok(c) = &closer {
-            let _ = c.shutdown(std::net::Shutdown::Both);
-        }
-        let _ = serving.join();
-        status
-    });
     let npm_secs = t_npm.elapsed().as_secs_f64();
     let _ = std::fs::remove_file(&helper);
     let stats = std::mem::take(&mut *server.stats.lock().unwrap());

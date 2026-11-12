@@ -1,0 +1,9 @@
+{
+  "name": "matchapack-fixture-yarn1-workspaces",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "y1-b": "http://127.0.0.1:48321/y1-b-2.0.0.tgz"
+  }
+}
