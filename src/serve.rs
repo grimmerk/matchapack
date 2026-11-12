@@ -1029,47 +1029,65 @@ impl<'a> Server<'a> {
     /// worker threads. Returns when the stream is at its end (the peer closed
     /// it, or someone shut it down) and every started request is answered.
     pub fn serve(&self, stream: UnixStream, threads: usize) -> Result<()> {
-        let reader = BufReader::new(stream.try_clone().context("cloning the socket")?);
-        let writer = Mutex::new(stream);
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        let rx = Mutex::new(rx);
-        std::thread::scope(|s| {
-            for _ in 0..threads.max(1) {
-                s.spawn(|| loop {
-                    let line = match rx.lock().unwrap().recv() {
-                        Ok(l) => l,
-                        Err(_) => return,
-                    };
-                    if self.stopping.load(Ordering::Relaxed) {
+        serve_lines(stream, threads, &self.stopping, &|v| self.record_message(v), &|l, _| self.handle_line(l))
+    }
+}
+
+/// The transport of a hook's JSON-lines conversation (this module's protocol,
+/// and the Yarn 1 engine's, src/yarn1.rs): read lines from `stream` until it
+/// ends; a line `record` accepts (a message that needs no answer) is handled
+/// at once on the reading thread, every other line by one of `threads`
+/// workers, which write the answer lines `handle` returns (it is given the
+/// line and when it was read). Once `stopping` is set (the node child is
+/// gone), queued lines are dropped. Returns when the
+/// stream is at its end and every started line is handled.
+pub fn serve_lines(
+    stream: UnixStream,
+    threads: usize,
+    stopping: &AtomicBool,
+    record: &(dyn Fn(&Value) -> bool + Sync),
+    handle: &(dyn Fn(&str, Instant) -> Vec<String> + Sync),
+) -> Result<()> {
+    let reader = BufReader::new(stream.try_clone().context("cloning the socket")?);
+    let writer = Mutex::new(stream);
+    let (tx, rx) = std::sync::mpsc::channel::<(String, Instant)>();
+    let rx = Mutex::new(rx);
+    std::thread::scope(|s| {
+        for _ in 0..threads.max(1) {
+            s.spawn(|| loop {
+                let (line, read_at) = match rx.lock().unwrap().recv() {
+                    Ok(l) => l,
+                    Err(_) => return,
+                };
+                if stopping.load(Ordering::Relaxed) {
+                    continue;
+                }
+                for mut answer in handle(&line, read_at) {
+                    answer.push('\n');
+                    // The peer may be gone; nothing to do about it here.
+                    let _ = writer.lock().unwrap().write_all(answer.as_bytes());
+                }
+            });
+        }
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    // Messages that need no answer are recorded here, at
+                    // once: the workers drop what is queued after stop(),
+                    // and a lost `hello` would read as "npm never started".
+                    if serde_json::from_str::<Value>(&l).is_ok_and(|v| record(&v)) {
                         continue;
                     }
-                    for mut answer in self.handle_line(&line) {
-                        answer.push('\n');
-                        // The peer may be gone; nothing to do about it here.
-                        let _ = writer.lock().unwrap().write_all(answer.as_bytes());
+                    if tx.send((l, Instant::now())).is_err() {
+                        break;
                     }
-                });
-            }
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        // Messages that need no answer are recorded here, at
-                        // once: the workers drop what is queued after stop(),
-                        // and a lost `hello` would read as "npm never started".
-                        if serde_json::from_str::<Value>(&l).is_ok_and(|v| self.record_message(&v)) {
-                            continue;
-                        }
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
                 }
+                Err(_) => break,
             }
-            drop(tx);
-        });
-        Ok(())
-    }
+        }
+        drop(tx);
+    });
+    Ok(())
 }
 
 impl Drop for Server<'_> {
