@@ -101,8 +101,10 @@ groups_other() { # a group the user is in, other than the one of $1
   for x in $(id -G); do [ "$x" != "$g" ] && { echo "$x"; return; }; done
 }
 
-# TEST_YARN1_PART=engine runs only the engine's tests (mutation runs).
-if [ "${TEST_YARN1_PART:-all}" != engine ]; then
+# TEST_YARN1_PART=engine runs only the engine's tests (mutation runs);
+# TEST_YARN1_PART=route only `matchapack yarn` run directly, corepack, the
+# shell route and convert-existing.sh (not the engine's fixture cases).
+if [ "${TEST_YARN1_PART:-all}" = all ]; then
 # --- Plain against plain -----------------------------------------------------
 verify small "$here/fixtures/yarn1-small"
 n=$(classified 'written during both runs')
@@ -277,6 +279,7 @@ copied() { ejson "$1" "y.get('copied', {}).get('$2', 0)"; }
 everify() { local c=$1; shift; verify "$c" --engine yarn1 "$@"; }
 same() { grep -q 'plain vs engine: IDENTICAL' "$work/out"; }
 
+if [ "${TEST_YARN1_PART:-all}" != route ]; then
 everify e-many "$here/fixtures/yarn1-many"
 n=$(ejson e-many "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && [ "$(copied e-many first-copies)" = "$(ejson e-many "y['first']")" ] \
@@ -397,6 +400,8 @@ else echo "SKIP cache filled by another Node (set MATCHAPACK_YARN_PRIME_NODE)"; 
 MATCHAPACK_YARN_HOOK=none everify e-nohook "$here/fixtures/yarn1-many"
 if [ $rc = 1 ] && grep -q 'engine: cloned 0 files, expected at least 1' "$work/out"; then ok "harness: an engine run that cloned nothing fails"
 else bad "harness on a run that cloned nothing (exit $rc)"; fi
+
+fi # TEST_YARN1_PART != route
 
 # --- matchapack yarn run directly: gates, the hook's checks, the report -------
 y1env() {
@@ -624,7 +629,7 @@ else
   n0=$(wc -l < "$work/y1/log/log.jsonl")
   rrun "$d" zsh "$rt/stub:/usr/bin:/bin" 'yarn install; echo "status $?"' STUB_RC=4
   if [ "$(starts)" = 1 ] && [ "$(cat "$work/out")" = "STUB-YARN [install]
-status 4" ] && [ ! -e "$rt/nodes" ] && [ "$(wc -l < "$work/y1/log/log.jsonl")" = "$n0" ]; then ok "route: a Yarn 4 project → plain yarn from its files (no node start, no yarn.js lookup, unlogged), status 4 passed"
+status 4" ] && [ ! -e "$rt/nodes" ] && [ "$(wc -l < "$work/y1/log/log.jsonl")" = "$n0" ]; then ok "route: a Yarn 4 project → plain yarn, decided from files (no node start, nothing printed or logged), status 4 passed"
   else bad "route: Yarn 4 project ($(tr '\n' '|' < "$work/out"); node: $(cat "$rt/nodes" 2>/dev/null))"; fi
   # corepack, as `corepack enable` links it: `yarn` → corepack's dist/yarn.js.
   if [ -n "${ch-}" ] && [ -f "$cpjs" ]; then
