@@ -5,7 +5,8 @@
 # workspace sources, but no node_modules) to <work>/A and <work>/B, runs
 # `npm ci` in A and `matchapack install` in B, then:
 #   1. matchapack diff A B  (paths, types, modes, content hashes, symlink targets,
-#      hidden lockfile as JSON)
+#      hidden lockfile as JSON; --normalize-roots: each tree's own path, where an
+#      install script wrote it into a file name, is written <root>)
 #   2. npm ls --all in B must exit 0
 # The engine in B is matchapack's own switch: MATCHAPACK_ENGINE=inject runs the
 # inject engine (npm's own `npm ci` with the extraction replaced by clones).
@@ -79,12 +80,14 @@ for i in ${MATCHAPACK_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
 if [ "${MATCHAPACK_VERIFY_NOISE:-0}" = 1 ]; then
   cpcow "$src" "$work/A2"
   (cd "$work/A2" && npm "$base" --no-audit --no-fund > "$work/A2.log" 2>&1) || { tail -30 "$work/A2.log"; exit 1; }
-  "$bin" diff "$work/A" "$work/A2" --paths > "$work/noise.txt" || true
+  # With --normalize-roots, as A vs B below: the ignored paths are given in
+  # the form that comparison reports.
+  "$bin" diff --normalize-roots "$work/A" "$work/A2" --paths > "$work/noise.txt" || true
   echo "noise (differs between two npm ci runs, ignored): $(wc -l < "$work/noise.txt" | tr -d ' ') paths"
   while IFS= read -r i; do [ -n "$i" ] && ign+=(--ignore "$i"); done < "$work/noise.txt"
 fi
 echo "== diff A B"
-"$bin" diff "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} > "$work/diff.txt" || rc=1
+"$bin" diff --normalize-roots "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} > "$work/diff.txt" || rc=1
 cat "$work/diff.txt"
 # MATCHAPACK_VERIFY_BYTES=1: the hidden lockfile must also be byte-identical, not
 # only equal as JSON (npm writes every entry in a fixed key order).

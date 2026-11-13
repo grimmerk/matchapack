@@ -354,7 +354,11 @@ it records nothing and shows the log.
   `.yarn-integrity`. Times written during an install differ between two runs:
   `--a-run START:END` / `--b-run` (ns since the epoch) and `--a-cache` /
   `--b-cache` let those through only when both sides wrote them the same way
-  (NOTES, "Yarn 1 harness").
+  (NOTES, "Yarn 1 harness"). `--normalize-roots` writes each tree's own
+  root path, where it appears inside a relative path, as `<root>`: an install
+  script that names a file after its own directory (node-gyp's
+  `build/Release/.deps/<absolute path>/…`) then gives the same path in both
+  trees. Both harnesses compare with it (NOTES, "Tree roots in file names").
 - `scripts/verify-yarn1.sh [--cache warm|empty] <project> [yarn args]`: plain
   Yarn 1 twice on copies of a project with a scratch cache, compared with
   `diff --meta`; exit 0 identical, 3 "plain varies" (with the paths). The

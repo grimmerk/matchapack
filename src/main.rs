@@ -133,6 +133,14 @@ enum Cmd {
         /// With --b-run: the cache B's run used.
         #[arg(long, requires = "b_run")]
         b_cache: Option<PathBuf>,
+        /// In each tree's relative paths, write the tree's own root path
+        /// (absolute, and its realpath) as `<root>` before comparing, so a
+        /// file an install script named after its own directory (node-gyp's
+        /// `.deps/<absolute path>/…`) is the same path in both trees. Only
+        /// the whole root, as whole components; --ignore paths are given as
+        /// reported (with `<root>`). See src/diff.rs, RootForms.
+        #[arg(long)]
+        normalize_roots: bool,
     },
     /// Summarise the trial logs: outcomes, reasons, time, space, verification samples.
     Report {
@@ -700,7 +708,7 @@ fn main() -> Result<()> {
                 println!("skip {p}: {why}");
             }
         }
-        Cmd::Diff { a, b, ignore, limit, paths, classes, meta, a_run, b_run, a_cache, b_cache } => {
+        Cmd::Diff { a, b, ignore, limit, paths, classes, meta, a_run, b_run, a_cache, b_cache, normalize_roots } => {
             let opts = if meta {
                 let parse = |s: Option<String>| {
                     s.as_deref().map(diff::Run::parse).transpose().unwrap_or_else(|e| {
@@ -717,7 +725,7 @@ fn main() -> Result<()> {
             } else {
                 None
             };
-            let r = match diff::diff_with(&a, &b, &ignore, opts.as_ref()) {
+            let r = match diff::diff_with(&a, &b, &ignore, opts.as_ref(), normalize_roots) {
                 Ok(r) => r,
                 Err(e) => {
                     // Not 1: a script must never read an error as "the trees differ".

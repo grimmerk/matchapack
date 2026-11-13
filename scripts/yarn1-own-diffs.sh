@@ -3,8 +3,10 @@
 #
 #   yarn1-own-diffs.sh <plain1-vs-plain2 classes> <plain1-vs-engine classes>
 #
-# Both files hold `matchapack diff --meta --classes` output (`<class>\t<path>`
-# per line). Prints each line of the second that is not in the first: a
+# Both files hold `matchapack diff --meta --normalize-roots --classes` output
+# (`<class>\t<path>` per line; each tree's own root written `<root>`, so a
+# file an install script named after its tree's path is the same path in
+# all three trees). Prints each line of the second that is not in the first: a
 # difference between plain1 and the engine counts as plain Yarn's own
 # variation only when the two plain runs differ on the same path IN THE SAME
 # CLASS (a path whose mtime varies between plain runs does not excuse a

@@ -295,6 +295,22 @@ if [ -f "$x" ] && [ "$(head -1 "$x")" = "$yarnjs" ] && cmp -s "$x" "$work/e-many
   ok "lifecycle scripts get npm_execpath = Yarn's own bin/yarn.js, and it runs Yarn"
 else bad "npm_execpath under the engine ($(head -1 "$x" 2>/dev/null))"; fi
 
+# An install script that names a file after its own directory, as node-gyp's
+# .deps/<absolute path>/... (issue grimmerk/matchapack-private#48): each tree gets another path, so two
+# plain runs differ by path when compared as they are. verify-yarn1.sh
+# compares with --normalize-roots, so those paths match in all three trees.
+# What remains is content: Yarn lists the script's outputs (with the tree's
+# path) in .yarn-integrity, which then differs between the plain runs too:
+# "differs only where plain varies" (exit 3), never ENGINE DIFFERS.
+everify e-rootpath "$here/fixtures/yarn1-rootpath"
+raw=$("$bin" diff "$work/e-rootpath/plain1" "$work/e-rootpath/plain2" --paths 2>/dev/null | grep -c '^node_modules/y1-rootpath/built/')
+m=$work/e-rootpath/engine/node_modules/y1-rootpath/built$work/e-rootpath/engine/node_modules/y1-rootpath/marker
+want=$(printf 'content\tnode_modules/.yarn-integrity')
+if [ $rc = 3 ] && grep -q 'plain vs engine: differs only where plain varies' "$work/out" && [ "${raw:-0}" -gt 0 ] && [ -f "$m" ] \
+  && [ "$(cat "$work/e-rootpath/classes-plain.txt")" = "$want" ] && [ "$(cat "$work/e-rootpath/classes-engine.txt")" = "$want" ]; then
+  ok "a file named after its own tree's path: $raw paths differ between the plain runs as they are, none with the roots normalised; engine as plain (.yarn-integrity content only)"
+else bad "file named after its tree's path (exit $rc, raw plain differences ${raw:-?})"; fi
+
 # A slow answer (the server sleeps between a clone and its fix-up, longer
 # than the hook waits): later copies go to Node, but the slow request is
 # answered, never copied over while its clone is being fixed up.
