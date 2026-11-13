@@ -28,7 +28,6 @@ jobs:
 
   macos:
     runs-on: macos-15
-    # PR C1 added a classic store run and the workspaces cases.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -36,37 +35,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          # npm 11.19.1: an npm major the inject engine (the default) runs
-          # on, and a version in the classic engine's VERIFIED_NPM
-          # (src/wrapper.rs).
+          # npm 11.19.1: an npm major the inject engine runs on
+          # (INJECT_NPM_MAJORS, src/wrapper.rs).
           node-version: 24.22.1
       - name: build
         env:
           RUSTFLAGS: -D warnings
         run: cargo build --release
-      # The classic engine's suites: test-safety.sh and test-wrapper.sh set
-      # MATCHAPACK_ENGINE=classic themselves (they go with that engine, #33
-      # PR C2).
-      - name: safety tests (classic engine)
+      - name: safety tests (tampered lockfiles, symlinked directories, against plain npm ci)
         run: scripts/test-safety.sh "$RUNNER_TEMP/safety"
-      - name: routing tests (classic engine)
+      - name: routing tests (the shell function and `matchapack npm`)
         run: scripts/test-wrapper.sh "$RUNNER_TEMP/wrapper"
-      - name: store tests (records, gc, verify through npm's pacote, locks), default engine
+      - name: store tests (records, gc, verify through npm's pacote, locks)
         run: scripts/test-store.sh "$RUNNER_TEMP/store"
-      - name: store tests, classic engine installs
-        run: MATCHAPACK_ENGINE=classic scripts/test-store.sh "$RUNNER_TEMP/store-classic"
-      - name: harness on the fixtures, classic engine (npm ci vs matchapack)
-        # The same cases as the npm upgrade routine, which starts the tarball
-        # server, requires byte-identical hidden lockfiles, and runs
-        # script-env through the shell function, legacy-peer with
-        # legacy-peer-deps and workspaces with --meta.
-        run: MATCHAPACK_ENGINE=classic scripts/verify-npm.sh --no-record "$RUNNER_TEMP/v"
       - name: inject engine tests (hook rules, gates, npm's failures, lock, record, gid, workspaces flags)
         run: scripts/test-inject.sh "$RUNNER_TEMP/inject"
-      - name: harness on the fixtures, inject engine (the default)
-        # The same list plus the cases only this engine handles (dep-event,
-        # optional-script-fail, per-file clones, odd-tarballs); every case
-        # must have cloned.
+      - name: harness on the fixtures (npm ci vs matchapack)
+        # The npm upgrade routine: starts the tarball server, requires
+        # byte-identical hidden lockfiles, runs script-env through the shell
+        # function, legacy-peer with legacy-peer-deps and workspaces with
+        # --meta; every case must have cloned.
         run: scripts/verify-npm.sh --no-record "$RUNNER_TEMP/vi"
       - name: Yarn 1 harness and engine (plain vs plain, diff --meta, matchapack yarn vs plain)
         # Yarn 1.22.22 into a scratch prefix, not the global npm; the
