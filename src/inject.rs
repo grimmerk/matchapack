@@ -1,4 +1,4 @@
-//! The inject engine, the default (NOTES "Inject engine", "PR C1";
+//! The inject engine, the only one since PR C2 (NOTES "Inject engine", "PR C2";
 //! grimmerk/matchapack-private#33): npm runs its own `npm ci`, in a node child started
 //! here, and only the per-package extraction is replaced by a clone from the
 //! store. This process keeps what must be decided before anything starts
@@ -20,22 +20,18 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// Which engine installs. The inject engine is the default; the classic
-/// engine (matchapack orders every step of `npm ci` itself) is still there
-/// with MATCHAPACK_ENGINE=classic until it is removed (#33, PR C2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Engine {
-    Classic,
-    Inject,
-}
-
-/// From MATCHAPACK_ENGINE: unset, empty or `inject` → Inject; `classic`.
-/// Anything else is an error, never a silent default.
-pub fn engine() -> std::result::Result<Engine, String> {
+/// MATCHAPACK_ENGINE: unset, empty or `inject` (the only engine since PR C2,
+/// #33) is fine. `classic` names the engine PR C2 removed, and anything else
+/// is no engine: an error, never a silent default. `matchapack install` stops
+/// on it; `npm ci` through the shell function runs plain npm with it as the
+/// reason (nothing has been changed, and the tree is npm's either way).
+pub fn engine() -> std::result::Result<(), String> {
     match std::env::var("MATCHAPACK_ENGINE").as_deref() {
-        Err(_) | Ok("") | Ok("inject") => Ok(Engine::Inject),
-        Ok("classic") => Ok(Engine::Classic),
-        Ok(other) => Err(format!("MATCHAPACK_ENGINE={other} is not an engine (classic, inject)")),
+        Err(_) | Ok("") | Ok("inject") => Ok(()),
+        Ok("classic") => Err(
+            "MATCHAPACK_ENGINE=classic: the classic engine was removed in PR C2; unset MATCHAPACK_ENGINE (or set it to inject) for the inject engine".into(),
+        ),
+        Ok(other) => Err(format!("MATCHAPACK_ENGINE={other} is not an engine (inject is the only one)")),
     }
 }
 
@@ -266,8 +262,9 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // about the store depends on who made them (serve.rs).
     for (kind, (n, first)) in &stats.differs {
         match kind.as_str() {
-            // Expected: matchapack's own extractor (the classic engine's)
-            // differs from pacote for some odd tarballs.
+            // Expected: matchapack's own extractor (the classic engine's,
+            // removed in PR C2; its entries stay in older stores) differs
+            // from pacote for some odd tarballs.
             "extractor" => crate::info!("inject: {n} store entries made by matchapack's extractor differed from npm's extraction and were replaced (first: {})", first[0]),
             "changed" => eprintln!(
                 "matchapack: {n} store entries had changed since npm's pacote made them; replaced with npm's extraction (first: {})",

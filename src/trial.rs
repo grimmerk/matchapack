@@ -323,21 +323,23 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     }
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
     println!(
-        "runs {}: installed {}, plain npm {}, script failed {}, failed then npm {}{}",
+        "runs {}: installed {}, plain npm {}, failed then npm {}{}{}",
         runs.len(),
         count("installed"),
         count("declined"),
-        count("script_failed"),
         count("broke"),
-        // Inject engine only: npm itself ran and exited non-zero.
-        if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() }
+        // npm itself ran and exited non-zero (the inject engine).
+        if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() },
+        // A root or dependency script failed in the classic engine's own
+        // post-install step: older logs only (removed in PR C2).
+        if count("script_failed") > 0 { format!(", script failed (classic engine) {}", count("script_failed")) } else { String::new() }
     );
     // Which engine each run went to: the inject engine logs `"engine":
-    // "inject"`, the classic engine (MATCHAPACK_ENGINE=classic; the default
-    // before PR C1) logs no engine.
+    // "inject"`; runs without an engine are the classic engine's (the
+    // default before PR C1, removed in PR C2), from older logs.
     if !runs.is_empty() {
         let n_inject = runs.iter().filter(|r| r["engine"] == "inject").count();
-        println!("engines: inject (the default) {n_inject}, classic {}", runs.len() - n_inject);
+        println!("engines: inject {n_inject}, classic (removed in PR C2; older runs) {}", runs.len() - n_inject);
     }
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] != "installed") {
@@ -351,9 +353,9 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         println!("  {n}× {why}");
     }
     // An npm upgrade turns every install into plain npm without an error:
-    // call it out on its own line, with the versions seen. Either engine's
-    // gate: the classic engine's list of verified minors, or the inject
-    // engine's npm majors.
+    // call it out on its own line, with the versions seen. The inject
+    // engine's gate (npm majors), or in older logs the classic engine's
+    // (its list of verified minors).
     let mut gated: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] == "declined") {
         if r["reason"]

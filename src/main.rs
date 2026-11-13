@@ -2,11 +2,6 @@ mod clone;
 mod diff;
 mod gc;
 mod inject;
-mod lock;
-mod npm;
-mod plan;
-mod platform;
-mod resolve;
 mod serve;
 mod store;
 mod trial;
@@ -15,14 +10,10 @@ mod verify;
 mod wrapper;
 mod yarn1;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use plan::{Kind, PostInstall, Source};
-use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
-use std::time::Instant;
-use store::{Ensure, Integrity, Store};
+use std::path::PathBuf;
+use store::Store;
 
 #[derive(Parser)]
 #[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MATCHAPACK_BUILD"), ")"), about = "Materialize node_modules from package-lock.json with copy-on-write clones")]
@@ -35,38 +26,22 @@ struct Cli {
 enum Cmd {
     /// Run `npm ci` with every package it can clone cloned from the store
     ///
-    /// The inject engine (the default) runs npm's own `npm ci` and replaces
-    /// only the extraction of each package by a clone; npm's arguments go
-    /// after `--`. MATCHAPACK_ENGINE=classic selects the older engine, which
-    /// wipes node_modules, clones every package and runs npm rebuild itself
-    /// (--npm-cache, --mtime and --no-rebuild are its options).
+    /// npm's own `npm ci` runs, and only the extraction of each package is
+    /// replaced by a clone (the inject engine); npm's arguments go after `--`.
     Install {
         #[arg(default_value = ".")]
         dir: PathBuf,
         /// Store root (default $MATCHAPACK_STORE or ~/.cache/matchapack/store).
         #[arg(long)]
         store: Option<PathBuf>,
-        /// Classic engine: npm content cache (default ~/.npm/_cacache). The
-        /// inject engine uses npm's own cache setting.
-        #[arg(long)]
-        npm_cache: Option<PathBuf>,
         /// Default: `dir` on macOS, `file` elsewhere (Linux has no directory reflink).
         #[arg(long, value_enum)]
         clone_mode: Option<clone::Mode>,
-        /// Modification times of placed files: `now` (default) matches npm ci;
-        /// `keep` (classic engine only) is faster and keeps each content's
-        /// store time (see NOTES.md).
-        #[arg(long, value_enum, default_value = "now")]
-        mtime: clone::Mtime,
         /// Run no install scripts (`npm ci --ignore-scripts`).
         #[arg(long)]
         ignore_scripts: bool,
-        /// Classic engine only: skip the npm rebuild step entirely (no
-        /// scripts, no bin links).
-        #[arg(long)]
-        no_rebuild: bool,
-        /// Inject engine (the default): arguments for npm's own `npm ci`,
-        /// after `--` (e.g. `matchapack install . -- --no-audit --omit=dev`).
+        /// Arguments for npm's own `npm ci`, after `--` (e.g. `matchapack
+        /// install . -- --no-audit --omit=dev`).
         #[arg(last = true)]
         npm_args: Vec<String>,
     },
@@ -102,11 +77,6 @@ enum Cmd {
     Init {
         #[arg(value_parser = INIT_SHELLS)]
         shell: Option<String>,
-    },
-    /// Print the classic engine's install plan (counts and every skipped entry with its reason); installs nothing.
-    Plan {
-        #[arg(default_value = ".")]
-        dir: PathBuf,
     },
     /// Compare two project trees. Exit status: 0 identical, 1 they differ, 2 an error (nothing was decided).
     Diff {
@@ -222,44 +192,6 @@ fn default_clone_mode() -> clone::Mode {
     }
 }
 
-fn timed<T>(label: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let t = Instant::now();
-    let r = f();
-    util::record(label, t.elapsed().as_secs_f64());
-    info!("{label}: {:.2}s", t.elapsed().as_secs_f64());
-    r
-}
-
-fn npm_cache_add(root: &Path, urls: &[String]) -> Result<()> {
-    for chunk in urls.chunks(200) {
-        let st = util::npm_cmd()
-            .arg("cache")
-            .arg("add")
-            .args(chunk)
-            .current_dir(root)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .context("running npm cache add")?;
-        if !st.success() {
-            bail!("npm cache add failed ({st})");
-        }
-    }
-    Ok(())
-}
-
-pub struct InstallOpts {
-    pub dir: PathBuf,
-    pub store: PathBuf,
-    pub cacache: PathBuf,
-    pub clone_mode: clone::Mode,
-    pub mtime: clone::Mtime,
-    pub ignore_scripts: bool,
-    pub no_rebuild: bool,
-    /// The arguments after `ci` in the user's `npm ci` (the wrapper accepts
-    /// only passive flags), passed on to npm for the post-install steps.
-    pub npm_args: Vec<String>,
-}
-
 pub struct Summary {
     pub placed: usize,
     pub secs: f64,
@@ -270,7 +202,7 @@ pub struct Summary {
     /// File bytes newly added to the store by this install.
     pub bytes_store_new: u64,
     /// The inject engine's counts (clones by placement, packages npm
-    /// extracted itself and why), for the log; None for the classic engine.
+    /// extracted itself and why), for the log.
     pub inject: Option<serde_json::Value>,
 }
 
@@ -278,272 +210,20 @@ pub struct Summary {
 pub enum InstallError {
     /// Refused before anything in the project changed: npm can take over as is.
     Declined(anyhow::Error),
-    /// A lifecycle script failed; `npm ci` would have failed the same way.
-    Scripts(anyhow::Error),
     /// matchapack itself failed after node_modules was changed.
     Broke(anyhow::Error),
-    /// Inject engine: npm ran and exited with this status, having reported
-    /// the failure itself; `npm ci` would have failed the same way.
+    /// npm ran and exited with this status, having reported the failure
+    /// itself; `npm ci` would have failed the same way.
     Npm { code: i32, inject: serde_json::Value },
 }
 
 impl InstallError {
     pub fn into_inner(self) -> anyhow::Error {
         match self {
-            InstallError::Declined(e) | InstallError::Scripts(e) | InstallError::Broke(e) => e,
+            InstallError::Declined(e) | InstallError::Broke(e) => e,
             InstallError::Npm { code, .. } => anyhow::anyhow!("npm exited with status {code}"),
         }
     }
-}
-
-type Prepared = (PathBuf, lock::Lockfile, plan::Plan, Store, Vec<Integrity>);
-
-/// Everything that can fail without touching the project: plan, packument
-/// resolution, store fill (writes only the store and npm's cache), and the
-/// reflink probe (writes only inside node_modules).
-fn prepare(o: &InstallOpts) -> Result<Prepared> {
-    let root = std::fs::canonicalize(&o.dir)?;
-    // npm's own modules run the root scripts and judge semver ranges; check now,
-    // not after node_modules has been wiped.
-    // The version gate holds for every install, not only the `npm ci` wrapper:
-    // the ideal tree and flags come from npm's internals (ideal-tree.js).
-    wrapper::npm_version_gate().map_err(|e| anyhow::anyhow!(e))?;
-    let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
-    for m in ["node_modules/@npmcli/run-script", "node_modules/semver", "node_modules/@npmcli/arborist", "node_modules/@npmcli/config", "lib/npm.js", "lib/commands/rebuild.js"] {
-        if !npm_dir.join(m).exists() {
-            bail!("npm installation {} has no {m}", npm_dir.display());
-        }
-    }
-    let (lf, mut plan) = timed("plan", || {
-        let mut lf = lock::Lockfile::load(&root)?;
-        let ideal = npm::check_in_sync(&root, &lf)?;
-        if let Some(i) = &ideal {
-            npm::apply_flags(&mut lf, i);
-        }
-        let plan = npm::build_plan(&lf, ideal.as_ref().map(|i| &i.paths))?;
-        Ok((lf, plan))
-    })?;
-    info!("{} lockfile entries skipped on this platform (MATCHAPACK_VERBOSE=1 lists them)", plan.skipped.len());
-    if std::env::var_os("MATCHAPACK_VERBOSE").is_some() {
-        for (p, why) in &plan.skipped {
-            eprintln!("[matchapack] skip {p}: {why}");
-        }
-    }
-    let n = timed("resolve name@version entries", || resolve::resolve(&mut plan, &root, &o.cacache))?;
-    if n > 0 {
-        info!("resolved {n} lockfile entries without `resolved` from packuments");
-    }
-    let store = Store::new(o.store.clone(), o.cacache.clone())?;
-
-    // Make sure every package is in the store.
-    let pkgs: Vec<(Integrity, String)> = {
-        let mut seen = HashMap::new();
-        for e in &plan.entries {
-            if let Kind::Package { integrity: Some(integrity), source: Source::Tarball { url } } = &e.kind {
-                let i = Integrity::parse(integrity)?;
-                seen.entry(i).or_insert_with(|| url.clone());
-            }
-        }
-        seen.into_iter().collect()
-    };
-    let mut extracted_now: Vec<Integrity> = vec![];
-    let (missing, extracted) = timed("store", || {
-        let res: Vec<Result<(Option<String>, bool)>> = pkgs
-            .par_iter()
-            .map(|(i, url)| match store.ensure(i, url)? {
-                Ensure::Present => Ok((None, false)),
-                Ensure::Extracted => Ok((None, true)),
-                Ensure::Missing => Ok((Some(url.clone()), false)),
-            })
-            .collect();
-        let mut missing = vec![];
-        let mut extracted = 0;
-        for (r, (i, _)) in res.into_iter().zip(&pkgs) {
-            let (m, x) = r?;
-            if let Some(u) = m {
-                missing.push(u);
-            }
-            if x {
-                extracted += 1;
-                extracted_now.push(i.clone());
-            }
-        }
-        Ok((missing, extracted))
-    })?;
-    info!("{} distinct packages: {} extracted now, {} not in npm cache", pkgs.len(), extracted, missing.len());
-    if !missing.is_empty() {
-        timed("npm cache add", || npm_cache_add(&root, &missing))?;
-        let by_url: HashMap<&String, &Integrity> = pkgs.iter().map(|(i, u)| (u, i)).collect();
-        for u in &missing {
-            match store.ensure(by_url[u], u)? {
-                Ensure::Missing => bail!("still not in npm cache after `npm cache add`: {u}"),
-                Ensure::Extracted => extracted_now.push(by_url[u].clone()),
-                Ensure::Present => {}
-            }
-        }
-    }
-
-    // Checked as late as possible before the first write (the probe below),
-    // after the slow steps (resolution, store fill), to keep the window in
-    // which something could swap a directory for a symlink short.
-    check_real_paths(&root, &plan)?;
-
-    // Refuse before deleting anything if this filesystem cannot clone.
-    if let Some((i, _)) = pkgs.first() {
-        clone::probe(&store.dir_for(i), &root)?;
-    }
-    Ok((root, lf, plan, store, extracted_now))
-}
-
-/// The part that changes the project: wipe, clone, mtime, scripts.
-fn place(
-    root: &Path,
-    store: &Store,
-    mode: clone::Mode,
-    mtime: clone::Mtime,
-    post: Option<&dyn PostInstall>,
-    plan: &plan::Plan,
-) -> Result<()> {
-    // Wipe what npm ci wipes, the way ci.js does: every entry INSIDE each
-    // node_modules goes, the directory itself stays (it matters when nothing is
-    // installed: npm leaves an empty node_modules, or none if there was none).
-    // The entries are removed in parallel: on APFS the removal is the largest
-    // fixed cost of a reinstall (NOTES "Removal and the fixed cost").
-    timed("remove old node_modules", || {
-        let mut old: Vec<PathBuf> = vec![];
-        for r in &plan.owned_roots {
-            let nm = root.join(r).join("node_modules");
-            let Ok(entries) = std::fs::read_dir(&nm) else { continue };
-            for ent in entries {
-                old.push(ent?.path());
-            }
-        }
-        remove_paths_par(old)
-    })?;
-
-    // Place packages, parents before children; one depth level at a time.
-    timed("clone", || {
-        let mut levels: BTreeMap<usize, Vec<&plan::PlanEntry>> = BTreeMap::new();
-        for e in &plan.entries {
-            levels.entry(lock::depth(&e.install_path)).or_default().push(e);
-        }
-        for (_, es) in levels {
-            es.par_iter().try_for_each(|e| -> Result<()> {
-                let dst = root.join(&e.install_path);
-                std::fs::create_dir_all(dst.parent().unwrap())?;
-                match &e.kind {
-                    Kind::Package { integrity, .. } => {
-                        let integrity = integrity.as_deref().context("unresolved package in plan")?;
-                        let i = Integrity::parse(integrity)?;
-                        let src = store.dir_for(&i);
-                        // Shared, as the inject engine's clones: no
-                        // replacement of the entry while it is cloned.
-                        let _shared = store.entry_lock(&i, false)?;
-                        clone::clone_tree(&src, &dst, mode)
-                    }
-                    Kind::Link { target } => {
-                        let rel = relative(&root.join(target), dst.parent().unwrap());
-                        std::os::unix::fs::symlink(rel, &dst)?;
-                        Ok(())
-                    }
-                }
-            })?;
-        }
-        Ok(())
-    })?;
-
-    // npm ci leaves every extracted file with the install time; a clone carries
-    // the store entry's time. One walk per owned node_modules covers every
-    // placed file exactly once; symlinks (workspace links) are not followed.
-    if mtime == clone::Mtime::Now {
-        let dirs: Vec<PathBuf> = plan
-            .owned_roots
-            .iter()
-            .map(|r| root.join(r).join("node_modules"))
-            .filter(|p| p.is_dir())
-            .collect();
-        let n = timed("touch (mtime now)", || clone::touch_trees(&dirs))?;
-        info!("touched {n} paths");
-    }
-
-    // Scripts, bins, package-manager metadata.
-    if let Some(p) = post {
-        timed("post-install", || p.run(root, plan))?;
-    }
-    Ok(())
-}
-
-fn remove_path(p: &Path) -> Result<()> {
-    let m = std::fs::symlink_metadata(p).with_context(|| format!("removing {}", p.display()))?;
-    let r = if m.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
-    r.with_context(|| format!("removing {}", p.display()))
-}
-
-/// Remove paths in parallel, each as a whole: a directory (a scope directory
-/// included) through remove_dir_all, which never follows a symlink inside the
-/// tree even when one is swapped in during the removal; a symlink as a link.
-/// Not split further: a path queued below a directory could be redirected if
-/// that directory were replaced by a symlink in the meantime.
-fn remove_paths_par(paths: Vec<PathBuf>) -> Result<()> {
-    paths.par_iter().try_for_each(|p| remove_path(p))
-}
-
-/// Every directory matchapack will empty or write into must really be inside
-/// the project. The lockfile paths are plain relative names (checked when the
-/// plan is built), but a directory on the way can be a symlink: the project's
-/// node_modules, a workspace directory, a `file:` dependency directory. Below
-/// `<dir>/node_modules` everything is emptied and recreated by matchapack, so
-/// checking each `<dir>` (its real path inside the project) and its
-/// node_modules (not a symlink) covers every write. In-project link targets
-/// are checked too even when nothing is placed under them: `npm rebuild`
-/// links their bins and chmods the files they point at. Runs right before the
-/// first write (the clone probe), so a refusal leaves the project untouched.
-/// Not covered: another process swapping a directory for a symlink between
-/// this check and the writes (npm ci has the same window).
-fn check_real_paths(root: &Path, plan: &plan::Plan) -> Result<()> {
-    let mut bases: Vec<&str> = plan.owned_roots.iter().map(|s| s.as_str()).collect();
-    for e in &plan.entries {
-        if let Kind::Link { target } = &e.kind {
-            if crate::util::safe_relative(target) && !bases.contains(&target.as_str()) {
-                bases.push(target.as_str());
-            }
-        }
-    }
-    for e in &plan.entries {
-        let base = match e.install_path.find("node_modules/") {
-            Some(0) => "",
-            Some(i) => e.install_path[..i].trim_end_matches('/'),
-            None => continue,
-        };
-        if !bases.contains(&base) {
-            bases.push(base);
-        }
-    }
-    for b in bases {
-        let dir = root.join(b);
-        // A directory that does not exist yet would be created under its
-        // nearest existing ancestor: check that one.
-        let mut existing = dir.as_path();
-        while !existing.exists() {
-            match existing.parent() {
-                Some(p) => existing = p,
-                None => break,
-            }
-        }
-        let real = std::fs::canonicalize(existing).with_context(|| format!("resolving {}", existing.display()))?;
-        if !real.starts_with(root) {
-            bail!("{} resolves outside the project ({}), through a symlink", show(b), real.display());
-        }
-        let nm = dir.join("node_modules");
-        if std::fs::symlink_metadata(&nm).is_ok_and(|m| m.file_type().is_symlink()) {
-            bail!("{}/node_modules is a symlink; npm ci replaces it, matchapack does not", show(b));
-        }
-    }
-    Ok(())
-}
-
-fn show(base: &str) -> &str {
-    if base.is_empty() { "the project directory" } else { base }
 }
 
 const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
@@ -579,76 +259,11 @@ fn shell_from_comm(comm: &str) -> Option<&'static str> {
     INIT_SHELLS.iter().copied().find(|s| *s == name)
 }
 
-pub fn run_install(o: &InstallOpts) -> std::result::Result<Summary, InstallError> {
-    let t0 = Instant::now();
-    let (root, lf, plan, store, extracted_now) = prepare(o).map_err(InstallError::Declined)?;
-    // Before anything is placed: from here on the project holds clones of
-    // these entries, even if the install fails part way.
-    let used: Vec<Integrity> = plan
-        .entries
-        .iter()
-        .filter_map(|e| match &e.kind {
-            Kind::Package { integrity: Some(i), .. } => Integrity::parse(i).ok(),
-            _ => None,
-        })
-        .collect();
-    if let Err(e) = store.record_project(&root, &used) {
-        info!("could not record the project for `matchapack store gc`: {e:#}");
-    }
-    let rebuild = npm::NpmRebuild { lock_raw: lf.raw.clone(), ignore_scripts: o.ignore_scripts, npm_args: o.npm_args.clone() };
-    let post: Option<&dyn PostInstall> = if o.no_rebuild { None } else { Some(&rebuild) };
-    match place(&root, &store, o.clone_mode, o.mtime, post, &plan) {
-        Ok(()) => {
-            let secs = t0.elapsed().as_secs_f64();
-            info!("placed {} entries in {secs:.2}s", plan.entries.len());
-            let bytes_logical = plan
-                .entries
-                .iter()
-                .filter_map(|e| match &e.kind {
-                    Kind::Package { integrity: Some(i), .. } => Integrity::parse(i).ok(),
-                    _ => None,
-                })
-                .map(|i| store.entry_size(&i))
-                .sum();
-            let bytes_store_new = extracted_now.iter().map(|i| store.entry_size(i)).sum();
-            Ok(Summary { placed: plan.entries.len(), secs, store_new: extracted_now.len(), bytes_logical, bytes_store_new, inject: None })
-        }
-        Err(e) if e.downcast_ref::<util::ScriptFailure>().is_some() => Err(InstallError::Scripts(e)),
-        Err(e) => Err(InstallError::Broke(e)),
-    }
-}
-
-/// Relative path from directory `from` to `to` (both absolute, no symlinks resolved).
-fn relative(to: &Path, from: &Path) -> PathBuf {
-    let t: Vec<_> = to.components().collect();
-    let f: Vec<_> = from.components().collect();
-    let common = t.iter().zip(&f).take_while(|(a, b)| a == b).count();
-    let mut out = PathBuf::new();
-    for _ in common..f.len() {
-        out.push("..");
-    }
-    for c in &t[common..] {
-        out.push(c);
-    }
-    out
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild, npm_args: extra }
-            if inject::engine().map_err(|e| anyhow::anyhow!(e))? == inject::Engine::Inject =>
-        {
-            // npm does the whole install; these belong to the classic engine.
-            if no_rebuild {
-                bail!("--no-rebuild is not available with the inject engine, the default (npm ci runs as a whole); MATCHAPACK_ENGINE=classic for the classic engine");
-            }
-            if mtime != clone::Mtime::Now {
-                bail!("--mtime keep is not available with the inject engine, the default; MATCHAPACK_ENGINE=classic for the classic engine");
-            }
-            if npm_cache.is_some() {
-                info!("--npm-cache is ignored by the inject engine: npm's own cache setting decides");
-            }
+        Cmd::Install { dir, store, clone_mode, ignore_scripts, npm_args: extra } => {
+            inject::engine().map_err(|e| anyhow::anyhow!(e))?;
             let mut npm_args = vec!["ci".to_string()];
             if ignore_scripts {
                 npm_args.push("--ignore-scripts".into());
@@ -663,24 +278,6 @@ fn main() -> Result<()> {
                 Err(InstallError::Npm { code, .. }) => std::process::exit(code),
                 Err(e) => return Err(e.into_inner()),
             }
-        }
-        Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild, npm_args } => {
-            if !npm_args.is_empty() {
-                bail!("arguments for npm (after --) are for the inject engine (the default; MATCHAPACK_ENGINE=classic is set): the classic engine reads npm's settings from its config");
-            }
-            let o = InstallOpts {
-                dir,
-                store: default_store(store),
-                cacache: npm_cache.unwrap_or_else(|| home().join(".npm/_cacache")),
-                clone_mode: clone_mode.unwrap_or_else(default_clone_mode),
-                mtime,
-                ignore_scripts,
-                no_rebuild,
-                npm_args: if ignore_scripts { vec!["--ignore-scripts".into()] } else { vec![] },
-            };
-            let r = run_install(&o).map_err(InstallError::into_inner);
-            util::remove_run_dir();
-            r?;
         }
         Cmd::Npm { args } => {
             let code = wrapper::run(args);
@@ -704,27 +301,6 @@ fn main() -> Result<()> {
                 })?,
             };
             print!("{}", init_script(&shell, cfg!(target_os = "macos")));
-        }
-        Cmd::Plan { dir } => {
-            let root = std::fs::canonicalize(&dir)?;
-            let mut lf = lock::Lockfile::load(&root)?;
-            let ideal = npm::check_in_sync(&root, &lf)?;
-            if let Some(i) = &ideal {
-                npm::apply_flags(&mut lf, i);
-            }
-            let plan = npm::build_plan(&lf, ideal.as_ref().map(|i| &i.paths))?;
-            let (mut pkgs, mut links, mut registry) = (0, 0, 0);
-            for e in &plan.entries {
-                match &e.kind {
-                    Kind::Link { .. } => links += 1,
-                    Kind::Package { source: Source::Registry { .. }, .. } => registry += 1,
-                    Kind::Package { .. } => pkgs += 1,
-                }
-            }
-            println!("entries {} ({pkgs} tarball, {registry} name@version, {links} links), skipped {}", plan.entries.len(), plan.skipped.len());
-            for (p, why) in &plan.skipped {
-                println!("skip {p}: {why}");
-            }
         }
         Cmd::Diff { a, b, ignore, limit, paths, classes, meta, a_run, b_run, a_cache, b_cache, normalize_roots } => {
             let opts = if meta {
