@@ -304,11 +304,12 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
     std::fs::remove_dir(from).with_context(|| format!("removing {}", from.display()))
 }
 
-/// The group npm's extraction gives the paths of a package placed at `dst`
-/// (`clone::new_path_gid` of its parent, which npm made).
-fn npm_gid(dst: &Path) -> Result<u32> {
+/// The group (and directory setgid bit) npm's extraction gives the paths of
+/// a package placed at `dst` (`clone::new_paths` of its parent, which npm
+/// made).
+fn npm_gid(dst: &Path) -> Result<clone::NewPaths> {
     let parent = dst.parent().context("the destination has no parent")?;
-    clone::new_path_gid(parent).with_context(|| format!("reading {}", parent.display()))
+    clone::new_paths(parent).with_context(|| format!("reading {}", parent.display()))
 }
 
 /// Whether `p` (not followed) has the group `g`.
@@ -465,8 +466,8 @@ impl<'a> Server<'a> {
         // the destination's afterwards (#41, `finish`): not possible for a
         // group this user is not in, and then npm extracts the package.
         match npm_gid(dst) {
-            Ok(g) if clone::can_give_group(g) => {}
-            Ok(g) => return Err(refused("group", format!("{} needs group {g}, which this user cannot give a file", dst.display()))),
+            Ok(w) if clone::can_give_group(w.gid) => {}
+            Ok(w) => return Err(refused("group", format!("{} needs group {}, which this user cannot give a file", dst.display(), w.gid))),
             Err(e) => return Err(refused("clone-error", format!("{e:#}"))),
         }
         let tmp = self.tmp.path.join(format!("m{}", self.seq.fetch_add(1, Ordering::Relaxed)));
@@ -741,7 +742,7 @@ impl<'a> Server<'a> {
                         return refused("clone-error", format!("{e:#}"));
                     }
                 };
-                if !clone::can_give_group(g) {
+                if !clone::can_give_group(g.gid) {
                     drop_cand();
                     let o = self.finish(i.clone(), extracted, dst, false, true, None, true);
                     discard();
@@ -927,7 +928,7 @@ impl<'a> Server<'a> {
         let settled = match npm_gid(dst).and_then(|g| {
             if !fresh {
                 clone::settle_placed(src, dst, true, Some(g))
-            } else if kind == Kind::Merge || !has_gid(dst, g) {
+            } else if kind == Kind::Merge || !has_gid(dst, g.gid) {
                 clone::settle_placed(src, dst, false, Some(g)).map(|s| clone::Settled { paths: 0, ..s })
             } else {
                 Ok(clone::Settled::default())
@@ -1485,7 +1486,7 @@ mod tests {
             return;
         }
         let nm = fx.root.join("node_modules");
-        let want = clone::new_path_gid(&nm).unwrap();
+        let want = clone::new_paths(&nm).unwrap().gid;
         let Some(other) = other_group(want) else {
             eprintln!("skipped: the user is in one group only");
             return;
@@ -1553,6 +1554,46 @@ mod tests {
         }
         // The store keeps its own group.
         assert_eq!(fs::metadata(fx.store.dir_for(&i).join("lib/deep/x.js")).unwrap().gid(), other);
+    }
+
+    /// Linux: in a setgid directory npm's extraction makes setgid
+    /// directories (the kernel hands the bit on); a directory moved in from
+    /// the store's tmp/ lacks it until it is given it. macOS hands no bit on.
+    #[test]
+    fn directories_get_the_setgid_bit_a_setgid_parent_hands_on() {
+        let fx = Fx::new("serve-setgid");
+        if !fx.can_clone() {
+            return;
+        }
+        let (i, sri) = fx.entry(&[("package.json", 0o644, "{}\n"), ("lib/deep/x.js", 0o644, "x\n")]);
+        let scope = fx.root.join("node_modules/@sg");
+        fs::create_dir_all(&scope).unwrap();
+        let m = fs::metadata(&scope).unwrap().permissions().mode();
+        fs::set_permissions(&scope, fs::Permissions::from_mode(m | libc::S_ISGID as u32)).unwrap();
+        let want = cfg!(target_os = "linux");
+        let bits = |d: &Path| -> Vec<(String, bool)> {
+            walkdir::WalkDir::new(d)
+                .sort_by_file_name()
+                .into_iter()
+                .map(|e| e.unwrap())
+                .filter(|e| e.file_type().is_dir())
+                .map(|e| (e.path().strip_prefix(d).unwrap().display().to_string(), fs::metadata(e.path()).unwrap().mode() & libc::S_ISGID as u32 != 0))
+                .collect()
+        };
+        for mode in modes() {
+            let s = fx.server(mode);
+            let fast = scope.join(format!("fast-{mode:?}"));
+            assert_eq!(placed(s.place_entry(&sri, &fast)).0, Kind::Fast);
+            let merge = scope.join(format!("merge-{mode:?}"));
+            fs::create_dir_all(merge.join("node_modules")).unwrap();
+            assert_eq!(placed(s.place_entry(&sri, &merge)).0, Kind::Merge);
+            for d in [&fast, &merge] {
+                let wrong: Vec<_> = bits(d).into_iter().filter(|(_, b)| *b != want).collect();
+                assert!(wrong.is_empty(), "{mode:?} {}: setgid bit not {want}: {wrong:?}", d.display());
+            }
+            drop(s);
+        }
+        let _ = i;
     }
 
     fn extract_to(o: Outcome, want: &str) -> PathBuf {
