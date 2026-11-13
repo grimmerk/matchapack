@@ -12,8 +12,20 @@
 # detection is the real binary's job, tested by test-wrapper.sh), runs one
 # command, and checks which of the two received it. The install itself is
 # covered by test-wrapper.sh (zsh and bash, with the real binary).
+#
+# With --real (in an image with cargo and network access), fish also runs
+# against the REAL matchapack, built here as scripts/linux-test.sh builds it,
+# with real npm and Yarn 1 on Node 24 (fish is not installed on the macOS
+# host):
+#   docker run --rm -v "$PWD":/src:ro rust:1-bookworm bash /src/scripts/test-shells.sh --real
+# The npm function (`matchapack init fish | source`) must take a bare npm ci
+# through matchapack and pass npm ci's status back. The yarn function is
+# macOS-only, so it is sourced by hand (shell/matchapack-yarn.fish): on Linux
+# `matchapack yarn` is plain Yarn by design, so these cases check the route,
+# the arguments and the status end to end, not clones.
 set -uo pipefail
-apt-get update -qq >/dev/null && apt-get install -y -qq fish zsh >/dev/null
+real=; [ "${1-}" = --real ] && real=1
+apt-get update -qq >/dev/null && apt-get install -y -qq fish zsh ${real:+python3 xz-utils} >/dev/null
 # A failed install would turn every zsh/fish case into "command not found".
 for s in zsh fish; do command -v "$s" >/dev/null || { echo "setup failed: no $s" >&2; exit 2; }; done
 bash --version | head -1; zsh --version; fish --version
@@ -98,6 +110,98 @@ YARN [-h] [install]" "yarn --version; yarn -v; yarn --help; yarn -h install"
   check yarn-no-binary "YARN" "yarn" "$np:$PATH"
   unset os
 done
+
+if [ -n "$real" ]; then
+  echo "== fish with the real matchapack"
+  arch=$(uname -m); case $arch in aarch64) narch=arm64;; x86_64) narch=x64;; esac
+  curl -fsSL "https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-$narch.tar.xz" | tar -xJ -C /opt
+  nodebin=/opt/node-v24.22.1-linux-$narch/bin; export PATH=$nodebin:$PATH
+  mkdir -p /build && cp -r /src /build/src && rm -rf /build/src/target
+  (cd /build/src && CARGO_TARGET_DIR=/build/target cargo build --release -q) || { echo "build failed" >&2; exit 2; }
+  npm i -g --silent yarn@1.22.22 || { echo "setup failed: yarn" >&2; exit 2; }
+  yjs=$(npm root -g)/yarn/bin/yarn.js
+  # (cd first: the server must not keep this shell's directory busy)
+  (cd /src/fixtures/optional-upward/tarballs && python3 -m http.server 48321 --bind 127.0.0.1 >/dev/null 2>&1 &)
+  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/y1-a-1.0.0.tgz && break; sleep 0.2; done
+  # PATH: the real binary, a `yarn` that records how it was started (every
+  # argument; MATCHAPACK, which `matchapack yarn` sets to 0 when it hands
+  # over to Yarn, unset otherwise) and then runs the real Yarn, node and npm.
+  rb=/tmp/real-bin; mkdir -p "$rb"; ln -s /build/target/release/matchapack "$rb/matchapack"
+  printf '#!/bin/sh\n{ printf "MATCHAPACK=%%s" "${MATCHAPACK-unset}"; for a in "$@"; do printf " [%%s]" "$a"; done; echo; } >> /tmp/yarn-calls\nexec node "%s" "$@"\n' "$yjs" > "$rb/yarn"
+  chmod +x "$rb/yarn"
+  export MATCHAPACK_LOG_DIR=/tmp/real-log MATCHAPACK_STORE=/tmp/real-store MATCHAPACK_CONFIG_DIR=/tmp/real-config YARN_DISABLE_SELF_UPDATE_CHECK=true
+  unset MATCHAPACK_ENGINE MATCHAPACK_PATHS MATCHAPACK MATCHAPACK_YARN_JS
+  rsetup='type -q matchapack; and matchapack init fish | source'
+  # rproj <name> npm|yarn [postinstall exit code]: a fresh project.
+  rproj() {
+    local d=/tmp/rp/$1; rm -rf "${d:?}"; mkdir -p "$d"
+    if [ "$2" = npm ]; then cp /src/fixtures/optional-upward/package.json /src/fixtures/optional-upward/package-lock.json "$d/"
+    else cp /src/fixtures/yarn1-small/package.json /src/fixtures/yarn1-small/yarn.lock "$d/"; fi
+    [ -n "${3-}" ] && python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"exit "+sys.argv[2]}; json.dump(d, open(p,"w"))' "$d/package.json" "$3"
+    echo "$d"
+  }
+  # rfish <dir> <fish commands> [yarn]: output in $out; yarn: also source the
+  # macOS yarn function by hand.
+  rfish() {
+    local s=$rsetup; [ "${3-}" = yarn ] && s="$s; source /src/shell/matchapack-yarn.fish"
+    : > /tmp/yarn-calls
+    out=$(cd "$1" && PATH="$rb:$PATH" fish --no-config -c "$s; $2" 2>&1)
+  }
+  logn() { { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl"; } 2>/dev/null || echo 0; }
+  lastrec() { tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
+  rcheck() { # name condition-result detail
+    if [ "$2" = 0 ]; then pass=$((pass+1)); echo "PASS fish real $1"
+    else fail=$((fail+1)); echo "FAIL fish real $1: $3"; printf '%s\n' "$out" | tail -6 | sed 's/^/    /'; fi
+  }
+  rfish /tmp 'type -t npm; functions -q yarn; and echo yarn-defined; or echo no-yarn-function'
+  [ "$out" = "function
+no-yarn-function" ]; rcheck "init: npm is a function, no yarn function on Linux" $? "[$out]"
+
+  d=$(rproj ci npm); n0=$(logn)
+  rfish "$d" 'npm ci --no-audit --no-fund; echo "status $status"'
+  [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"], r["args"]')" = "('installed', ['ci', '--no-audit', '--no-fund'])" ] \
+    && printf '%s\n' "$out" | grep -q '^matchapack: npm ci with clones' && [ -d "$d/node_modules/lc-r" ]
+  rcheck "npm ci → matchapack npm (logged, arguments unchanged), installed, status 0" $? "log $n0 → $(logn)"
+
+  d=$(rproj cmd npm); n0=$(logn)
+  rfish "$d" 'command npm ci --no-audit --no-fund; echo "status $status"'
+  [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(logn)" = "$n0" ] && ! printf '%s\n' "$out" | grep -q '^matchapack' && [ -d "$d/node_modules/lc-r" ]
+  rcheck "command npm ci → plain npm, matchapack never started" $? "log $n0 → $(logn)"
+
+  # A failing npm ci (the root postinstall exits 7): the function returns
+  # what plain npm returns.
+  d=$(rproj failplain npm 7); rfish "$d" 'command npm ci --no-audit --no-fund; echo "status $status"'; want=$(printf '%s\n' "$out" | tail -1)
+  d=$(rproj fail npm 7); n0=$(logn); rfish "$d" 'npm ci --no-audit --no-fund; echo "status $status"'
+  [ "$want" != "status 0" ] && [ "$(printf '%s\n' "$out" | tail -1)" = "$want" ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"]')" = npm_failed ]
+  rcheck "a failing npm ci: status ($want) passes through the function, as plain npm's" $? "plain $want, got $(printf '%s\n' "$out" | tail -1), outcome $(lastrec 'r["outcome"]' 2>/dev/null)"
+
+  # The yarn function, sourced by hand. Arguments with spaces and quotes
+  # reach Yarn unchanged, through `matchapack yarn` (MATCHAPACK=0 seen),
+  # and Yarn uses them (the cache folder named so is made and filled).
+  d=$(rproj yargs yarn)
+  rfish "$d" 'yarn install --frozen-lockfile --cache-folder "/tmp/c d/it'\''s \"q\"" --non-interactive; echo "status $status"' yarn
+  [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(cat /tmp/yarn-calls)" = "MATCHAPACK=0 [install] [--frozen-lockfile] [--cache-folder] [/tmp/c d/it's \"q\"] [--non-interactive]" ] \
+    && [ -d "/tmp/c d/it's \"q\"/v6" ] && [ -f "$d/node_modules/.yarn-integrity" ]
+  rcheck "yarn install with spaced and quoted arguments → matchapack yarn → Yarn, arguments unchanged, installed" $? "calls [$(cat /tmp/yarn-calls)]"
+
+  d=$(rproj ybare yarn); rfish "$d" 'yarn; echo "status $status"' yarn
+  [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(cat /tmp/yarn-calls)" = "MATCHAPACK=0" ] && [ -f "$d/node_modules/.yarn-integrity" ]
+  rcheck "bare yarn → matchapack yarn → Yarn, installed" $? "calls [$(cat /tmp/yarn-calls)]"
+
+  d=$(rproj yflag yarn); rfish "$d" 'yarn --frozen-lockfile --non-interactive; echo "status $status"' yarn
+  [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(cat /tmp/yarn-calls)" = "MATCHAPACK=0 [--frozen-lockfile] [--non-interactive]" ]
+  rcheck "yarn --frozen-lockfile → matchapack yarn → Yarn" $? "calls [$(cat /tmp/yarn-calls)]"
+
+  rfish /tmp 'yarn --version; echo "status $status"' yarn
+  [ "$out" = "1.22.22
+status 0" ] && [ "$(cat /tmp/yarn-calls)" = "MATCHAPACK=unset [--version]" ]
+  rcheck "yarn --version → Yarn directly, matchapack never started" $? "calls [$(cat /tmp/yarn-calls)]"
+
+  d=$(rproj yfailplain yarn 7); rfish "$d" 'command yarn install --frozen-lockfile; echo "status $status"' yarn; want=$(printf '%s\n' "$out" | tail -1)
+  d=$(rproj yfail yarn 7); rfish "$d" 'yarn install --frozen-lockfile; echo "status $status"' yarn
+  [ "$want" != "status 0" ] && [ "$(printf '%s\n' "$out" | tail -1)" = "$want" ] && [ "$(cat /tmp/yarn-calls)" = "MATCHAPACK=0 [install] [--frozen-lockfile]" ]
+  rcheck "a failing yarn install: status ($want) passes through the function and matchapack, as plain Yarn's" $? "plain $want, got $(printf '%s\n' "$out" | tail -1), calls [$(cat /tmp/yarn-calls)]"
+fi
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

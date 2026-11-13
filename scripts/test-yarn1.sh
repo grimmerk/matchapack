@@ -17,7 +17,8 @@
 # --pure-lockfile, --check-files, --force, --offline, --prefer-offline,
 # --ignore-engines, NODE_ENV=production; where plain Yarn refuses, the engine
 # must fail the same way); its gates, the start-up probe, the report,
-# two volumes (a disk image). Needs the release binary, node and Yarn 1
+# two volumes (a disk image); Homebrew's yarn launcher, and (MATCHAPACK_FISH=
+# <fish>) the yarn function under fish. Needs the release binary, node and Yarn 1
 # (MATCHAPACK_YARN_NODE / MATCHAPACK_YARN_JS as in verify-yarn1.sh).
 # Installs from the local tarball server only; never touches the real Yarn
 # cache or ~/.yarnrc (checked).
@@ -878,8 +879,9 @@ open(f, "w").write(s.replace(a, "\"installationMethod\": \"homebrew\""))' "$keg"
 fi
 
 # --- The shell route: the `yarn` function `matchapack init` prints ------------
-# The real binary's init, in zsh and bash; `yarn` on PATH linked to Yarn 1's
-# bin/yarn.js as an npm-global install links it, no MATCHAPACK_YARN_JS. A
+# The real binary's init, in zsh and bash (fish at the end: MATCHAPACK_FISH);
+# `yarn` on PATH linked to Yarn 1's bin/yarn.js as an npm-global install
+# links it, no MATCHAPACK_YARN_JS. A
 # `matchapack` shim on PATH records every start, so "never started" is
 # proved, not assumed.
 rt=$work/route; rm -rf "${rt:?}"; mkdir -p "$rt/bin" "$rt/stub"
@@ -960,6 +962,46 @@ status 4" ] && [ ! -e "$rt/nodes" ] && [ "$(wc -l < "$work/y1/log/log.jsonl")" =
     rrun "$d" zsh "$rt/cpbin:/usr/bin:/bin" 'yarn' COREPACK_HOME="$ch"
     if [ $rc = 0 ] && [ "$(starts)" = 1 ] && grep -q 'files cloned from Yarn' "$work/out" && [ "$(lastlog 'r.get("launcher")')" = corepack ]; then ok "route: bare yarn with yarn linked to corepack → matchapack yarn through corepack, cloned"
     else bad "route: corepack (exit $rc, starts $(starts))"; fi
+  fi
+  # fish (MATCHAPACK_FISH, else a fish on PATH; none is installed on the
+  # owner's Mac, so a standalone fish from fish-shell's releases, unpacked
+  # anywhere, can be named): the real binary's `matchapack init fish`, whose
+  # yarn function routes an install through `matchapack yarn`. Plain
+  # (`command yarn`) against the function on fresh copies, one cache whose
+  # path has a space and a quote (passed in fish's own quoting): identical
+  # trees, clones, the arguments unchanged, and a failing install's status.
+  fish=${MATCHAPACK_FISH:-$(command -v fish 2>/dev/null || true)}
+  if [ -z "$fish" ]; then echo "SKIP route fish: no fish on PATH (set MATCHAPACK_FISH to one)"
+  else
+    fh=$work/fishhome; mkdir -p "$fh"; fc="$work/fish cache 'q'"; rm -rf "${fc:?}"
+    # frun <dir> <fish commands>: output in $work/out, exit in $rc, START:END in $win.
+    frun() {
+      local d=$1 c=$2 s; : > "$rt/starts"; s=$(now_ns)
+      (cd "$d" && env -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK -u GITHUB_TOKEN \
+        PATH="$rt/bin:/usr/bin:/bin" HOME="$fh" XDG_CONFIG_HOME="$fh/.config" XDG_DATA_HOME="$fh/.local/share" \
+        YARN_DISABLE_SELF_UPDATE_CHECK=true MATCHAPACK_STORE="$work/y1/store" MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" \
+        "$fish" --no-config -c "type -q matchapack; and matchapack init fish | source; $c") > "$work/out" 2>&1; rc=$?
+      win=$s:$(now_ns)
+    }
+    yargs="install --frozen-lockfile --non-interactive --cache-folder \"$fc\""
+    frun "$work" 'type -t yarn; type -t npm'
+    if [ $rc = 0 ] && [ "$(cat "$work/out")" = "function
+function" ]; then ok "route fish ($("$fish" --version 2>&1)): the real init defines the yarn and npm functions"
+    else bad "route fish: functions (exit $rc)"; fi
+    d=$(project fprime); frun "$d" "command yarn $yargs"; r0=$rc
+    da=$(project fplain); frun "$da" "command yarn $yargs"; ra=$rc wa=$win sa=$(starts)
+    db=$(project ffunc); frun "$db" "yarn $yargs"; rb=$rc wb=$win sb=$(starts)
+    n=$(lastlog 'r["yarn1"]["cloned"]')
+    "$bin" diff --meta --normalize-roots "$da" "$db" --a-run "$wa" --b-run "$wb" --a-cache "$fc" --b-cache "$fc" > "$work/fish-diff.txt" 2>&1; rd=$?
+    if [ "$r0" = 0 ] && [ "$ra" = 0 ] && [ "$rb" = 0 ] && [ "$sa" = 0 ] && [ "$sb" = 1 ] && [ "$rd" = 0 ] && [ "${n:-0}" -gt 0 ] \
+      && [ "$(lastlog 'r["args"]')" = "['install', '--frozen-lockfile', '--non-interactive', '--cache-folder', \"$fc\"]" ]; then
+      ok "route fish: yarn install → matchapack yarn, arguments unchanged (a cache path with a space and a quote); tree identical to plain (diff --meta); $n files cloned"
+    else bad "route fish: install (prime $r0, plain $ra/$sa starts, function $rb/$sb starts, diff $rd, cloned ${n:-?}, args $(lastlog 'r["args"]' 2>/dev/null))"; grep -v '^      ' "$work/fish-diff.txt" | tail -15; fi
+    d=$(project ffailplain); rootfail "$d"; frun "$d" "command yarn $yargs; echo \"status \$status\""; want=$(tail -1 "$work/out")
+    d=$(project ffail); rootfail "$d"; frun "$d" "yarn $yargs; echo \"status \$status\""
+    if [ "$want" != "status 0" ] && [ "$(tail -1 "$work/out")" = "$want" ] && [ "$(starts)" = 1 ] && [ "$(lastlog 'r["outcome"]')" = yarn_failed ]; then
+      ok "route fish: a failing install's status ($want) passes through the function, as plain Yarn's"
+    else bad "route fish: failing install (plain $want, got $(tail -1 "$work/out"), starts $(starts))"; fi
   fi
 fi
 

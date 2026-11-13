@@ -423,4 +423,7 @@ src/wrapper.rs). When a case differs it records nothing and shows the log.
   default engine, or `MATCHAPACK_ENGINE=classic`).
 - `scripts/test-shells.sh`: the same routing in bash, zsh and fish with stubs,
   in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash
-  /src/scripts/test-shells.sh`).
+  /src/scripts/test-shells.sh`). With `--real`, in `rust:1-bookworm` (it
+  builds the binary and needs the network), fish also runs the real binary
+  with real npm and Yarn 1. `scripts/test-yarn1.sh` runs the macOS yarn
+  function under fish when `MATCHAPACK_FISH` names a fish binary.
