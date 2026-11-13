@@ -105,6 +105,11 @@ esac
 [ -z "$before_then" ] || [ -n "$then" ] || { echo "--before-then needs --then" >&2; exit 2; }
 case $subdir in /*|..|../*|*/..|*/../*) echo "--subdir $subdir: a relative path inside the project" >&2; exit 2 ;; esac
 [ -d "$src/$subdir" ] || { echo "--subdir $subdir: no such directory in $src" >&2; exit 2; }
+# A symlink in the path could lead out of the project: Yarn would then
+# install (and run scripts) in another checkout. The resolved directory must
+# stay inside the resolved project.
+sub_real=$(cd "$src/$subdir" && pwd -P) && src_real0=$(cd "$src" && pwd -P) || exit 2
+case "$sub_real/" in "$src_real0/"*) ;; *) echo "--subdir $subdir resolves outside the project ($sub_real)" >&2; exit 2 ;; esac
 node=${MATCHAPACK_YARN_NODE:-$(command -v node)}
 yarnjs=${MATCHAPACK_YARN_JS:-}
 if [ -z "$yarnjs" ]; then
@@ -158,8 +163,12 @@ now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 # install <name> <cache> <node> <how> [args]: one install in $work/<name>;
 # <how> is plain or engine. Exit status: the install's.
 install() {
-  local name=$1 cache=$2 n=$3 how=$4
+  local name=$1 cache=$2 n=$3 how=$4 tree_real dir_real
   shift 4
+  # Checked in each copy: an absolute symlink copied as is would lead back to
+  # the source or elsewhere.
+  tree_real=$(cd "$work/$name" && pwd -P) && dir_real=$(cd "$work/$name/$subdir" && pwd -P) || return 2
+  case "$dir_real/" in "$tree_real/"*) ;; *) echo "--subdir $subdir resolves outside the copy ($dir_real)" >&2; return 2 ;; esac
   if [ "$how" = plain ]; then
     (cd "$work/$name/$subdir" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true \
       "$n" "$yarnjs" install --frozen-lockfile --non-interactive --cache-folder "$cache" "$@") >> "$work/$name.log" 2>&1
