@@ -25,6 +25,12 @@ unset MATCHAPACK_VERIFY_IGNORE MATCHAPACK_VERIFY_NOISE MATCHAPACK_VERIFY_BASELIN
 # The engine is fixed too: a caller's MATCHAPACK_ENGINE other than inject
 # would make every install an error.
 unset MATCHAPACK_ENGINE
+# The fixtures use a store of their own in the work directory, never the
+# user's, unless the caller names one. verify.sh puts each case's trial log
+# (MATCHAPACK_LOG_DIR) and its trial scope (MATCHAPACK_PATHS) in the work
+# directory too; nothing else is written under ~/.cache/matchapack or
+# ~/.config/matchapack (the run's helper files go to <store>/tmp).
+export MATCHAPACK_STORE=${MATCHAPACK_STORE:-$(cd "$work" && pwd -P)/store}
 export MATCHAPACK_VERIFY_CLONES=some
 echo "npm $npm_version, node $(node -v), $("$bin" --version)"
 

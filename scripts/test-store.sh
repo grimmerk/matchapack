@@ -183,5 +183,20 @@ p7=$(project p7); install "$p7"; irc=$?
 [ $iok = 0 ] && [ $rc = 1 ] && grep -q 'not a directory' "$work/out" && "$bin" store verify --fix > "$work/out" 2>&1 && [ ! -L "$victim" ] && [ -d "$work/moved-entry" ] \
   && ok "verify: a symlinked entry is reported and removed (the link only); an install refuses it" || bad "verify: symlinked entry (install rc=$irc, verify rc=$rc)"
 
+# 13. scripts/verify.sh (verify-sample.sh runs it on real projects against
+#     the real store) leaves no project record for its copies: on exit it
+#     removes the records pointing into its work directory, and only those.
+#     Planted: a record for a project elsewhere, and one whose path only
+#     starts with the work directory's name (a sibling directory).
+vw=$work/vs; rm -rf "${vw:?}" "${work:?}/vs-other"; mkdir -p "$vw" "$store/projects"
+plant() { printf '{"path":"%s","ts":0,"build":"test","entries":[]}\n' "$2" > "$store/projects/$1.json"; }
+plant 0123456789abcdef0123456789abcdef "$work/elsewhere-project"
+plant fedcba9876543210fedcba9876543210 "$work/vs-other/B"
+before=$(ls "$store/projects" | sort)
+"$here/scripts/verify.sh" "$here/fixtures/small" "$vw" > "$work/out" 2>&1; rc=$?
+copies=$(grep -l "\"$vw/" "$store"/projects/*.json 2>/dev/null | wc -l | tr -d ' ')
+[ $rc = 0 ] && grep -q 'RESULT: IDENTICAL' "$work/out" && [ "$copies" = 0 ] && [ "$(ls "$store/projects" | sort)" = "$before" ] \
+  && ok "verify.sh: no project record left for its copies; the other records kept" || bad "verify.sh records: rc=$rc, $copies left for its copies, records $(ls "$store/projects" | wc -l | tr -d ' ') (before $(echo "$before" | wc -l | tr -d ' '))"
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]
