@@ -23,8 +23,24 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: cargo test --release
-      - name: shell routing in bash, zsh and fish (Docker)
+      # Right after cargo test, with the same RUSTFLAGS: the dependencies are
+      # already compiled, so only matchapack itself is (seconds, not the
+      # minutes a fresh container's build takes).
+      - name: build
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo build --release
+      - name: shell routing in bash, zsh and fish (Docker, stubs)
         run: docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash /src/scripts/test-shells.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - name: fish with the real binary (npm ci and the yarn function, real npm and Yarn 1)
+        # On the runner, not in a container: the binary built above, Yarn
+        # 1.22.22 into a scratch prefix under RUNNER_TEMP.
+        run: |
+          sudo apt-get install -y -qq fish zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq fish zsh >/dev/null; }
+          MATCHAPACK_BIN=target/release/matchapack bash scripts/test-shells.sh --real
 
   macos:
     runs-on: macos-15
@@ -56,11 +72,17 @@ jobs:
         # function, legacy-peer with legacy-peer-deps and workspaces with
         # --meta; every case must have cloned.
         run: scripts/verify-npm.sh --no-record "$RUNNER_TEMP/vi"
+      - name: fish, for the real yarn function (Homebrew comes with the runner)
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install fish && fish --version
       - name: Yarn 1 harness and engine (plain vs plain, diff --meta, matchapack yarn vs plain)
         # Yarn 1.22.22 into a scratch prefix, not the global npm; the
         # fixtures install from the local tarball server. The engine's
         # cross-Node case needs a second node (MATCHAPACK_YARN_PRIME_NODE)
         # and is skipped here; the two-volume case makes a disk image.
+        # MATCHAPACK_FISH runs the route cases in fish with the real binary.
         run: |
           npm install --prefix "$RUNNER_TEMP/yarn1" --ignore-scripts --no-audit --no-fund yarn@1.22.22
-          MATCHAPACK_YARN_JS="$RUNNER_TEMP/yarn1/node_modules/yarn/bin/yarn.js" scripts/test-yarn1.sh "$RUNNER_TEMP/y1"
+          MATCHAPACK_FISH="$(command -v fish)" MATCHAPACK_YARN_JS="$RUNNER_TEMP/yarn1/node_modules/yarn/bin/yarn.js" scripts/test-yarn1.sh "$RUNNER_TEMP/y1"

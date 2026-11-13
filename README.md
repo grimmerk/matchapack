@@ -209,8 +209,8 @@ it.
 
 **When it runs plain Yarn instead.** matchapack decides before Yarn starts
 and prints why when:
-- the `yarn` on PATH is neither Yarn 1's npm package nor corepack's launcher
-  (for example Yarn 2+ installed globally, or another launcher;
+- the `yarn` on PATH is neither Yarn 1's npm package, Homebrew's `yarn`
+  (its launcher for that package), nor corepack's launcher (for example Yarn 2+ installed globally, or another launcher;
   `MATCHAPACK_YARN_JS` can name a `yarn.js`), or corepack chose a Yarn that is
   not Yarn 1;
 - there is no `yarn.lock` in the directory or above it;
@@ -407,4 +407,10 @@ times, owner, group and extended attribute names). A new npm major goes into
   the store lock and the tmp cleanup, on a store of its own.
 - `scripts/test-shells.sh`: the same routing in bash, zsh and fish with stubs,
   in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash
-  /src/scripts/test-shells.sh`).
+  /src/scripts/test-shells.sh`). With `--real`, in `rust:1-bookworm` (it
+  builds the binary and needs the network), fish also runs the real binary
+  with real npm and Yarn 1; on a Linux host with fish and Node 24 (the CI
+  job), `MATCHAPACK_BIN=target/release/matchapack scripts/test-shells.sh
+  --real` runs those cases against a built binary: no apt and no build, and
+  Yarn 1 goes into a scratch prefix. `scripts/test-yarn1.sh` runs the macOS
+  yarn function under fish when `MATCHAPACK_FISH` names a fish binary.
