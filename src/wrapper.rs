@@ -50,10 +50,12 @@ pub fn run(args: Vec<String>) -> i32 {
     if !args.first().is_some_and(|a| CI_ALIASES.contains(&a.as_str())) {
         return exec_npm(&args);
     }
+    // Before anything of the install runs (`load_end`: trial::append).
+    let load_start = trial::loadavg();
     let dir = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
     let npm_version = util::npm_version().unwrap_or_default();
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "phases": util::phases() });
+        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "phases": util::phases(), "load_start": load_start });
         if let (Value::Object(m), Value::Object(x)) = (&mut rec, extra) {
             m.extend(x);
         }

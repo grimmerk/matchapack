@@ -115,8 +115,10 @@ check scope-in "project inside the trial scope → matchapack" $r "$d"
 n_inst=$(grep -c '"outcome":"installed"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
 n_decl=$(grep -c '"outcome":"declined"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
 n_nobuild=$(grep -vc '"build":"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null)
-[ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && [ "${n_nobuild:-1}" = 0 ] && r=ok || r=bad
-check log "log.jsonl records installs ($n_inst) and declines ($n_decl), each with the build (missing: ${n_nobuild:-?})" $r "$work/logs"
+# The load average at the start and the end of every run: [1 min, 5 min].
+n_noload=$(( $(grep -vc '"load_start":\[[0-9.]*,[0-9.]*\]' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null) + $(grep -vc '"load_end":\[[0-9.]*,[0-9.]*\]' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null) ))
+[ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && [ "${n_nobuild:-1}" = 0 ] && [ "$n_noload" = 0 ] && r=ok || r=bad
+check log "log.jsonl records installs ($n_inst) and declines ($n_decl), each with the build (missing: ${n_nobuild:-?}) and the load average (missing: $n_noload)" $r "$work/logs"
 
 # 17–19. settings npm applies and matchapack does not → plain npm with the reason
 d=$(new_project strict); CMD="npm ci"; rc=$(run "$d" npm_config_strict_allow_scripts=true)

@@ -1184,6 +1184,8 @@ pub fn cli(args: Vec<String>) -> i32 {
     if !cfg!(target_os = "macos") || std::env::var("MATCHAPACK").as_deref() == Ok("0") || !is_install(&args) {
         return exec_yarn(&args, None);
     }
+    // Before anything of the install runs (`load_end`: trial::append).
+    let load_start = trial::loadavg();
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(_) => return exec_yarn(&args, None),
@@ -1203,7 +1205,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     let yarn_version = found.as_ref().map(|y| y.version.clone()).unwrap_or_default();
     let corepack = found.as_ref().is_ok_and(|y| y.corepack);
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args });
+        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args, "load_start": load_start });
         if corepack {
             rec["launcher"] = json!("corepack");
         }

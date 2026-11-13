@@ -49,7 +49,7 @@ for d in "${dirs[@]}"; do
   # The build verify.sh ran (target/release), which may differ from the one on PATH.
   build=$("$here/target/release/matchapack" --version 2>/dev/null | sed -n 's/.*(\(.*\)).*/\1/p')
   python3 -I - "$logdir/verify.jsonl" "$d" "$work/out.txt" "${build:-unknown}" <<'EOF'
-import json, re, sys, time
+import fcntl, json, re, sys, time
 log, d, outfile, build = sys.argv[1:5]
 out = open(outfile, errors="replace").read()
 m = re.search(r"RESULT: (\w+)", out)
@@ -66,7 +66,11 @@ if result == "DIFFERENT" and paths and all(not (p.startswith("node_modules/") or
 rec = {"ts": time.time(), "build": build, "dir": d, "result": result, "differing": paths[:20],
        "npm_ci_secs": float(t.group(1)) if t else None, "matchapack_secs": float(t.group(2)) if t else None,
        "noise_paths": int(n.group(1)) if n else None, "npm_ls": ls.group(1).strip() if ls else None}
-open(log, "a").write(json.dumps(rec) + "\n")
+# One whole line under the lock matchapack's own log writer takes (src/trial.rs
+# append_line), in case two samplers run at once.
+with open(log, "a") as f:
+    fcntl.flock(f, fcntl.LOCK_EX)
+    f.write(json.dumps(rec) + "\n")
 print("recorded:", rec["result"])
 if rec["result"] == "ERROR":
     print("\n".join("    " + l for l in out.strip().splitlines()[-15:]))
