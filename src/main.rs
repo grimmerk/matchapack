@@ -33,30 +33,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Replace `npm ci`: wipe node_modules, clone every package from the store, run npm rebuild.
+    /// Run `npm ci` with every package it can clone cloned from the store
+    ///
+    /// The inject engine (the default) runs npm's own `npm ci` and replaces
+    /// only the extraction of each package by a clone; npm's arguments go
+    /// after `--`. MATCHAPACK_ENGINE=classic selects the older engine, which
+    /// wipes node_modules, clones every package and runs npm rebuild itself
+    /// (--npm-cache, --mtime and --no-rebuild are its options).
     Install {
         #[arg(default_value = ".")]
         dir: PathBuf,
         /// Store root (default $MATCHAPACK_STORE or ~/.cache/matchapack/store).
         #[arg(long)]
         store: Option<PathBuf>,
-        /// npm content cache (default ~/.npm/_cacache).
+        /// Classic engine: npm content cache (default ~/.npm/_cacache). The
+        /// inject engine uses npm's own cache setting.
         #[arg(long)]
         npm_cache: Option<PathBuf>,
         /// Default: `dir` on macOS, `file` elsewhere (Linux has no directory reflink).
         #[arg(long, value_enum)]
         clone_mode: Option<clone::Mode>,
         /// Modification times of placed files: `now` (default) matches npm ci;
-        /// `keep` is faster and keeps each content's store time (see NOTES.md).
+        /// `keep` (classic engine only) is faster and keeps each content's
+        /// store time (see NOTES.md).
         #[arg(long, value_enum, default_value = "now")]
         mtime: clone::Mtime,
-        /// Pass --ignore-scripts to npm rebuild.
+        /// Run no install scripts (`npm ci --ignore-scripts`).
         #[arg(long)]
         ignore_scripts: bool,
-        /// Skip the npm rebuild step entirely (no scripts, no bin links).
+        /// Classic engine only: skip the npm rebuild step entirely (no
+        /// scripts, no bin links).
         #[arg(long)]
         no_rebuild: bool,
-        /// With MATCHAPACK_ENGINE=inject: arguments for npm's own `npm ci`,
+        /// Inject engine (the default): arguments for npm's own `npm ci`,
         /// after `--` (e.g. `matchapack install . -- --no-audit --omit=dev`).
         #[arg(last = true)]
         npm_args: Vec<String>,
@@ -94,7 +103,7 @@ enum Cmd {
         #[arg(value_parser = INIT_SHELLS)]
         shell: Option<String>,
     },
-    /// Print the install plan (counts and every skipped entry with its reason); installs nothing.
+    /// Print the classic engine's install plan (counts and every skipped entry with its reason); installs nothing.
     Plan {
         #[arg(default_value = ".")]
         dir: PathBuf,
@@ -632,13 +641,13 @@ fn main() -> Result<()> {
         {
             // npm does the whole install; these belong to the classic engine.
             if no_rebuild {
-                bail!("--no-rebuild is not available with MATCHAPACK_ENGINE=inject (npm ci runs as a whole)");
+                bail!("--no-rebuild is not available with the inject engine, the default (npm ci runs as a whole); MATCHAPACK_ENGINE=classic for the classic engine");
             }
             if mtime != clone::Mtime::Now {
-                bail!("--mtime keep is not available with MATCHAPACK_ENGINE=inject");
+                bail!("--mtime keep is not available with the inject engine, the default; MATCHAPACK_ENGINE=classic for the classic engine");
             }
             if npm_cache.is_some() {
-                info!("--npm-cache is ignored with MATCHAPACK_ENGINE=inject: npm's own cache setting decides");
+                info!("--npm-cache is ignored by the inject engine: npm's own cache setting decides");
             }
             let mut npm_args = vec!["ci".to_string()];
             if ignore_scripts {
@@ -657,7 +666,7 @@ fn main() -> Result<()> {
         }
         Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild, npm_args } => {
             if !npm_args.is_empty() {
-                bail!("arguments for npm (after --) need MATCHAPACK_ENGINE=inject; the classic engine reads npm's settings from its config");
+                bail!("arguments for npm (after --) are for the inject engine (the default; MATCHAPACK_ENGINE=classic is set): the classic engine reads npm's settings from its config");
             }
             let o = InstallOpts {
                 dir,

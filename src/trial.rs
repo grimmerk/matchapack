@@ -332,6 +332,13 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         // Inject engine only: npm itself ran and exited non-zero.
         if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() }
     );
+    // Which engine each run went to: the inject engine logs `"engine":
+    // "inject"`, the classic engine (MATCHAPACK_ENGINE=classic; the default
+    // before PR C1) logs no engine.
+    if !runs.is_empty() {
+        let n_inject = runs.iter().filter(|r| r["engine"] == "inject").count();
+        println!("engines: inject (the default) {n_inject}, classic {}", runs.len() - n_inject);
+    }
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] != "installed") {
         let why = r["reason"].as_str().unwrap_or("?");
@@ -344,17 +351,22 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         println!("  {n}× {why}");
     }
     // An npm upgrade turns every install into plain npm without an error:
-    // call it out on its own line, with the versions seen.
+    // call it out on its own line, with the versions seen. Either engine's
+    // gate: the classic engine's list of verified minors, or the inject
+    // engine's npm majors.
     let mut gated: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] == "declined") {
-        if r["reason"].as_str().is_some_and(|w| w.ends_with("has not been verified against npm ci")) {
+        if r["reason"]
+            .as_str()
+            .is_some_and(|w| w.contains("has not been verified against npm ci") || w.contains(": the inject engine (the default) runs on npm"))
+        {
             *gated.entry(r["npm"].as_str().unwrap_or("?").to_string()).or_default() += 1;
         }
     }
     if !gated.is_empty() {
         let list: Vec<String> = gated.iter().map(|(v, n)| format!("npm {v}: {n}")).collect();
         println!(
-            "npm version gate: {} runs went to plain npm ({}); run scripts/verify-npm.sh with that npm on PATH",
+            "npm version gate: {} runs went to plain npm ({}); run scripts/verify-npm.sh with that npm on PATH (both engines' harness)",
             gated.values().sum::<usize>(),
             list.join(", ")
         );

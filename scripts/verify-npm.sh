@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# The npm upgrade routine (#11): run the harness on the npm on PATH, and when
-# every case is identical to `npm ci`, record its major.minor in
-# <config dir>/npm-verified (~/.config/matchapack, or $MATCHAPACK_CONFIG_DIR),
-# which matchapack's version gate reads next to the built-in VERIFIED_NPM.
+# The npm upgrade routine (#11): run the harness on the npm on PATH. With the
+# classic engine (MATCHAPACK_ENGINE=classic), when every case is identical to
+# `npm ci`, record its major.minor in <config dir>/npm-verified
+# (~/.config/matchapack, or $MATCHAPACK_CONFIG_DIR), which the classic
+# engine's version gate reads next to the built-in VERIFIED_NPM.
 #   verify-npm.sh [--no-record] <work-dir> [extra project dir...]
 # Cases: the fixtures (hidden lockfile byte-identical; rootpath writes a file
 # named after its own directory), script-env through the
 # shell function, legacy-peer with legacy-peer-deps, then each extra project
 # (a real repository is worth adding: the fixtures are small). CI runs it with
 # --no-record.
-# MATCHAPACK_ENGINE=inject runs the same cases with the inject engine, plus the
-# cases only it handles (dep-event), requires every case to have cloned
-# something, and never records: npm-verified is the classic engine's gate.
+# The engine is matchapack's default, the inject engine: the same cases plus
+# the ones only it handles (dep-event, …), every case required to have cloned
+# something, and nothing recorded (npm-verified is the classic engine's gate;
+# the inject engine's is by npm major, INJECT_NPM_MAJORS in src/wrapper.rs).
+# MATCHAPACK_ENGINE=classic runs the classic engine and records on success.
 set -uo pipefail
 record=1
 if [ "${1-}" = --no-record ]; then record=0; shift; fi
@@ -26,12 +29,12 @@ cfg=${MATCHAPACK_CONFIG_DIR:-$HOME/.config/matchapack}
 # What is certified is fixed here, never inherited: a caller's settings that
 # loosen the comparison (ignored paths, noise filtering, another baseline,
 # mtime handling) or route the install differently do not apply.
-unset MATCHAPACK_VERIFY_IGNORE MATCHAPACK_VERIFY_NOISE MATCHAPACK_VERIFY_BASELINE MATCHAPACK_VERIFY_MTIME MATCHAPACK_VERIFY_VIA MATCHAPACK_VERIFY_BYTES MATCHAPACK_VERIFY_CLONES
-engine=${MATCHAPACK_ENGINE:-classic}
+unset MATCHAPACK_VERIFY_IGNORE MATCHAPACK_VERIFY_NOISE MATCHAPACK_VERIFY_BASELINE MATCHAPACK_VERIFY_MTIME MATCHAPACK_VERIFY_VIA MATCHAPACK_VERIFY_BYTES MATCHAPACK_VERIFY_CLONES MATCHAPACK_VERIFY_META
+engine=${MATCHAPACK_ENGINE:-inject}
 case $engine in
   classic) ;;
   inject)
-    if [ $record = 1 ]; then echo "MATCHAPACK_ENGINE=inject: nothing is recorded (npm-verified is the classic engine's gate)"; record=0; fi
+    if [ $record = 1 ]; then echo "inject engine: nothing is recorded (npm-verified is the classic engine's gate; MATCHAPACK_ENGINE=classic to record)"; record=0; fi
     # A run in which the hook never fired would pass without testing it.
     export MATCHAPACK_VERIFY_CLONES=some ;;
   *) echo "MATCHAPACK_ENGINE=$engine is not an engine (classic, inject)" >&2; exit 2 ;;
@@ -63,10 +66,14 @@ case_() { # name env-assignments... -- source [matchapack install args...]
 }
 # rootpath: an install script names a file after its own directory, so A and
 # B have another path there; verify.sh's --normalize-roots must make them the
-# same (issue grimmerk/matchapack-private#48).
+# same (issue grimmerk/matchapack-private#48). workspaces: `npm ci` at the root of an npm workspaces
+# project (links, a workspace's own nested node_modules and .bin, an install
+# script), also compared with --meta (times outside the runs, uid, gid,
+# xattr names).
 for f in small stale-flags optional-upward optional-engines legacy-peer bundled rootpath; do
   case_ "$f" -- "$here/fixtures/$f"
 done
+case_ workspaces MATCHAPACK_VERIFY_META=1 -- "$here/fixtures/workspaces"
 if [ $engine = inject ]; then
   # The root's predependencies / dependencies / postdependencies scripts,
   # which npm ci runs and the classic engine does not (NOTES "Inject engine").
@@ -139,7 +146,11 @@ if [ $fail != 0 ]; then
     r=$(update remove) || { echo "could NOT take $mm back out of $cfg/npm-verified: remove that line by hand" >&2; exit 3; }
     [ "$r" = removed ] && echo "removed $mm from $cfg/npm-verified (recorded by an earlier run)"
   fi
-  echo "npm $npm_version: NOT verified; matchapack keeps handing npm ci to npm on it"
+  if [ $engine = classic ]; then
+    echo "npm $npm_version: NOT verified; the classic engine keeps handing npm ci to npm on it"
+  else
+    echo "npm $npm_version: the inject engine is NOT identical to npm ci here (see the failing cases)"
+  fi
   exit 1
 fi
 if [ $record = 0 ]; then

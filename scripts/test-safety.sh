@@ -6,6 +6,12 @@ work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matcha
 pass=0; fail=0
 # Run on any npm: a version-gate refusal would pass the "refused" cases vacuously.
 export MATCHAPACK_NPM_VERSIONS=any
+# The classic engine's cases, whatever the caller set: the inject engine
+# (the default since PR C1) does not plan, gate or place this way; its own
+# cases are in scripts/test-inject.sh. These go with the classic engine (#33,
+# PR C2; which ones to port: NOTES "PR C1").
+export MATCHAPACK_ENGINE=classic
+
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; }
 

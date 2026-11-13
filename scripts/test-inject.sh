@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Inject engine tests (MATCHAPACK_ENGINE=inject), end to end with the release
-# binary and the npm on PATH:   test-inject.sh <work-dir>
+# Inject engine tests (the default engine; MATCHAPACK_ENGINE=inject is set
+# here), end to end with the release binary and the npm on PATH:
+#   test-inject.sh <work-dir>
 # What the fixture harness cannot show: that the hook really cloned, that a
 # disabled hook and a store miss still give npm ci's tree, the gates before
 # npm starts, that npm's own failures stay npm's, the store lock and the
@@ -10,11 +11,16 @@ set -uo pipefail
 work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
+# The projects sit in a directory of the user's own group (macOS: new paths
+# take their directory's group). Under a directory of a group the user is
+# not in (macOS /tmp: wheel), placements moved in from the store's tmp/ are
+# left to npm, which changes the counts below (#41; case 4f covers it).
+chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs MATCHAPACK_PATHS=$work
 export MATCHAPACK_ENGINE=inject
 unset MATCHAPACK_INJECT_HOOK MATCHAPACK_INJECT_THREADS MATCHAPACK
 store=$work/store
-rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/store-classic" "${work:?}/store-odd"
+rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/store-classic" "${work:?}/store-odd" "${work:?}/store-gid" "${work:?}/gid-projects"
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -6; }
@@ -123,7 +129,7 @@ MATCHAPACK_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p"
 #     use, and then recorded as known to this pacote and tar.
 cs=$work/store-classic
 p=$(project classic-fill small)
-MATCHAPACK_STORE=$cs env -u MATCHAPACK_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1 && [ -z "$(ls "$cs/made-by" 2>/dev/null)" ] || bad "classic fill"
+MATCHAPACK_STORE=$cs MATCHAPACK_ENGINE=classic "$bin" install "$p" --no-rebuild > "$work/out" 2>&1 && [ -z "$(ls "$cs/made-by" 2>/dev/null)" ] || bad "classic fill"
 p=$(project classic-then-inject small)
 MATCHAPACK_STORE=$cs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] \
   && [ "$(cat "$cs/made-by/sha512/"*/* | sort -u)" = "$want_key" ] && same "$ref_small" "$p" \
@@ -176,12 +182,62 @@ MATCHAPACK_STORE=$cs MATCHAPACK_INJECT_CHECK=1000000 install "$p" && [ "$(checke
 os=$work/store-odd
 ref_odd=$(project ref-odd odd-tarballs); (cd "$ref_odd" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci on odd-tarballs"
 p=$(project odd-classic odd-tarballs)
-MATCHAPACK_STORE=$os env -u MATCHAPACK_ENGINE "$bin" install "$p" --no-rebuild > "$work/out" 2>&1
+MATCHAPACK_STORE=$os MATCHAPACK_ENGINE=classic "$bin" install "$p" --no-rebuild > "$work/out" 2>&1
 ! same "$ref_odd" "$p" || bad "odd-tarballs: the classic engine was expected to differ (lc-dup/run.sh)"
 p=$(project odd-inject odd-tarballs)
 MATCHAPACK_STORE=$os install "$p" && [ "$(cloned)" = 2 ] && same "$ref_odd" "$p" \
   && grep -q "1 store entries made by matchapack's extractor differed from npm's extraction and were replaced (first: .*run.sh: mode 644, the tarball gives 755)" "$work/out" \
   && ok "a path listed twice: the classic engine's entry is replaced by pacote's before use, tree identical" || bad "odd-tarballs inject: cloned $(cloned)"
+
+# 4f. #41: a store under another group than the project. npm's extraction
+#     gives every path the project's group (macOS: the directory's; Linux:
+#     the process's, or a setgid directory's); placements moved in from the
+#     store's tmp/ (merges, checked entries) kept the store's. `diff --meta`
+#     against plain npm ci, gid class only (the times differ by design):
+#     an empty store (fills), then every entry compared, then the classic
+#     engine on the same store (its clones are made at the destination).
+#     The projects sit in a directory of the user's own group, the store in
+#     another group the user is in (setgid, so Linux hands it on too).
+gs=$work/store-gid; gp=$work/gid-projects
+mine=$(id -g)
+other_gid=$(python3 -c "import os;print(next((g for g in os.getgroups() if g!=$mine),''))")
+gid_diffs() { "$bin" diff --meta "$1" "$2" > "$work/meta" 2>&1; grep -Eo '^  gid: [0-9]+' "$work/meta" | grep -Eo '[0-9]+$'; }
+gproject() { local d=$gp/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo "$d"; }
+if [ -z "$other_gid" ]; then
+  echo "SKIP store under another group: the user is in one group only"
+else
+  rm -rf "${gp:?}"; mkdir -p "$gp" "$gs"; chgrp "$mine" "$gp"; chgrp "$other_gid" "$gs"; chmod g+s "$gs"
+  ref_gid=$(gproject ref); (cd "$ref_gid" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci for the gid reference"
+  p=$(gproject fill)
+  MATCHAPACK_STORE=$gs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(gid_diffs "$ref_gid" "$p")" = 0 ] && same "$ref_gid" "$p" \
+    && [ "$(stat -f %g "$gs/v2" 2>/dev/null || stat -c %g "$gs/v2")" = "$other_gid" ] \
+    && ok "store under group $other_gid, empty: all $n_small cloned, every path has npm ci's group ($(grep -Eo '[0-9]+ paths regrouped' "$work/out"))" \
+    || bad "gid, empty store: cloned $(cloned), $(gid_diffs "$ref_gid" "$p") paths differ in group"
+  p=$(gproject checked)
+  MATCHAPACK_STORE=$gs MATCHAPACK_INJECT_CHECK=all install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] && [ "$(gid_diffs "$ref_gid" "$p")" = 0 ] \
+    && ok "store under group $other_gid, every entry compared: all cloned, every path has npm ci's group" || bad "gid, checked: cloned $(cloned), $(gid_diffs "$ref_gid" "$p") paths differ in group"
+  p=$(gproject classic)
+  MATCHAPACK_STORE=$gs MATCHAPACK_ENGINE=classic "$bin" install "$p" > "$work/out" 2>&1 && [ "$(gid_diffs "$ref_gid" "$p")" = 0 ] \
+    && ok "store under group $other_gid, classic engine: every path has npm ci's group" || bad "gid, classic: $(gid_diffs "$ref_gid" "$p") paths differ in group"
+  # A project directory of a group the user is NOT in (macOS: /tmp's wheel):
+  # npm's files get it from the kernel, matchapack cannot lchown to it. A
+  # clone made at the destination gets it too; a placement that would be
+  # moved in from tmp/ (a merge) is extracted by npm instead.
+  fd=$work.foreign; rm -rf "${fd:?}"; mkdir -p "$fd"
+  fgid=$(stat -f %g "$fd" 2>/dev/null || stat -c %g "$fd")
+  if python3 -c "import os,sys;sys.exit(0 if $fgid in os.getgroups() or $fgid==os.getegid() or os.geteuid()==0 else 1)"; then
+    echo "SKIP a project of a group the user is not in: $fd's group $fgid is one of the user's"
+  else
+    fproj() { local d=$fd/$1; mkdir -p "$d"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo "$d"; }
+    fref=$(fproj ref); (cd "$fref" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci for the foreign-group reference"
+    for chk in off all; do
+      p=$(fproj "p-$chk")
+      MATCHAPACK_STORE=$gs MATCHAPACK_INJECT_CHECK=$chk install "$p" && [ "$(gid_diffs "$fref" "$p")" = 0 ] && same "$fref" "$p" && [ "$(cloned)" -gt 0 ] \
+        && ok "a project of group $fgid, which the user is not in (checks $chk): identical to npm ci, gid included (cloned $(cloned), extracted by npm $(by_npm): $(grep -Eo 'group [0-9]+' "$work/out" | head -1 || true))" \
+        || bad "gid, foreign group, checks $chk: cloned $(cloned), by npm $(by_npm), $(gid_diffs "$fref" "$p") paths differ in group"
+    done
+  fi
+fi
 
 # 5. The project is recorded with the entries it cloned, so gc keeps them.
 p=$(project recorded small); install "$p"
@@ -234,11 +290,20 @@ MATCHAPACK_ENGINE=bogus wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
 # 9. Options of the other engine are refused, not ignored.
 p=$(project flags small)
 "$bin" install "$p" --no-rebuild > "$work/out" 2>&1; rc=$?
-[ $rc != 0 ] && grep -q 'not available with MATCHAPACK_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "--no-rebuild is refused with the inject engine" || bad "--no-rebuild: rc=$rc"
-env -u MATCHAPACK_ENGINE "$bin" install "$p" -- --no-audit > "$work/out" 2>&1; rc=$?
-[ $rc != 0 ] && grep -q 'need MATCHAPACK_ENGINE=inject' "$work/out" && [ ! -e "$p/node_modules" ] && ok "npm arguments are refused by the classic engine" || bad "classic with npm args: rc=$rc"
-env -u MATCHAPACK_ENGINE "$bin" install "$p" > "$work/out" 2>&1; rc=$?
-[ $rc = 0 ] && ! grep -q 'inject:' "$work/out" && grep -q 'post-install' "$work/out" && ok "without MATCHAPACK_ENGINE the classic engine installs" || bad "default engine: rc=$rc"
+[ $rc != 0 ] && grep -q 'not available with the inject engine' "$work/out" && [ ! -e "$p/node_modules" ] && ok "--no-rebuild is refused with the inject engine" || bad "--no-rebuild: rc=$rc"
+MATCHAPACK_ENGINE=classic "$bin" install "$p" -- --no-audit > "$work/out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'are for the inject engine' "$work/out" && [ ! -e "$p/node_modules" ] && ok "npm arguments are refused by the classic engine" || bad "classic with npm args: rc=$rc"
+MATCHAPACK_ENGINE=classic "$bin" install "$p" > "$work/out" 2>&1; rc=$?
+[ $rc = 0 ] && ! grep -q 'inject:' "$work/out" && grep -q 'post-install' "$work/out" && ok "MATCHAPACK_ENGINE=classic: the classic engine installs" || bad "classic engine: rc=$rc"
+# 9b. The default (PR C1): without MATCHAPACK_ENGINE, or with it empty, the
+#     inject engine installs, directly and through the shell function.
+p=$(project default small)
+env -u MATCHAPACK_ENGINE "$bin" install "$p" -- --no-audit --no-fund > "$work/out" 2>&1; rc=$?
+[ $rc = 0 ] && [ "$(cloned)" = "$n_small" ] && ! grep -q 'post-install' "$work/out" && same "$ref_small" "$p" \
+  && ok "without MATCHAPACK_ENGINE the inject engine installs" || bad "default engine: rc=$rc"
+(export MATCHAPACK_ENGINE=; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q 'npm ci with clones from the store' "$work/out" && [ "$(last_log "r['outcome'], r['engine']")" = "installed inject" ] \
+  && ok "MATCHAPACK_ENGINE empty, through the shell function: the inject engine" || bad "default engine wrapper: rc=$rc"
 
 # 10. npm's failures are npm's: same status, said once, nothing retried.
 p=$(project outofsync small "d['dependencies']['left-pad']='1.3.0'"); mkdir -p "$p/node_modules/sentinel"
@@ -270,7 +335,7 @@ cp "$real_npm13/bin/npm-cli.js" "$fake13/npm/bin/"; ln -s "$real_npm13/lib" "$fa
 ln -s ../npm/bin/npm-cli.js "$fake13/bin/npm"
 p=$(project gate-13 small)
 (unset MATCHAPACK_NPM_VERSIONS; PATH=$fake13/bin:$PATH; MATCHAPACK_CONFIG_DIR=$work/cfg-empty wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
-[ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && last_log "r['reason']" | grep -q 'npm 13.0.0: the inject engine runs on npm' \
+[ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && last_log "r['reason']" | grep -q 'npm 13.0.0: the inject engine (the default) runs on npm' \
   && same "$ref_small" "$p" \
   && ok "version gate: npm 13 handed to plain npm, tree identical" || bad "version gate 13: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
 
@@ -364,6 +429,56 @@ print(json.dumps(r))" >> "$work/logs/log.jsonl"
   && grep -q "2 differing entries made by the classic engine's extractor (expected for odd tarballs); first: sha512-aa" "$work/out" \
   && grep -q "1 differing entries made under another npm's pacote/tar" "$work/out" \
   && ok "report: entries compared with npm's extraction, and the differing ones by kind" || bad "report: store checks ($(grep 'compared with' "$work/out"))"
+
+# 14. npm's own flags on a workspaces project (fixtures/workspaces): the
+#     inject engine passes every flag to npm, so workspace selection, omit
+#     and the install strategies are live paths. Each: plain npm ci and the
+#     inject engine with the same flags on fresh copies, compared with
+#     `diff --meta --normalize-roots` (times written during each run may
+#     differ; everything else, mtimes outside the runs, uid, gid and xattr
+#     names included, must be equal), and the same exit status. The clone
+#     count and npm's own extractions are printed with each case. The
+#     classic engine declines every one of these up front, with a reason.
+ns() { python3 -c 'import time;print(time.time_ns())'; }
+wsproj() { local d=$work/$1; rm -rf "${d:?}"; cp -R -p "$here/fixtures/workspaces" "$d"; echo "$d"; }
+ws_case() { # name flags [VAR=value]  (sets ws_cloned, ws_by_npm)
+  local name=$1 flags=$2 envs=${3-} a b ta tb tc wa wb
+  a=$(wsproj "ws-$name-npm"); b=$(wsproj "ws-$name-inject")
+  ta=$(ns); (cd "$a" && env $envs npm ci --no-audit --no-fund $flags > "$work/ws-ref.out" 2>&1); wa=$?
+  tb=$(ns); env $envs "$bin" install "$b" -- --no-audit --no-fund $flags > "$work/out" 2>&1; wb=$?
+  tc=$(ns)
+  ws_cloned=$(cloned); ws_by_npm=$(by_npm)
+  "$bin" diff --meta --normalize-roots --a-run "$ta:$tb" --b-run "$tb:$tc" "$a" "$b" > "$work/meta" 2>&1
+  if [ $wa = $wb ] && grep -q '^RESULT: IDENTICAL' "$work/meta"; then
+    ok "workspaces, npm ci $flags${envs:+ ($envs)}: identical to plain npm ci with --meta (status $wa; cloned ${ws_cloned:-none}, extracted by npm ${ws_by_npm:-none})"
+  else
+    bad "workspaces, npm ci $flags${envs:+ ($envs)}: status npm $wa, inject $wb; $(grep -E '^(only|differ|RESULT)|: [1-9]' "$work/meta" | tr '\n' ' ')"
+  fi
+  # The classic engine: declined before anything changes, with a reason
+  # (MATCHAPACK_NO_FALLBACK=1: exit 3 instead of running npm).
+  if [ "$name" != root ]; then
+    local c; c=$(wsproj "ws-$name-classic")
+    (cd "$c" && env $envs MATCHAPACK_ENGINE=classic MATCHAPACK_NO_FALLBACK=1 "$bin" npm ci --no-audit --no-fund $flags > "$work/classic.out" 2>&1); local rc=$?
+    if [ $rc = 3 ] && grep -q 'not handled, left unchanged (.\+)' "$work/classic.out" && [ ! -e "$c/node_modules" ]; then
+      ok "workspaces, npm ci $flags${envs:+ ($envs)}, classic engine: declined ($(sed -n 's/.*left unchanged (\(.*\))/\1/p' "$work/classic.out" | cut -c1-70))"
+    else
+      bad "workspaces, npm ci $flags${envs:+ ($envs)}, classic engine: not declined (rc=$rc: $(tail -1 "$work/classic.out"))"
+    fi
+  fi
+}
+# The root: every package cloned, npm extracting none (the fixture's ten
+# package directories: two nested in a workspace, one in a dependency).
+ws_case root ""
+[ "$ws_cloned" = 10 ] && [ "$ws_by_npm" = 0 ] && ok "workspaces root: all 10 packages cloned, none extracted by npm" || bad "workspaces root: cloned $ws_cloned, by npm $ws_by_npm"
+ws_case w-one "-w ws-app"
+ws_case w-two "--workspace=ws-app --workspace=ws-lib"
+ws_case workspaces "--workspaces"
+ws_case workspaces-noroot "--workspaces --include-workspace-root=false"
+ws_case omit-dev "--omit=dev"
+ws_case node-env-prod "" NODE_ENV=production
+ws_case nested "--install-strategy=nested"
+ws_case shallow "--install-strategy=shallow"
+ws_case linked "--install-strategy=linked"
 
 # 13. npm 12: a tarball npm refuses (allow-remote=none, its default) is
 #     refused the same way with the hook, which is never asked.
