@@ -1,7 +1,6 @@
-//! Small shared helpers: quiet-aware logging, the one way to start npm, and the
-//! error type that marks a failed lifecycle script.
+//! Small shared helpers: quiet-aware logging, phase times, where npm is
+//! installed, matchapack's run and settings directories.
 
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUIET: AtomicBool = AtomicBool::new(false);
@@ -44,51 +43,6 @@ macro_rules! info {
         }
     };
 }
-
-/// Every npm that matchapack starts goes through here. `MATCHAPACK=0` tells any
-/// npm wrapper (shell function, PATH shim) to pass straight through, so a
-/// wrapper can never recurse into matchapack.
-pub fn npm_cmd() -> Command {
-    let mut c = Command::new("npm");
-    c.env("MATCHAPACK", "0").envs(npm_env());
-    c
-}
-
-/// `node` for matchapack's helpers that load npm's own modules, with the same
-/// environment as `npm_cmd`.
-pub fn node_cmd() -> Command {
-    let mut c = Command::new("node");
-    c.env("MATCHAPACK", "0").envs(npm_env());
-    c
-}
-
-static NPM_ENV: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
-
-/// npm settings given on the command line (`--legacy-peer-deps`), passed to
-/// every npm matchapack starts as npm_config_* variables, the way npm itself
-/// hands its config to the scripts it runs.
-pub fn set_npm_config(key: &str, value: &str) {
-    if let Ok(mut e) = NPM_ENV.lock() {
-        e.push((format!("npm_config_{}", key.replace('-', "_")), value.to_string()));
-    }
-}
-
-fn npm_env() -> Vec<(String, String)> {
-    NPM_ENV.lock().map(|e| e.clone()).unwrap_or_default()
-}
-
-/// A dependency or root lifecycle script failed. `npm ci` would have failed the
-/// same way, so this is reported, never retried with npm.
-#[derive(Debug)]
-pub struct ScriptFailure(pub String);
-
-impl std::fmt::Display for ScriptFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ScriptFailure {}
 
 /// The npm installation the `npm` on PATH runs: bin/npm resolves to
 /// <dir>/bin/npm-cli.js. Used for npm's own modules (@npmcli/run-script,
@@ -143,12 +97,4 @@ pub fn remove_run_dir() {
 /// ~/.config/matchapack (trial scope `paths`, `npm-verified`).
 pub fn config_dir() -> std::path::PathBuf {
     std::env::var_os("MATCHAPACK_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| crate::home().join(".config/matchapack"))
-}
-
-/// A path from the lockfile is used under the project root only if it is
-/// relative and made of plain names: no `..`, no root, no `.`. Path::join with
-/// an absolute path would REPLACE the root, so this guards every delete, clone
-/// and symlink matchapack does inside the project.
-pub fn safe_relative(p: &str) -> bool {
-    !p.is_empty() && std::path::Path::new(p).components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }

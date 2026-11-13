@@ -2,8 +2,7 @@
 # Store maintenance tests: project records, `store gc`, `store verify`, the
 # store lock and the tmp cleanup, end to end with the release binary.
 #   test-store.sh <work-dir>
-# Uses its own store and log directory, never the real ones. The installs
-# use matchapack's default engine (inject), or MATCHAPACK_ENGINE=classic.
+# Uses its own store and log directory, never the real ones.
 # `store verify` extracts with the pacote of the npm on PATH.
 set -uo pipefail
 work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
@@ -13,8 +12,7 @@ mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 # placements to npm (#41), and the entry counts below would differ.
 chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs
-engine=${MATCHAPACK_ENGINE:-inject}; export MATCHAPACK_ENGINE=$engine
-echo "installs with the $engine engine"
+unset MATCHAPACK_ENGINE MATCHAPACK_INJECT_HOOK MATCHAPACK
 store=$work/store
 # moved-entry: left by the last case; a third run over the same work
 # directory failed on it (the `mv` into it found a non-empty directory).
@@ -32,15 +30,18 @@ ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -5; }
 
 project() { local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo "$d"; }
-# install: no scripts (classic: no npm rebuild step); full_install: scripts,
-# bin links and the hidden lockfile.
-if [ "$engine" = classic ]; then
-  install() { "$bin" install "$1" --no-rebuild > "$work/out" 2>&1; }
-  full_install() { "$bin" install "$1" > "$work/out" 2>&1; }
-else
-  install() { "$bin" install "$1" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1; }
-  full_install() { "$bin" install "$1" -- --no-audit --no-fund > "$work/out" 2>&1; }
-fi
+# install: no scripts; full_install: scripts too.
+install() { "$bin" install "$1" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1; }
+full_install() { "$bin" install "$1" -- --no-audit --no-fund > "$work/out" 2>&1; }
+# classic_entries <store>: make the store's entries what the classic engine
+# (removed in PR C2) left in stores it filled: no made-by record, and lc-dup's
+# run.sh (listed twice in its tarball) with mode 644 where npm's extraction
+# gives 755. Stores filled before PR C2 still hold such entries.
+classic_entries() {
+  rm -rf "${1:?}/made-by"
+  local f; f=$(find "$1/v2" -path '*/run.sh' -type f | head -1)
+  [ -z "$f" ] || chmod 644 "$f"
+}
 entries() { find "$store/v2" -mindepth 3 -maxdepth 3 -type d | wc -l | tr -d ' '; }
 records() { find "$store/projects" -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
 # Entries extracted by these tests are minutes old; gc keeps entries younger
@@ -94,7 +95,7 @@ gc && grep -q "removed 0 of $n" "$work/out" && grep -q "kept $n unused entries e
 
 # 6. A project installed by a build without records (only in the trial log)
 #    keeps the entries its hidden lockfile lists.
-# The hidden lockfile is written by the post-install step: no --no-rebuild here.
+# The hidden lockfile is written by npm's reify, scripts or not.
 p3=$(project p3); full_install "$p3"; rm -f "$store"/projects/*.json; age_entries
 mkdir -p "$work/logs"
 python3 -c "import json,time;open('$work/logs/log.jsonl','a').write(json.dumps({'outcome':'installed','dir':'$p3','ts':time.time()})+'\\n')"
@@ -111,11 +112,8 @@ release
 #    changed directory mode are found and named with who made the entry;
 #    --fix replaces the entry with npm's extraction.
 verify() { "$bin" store verify "$@" > "$work/out" 2>&1; }
-# The entries carry no made-by record when the classic engine's extractor
-# made them: this verify then records them as known to npm's pacote/tar.
-[ "$engine" = classic ] && recorded="$n matching entries recorded as known to pacote@" || recorded=""
-verify && grep -q "$n match, 0 differ" "$work/out" && { [ -z "$recorded" ] || grep -q "$recorded" "$work/out"; } \
-  && ok "verify: $n entries match npm's extraction${recorded:+, and are recorded as known to it}" || bad "verify: clean store"
+verify && grep -q "$n match, 0 differ" "$work/out" \
+  && ok "verify: $n entries match npm's extraction" || bad "verify: clean store"
 # Every entry is now known to this pacote/tar: a difference is a change.
 made="changed after this pacote/tar had made or checked it"
 victim=$(find "$store/v2" -path '*/lodash.js' -type f | head -1)
@@ -129,13 +127,15 @@ verify --fix && grep -q 'replaced 1 entries with npm' "$work/out" && [ "$(entrie
   && [ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$vdir")" = 755 ] && ok "verify --fix: the entry is replaced by npm's extraction" || bad "verify --fix"
 verify && grep -q "$n match, 0 differ" "$work/out" && ok "verify: after --fix, every entry matches" || bad "verify: after --fix"
 
-# 8b. Entries made by the classic engine's extractor are judged by npm's
-#     extraction too: odd-tarballs' lc-dup (a path listed twice) differs and
-#     is replaced; the matching one is recorded as known to this pacote.
+# 8b. Entries made by the classic engine's extractor (no record; in stores
+#     filled before PR C2) are judged by npm's extraction too: odd-tarballs'
+#     lc-dup (a path listed twice) differs and is replaced; the matching one
+#     is recorded as known to this pacote.
 if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
   os=$work/store-odd; rm -rf "${os:?}"
   po=$work/odd; rm -rf "${po:?}"; mkdir -p "$po"; cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$po/"
-  MATCHAPACK_STORE=$os MATCHAPACK_ENGINE=classic "$bin" install "$po" --no-rebuild > "$work/out" 2>&1 || bad "odd-tarballs: classic install"
+  MATCHAPACK_STORE=$os "$bin" install "$po" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1 || bad "odd-tarballs: install"
+  classic_entries "$os"
   MATCHAPACK_STORE=$os "$bin" store verify > "$work/out" 2>&1; rc=$?
   [ $rc = 1 ] && grep -q "2 entries compared.*: 1 match, 1 differ" "$work/out" && grep -q "run.sh: mode 644, the tarball gives 755 (made by the classic engine's extractor)" "$work/out" \
     && grep -q '1 matching entries recorded as known to pacote@' "$work/out" \
@@ -172,16 +172,31 @@ wait "$inst"; rc=$?
 [ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `matchapack store` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
 
 # 12. An entry replaced by a symlink: verify reports it, --fix removes it,
-#     and an install never clones it (classic: refused; inject: npm extracts
-#     that package itself instead of placing a link).
+#     and an install never clones it (npm extracts that package itself
+#     instead of placing a link).
 # The lodash entry: lodash.js sits at the package root, four levels down.
 victim=$(dirname "$(find "$store/v2" -mindepth 4 -maxdepth 4 -name lodash.js | head -1)")
 mv "$victim" "$work/moved-entry"; ln -s "$work/moved-entry" "$victim"
 p7=$(project p7); install "$p7"; irc=$?
-if [ "$engine" = classic ]; then [ $irc != 0 ]; else [ $irc = 0 ] && grep -q 'rejected-source' "$work/out" && [ ! -L "$p7/node_modules/lodash" ] && [ -f "$p7/node_modules/lodash/lodash.js" ]; fi; iok=$?
+[ $irc = 0 ] && grep -q 'rejected-source' "$work/out" && [ ! -L "$p7/node_modules/lodash" ] && [ -f "$p7/node_modules/lodash/lodash.js" ]; iok=$?
 "$bin" store verify > "$work/out" 2>&1; rc=$?
 [ $iok = 0 ] && [ $rc = 1 ] && grep -q 'not a directory' "$work/out" && "$bin" store verify --fix > "$work/out" 2>&1 && [ ! -L "$victim" ] && [ -d "$work/moved-entry" ] \
   && ok "verify: a symlinked entry is reported and removed (the link only); an install refuses it" || bad "verify: symlinked entry (install rc=$irc, verify rc=$rc)"
+
+# 13. scripts/verify.sh (verify-sample.sh runs it on real projects against
+#     the real store) leaves no project record for its copies: on exit it
+#     removes the records pointing into its work directory, and only those.
+#     Planted: a record for a project elsewhere, and one whose path only
+#     starts with the work directory's name (a sibling directory).
+vw=$work/vs; rm -rf "${vw:?}" "${work:?}/vs-other"; mkdir -p "$vw" "$store/projects"
+plant() { printf '{"path":"%s","ts":0,"build":"test","entries":[]}\n' "$2" > "$store/projects/$1.json"; }
+plant 0123456789abcdef0123456789abcdef "$work/elsewhere-project"
+plant fedcba9876543210fedcba9876543210 "$work/vs-other/B"
+before=$(ls "$store/projects" | sort)
+"$here/scripts/verify.sh" "$here/fixtures/small" "$vw" > "$work/out" 2>&1; rc=$?
+copies=$(grep -l "\"$vw/" "$store"/projects/*.json 2>/dev/null | wc -l | tr -d ' ')
+[ $rc = 0 ] && grep -q 'RESULT: IDENTICAL' "$work/out" && [ "$copies" = 0 ] && [ "$(ls "$store/projects" | sort)" = "$before" ] \
+  && ok "verify.sh: no project record left for its copies; the other records kept" || bad "verify.sh records: rc=$rc, $copies left for its copies, records $(ls "$store/projects" | wc -l | tr -d ' ') (before $(echo "$before" | wc -l | tr -d ' '))"
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

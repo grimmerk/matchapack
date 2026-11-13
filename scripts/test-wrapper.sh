@@ -3,22 +3,28 @@
 #   test-wrapper.sh <work-dir>
 # Each case runs a command in `zsh -c` after sourcing shell/matchapack.sh, the
 # way a user's shell would, and asserts WHO installed (matchapack or plain npm),
-# the exit code, and a property of the result.
+# the exit code, and a property of the result. The inject engine's own cases
+# (flags, gates, npm's failures, workspaces) are in scripts/test-inject.sh;
+# these are the routing cases that do not depend on how the install is made.
 set -uo pipefail
 work=$1
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin_dir=$here/target/release
-# Test runs log to the work dir, never to the real trial log.
-export MATCHAPACK_LOG_DIR=$work/logs
-mkdir -p "$work"
+mkdir -p "$work"; work=$(cd "$work" && pwd -P)
+# Projects in a directory of the user's own group (macOS /tmp is wheel, a
+# group the user is not in: some packages would then be npm's own extraction,
+# #41; nothing here counts them, but the work dir stays like test-inject's).
+chgrp "$(id -g)" "$work"
+# Test runs log to the work dir and use a store of their own, never the real
+# ones.
+export MATCHAPACK_LOG_DIR=$work/logs MATCHAPACK_STORE=$work/store
+rm -rf "${work:?}/logs"
 # Every case runs inside the trial scope unless it sets its own (cases 14-15):
 # the user's ~/.config/matchapack/paths must not decide the outcome.
-export MATCHAPACK_PATHS=$(cd "$work" && pwd -P)
-# The classic engine's cases, whatever the caller set: the inject engine
-# (the default since PR C1) does not plan, gate or place this way; its own
-# cases are in scripts/test-inject.sh. These go with the classic engine (#33,
-# PR C2; which ones to port: NOTES "PR C1").
-export MATCHAPACK_ENGINE=classic
+export MATCHAPACK_PATHS=$work
+# Any npm 10-12 is taken by the inject engine's gate; a run on another npm
+# would pass the routing cases through plain npm and fail them, not skip.
+unset MATCHAPACK_ENGINE MATCHAPACK_NPM_VERSIONS MATCHAPACK_INJECT_HOOK MATCHAPACK
 fx=$here/fixtures/small
 pass=0; fail=0
 
@@ -45,18 +51,8 @@ check ci "bare npm ci installs from the store, bins linked" $r "$d"
 
 # 2. alias npm clean-install → matchapack
 d=$(new_project alias); CMD="npm clean-install --no-audit --no-fund"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_matchapack "$d" && r=ok || r=bad
-check alias "npm clean-install with passive flags → matchapack" $r "$d"
-
-# 3. a tree-shaping flag → plain npm, and npm's semantics apply (no dev deps)
-d=$(new_project omit); CMD="npm ci --omit=dev"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_npm "$d" && [ ! -d "$d/node_modules/jest" ] && grep -q 'option --omit=dev is not handled' "$d.out" && r=ok || r=bad
-check omit-flag "npm ci --omit=dev → plain npm with the reason printed, jest absent" $r "$d"
-
-# 4. NODE_ENV=production → plain npm (npm omits dev)
-d=$(new_project nodeenv); CMD="npm ci"; rc=$(run "$d" NODE_ENV=production)
-[ "$rc" = 0 ] && by_npm "$d" && [ ! -d "$d/node_modules/jest" ] && r=ok || r=bad
-check node-env "NODE_ENV=production → plain npm, dev deps omitted" $r "$d"
+[ "$rc" = 0 ] && by_matchapack "$d" && [ -x "$d/node_modules/.bin/tsc" ] && r=ok || r=bad
+check alias "npm clean-install --no-audit --no-fund → matchapack" $r "$d"
 
 # 5. MATCHAPACK=0 → plain npm, silently
 d=$(new_project optout); CMD="npm ci"; rc=$(run "$d" MATCHAPACK=0)
@@ -73,31 +69,14 @@ d=$(new_project other); CMD="npm run nope"; rc=$(run "$d")
 [ "$rc" != 0 ] && ! grep -q '^matchapack' "$d.out" && grep -q 'Missing script' "$d.out" && r=ok || r=bad
 check passthrough "npm run <missing> → npm's own error and non-zero exit" $r "$d"
 
-# 8. npm version not verified → plain npm
-d=$(new_project version); CMD="npm ci"; rc=$(run "$d" MATCHAPACK_NPM_VERSIONS=0.1)
-[ "$rc" = 0 ] && by_npm "$d" && grep -q 'has not been verified' "$d.out" && r=ok || r=bad
-check version-gate "unverified npm version → plain npm with the reason" $r "$d"
-
-# 9. lockfile out of sync → plain npm, which refuses; old node_modules kept
-d=$(new_project unsync "d['dependencies']['lodash']='^3.0.0'"); mkdir -p "$d/node_modules/keepme"; CMD="npm ci"; rc=$(run "$d")
-[ "$rc" != 0 ] && grep -q 'running plain npm instead' "$d.out" && grep -q 'in sync' "$d.out" && [ -d "$d/node_modules/keepme" ] && r=ok || r=bad
-check unsync "out-of-sync lockfile → npm's own EUSAGE, node_modules untouched" $r "$d"
-
-# 10. a failing root lifecycle script → reported, not retried with npm
+# 10. a failing root lifecycle script → npm's own failure, said once, not
+#     retried with plain npm
 d=$(new_project scriptfail "d['scripts']['postinstall']='node -e \"process.exit(3)\"'"); CMD="npm ci"; rc=$(run "$d")
-n_ci=$(grep -c 'npm ci from the store' "$d.out")
-[ "$rc" != 0 ] && [ "$n_ci" = 1 ] && grep -q 'root lifecycle script failed' "$d.out" && ! grep -q 'running plain npm' "$d.out" && r=ok || r=bad
-check script-fail "failing postinstall → non-zero exit, no npm retry" $r "$d"
+n_ci=$(grep -c 'npm ci with clones from the store' "$d.out")
+[ "$rc" != 0 ] && [ "$n_ci" = 1 ] && [ "$(grep -c 'npm error code' "$d.out")" = 1 ] && ! grep -q 'running plain npm\|running npm ci to rebuild' "$d.out" && r=ok || r=bad
+check script-fail "failing postinstall → npm's non-zero exit, npm ci run once" $r "$d"
 
-# 11. a `file:` tarball dependency (unsupported) → plain npm
-d=$work/filedep; rm -rf "$d"; mkdir -p "$d"; cp "$here/fixtures/optional-upward/tarballs/lc-q-1.0.0.tgz" "$d/"
-echo '{"name":"filedep","version":"1.0.0","dependencies":{"lc-q":"file:lc-q-1.0.0.tgz"}}' > "$d/package.json"
-(cd "$d" && command npm install --package-lock-only --ignore-scripts >/dev/null 2>&1)
-CMD="npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_npm "$d" && [ -f "$d/node_modules/lc-q/index.js" ] && grep -q 'unsupported lockfile entries' "$d.out" && r=ok || r=bad
-check file-dep "file: tarball dependency → plain npm installs it" $r "$d"
-
-# 12. --ignore-scripts → matchapack; bins linked, no root postinstall output
+# 12. --ignore-scripts → matchapack; bins linked, no root postinstall
 d=$(new_project ignorescripts); CMD="npm ci --ignore-scripts"; rc=$(run "$d")
 [ "$rc" = 0 ] && by_matchapack "$d" && [ -x "$d/node_modules/.bin/tsc" ] && [ ! -f "$d/root-postinstall.txt" ] && r=ok || r=bad
 check ignore-scripts "npm ci --ignore-scripts → matchapack, bins linked, root postinstall not run" $r "$d"
@@ -108,7 +87,7 @@ check root-script "bare npm ci ran the root postinstall (control for case 12)" $
 
 # 14. trial scope: a project outside MATCHAPACK_PATHS → plain npm with the reason
 d=$(new_project outscope); CMD="npm ci"; rc=$(run "$d" MATCHAPACK_PATHS=/nonexistent-prefix)
-[ "$rc" = 0 ] && by_npm "$d" && grep -q 'outside the trial scope' "$d.out" && r=ok || r=bad
+[ "$rc" = 0 ] && by_npm "$d" && grep -q 'outside the trial scope' "$d.out" && [ -x "$d/node_modules/.bin/tsc" ] && r=ok || r=bad
 check scope-out "project outside the trial scope → plain npm with the reason" $r "$d"
 
 # 15. inside the scope → matchapack
@@ -116,100 +95,41 @@ d=$(new_project inscope); CMD="npm ci"; rc=$(run "$d" MATCHAPACK_PATHS="/nonexis
 [ "$rc" = 0 ] && by_matchapack "$d" && r=ok || r=bad
 check scope-in "project inside the trial scope → matchapack" $r "$d"
 
-# 16. the run log records installs and declines (in the test's own log dir)
-n_inst=$(grep -c '"outcome":"installed"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
-n_decl=$(grep -c '"outcome":"declined"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
-n_nobuild=$(grep -vc '"build":"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null)
-# The load average at the start and the end of every run: [1 min, 5 min].
-n_noload=$(( $(grep -vc '"load_start":\[[0-9.]*,[0-9.]*\]' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null) + $(grep -vc '"load_end":\[[0-9.]*,[0-9.]*\]' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null) ))
-[ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 5 ] && [ "${n_nobuild:-1}" = 0 ] && [ "$n_noload" = 0 ] && r=ok || r=bad
-check log "log.jsonl records installs ($n_inst) and declines ($n_decl), each with the build (missing: ${n_nobuild:-?}) and the load average (missing: $n_noload)" $r "$work/logs"
-
-# 17–19. settings npm applies and matchapack does not → plain npm with the reason
-d=$(new_project strict); CMD="npm ci"; rc=$(run "$d" npm_config_strict_allow_scripts=true)
-grep -q 'strict-allow-scripts' "$d.out" && ! by_matchapack "$d" && r=ok || r=bad
-check strict-scripts "strict-allow-scripts=true → plain npm (npm refuses before wiping)" $r "$d"
-d=$(new_project umask); CMD="umask 077; npm ci"; rc=$(run "$d")
-grep -q 'umask is 077' "$d.out" && by_npm "$d" && r=ok || r=bad
-check umask "umask 077 → plain npm" $r "$d"
-d=$(new_project allowremote); CMD="npm ci"; rc=$(run "$d" npm_config_allow_remote=none)
-grep -q 'allow-remote' "$d.out" && ! by_matchapack "$d" && r=ok || r=bad
-check allow-remote "allow-remote=none → plain npm" $r "$d"
-
-# 20–21. engine-strict: matching engines → matchapack; a mismatch → npm (EBADENGINE)
-d=$(new_project esok); echo 'engine-strict=true' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_matchapack "$d" && r=ok || r=bad
-check engine-ok "engine-strict with matching engines → matchapack" $r "$d"
-d=$(new_project esbad); echo 'engine-strict=true' > "$d/.npmrc"
-python3 -c "import json;p='$d/package-lock.json';l=json.load(open(p));l['packages']['node_modules/lodash']['engines']={'node':'>=99'};json.dump(l,open(p,'w'),indent=2)"
-mkdir -p "$d/node_modules/keepme"; CMD="npm ci"; rc=$(run "$d")
-[ "$rc" != 0 ] && grep -q 'EBADENGINE' "$d.out" && [ -d "$d/node_modules/keepme" ] && r=ok || r=bad
-check engine-bad "engine-strict with an engines mismatch → npm's EBADENGINE, node_modules untouched" $r "$d"
-
-# 22. --legacy-peer-deps → matchapack follows npm's ideal tree for it: npm 11
-# leaves out react (only a peer of react-dom), npm 10 still installs it.
-d=$work/legacypeer; rm -rf "${d:?}"; mkdir -p "$d"
-cp "$here/fixtures/legacy-peer/package.json" "$here/fixtures/legacy-peer/package-lock.json" "$d/"
-CMD="npm ci --legacy-peer-deps"; rc=$(run "$d")
-if [ "$(npm -v | cut -d. -f1)" -ge 11 ]; then want_react=no; else want_react=yes; fi
-[ -d "$d/node_modules/react" ] && has_react=yes || has_react=no
-[ "$rc" = 0 ] && by_matchapack "$d" && [ "$has_react" = "$want_react" ] && r=ok || r=bad
-check legacy-peer "npm ci --legacy-peer-deps → matchapack, react installed: $has_react (npm $(npm -v) installs it: $want_react)" $r "$d"
-
-# 25–26. #6: npm settings are an allow-list. A setting npm defines that is
-# not on the list hands over to npm, naming it; settings npm does not define
-# (another package manager's) and listed ones (min-release-age) do not.
-d=$(new_project cfgdeny); printf 'prefer-dedupe=true\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_npm "$d" && grep -q 'not on matchapack.s list.*prefer-dedupe (from project)' "$d.out" && r=ok || r=bad
-check config-allowlist "a setting not on the allow-list (prefer-dedupe) → plain npm, named" $r "$d"
-d=$(new_project cfgok); printf 'resolution-mode=highest\nmin-release-age=7\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_matchapack "$d" && r=ok || r=bad
-check config-allowed "a pnpm-only setting and min-release-age → matchapack" $r "$d"
-# 27. `call` (an `npm exec` option) is ignored by npm ci. matchapack used to
-# run the root scripts through `npm exec`, which refuses it with a command, so
-# the install failed after changing node_modules. The post-install step no
-# longer uses `npm exec`: matchapack installs, root postinstall included.
-d=$(new_project cfgcall); printf 'call=echo hello\n' > "$d/.npmrc"; CMD="npm ci"; rc=$(run "$d")
-[ "$rc" = 0 ] && by_matchapack "$d" && [ -f "$d/root-postinstall.txt" ] && r=ok || r=bad
-check config-call "call=… in .npmrc → matchapack, root postinstall ran" $r "$d"
-
-# 28. An optional dependency whose (approved) install script fails: npm ci
-# drops it and succeeds. matchapack's post-install step reports the failure,
-# and the wrapper hands over to npm ci, which rebuilds node_modules the same
-# way (the outcome is logged as "broke"). Needs the fixtures' tarball server.
-if ! curl -sf -o /dev/null http://127.0.0.1:48321/lc-fail-1.0.0.tgz; then
-  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
-  started_server=$!
-  until curl -sf -o /dev/null http://127.0.0.1:48321/lc-fail-1.0.0.tgz; do sleep 0.3; done
-fi
-d=$work/optfail; rm -rf "${d:?}"; mkdir -p "$d"
-cp "$here/fixtures/optional-script-fail/package.json" "$here/fixtures/optional-script-fail/package-lock.json" "$d/"
-CMD="npm ci"; rc=$(run "$d")
-[ -n "${started_server-}" ] && kill "$started_server"
-[ "$rc" = 0 ] && [ "$(ls "$d/node_modules" | tr '\n' ' ')" = "lc-r lc-s " ] && grep -q 'running npm ci to rebuild it' "$d.out" && r=ok || r=bad
-check optional-script-fail "a failing optional dependency script → npm ci takes over, the package is dropped as npm ci does" $r "$d"
-
 # 29. A hand-over happens before matchapack changes anything (#27). With
 # MATCHAPACK_NO_FALLBACK=1 matchapack exits 3 instead of running npm, so the
 # project shows exactly what matchapack did: an existing node_modules (a
-# sentinel, a 2020 mtime) must be untouched, mtimes included.
-d=$(new_project untouched); printf 'prefer-dedupe=true\n' > "$d/.npmrc"
-mkdir -p "$d/node_modules/sentinel"; echo keep > "$d/node_modules/sentinel/x"
-touch -t 202001010000 "$d/node_modules" "$d/node_modules/sentinel" "$d/node_modules/sentinel/x"
-before=$(cd "$d" && find node_modules -print0 | xargs -0 stat -f '%N %m' 2>/dev/null | sort)
-CMD="npm ci"; rc=$(run "$d" MATCHAPACK_NO_FALLBACK=1)
-after=$(cd "$d" && find node_modules -print0 | xargs -0 stat -f '%N %m' 2>/dev/null | sort)
-[ "$rc" = 3 ] && grep -q 'not handled, left unchanged' "$d.out" && [ "$before" = "$after" ] && r=ok || r=bad
-check untouched "a hand-over leaves node_modules exactly as it was (exit 3 with MATCHAPACK_NO_FALLBACK=1)" $r "$d"
+# sentinel, a 2020 mtime) must be untouched, mtimes included. Two hand-overs
+# decided at different points: the trial scope (before the engine's gates)
+# and the npm version gate (inject::gates, the last check before npm starts).
+for why in scope version; do
+  d=$(new_project "untouched-$why")
+  mkdir -p "$d/node_modules/sentinel"; echo keep > "$d/node_modules/sentinel/x"
+  touch -t 202001010000 "$d/node_modules" "$d/node_modules/sentinel" "$d/node_modules/sentinel/x"
+  before=$(cd "$d" && find node_modules -print0 | xargs -0 stat -f '%N %m' 2>/dev/null | sort)
+  if [ $why = scope ]; then envs=(MATCHAPACK_PATHS=/nonexistent-prefix); else envs=(MATCHAPACK_NPM_VERSIONS=0.1); fi
+  CMD="npm ci"; rc=$(run "$d" MATCHAPACK_NO_FALLBACK=1 "${envs[@]}")
+  after=$(cd "$d" && find node_modules -print0 | xargs -0 stat -f '%N %m' 2>/dev/null | sort)
+  [ "$rc" = 3 ] && grep -q 'not handled, left unchanged' "$d.out" && [ -n "$before" ] && [ "$before" = "$after" ] && r=ok || r=bad
+  check "untouched-$why" "a hand-over ($why) leaves node_modules exactly as it was (exit 3 with MATCHAPACK_NO_FALLBACK=1)" $r "$d"
+done
 
-# 30. A root script killed by a signal: run-script passes the signal on to
-# the post-install process, which dies before its final report. That is a root
-# script failure (npm ci dies the same way): reported, never retried with npm
-# ci, so the script runs exactly once.
+# 30. A root script killed by a signal: npm ci fails, and matchapack passes
+# npm's status on; never retried with npm ci, so the script runs exactly once.
 d=$(new_project rootkill "d['scripts']['postinstall']='echo ran >> runs.txt; kill -TERM \$\$'"); CMD="npm ci"; rc=$(run "$d")
 runs=$(wc -l < "$d/runs.txt" 2>/dev/null | tr -d ' ')
-[ "$rc" != 0 ] && [ "$runs" = 1 ] && ! grep -q 'running npm ci to rebuild it' "$d.out" && r=ok || r=bad
-check root-killed "a root script killed by a signal → reported once, not retried (ran $runs time(s))" $r "$d"
+[ "$rc" != 0 ] && [ "$runs" = 1 ] && ! grep -q 'running npm ci to rebuild\|running plain npm' "$d.out" && r=ok || r=bad
+check root-killed "a root script killed by a signal → npm's failure, not retried (ran $runs time(s))" $r "$d"
+
+# 16. the run log records installs and declines (in the test's own log dir)
+n_inst=$(grep -c '"outcome":"installed"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
+n_decl=$(grep -c '"outcome":"declined"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
+n_npmfail=$(grep -c '"outcome":"npm_failed"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
+n_nobuild=$(grep -vc '"build":"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null)
+n_noengine=$(grep -vc '"engine":"inject"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null)
+# The load average at the start and the end of every run: [1 min, 5 min].
+n_noload=$(( $(grep -vc '"load_start":\[[0-9.]*,[0-9.]*\]' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null) + $(grep -vc '"load_end":\[[0-9.]*,[0-9.]*\]' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null) ))
+[ "$n_inst" -ge 4 ] && [ "$n_decl" -ge 3 ] && [ "$n_npmfail" -ge 2 ] && [ "${n_nobuild:-1}" = 0 ] && [ "${n_noengine:-1}" = 0 ] && [ "$n_noload" = 0 ] && r=ok || r=bad
+check log "log.jsonl records installs ($n_inst), declines ($n_decl) and npm's failures ($n_npmfail), each with the build (missing: ${n_nobuild:-?}), the engine (missing: ${n_noengine:-?}) and the load average (missing: $n_noload)" $r "$work/logs"
 
 # 23–24. The rc one-liner from the README, `eval "$(matchapack init)"`, detects
 # the shell and loads the same function from the binary (no checkout needed).

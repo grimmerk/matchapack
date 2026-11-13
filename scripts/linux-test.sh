@@ -2,12 +2,12 @@
 # Linux FICLONE test, run inside a privileged container:
 #   docker run --rm --privileged -v "$PWD":/src:ro rust:1-bookworm bash /src/scripts/linux-test.sh
 # Builds matchapack, then for btrfs and XFS (reflink=1) on loop devices runs the
-# harness on fixtures/small and fixtures/optional-upward with both engines
-# (MATCHAPACK_ENGINE=classic, then the default, inject) and the clone
-# server's unit tests
-# with their scratch directory on that filesystem, checks that cloned
-# files share extents with the store, and checks that a filesystem WITHOUT
-# reflink (the container's overlayfs) makes matchapack fail loudly.
+# harness on fixtures/small and fixtures/optional-upward and the clone
+# server's unit tests with their scratch directory on that filesystem, checks
+# that cloned files share extents with the store, and checks that where
+# nothing can be cloned (the container's overlayfs, or store and project on
+# two filesystems) npm extracts every package itself, matchapack says so, and
+# the tree is still npm ci's.
 set -euo pipefail
 log() { echo; echo "######## $*"; }
 # Run a check, print only the lines that matter, keep the check's status: a
@@ -51,12 +51,9 @@ run_fs() {
   cp /src/fixtures/small/package.json /src/fixtures/small/package-lock.json $w/src-small/
   cp /src/fixtures/optional-upward/package.json /src/fixtures/optional-upward/package-lock.json $w/src-ou/
   for f in small ou; do
+    # npm's own npm ci, packages placed by the clone server with per-file
+    # FICLONE (no directory reflink on Linux).
     echo "== $fs / $f"
-    filtered 'RESULT|only in|differ:|^A:|^B:|npm ls:|clone:|touch' \
-      env MATCHAPACK_ENGINE=classic /build/src/scripts/verify.sh $w/src-$f $w/v-$f --npm-cache $mnt/npmcache/_cacache
-    # The inject engine: npm's own npm ci, packages placed by the clone
-    # server with per-file FICLONE (no directory reflink on Linux).
-    echo "== $fs / $f, inject engine"
     filtered 'RESULT|only in|differ:|^A:|^B:|npm ls:|inject:|cloned nothing|byte-identical|^meta' \
       env -u MATCHAPACK_ENGINE MATCHAPACK_VERIFY_CLONES=some MATCHAPACK_VERIFY_BYTES=1 MATCHAPACK_VERIFY_META=1 /build/src/scripts/verify.sh $w/src-$f $w/vi-$f
   done
@@ -66,8 +63,8 @@ run_fs() {
   mkdir -p $mnt/tmp
   filtered 'test result|skipped|FAILED|panicked' \
     env -C /build/src TMPDIR=$mnt/tmp CARGO_TARGET_DIR=/build/target cargo test --release -q serve::
-  echo "== $fs: placed esbuild binary shares extents with the store? (classic, then inject)"
-  for v in v-small vi-small; do
+  echo "== $fs: placed esbuild binary shares extents with the store?"
+  for v in vi-small; do
     f=$(find $w/$v/B/node_modules/@esbuild -name esbuild -path '*bin*' -type f | head -1)
     echo "file: ${f#$w/}"
     case $fs in
@@ -82,19 +79,24 @@ run_fs() {
 run_fs btrfs
 run_fs xfs
 
-log "negative: store and project on overlayfs (no reflink) must fail, not copy"
-mkdir -p /neg/p && cp /src/fixtures/small/package*.json /neg/p/
-if MATCHAPACK_ENGINE=classic MATCHAPACK_STORE=/neg/store npm_config_cache=/mnt/btrfs/npmcache "$bin" install /neg/p --npm-cache /mnt/btrfs/npmcache/_cacache --no-rebuild 2>&1 | tail -2; then
-  echo "NEGATIVE TEST FAILED: install succeeded on overlayfs"; failures=$((failures+1))
-else
-  echo "refused as expected; files placed: $(find /neg/p/node_modules -type f 2>/dev/null | wc -l)"
-fi
-log "negative: store on btrfs, project on overlayfs (cross-device) must fail"
-rm -rf /neg/p/node_modules
-if MATCHAPACK_ENGINE=classic MATCHAPACK_STORE=/mnt/btrfs/store "$bin" install /neg/p --npm-cache /mnt/btrfs/npmcache/_cacache --no-rebuild 2>&1 | tail -2; then
-  echo "NEGATIVE TEST FAILED: cross-device install succeeded"; failures=$((failures+1))
-else
-  echo "refused as expected; files placed: $(find /neg/p/node_modules -type f 2>/dev/null | wc -l)"
-fi
+# Where the filesystem cannot clone, the first refused clone stops cloning
+# (clone-unsupported) and npm extracts every package itself: the install
+# succeeds, says so, and the tree is npm ci's (verify.sh, no clones expected).
+neg() { # name store
+  local out rc=0
+  mkdir -p /neg/src-$1 && cp /src/fixtures/small/package.json /src/fixtures/small/package-lock.json /neg/src-$1/
+  out=$(env -u MATCHAPACK_ENGINE MATCHAPACK_STORE=$2 npm_config_cache=/mnt/btrfs/npmcache MATCHAPACK_VERIFY_CLONES=none \
+    /build/src/scripts/verify.sh /neg/src-$1 /neg/v-$1 2>&1) || rc=$?
+  grep -E 'RESULT|no clones from the store|inject:|cloned' <<<"$out" || true
+  if [ $rc = 0 ] && grep -q 'no clones from the store here, npm extracted the packages itself (clone-unsupported' <<<"$out"; then
+    echo "npm extracted every package, as expected; files: $(find /neg/v-$1/B/node_modules -type f | wc -l)"
+  else
+    echo "NEGATIVE TEST FAILED ($1, status $rc)"; failures=$((failures+1))
+  fi
+}
+log "negative: store and project on overlayfs (no reflink): npm extracts, the tree is npm ci's"
+neg overlay /neg/store
+log "negative: store on btrfs, project on overlayfs (cross-device): npm extracts, the tree is npm ci's"
+neg crossdev /mnt/btrfs/store
 log "checks failed: $failures"
 [ "$failures" -eq 0 ]

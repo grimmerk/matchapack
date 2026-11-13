@@ -18,10 +18,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use sha2::Digest;
 use std::fs;
-use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -84,26 +83,6 @@ impl Integrity {
             _ => String::new(),
         }
     }
-}
-
-/// Read the newest cacache entry for `key` (npm's content cache): the content
-/// bytes, located through the index.
-pub fn cacache_read(cacache: &Path, key: &str) -> Option<Vec<u8>> {
-    let kh = hex::encode(sha2::Sha256::digest(key.as_bytes()));
-    let idx = cacache.join("index-v5").join(&kh[0..2]).join(&kh[2..4]).join(&kh[4..]);
-    let text = fs::read_to_string(idx).ok()?;
-    let mut found = None;
-    for line in text.lines() {
-        let Some((_, json)) = line.split_once('\t') else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { continue };
-        if v.get("key").and_then(|k| k.as_str()) != Some(key) {
-            continue;
-        }
-        // A null integrity is a deletion record.
-        found = v.get("integrity").and_then(|x| x.as_str()).map(String::from);
-    }
-    let ci = Integrity::parse(&found?).ok()?;
-    fs::read(ci.split_path(&cacache.join("content-v2"))).ok()
 }
 
 fn flock(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
@@ -207,6 +186,8 @@ pub struct Store {
     _lock: Option<fs::File>,
 }
 
+/// What `Store::ensure` (tests only) did.
+#[cfg(test)]
 pub enum Ensure {
     Present,
     Extracted,
@@ -274,8 +255,8 @@ impl Store {
     /// The pacote and tar versions (`pacote@… tar@…`, one per line) under
     /// which this entry is known to be what pacote extracts: the one that
     /// made it, and every one that later extracted its tarball to the same
-    /// tree. Empty: made by matchapack's own extractor (the classic engine),
-    /// or before this was recorded.
+    /// tree. Empty: made by matchapack's own extractor (the classic engine,
+    /// removed in PR C2), or before this was recorded.
     pub fn made_by(&self, i: &Integrity) -> Vec<String> {
         fs::read_to_string(self.made_by_file(i))
             .unwrap_or_default()
@@ -466,10 +447,13 @@ impl Store {
         p.is_file().then_some(p)
     }
 
-    /// The entry for `i`, extracted by matchapack's own extractor from the
-    /// tarball in npm's cache when missing (the classic engine; the inject
-    /// engine's entries are extracted by pacote, serve.rs). The tarball's
-    /// digest is checked against `i` before anything is extracted.
+    /// Tests only: the entry for `i`, extracted by matchapack's own
+    /// extractor (`extract`) from the tarball in npm's cache when missing,
+    /// with no made-by record: what the classic engine (removed in PR C2)
+    /// put in the store, and a quick way to fill a test store. Installs fill
+    /// it through pacote (serve.rs). The tarball's digest is checked against
+    /// `i` before anything is extracted.
+    #[cfg(test)]
     pub fn ensure(&self, i: &Integrity, url: &str) -> Result<Ensure> {
         let cacache = &self.cacache;
         let dest = self.dir_for(i);
@@ -617,15 +601,18 @@ fn dir_bytes(d: &Path) -> u64 {
         .sum()
 }
 
+#[cfg(test)]
 const UMASK: u32 = 0o022;
 
-/// Store layout / extraction-rules version. Bump whenever `extract` changes what
-/// lands on disk, so entries made under old rules are never reused.
+/// Store layout / extraction-rules version. Bump whenever what lands in an
+/// entry changes (it was `extract`'s rules while the classic engine filled
+/// the store), so entries made under old rules are never reused.
 /// v1 → v2: drop directory entries (pacote only creates parents of files) and
 /// the `.gitignore` → `.npmignore` rename.
 pub const LAYOUT: &str = "v2";
 
-/// Extract like pacote (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`):
+/// Tests only (the classic engine's extractor, removed in PR C2; installs
+/// and `store verify` extract with npm's own pacote). Extract like pacote (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`):
 /// strip the first path component; keep FILE entries only (links and directory
 /// entries are filtered out, so empty directories never appear; directories
 /// exist only as parents of files, mode 0o755); refuse `..`; a `.gitignore` is
@@ -633,7 +620,10 @@ pub const LAYOUT: &str = "v2";
 /// the archive, in which case it is dropped; files get
 /// `((mode | 0o666) & ~umask) | 0o600`. Executable bits for declared bins are
 /// added later by npm's bin linking, as in `npm ci`.
+#[cfg(test)]
 pub fn extract(data: &[u8], dest: &Path) -> Result<()> {
+    use std::io::Read;
+    use std::path::Component;
     let reader: Box<dyn Read> = if data.starts_with(&[0x1f, 0x8b]) {
         Box::new(flate2::read::GzDecoder::new(data))
     } else {

@@ -8,13 +8,17 @@
 #      hidden lockfile as JSON; --normalize-roots: each tree's own path, where an
 #      install script wrote it into a file name, is written <root>)
 #   2. npm ls --all in B must exit 0
-# The engine in B is matchapack's own switch: the inject engine by default
-# (npm's own `npm ci` with the extraction replaced by clones),
-# MATCHAPACK_ENGINE=classic for the classic engine. With the inject engine,
-# MATCHAPACK_VERIFY_CLONES=some fails the run when B cloned nothing
-# (the hook did not fire: the trees are then identical without testing
-# anything), =none when it cloned anything. MATCHAPACK_VERIFY_META=1 also
-# compares mtimes outside the two runs, uid, gid and xattr names (diff --meta).
+# B is the inject engine (npm's own `npm ci` with the extraction replaced by
+# clones; the only engine since PR C2). MATCHAPACK_VERIFY_CLONES=some fails
+# the run when B cloned nothing (the hook did not fire: the trees are then
+# identical without testing anything), =none when it cloned anything.
+# MATCHAPACK_VERIFY_META=1 also compares mtimes outside the two runs, uid,
+# gid and xattr names (diff --meta).
+# The store is the caller's (MATCHAPACK_STORE, else the user's own:
+# verify-sample.sh samples real projects against the real store on purpose).
+# B's install records its copy under <store>/projects/ for `store gc`; the
+# copy is temporary, so on exit every record pointing into <work-dir> is
+# removed, and no other.
 set -euo pipefail
 src=$1; work=$2; shift 2
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -22,6 +26,33 @@ bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 rm -rf "${work:?}/A" "${work:?}/A2" "${work:?}/B"
 mkdir -p "$work"
+# The records of this run's copies: <store>/projects/<32 hex>.json, each
+# holding the canonical path of the project it was written for
+# (src/store.rs, record_project). Only a record whose path is inside this
+# work directory goes.
+store=${MATCHAPACK_STORE:-$HOME/.cache/matchapack/store}
+work_real=$(cd "$work" && pwd -P)
+forget_copies() {
+  python3 -I - "$store/projects" "$work_real" <<'EOF' || echo "could not remove this run's project records from $store/projects" >&2
+import json, os, re, sys
+d, w = sys.argv[1], sys.argv[2].rstrip("/") + "/"
+try:
+    names = os.listdir(d)
+except FileNotFoundError:
+    sys.exit(0)
+for n in names:
+    if not re.fullmatch(r"[0-9a-f]{32}\.json", n):
+        continue
+    p = os.path.join(d, n)
+    try:
+        path = json.load(open(p)).get("path")
+    except (OSError, ValueError, AttributeError):
+        continue
+    if isinstance(path, str) and path.startswith(w):
+        os.remove(p)
+EOF
+}
+trap forget_copies EXIT
 # Copy-on-write copies of the source (macOS: cp -c; Linux: --reflink=auto).
 if [ "$(uname)" = Darwin ]; then cpcow() { cp -c -R -p "$1" "$2"; }; else cpcow() { cp -a --reflink=auto "$1" "$2"; }; fi
 cpcow "$src" "$work/A"
@@ -46,8 +77,7 @@ if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.
   echo "NOTE: npm $base rewrote package-lock.json"
 fi
 t1=$(python3 -c 'import time;print(time.time_ns())')
-engine=${MATCHAPACK_ENGINE:-inject}
-echo "== matchapack install (B, $engine engine)"
+echo "== matchapack install (B)"
 if [ "${MATCHAPACK_VERIFY_VIA:-install}" = wrapper ]; then
   # The path a user takes: plain `npm ci` in a shell that sourced the wrapper.
   # Not anchored: a script may leave the line unterminated (husky prints
@@ -55,17 +85,15 @@ if [ "${MATCHAPACK_VERIFY_VIA:-install}" = wrapper ]; then
   (cd "$work/B" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/matchapack.sh'; npm ci --no-audit --no-fund" > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
   grep -q 'matchapack: added' "$work/B.log" || { echo "wrapper did NOT install from the store:"; grep '^matchapack' "$work/B.log"; exit 1; }
 else
-  # The inject engine runs npm's own `npm ci`: give it A's flags (the classic
-  # engine never runs the audit).
-  npmflags=(); [ "$engine" = inject ] && npmflags=(-- --no-audit --no-fund)
-  (cd "$work/B" && "$bin" install . "$@" ${npmflags[@]+"${npmflags[@]}"} > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
+  # matchapack runs npm's own `npm ci`: give it A's flags.
+  (cd "$work/B" && "$bin" install . "$@" -- --no-audit --no-fund > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
 fi
 t2=$(python3 -c 'import time;print(time.time_ns())')
 grep '^\[matchapack\]\|^matchapack:' "$work/B.log" | grep -v '\] skip ' || true
 python3 -c "print(f'npm ci: {($t1-$t0)/1e9:.2f}s   matchapack: {($t2-$t1)/1e9:.2f}s')" 2>/dev/null || true
 
 rc=0
-if [ "$engine" = inject ] && [ -n "${MATCHAPACK_VERIFY_CLONES:-}" ]; then
+if [ -n "${MATCHAPACK_VERIFY_CLONES:-}" ]; then
   # `matchapack install` prints "inject: cloned N", the shell function
   # "matchapack: added N packages".
   cloned=$(grep -Eo 'inject: cloned [0-9]+|matchapack: added [0-9]+' "$work/B.log" | grep -Eo '[0-9]+$' | head -1)

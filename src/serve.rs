@@ -31,8 +31,8 @@
 //! `pacote@21.5.1 tar@7.5.22`): the one that made it, and each one that later
 //! extracted it to the same tree. An entry is compared before use **once per
 //! key**: whenever the npm that is running (its pacote and tar) is not in the
-//! record yet (matchapack's own extractor, the classic engine's, records
-//! nothing), and then added to it; an entry whose record has this key is
+//! record yet (matchapack's own extractor, the classic engine's until PR C2,
+//! recorded nothing), and then added to it; an entry whose record has this key is
 //! compared one time in MATCHAPACK_INJECT_CHECK (default 50), at random, to
 //! catch an entry changed since. pacote or tar extract differently across
 //! versions for odd tarballs (tar 6 extracts a file named `a\..\b` that tar 7
@@ -1870,18 +1870,6 @@ mod tests {
         let s = Server::new(&fx.store, fx.root.clone(), clone::Mode::File, None, CheckPolicy::OneIn(50)).unwrap();
         assert!(s.record_message(&json!({ "hello": true, "pacote": "21.5.1", "tar": "7.5.22", "hook": "on" })));
         assert_eq!(s.key(), "pacote@21.5.1 tar@7.5.22");
-    }
-
-    #[test]
-    fn a_classic_fill_drops_a_record_left_by_an_earlier_entry() {
-        let fx = Fx::new("serve-made-by-stale");
-        let (i, _) = fx.entry(PKG);
-        fx.store.set_made_by(&i, KEY).unwrap();
-        // The entry goes (an interrupted replacement, a hand removal) and
-        // matchapack's extractor makes it again.
-        fs::remove_dir_all(fx.store.dir_for(&i)).unwrap();
-        assert!(matches!(fx.store.ensure(&i, "http://x/p.tgz").unwrap(), Ensure::Extracted));
-        assert!(fx.store.made_by(&i).is_empty());
     }
 
     #[test]

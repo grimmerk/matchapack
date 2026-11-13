@@ -22,10 +22,10 @@
 //!   version's, under the entry's exclusive lock: what a differing check
 //!   does in an install.
 //!
-//! The classic engine's Rust extractor is not used: an entry it made is
-//! judged by pacote like any other (it has an empty record, so it shows as
-//! `extractor` when it differs). The classic engine itself still fills the
-//! store with that extractor (`Store::ensure`) until it is removed.
+//! The classic engine's Rust extractor is not used: an entry it made (the
+//! engine was removed in PR C2; older stores keep its entries) is judged by
+//! pacote like any other (it has an empty record, so it shows as `extractor`
+//! when it differs).
 
 use crate::store::{compare_trees, process_tag, rename_noreplace, Integrity, Store, TmpDir};
 use anyhow::{anyhow, bail, Context, Result};
@@ -329,7 +329,7 @@ mod tests {
         let ex = |i: &Integrity, to: &Path| crate::store::extract(&fs::read(i.split_path(&cacache.join("content-v2")))?, to);
         let v = |fix: bool| verify_entry(&store, KEY, &i, &ex, fix).unwrap();
         assert!(matches!(store.ensure(&i, "http://x/p.tgz").unwrap(), Ensure::Extracted));
-        // Made by the classic engine (no record): a match records this version.
+        // No record (as the classic engine's entries): a match records this version.
         assert_eq!(v(false), Found::Match { recorded: true });
         assert_eq!(store.made_by(&i), [KEY]);
         assert_eq!(v(false), Found::Match { recorded: false }, "already known");

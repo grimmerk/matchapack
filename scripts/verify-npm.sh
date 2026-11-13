@@ -1,45 +1,38 @@
 #!/usr/bin/env bash
-# The npm upgrade routine (#11): run the harness on the npm on PATH. With the
-# classic engine (MATCHAPACK_ENGINE=classic), when every case is identical to
-# `npm ci`, record its major.minor in <config dir>/npm-verified
-# (~/.config/matchapack, or $MATCHAPACK_CONFIG_DIR), which the classic
-# engine's version gate reads next to the built-in VERIFIED_NPM.
+# The npm upgrade routine (#11): run the harness on the npm on PATH.
 #   verify-npm.sh [--no-record] <work-dir> [extra project dir...]
 # Cases: the fixtures (hidden lockfile byte-identical; rootpath writes a file
-# named after its own directory), script-env through the
-# shell function, legacy-peer with legacy-peer-deps, then each extra project
-# (a real repository is worth adding: the fixtures are small). CI runs it with
-# --no-record.
-# The engine is matchapack's default, the inject engine: the same cases plus
-# the ones only it handles (dep-event, …), every case required to have cloned
-# something, and nothing recorded (npm-verified is the classic engine's gate;
-# the inject engine's is by npm major, INJECT_NPM_MAJORS in src/wrapper.rs).
-# MATCHAPACK_ENGINE=classic runs the classic engine and records on success.
+# named after its own directory), script-env through the shell function,
+# legacy-peer with legacy-peer-deps, then each extra project (a real
+# repository is worth adding: the fixtures are small). Every case must have
+# cloned something (a run in which the hook never fired would pass without
+# testing it). Nothing is recorded: the version gate is by npm major
+# (INJECT_NPM_MAJORS in src/wrapper.rs). --no-record is accepted and ignored
+# (it turned off recording into npm-verified, the classic engine's gate,
+# removed in PR C2).
 set -uo pipefail
-record=1
-if [ "${1-}" = --no-record ]; then record=0; shift; fi
+if [ "${1-}" = --no-record ]; then shift; fi
 work=${1:?usage: verify-npm.sh [--no-record] <work-dir> [extra project dir...]}; shift
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 mkdir -p "$work"
 npm_version=$(npm -v) || { echo "no npm on PATH" >&2; exit 2; }
-mm=$(echo "$npm_version" | cut -d. -f1-2)
-cfg=${MATCHAPACK_CONFIG_DIR:-$HOME/.config/matchapack}
 # What is certified is fixed here, never inherited: a caller's settings that
 # loosen the comparison (ignored paths, noise filtering, another baseline,
 # mtime handling) or route the install differently do not apply.
 unset MATCHAPACK_VERIFY_IGNORE MATCHAPACK_VERIFY_NOISE MATCHAPACK_VERIFY_BASELINE MATCHAPACK_VERIFY_MTIME MATCHAPACK_VERIFY_VIA MATCHAPACK_VERIFY_BYTES MATCHAPACK_VERIFY_CLONES MATCHAPACK_VERIFY_META
-engine=${MATCHAPACK_ENGINE:-inject}
-case $engine in
-  classic) ;;
-  inject)
-    if [ $record = 1 ]; then echo "inject engine: nothing is recorded (npm-verified is the classic engine's gate; MATCHAPACK_ENGINE=classic to record)"; record=0; fi
-    # A run in which the hook never fired would pass without testing it.
-    export MATCHAPACK_VERIFY_CLONES=some ;;
-  *) echo "MATCHAPACK_ENGINE=$engine is not an engine (classic, inject)" >&2; exit 2 ;;
-esac
-echo "npm $npm_version, node $(node -v), $("$bin" --version), $engine engine"
+# The engine is fixed too: a caller's MATCHAPACK_ENGINE other than inject
+# would make every install an error.
+unset MATCHAPACK_ENGINE
+# The fixtures use a store of their own in the work directory, never the
+# user's, unless the caller names one. verify.sh puts each case's trial log
+# (MATCHAPACK_LOG_DIR) and its trial scope (MATCHAPACK_PATHS) in the work
+# directory too; nothing else is written under ~/.cache/matchapack or
+# ~/.config/matchapack (the run's helper files go to <store>/tmp).
+export MATCHAPACK_STORE=${MATCHAPACK_STORE:-$(cd "$work" && pwd -P)/store}
+export MATCHAPACK_VERIFY_CLONES=some
+echo "npm $npm_version, node $(node -v), $("$bin" --version)"
 
 # The optional-upward fixture installs from a local tarball server.
 server=
@@ -74,20 +67,17 @@ for f in small stale-flags optional-upward optional-engines legacy-peer bundled 
   case_ "$f" -- "$here/fixtures/$f"
 done
 case_ workspaces MATCHAPACK_VERIFY_META=1 -- "$here/fixtures/workspaces"
-if [ $engine = inject ]; then
-  # The root's predependencies / dependencies / postdependencies scripts,
-  # which npm ci runs and the classic engine does not (NOTES "Inject engine").
-  case_ dep-event -- "$here/fixtures/dep-event"
-  # A failing optional dependency script: npm ci removes the package. The
-  # classic engine hands that install to npm (routing case 28).
-  case_ optional-script-fail -- "$here/fixtures/optional-script-fail"
-  # The same package placed by per-file clones (the Linux placement).
-  case_ small-file-clones -- "$here/fixtures/small" --clone-mode file
-  # Tarballs where an extractor other than pacote's can give another tree
-  # (a path listed twice; .gitignore next to .npmignore): the store is
-  # filled through pacote.
-  case_ odd-tarballs -- "$here/fixtures/odd-tarballs"
-fi
+# The root's predependencies / dependencies / postdependencies scripts,
+# which npm ci runs (the classic engine did not; NOTES "Inject engine").
+case_ dep-event -- "$here/fixtures/dep-event"
+# A failing optional dependency script: npm ci removes the package.
+case_ optional-script-fail -- "$here/fixtures/optional-script-fail"
+# The same package placed by per-file clones (the Linux placement).
+case_ small-file-clones -- "$here/fixtures/small" --clone-mode file
+# Tarballs where an extractor other than pacote's can give another tree
+# (a path listed twice; .gitignore next to .npmignore): the store is
+# filled through pacote.
+case_ odd-tarballs -- "$here/fixtures/odd-tarballs"
 # script-env records the npm environment scripts see; the user's flags
 # (--no-audit) reach matchapack only through the shell function.
 case_ script-env MATCHAPACK_VERIFY_VIA=wrapper -- "$here/fixtures/script-env"
@@ -96,72 +86,8 @@ for p in "$@"; do
   case_ "project-$(basename "$p")" -- "$p"
 done
 
-# Add or remove this version's line in npm-verified: under a lock, written to
-# a fresh temporary file and renamed over the old one, so concurrent runs never
-# lose each other's lines and an error never leaves a partial file. Prints
-# what it did; exits 3 on any error (the file is then unchanged).
-#   update add|remove <line to add>
-update() {
-  python3 -c '
-import fcntl, os, re, sys, tempfile
-cfg, mm, action, line = sys.argv[1:]
-f = os.path.join(cfg, "npm-verified")
-try:
-    os.makedirs(cfg, exist_ok=True)
-    with open(f + ".lock", "a") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
-        try:
-            with open(f) as h:
-                lines = h.read().splitlines(keepends=True)
-        except FileNotFoundError:
-            lines = []
-        mine = re.compile(r"^\s*" + re.escape(mm) + r"(\s|#|$)")
-        present = any(mine.match(l) for l in lines)
-        if action == "add":
-            if present:
-                print("already"); sys.exit(0)
-            if lines and not lines[-1].endswith("\n"):
-                lines[-1] += "\n"
-            lines.append(line + "\n")
-        else:
-            if not present:
-                print("absent"); sys.exit(0)
-            lines = [l for l in lines if not mine.match(l)]
-        fd, tmp = tempfile.mkstemp(dir=cfg, prefix=".npm-verified.")
-        with os.fdopen(fd, "w") as h:
-            h.writelines(lines)
-            h.flush()
-            os.fsync(h.fileno())
-        os.replace(tmp, f)
-        print("added" if action == "add" else "removed")
-except Exception as e:
-    print(f"error: {e}", file=sys.stderr); sys.exit(3)
-' "$cfg" "$mm" "$1" "${2-}"
-}
-
 if [ $fail != 0 ]; then
-  # A version recorded by an earlier run is taken back: this run found a
-  # difference (perhaps in a project the earlier run did not include).
-  if [ $record = 1 ]; then
-    r=$(update remove) || { echo "could NOT take $mm back out of $cfg/npm-verified: remove that line by hand" >&2; exit 3; }
-    [ "$r" = removed ] && echo "removed $mm from $cfg/npm-verified (recorded by an earlier run)"
-  fi
-  if [ $engine = classic ]; then
-    echo "npm $npm_version: NOT verified; the classic engine keeps handing npm ci to npm on it"
-  else
-    echo "npm $npm_version: the inject engine is NOT identical to npm ci here (see the failing cases)"
-  fi
+  echo "npm $npm_version: matchapack is NOT identical to npm ci here (see the failing cases)"
   exit 1
 fi
-if [ $record = 0 ]; then
-  echo "npm $npm_version: every case identical (not recorded: --no-record)"
-  exit 0
-fi
-r=$(update add "$mm  # $(date +%F): scripts/verify-npm.sh, npm $npm_version, $("$bin" --version)${*:+, plus $*}") \
-  || { echo "npm $npm_version: every case identical, but recording it in $cfg/npm-verified FAILED" >&2; exit 3; }
-if [ "$r" = already ]; then
-  echo "npm $npm_version: every case identical; $mm was already in $cfg/npm-verified"
-else
-  echo "npm $npm_version: every case identical; recorded $mm in $cfg/npm-verified"
-fi
-echo "(for every machine: add \"$mm\" to VERIFIED_NPM in src/wrapper.rs)"
+echo "npm $npm_version: every case identical"

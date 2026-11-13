@@ -390,9 +390,8 @@ EOF
     out=$(cd "$dir" && MATCHAPACK_NO_FALLBACK=1 matchapack npm ci --no-audit --no-fund 2>&1 < /dev/null); rc=$?
     done_line=$(printf '%s\n' "$out" | grep -o 'matchapack: added.*' | sed 's/^matchapack: //')
     # Cloned: "added N packages from the store", where N is what was placed
-    # as clones (src/wrapper.rs: the classic engine's placed entries, the
-    # inject engine's stats.cloned; packages npm extracted itself are the
-    # separate "npm extracted E").
+    # as clones (src/wrapper.rs: the inject engine's stats.cloned; packages
+    # npm extracted itself are the separate "npm extracted E").
     if [[ $done_line =~ ^added\ ([0-9]+)\ packages\ from\ the\ store ]] && [ "${BASH_REMATCH[1]}" -gt 0 ]; then cloned=yes; else cloned=no; fi
   else
     for p in "${nms[@]}"; do rm -rf "${p:?}"; done
