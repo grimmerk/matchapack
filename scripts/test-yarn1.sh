@@ -295,6 +295,79 @@ if [ -f "$x" ] && [ "$(head -1 "$x")" = "$yarnjs" ] && cmp -s "$x" "$work/e-many
   ok "lifecycle scripts get npm_execpath = Yarn's own bin/yarn.js, and it runs Yarn"
 else bad "npm_execpath under the engine ($(head -1 "$x" 2>/dev/null))"; fi
 
+# An install script that names a file after its own directory, as node-gyp's
+# .deps/<absolute path>/... (issue grimmerk/matchapack-private#48): each tree gets another path, so two
+# plain runs differ by path when compared as they are. verify-yarn1.sh
+# compares with --normalize-roots, so those paths match in all three trees.
+# What remains is content: Yarn lists the script's outputs (with the tree's
+# path) in .yarn-integrity, which then differs between the plain runs too:
+# "differs only where plain varies" (exit 3), never ENGINE DIFFERS.
+everify e-rootpath "$here/fixtures/yarn1-rootpath"
+raw=$("$bin" diff "$work/e-rootpath/plain1" "$work/e-rootpath/plain2" --paths 2>/dev/null | grep -c '^node_modules/y1-rootpath/built/')
+m=$work/e-rootpath/engine/node_modules/y1-rootpath/built$work/e-rootpath/engine/node_modules/y1-rootpath/marker
+want=$(printf 'content\tnode_modules/.yarn-integrity')
+if [ $rc = 3 ] && grep -q 'plain vs engine: differs only where plain varies' "$work/out" && [ "${raw:-0}" -gt 0 ] && [ -f "$m" ] \
+  && [ "$(cat "$work/e-rootpath/classes-plain.txt")" = "$want" ] && [ "$(cat "$work/e-rootpath/classes-engine.txt")" = "$want" ]; then
+  ok "a file named after its own tree's path: $raw paths differ between the plain runs as they are, none with the roots normalised; engine as plain (.yarn-integrity content only)"
+else bad "file named after its tree's path (exit $rc, raw plain differences ${raw:-?})"; fi
+
+# package.json out of sync with yarn.lock: yarn1-small plus a dependency the
+# lockfile lacks (y1-many: enough files that the engine clones some), with
+# node_modules/keepme already there. Not y1-empty: its empty files flip
+# Yarn's time probe, so two PLAIN runs already differ in mtimes (measured
+# here 2026-11-14: 2 of 3 plain pairs; NOTES "Yarn 1 harness"). Plain Yarn
+# and `matchapack yarn` on separate copies (cp -p of one source, so files
+# outside node_modules keep the same times), one scratch cache.
+sy=$work/sync; rm -rf "${sy:?}"; mkdir -p "$sy/src/node_modules/keepme"
+cp -p "$here/fixtures/yarn1-small/yarn.lock" "$sy/src/"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["dependencies"]["y1-many"]="http://127.0.0.1:48321/y1-many-1.0.0.tgz"; json.dump(d, open(sys.argv[2],"w"), indent=2)' \
+  "$here/fixtures/yarn1-small/package.json" "$sy/src/package.json"
+now_ns() { python3 -c 'import time; print(time.time_ns())'; }
+# sync_run <name> plain|engine [yarn args]: a fresh copy $sy/<name>, one
+# install; exit status in $rc, START:END in $win, output in $sy/<name>.log.
+sync_run() {
+  local d=$sy/$1 how=$2 s; shift 2
+  cpp "$sy/src" "$d"; s=$(now_ns)
+  if [ "$how" = plain ]; then
+    (cd "$d" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true \
+      "$node" "$yarnjs" install --non-interactive --cache-folder "$sy/cache" "$@") > "$d.log" 2>&1; rc=$?
+  else
+    (cd "$d" && env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK \
+      YARN_DISABLE_SELF_UPDATE_CHECK=true PATH="$(dirname "$node"):$PATH" MATCHAPACK_YARN_JS="$yarnjs" \
+      MATCHAPACK_STORE="$sy/mp/store" MATCHAPACK_LOG_DIR="$sy/mp/log" MATCHAPACK_CONFIG_DIR="$sy/mp/config" MATCHAPACK_NO_FALLBACK=1 \
+      "$bin" yarn install --non-interactive --cache-folder "$sy/cache" "$@") > "$d.log" 2>&1; rc=$?
+  fi
+  win=$s:$(now_ns)
+}
+# srec <python expression over r (the engine's last log line), y = r["yarn1"]>
+srec() { python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); y=r.get("yarn1") or {}; print(eval(sys.argv[2]))' "$sy/mp/log/log.jsonl" "$1" 2>/dev/null; }
+# 1. --frozen-lockfile: Yarn refuses before it fetches or links anything.
+sync_run f-plain plain --frozen-lockfile; rp=$rc
+sync_run f-engine engine --frozen-lockfile; re=$rc
+why=
+for t in f-plain f-engine; do
+  grep -q 'Your lockfile needs to be updated' "$sy/$t.log" || why="$why $t:no-error"
+  cmp -s "$sy/src/yarn.lock" "$sy/$t/yarn.lock" || why="$why $t:lock-changed"
+  [ -d "$sy/$t/node_modules/keepme" ] || why="$why $t:keepme-gone"
+  [ ! -e "$sy/$t/node_modules/.yarn-integrity" ] || why="$why $t:integrity-written"
+done
+rec=$(srec '(r["outcome"], r.get("code"), y.get("link_steps"), y.get("cloned"), y.get("linked"))')
+if [ "$rp" != 0 ] && [ "$re" = "$rp" ] && [ -z "$why" ] && [ "$rec" = "('yarn_failed', $re, 0, 0, False)" ]; then
+  ok "package.json ahead of yarn.lock, --frozen-lockfile: plain and engine both exit $rp with Yarn's error; lock unchanged, node_modules untouched; logged yarn_failed, no link step, nothing cloned"
+else bad "out-of-sync --frozen-lockfile (plain $rp, engine $re,$why; record $rec)"; fi
+# 2. A plain install: Yarn updates the lockfile and installs. A first run
+# fills the cache, so the compared runs both take every file from a warm
+# cache and the harness's --meta comparison applies.
+sync_run b-prime plain; r0=$rc
+sync_run b-plain plain; rp=$rc wp=$win
+sync_run b-engine engine; re=$rc we=$win
+n=$(srec 'y["cloned"]')
+"$bin" diff --meta --normalize-roots "$sy/b-plain" "$sy/b-engine" --a-run "$wp" --b-run "$we" --a-cache "$sy/cache" --b-cache "$sy/cache" > "$sy/b-diff.txt" 2>&1; rd=$?
+if [ "$r0" = 0 ] && [ "$rp" = 0 ] && [ "$re" = 0 ] && ! cmp -s "$sy/src/yarn.lock" "$sy/b-plain/yarn.lock" && cmp -s "$sy/b-plain/yarn.lock" "$sy/b-engine/yarn.lock" \
+  && grep -q 'y1-many-1.0.0.tgz#' "$sy/b-engine/yarn.lock" && [ "$rd" = 0 ] && [ "$(srec 'r["outcome"]')" = installed ] && [ "${n:-0}" -gt 0 ]; then
+  ok "package.json ahead of yarn.lock, plain install: both update yarn.lock the same way; trees identical (diff --meta); $n files cloned"
+else bad "out-of-sync install (prime $r0, plain $rp, engine $re, diff $rd, cloned ${n:-?})"; sed 's/^/    /' "$sy/b-diff.txt" | grep -v '^      ' | tail -25; fi
+
 # A slow answer (the server sleeps between a clone and its fix-up, longer
 # than the hook waits): later copies go to Node, but the slow request is
 # answered, never copied over while its clone is being fixed up.

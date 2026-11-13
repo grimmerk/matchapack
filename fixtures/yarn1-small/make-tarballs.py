@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Write the tarballs of the Yarn 1 fixtures (yarn1-small, yarn1-emptyfirst,
-yarn1-scriptpkg, yarn1-many, yarn1-workspaces) into
+yarn1-scriptpkg, yarn1-many, yarn1-workspaces, yarn1-rootpath; y1-rootpath
+also for the npm fixture rootpath) into
 fixtures/optional-upward/tarballs, where the local tarball server
 (127.0.0.1:48321) serves from, so that the fixtures install without a
 network.
@@ -16,6 +17,9 @@ network.
   y1-script 1.0.0 an install script that writes built.txt
   y1-execpath 1.0.0  an install script that records $npm_execpath and runs
                   `node "$npm_execpath" --version` (execpath.txt)
+  y1-rootpath 1.0.0  an install script that writes built/<its own absolute
+                  directory>/marker: a path named after the tree, as
+                  node-gyp's .deps/ (issue grimmerk/matchapack-private#48)
   y1-many 1.0.0/2.0.0  300 files and a bin: more than the 128 first copies
                   of Yarn's link step, which the Yarn 1 engine leaves to Node
 
@@ -97,6 +101,22 @@ tarball("y1-execpath-1.0.0.tgz", [
 const p = process.env.npm_execpath
 const v = cp.execFileSync(process.execPath, [p, '--version']).toString()
 require('fs').writeFileSync('execpath.txt', p + '\\n' + v)
+"""),
+])
+
+
+# Names a file after its own directory, as node-gyp's make build does under
+# build/Release/.deps/<absolute path>/ (issue grimmerk/matchapack-private#48): its install script writes
+# built/<cwd without the leading />/marker, so every tree has another path.
+# Used by yarn1-rootpath and by the npm fixture rootpath.
+tarball("y1-rootpath-1.0.0.tgz", [
+    ("package.json", 0o644, manifest(
+        name="y1-rootpath", version="1.0.0",
+        scripts={"install": "node build.js"})),
+    ("build.js", 0o644, b"""const fs = require('fs'), path = require('path')
+const d = path.join('built', process.cwd())
+fs.mkdirSync(d, { recursive: true })
+fs.writeFileSync(path.join(d, 'marker'), 'x\\n')
 """),
 ])
 

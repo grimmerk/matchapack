@@ -53,6 +53,10 @@
 # log line (engine.json) and `runs`: one line per run, "<name> <start
 # ns>:<end ns> <cache dir>", the --a-run / --a-cache values for comparing
 # these trees again.
+# Every comparison uses --normalize-roots: each tree's own path, where an
+# install script wrote it into a file name (node-gyp's .deps/<absolute
+# path>/...), is written <root>, so plain1, plain2 and the engine have the
+# same path there (issue grimmerk/matchapack-private#48).
 # Yarn always gets a scratch --cache-folder, YARN_DISABLE_SELF_UPDATE_CHECK
 # (so it never writes ~/.yarnrc) and no GITHUB_TOKEN; matchapack a scratch
 # store, log and config directory.
@@ -208,7 +212,7 @@ yarn_run plain1 "$c1" "$node" plain "$@"
 yarn_run plain2 "$c2" "$node" plain "$@"
 [ -n "$engine" ] && yarn_run engine "$ce" "$node" engine "$@"
 
-"$bin" diff --meta "$work/plain1" "$work/plain2" --a-run "$run_plain1" --b-run "$run_plain2" \
+"$bin" diff --meta --normalize-roots "$work/plain1" "$work/plain2" --a-run "$run_plain1" --b-run "$run_plain2" \
   --a-cache "$c1" --b-cache "$c2" > "$work/diff-plain.txt"
 rc=$?
 grep -v '^    ' "$work/diff-plain.txt" | grep -v '^  written during\|^  from each run' || true
@@ -245,7 +249,7 @@ fi
 [ "$min_clones" = 0 ] || [ "$unseen" = False ] || { echo "engine: Yarn linked but the hook saw no link step"; exit 1; }
 [ "$(uname)" = Darwin ] && echo "engine: $(python3 "$here/scripts/shared-blocks.py" "$work/engine" "$ce")"
 
-"$bin" diff --meta "$work/plain1" "$work/engine" --a-run "$run_plain1" --b-run "$run_engine" \
+"$bin" diff --meta --normalize-roots "$work/plain1" "$work/engine" --a-run "$run_plain1" --b-run "$run_engine" \
   --a-cache "$c1" --b-cache "$ce" > "$work/diff-engine.txt"
 rc=$?
 if [ $rc != 0 ] && [ $rc != 1 ]; then echo "matchapack diff failed (exit $rc)"; exit 1; fi
@@ -257,9 +261,9 @@ fi
 # A difference between plain1 and the engine that the two plain runs also
 # have, on the same path and in the same class, is plain Yarn's own
 # variation, not the engine's (scripts/yarn1-own-diffs.sh).
-"$bin" diff --meta "$work/plain1" "$work/plain2" --a-run "$run_plain1" --b-run "$run_plain2" --a-cache "$c1" --b-cache "$c2" --classes > "$work/classes-plain.txt" 2>/dev/null
+"$bin" diff --meta --normalize-roots "$work/plain1" "$work/plain2" --a-run "$run_plain1" --b-run "$run_plain2" --a-cache "$c1" --b-cache "$c2" --classes > "$work/classes-plain.txt" 2>/dev/null
 r1=$?
-"$bin" diff --meta "$work/plain1" "$work/engine" --a-run "$run_plain1" --b-run "$run_engine" --a-cache "$c1" --b-cache "$ce" --classes > "$work/classes-engine.txt" 2>/dev/null
+"$bin" diff --meta --normalize-roots "$work/plain1" "$work/engine" --a-run "$run_plain1" --b-run "$run_engine" --a-cache "$c1" --b-cache "$ce" --classes > "$work/classes-engine.txt" 2>/dev/null
 r2=$?
 { [ $r1 -le 1 ] && [ $r2 -le 1 ]; } || { echo "matchapack diff --classes failed (exit $r1, $r2)"; exit 1; }
 own=$("$here/scripts/yarn1-own-diffs.sh" "$work/classes-plain.txt" "$work/classes-engine.txt") \

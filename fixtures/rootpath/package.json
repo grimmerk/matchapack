@@ -1,0 +1,11 @@
+{
+  "name": "matchapack-fixture-rootpath",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "y1-rootpath": "http://127.0.0.1:48321/y1-rootpath-1.0.0.tgz"
+  },
+  "allowScripts": {
+    "y1-rootpath": true
+  }
+}

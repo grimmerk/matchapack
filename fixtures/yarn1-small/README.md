@@ -21,6 +21,11 @@ The tarballs are made by `make-tarballs.py` (deterministic).
   removed, one added, one removed) for an incremental install over the tree.
 - `yarn1-workspaces` (Yarn 1 engine): two workspaces linked from the root
   `node_modules`, one with its own nested `node_modules`.
+- `yarn1-rootpath` (Yarn 1 engine): `y1-many` and `y1-rootpath`, whose
+  install script writes `built/<its own absolute directory>/marker`, so each
+  tree has another path there, as node-gyp's `build/Release/.deps/` (issue
+  #48; `matchapack diff --normalize-roots`). The npm fixture `rootpath` uses
+  the same tarball.
 
 To change a tarball: edit `make-tarballs.py`, run it, then regenerate each
 affected `yarn.lock` with the tarball server running:

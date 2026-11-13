@@ -4,7 +4,8 @@
 # <config dir>/npm-verified (~/.config/matchapack, or $MATCHAPACK_CONFIG_DIR),
 # which matchapack's version gate reads next to the built-in VERIFIED_NPM.
 #   verify-npm.sh [--no-record] <work-dir> [extra project dir...]
-# Cases: the fixtures (hidden lockfile byte-identical), script-env through the
+# Cases: the fixtures (hidden lockfile byte-identical; rootpath writes a file
+# named after its own directory), script-env through the
 # shell function, legacy-peer with legacy-peer-deps, then each extra project
 # (a real repository is worth adding: the fixtures are small). CI runs it with
 # --no-record.
@@ -60,7 +61,10 @@ case_() { # name env-assignments... -- source [matchapack install args...]
     fail=1; echo "FAIL  $name (log: $out)"; tail -15 "$out" | sed 's/^/      /'
   fi
 }
-for f in small stale-flags optional-upward optional-engines legacy-peer bundled; do
+# rootpath: an install script names a file after its own directory, so A and
+# B have another path there; verify.sh's --normalize-roots must make them the
+# same (issue grimmerk/matchapack-private#48).
+for f in small stale-flags optional-upward optional-engines legacy-peer bundled rootpath; do
   case_ "$f" -- "$here/fixtures/$f"
 done
 if [ $engine = inject ]; then

@@ -1,14 +1,18 @@
 # matchapack
 
-Makes `npm ci` place every package as a copy-on-write clone from one
-machine-wide store, so N worktrees of a repo cost about one copy on disk. The
-tree it builds is the tree `npm ci` builds: same paths, contents, permissions,
-symlinks, `.bin` links, hidden lockfile and mtimes (see `NOTES.md` for how that
-was verified). Nothing is added to the project: no config file, no package.json
-change; node_modules is all it writes.
+Makes `npm ci` and Yarn 1 installs place `node_modules` as copy-on-write
+clones, so each extra checkout or git worktree of a repo costs almost no disk.
+`npm ci` clones every package from one machine-wide store; Yarn 1 (macOS) clones
+every file from Yarn's own cache (see "Yarn 1 (classic) projects"). The tree it
+builds is the tree plain `npm ci` or `yarn` builds: same paths, contents,
+permissions, symlinks, `.bin` links, mtimes, and npm's hidden lockfile or
+Yarn's `.yarn-integrity` (see `NOTES.md`
+for how that was verified). Nothing is added to the project: no config file, no
+package.json change; node_modules is all it writes.
 
 Requires a filesystem with reflinks: APFS (every current Mac), Btrfs or XFS
-with `reflink=1`. Elsewhere it hands over to npm.
+with `reflink=1`. Elsewhere it hands over to npm or Yarn. On Linux, Yarn 1's own
+copy already clones, so matchapack leaves Yarn alone there.
 
 ## Use
 
@@ -354,7 +358,11 @@ it records nothing and shows the log.
   `.yarn-integrity`. Times written during an install differ between two runs:
   `--a-run START:END` / `--b-run` (ns since the epoch) and `--a-cache` /
   `--b-cache` let those through only when both sides wrote them the same way
-  (NOTES, "Yarn 1 harness").
+  (NOTES, "Yarn 1 harness"). `--normalize-roots` writes each tree's own
+  root path, where it appears inside a relative path, as `<root>`: an install
+  script that names a file after its own directory (node-gyp's
+  `build/Release/.deps/<absolute path>/…`) then gives the same path in both
+  trees. Both harnesses compare with it (NOTES, "Tree roots in file names").
 - `scripts/verify-yarn1.sh [--cache warm|empty] <project> [yarn args]`: plain
   Yarn 1 twice on copies of a project with a scratch cache, compared with
   `diff --meta`; exit 0 identical, 3 "plain varies" (with the paths). The

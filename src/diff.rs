@@ -9,12 +9,17 @@
 //! and reports every class of difference separately. File times written
 //! during the install legitimately differ between two runs; `MetaOpts`
 //! explains the one rule that lets them through.
+//!
+//! `--normalize-roots` (`RootForms`) replaces each tree's own root path,
+//! where it appears inside a relative path, with `<root>` before anything is
+//! compared: an install script that names a file after its own directory
+//! then gives the same path in every tree.
 
 use anyhow::Result;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Node {
@@ -195,11 +200,100 @@ fn names_from(mut list: impl FnMut(Option<&mut [u8]>) -> std::io::Result<usize>)
     Err(std::io::Error::other("the extended attribute list kept changing"))
 }
 
-fn scan(root: &Path, meta: bool) -> Result<BTreeMap<String, (Node, Option<Meta>)>> {
+/// What `--normalize-roots` writes in place of a tree's own root.
+pub const ROOT: &str = "<root>";
+
+/// `--normalize-roots`: the forms of one tree's root that are replaced by
+/// `ROOT` inside its relative paths, each a sequence of whole path
+/// components, longest first.
+///
+/// Why: an install script can name a file after its own working directory.
+/// node-gyp's make build writes `build/Release/.deps/<absolute path of the
+/// package>/…/<target>.node.d`, so `pprof` in tree `plain1` gets
+/// `…/.deps/<…>/plain1/node_modules/pprof/…` and in tree `engine`
+/// `…/.deps/<…>/engine/node_modules/pprof/…`: two plain runs already differ
+/// there, and an exact-path match of "what plain also varies on" can never
+/// pair them with the engine's (issue grimmerk/matchapack-private#48). With the root replaced, all three
+/// trees have `…/.deps/<root>/node_modules/pprof/…`.
+///
+/// The forms: the root as given, made absolute, and its realpath when that
+/// differs (the script sees the physical directory: on macOS `/tmp` is
+/// `/private/tmp` and `$TMPDIR` lives under `/private/var`).
+///
+/// Over-matching: only the WHOLE root matches, as consecutive whole
+/// components, never a part of a component and never the root's last
+/// component alone. A tree called `A` with a package directory `A` is
+/// therefore not touched; nor is a path naming only the root's parent
+/// (directories such as `.deps/Users/me/work`, which are the same in every
+/// tree that shares that parent, as the harnesses' trees do). A form of fewer
+/// than two components (a tree at `/A`) is not used: its one name could be
+/// any directory's. The measured case writes the full absolute path, so the
+/// basename alone is not needed. If two paths of one tree become the same
+/// path, `scan` fails instead of keeping one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootForms(Vec<Vec<String>>);
+
+impl RootForms {
+    fn of(root: &Path) -> Result<RootForms> {
+        // None when the path has a `..` (absolute() keeps it; the realpath
+        // form covers that root).
+        let comps = |p: &Path| -> Option<Vec<String>> {
+            let mut v = vec![];
+            for c in p.components() {
+                match c {
+                    Component::Normal(s) => v.push(s.to_string_lossy().into_owned()),
+                    Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
+                    Component::ParentDir => return None,
+                }
+            }
+            Some(v)
+        };
+        let abs = std::path::absolute(root).map_err(|e| anyhow::anyhow!("{}: {e}", root.display()))?;
+        let real = std::fs::canonicalize(root).map_err(|e| anyhow::anyhow!("{}: {e}", root.display()))?;
+        let mut forms: Vec<Vec<String>> = [comps(&abs), comps(&real)].into_iter().flatten().filter(|f| f.len() >= 2).collect();
+        forms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        forms.dedup();
+        Ok(RootForms(forms))
+    }
+
+    /// `rel` (components separated by `/`) with every occurrence of a form
+    /// replaced by `ROOT`.
+    fn apply(&self, rel: &str) -> String {
+        let parts: Vec<&str> = rel.split('/').collect();
+        let mut out: Vec<&str> = Vec::with_capacity(parts.len());
+        let mut i = 0;
+        'next: while i < parts.len() {
+            for f in &self.0 {
+                if parts.len() - i >= f.len() && parts[i..i + f.len()].iter().zip(f).all(|(p, q)| *p == q) {
+                    out.push(ROOT);
+                    i += f.len();
+                    continue 'next;
+                }
+            }
+            out.push(parts[i]);
+            i += 1;
+        }
+        out.join("/")
+    }
+}
+
+fn scan(root: &Path, meta: bool, normalize_roots: bool) -> Result<BTreeMap<String, (Node, Option<Meta>)>> {
+    let forms = if normalize_roots { Some(RootForms::of(root)?) } else { None };
     let mut paths = vec![];
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for ent in walkdir::WalkDir::new(root).follow_links(false).min_depth(1) {
         let ent = ent?;
-        let rel = ent.path().strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let raw = ent.path().strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let rel = match &forms {
+            Some(f) => {
+                let n = f.apply(&raw);
+                if let Some(other) = seen.insert(n.clone(), raw.clone()) {
+                    anyhow::bail!("{}: {other} and {raw} are the same path once the tree's root is written {ROOT}", root.display());
+                }
+                n
+            }
+            None => raw,
+        };
         paths.push((rel, ent.path().to_path_buf(), ent.file_type()));
     }
     let nodes: Result<Vec<(String, (Node, Option<Meta>))>> = paths
@@ -272,9 +366,12 @@ pub struct Report {
     pub meta: Option<MetaReport>,
 }
 
-pub fn diff_with(a: &Path, b: &Path, ignore: &[String], meta: Option<&MetaOpts>) -> Result<Report> {
+/// Compare tree `a` with tree `b`. `ignore` holds relative paths (with
+/// `normalize_roots`, as reported: with `<root>`); `normalize_roots` is
+/// `--normalize-roots` (`RootForms`).
+pub fn diff_with(a: &Path, b: &Path, ignore: &[String], meta: Option<&MetaOpts>, normalize_roots: bool) -> Result<Report> {
     let want = meta.is_some();
-    let (ma, mb) = rayon::join(|| scan(a, want), || scan(b, want));
+    let (ma, mb) = rayon::join(|| scan(a, want, normalize_roots), || scan(b, want, normalize_roots));
     let (ma, mb) = (ma?, mb?);
     let ignored = |p: &str| ignore.iter().any(|i| p == i || p.starts_with(&format!("{i}/")));
     let mut r = Report { only_a: vec![], only_b: vec![], differ: vec![], hidden_bytes_equal: None, files: ma.len(), meta: None };
@@ -293,6 +390,9 @@ pub fn diff_with(a: &Path, b: &Path, ignore: &[String], meta: Option<&MetaOpts>)
             r.only_a.push(k.clone());
             continue;
         };
+        // (With --normalize-roots `k` is the reported path; one with a root
+        // replaced has a `<root>` component, so a `k` equal to HIDDEN is
+        // also the path on disk.)
         if k == HIDDEN && matches!((va, vb), (Node::File { .. }, Node::File { .. })) {
             let ja: serde_json::Value = serde_json::from_slice(&std::fs::read(a.join(k))?)?;
             let jb: serde_json::Value = serde_json::from_slice(&std::fs::read(b.join(k))?)?;
@@ -529,7 +629,7 @@ mod tests {
 
     /// The comparison without --meta.
     fn diff(a: &Path, b: &Path, ignore: &[String]) -> Result<Report> {
-        diff_with(a, b, ignore, None)
+        diff_with(a, b, ignore, None, false)
     }
 
     /// Two identical trees, A and B, with every time set to OLD: a package
@@ -551,7 +651,7 @@ mod tests {
     }
 
     fn meta(a: &Path, b: &Path, o: &MetaOpts) -> Report {
-        diff_with(a, b, &[], Some(o)).unwrap()
+        diff_with(a, b, &[], Some(o), false).unwrap()
     }
 
     #[test]
@@ -800,6 +900,85 @@ mod tests {
         // End to end: a path that does not exist is an error, not "no attributes".
         let d = scratch("xattr-missing");
         assert!(xattr_names(&d.join("gone")).is_err());
+    }
+
+    /// `rel` under `root`, with the parent directories.
+    fn put(root: &Path, rel: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, "x\n").unwrap();
+    }
+
+    /// A path without its leading `/`, as node-gyp writes it under `.deps/`.
+    fn rel_of(p: &Path) -> String {
+        p.to_string_lossy().trim_start_matches('/').to_string()
+    }
+
+    #[test]
+    fn normalize_roots_makes_files_named_after_each_root_the_same() {
+        // The trees are reached through a symlink, so the root as given and
+        // its realpath differ on every platform. Each case: both trees' file
+        // named after one form of their own root (a script writes what
+        // getcwd gives, the realpath; the other form is also covered).
+        for (case, real) in [("roots-real", true), ("roots-given", false)] {
+            let d = scratch(case);
+            std::os::unix::fs::symlink(&d, d.join("via")).unwrap();
+            let (a, b) = (d.join("via/A"), d.join("via/B"));
+            let form = |t: &Path| rel_of(&if real { fs::canonicalize(t.parent().unwrap()).unwrap().join(t.file_name().unwrap()) } else { t.to_path_buf() });
+            let file = |t: &Path| format!("x/.deps/{}/node_modules/p/f.d", form(t));
+            for t in [&a, &b] {
+                put(t, &file(t));
+            }
+            assert_ne!(fs::canonicalize(&b).unwrap(), b, "the root as given is not its realpath");
+            // Without the option: each tree's file only in that tree.
+            let r = diff(&a, &b, &[]).unwrap();
+            assert!(!r.ok());
+            assert!(r.only_a.contains(&file(&a)), "{case}: {:?}", r.only_a);
+            assert!(r.only_b.contains(&file(&b)), "{case}: {:?}", r.only_b);
+            // With it: identical.
+            let n = diff_with(&a, &b, &[], None, true).unwrap();
+            assert!(n.ok(), "{case}: only A {:?} only B {:?}", n.only_a, n.only_b);
+            assert!(diff_with(&a, &b, &[], Some(&MetaOpts::default()), true).unwrap().meta.unwrap().content.is_empty());
+            // A content difference there is still reported, under the
+            // <root> path, and --ignore takes that form.
+            fs::write(b.join(file(&b)), "y\n").unwrap();
+            let n = diff_with(&a, &b, &[], None, true).unwrap();
+            assert_eq!(n.differ.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["x/.deps/<root>/node_modules/p/f.d"], "{case}");
+            assert!(diff_with(&a, &b, &["x/.deps/<root>".into()], None, true).unwrap().ok());
+        }
+    }
+
+    #[test]
+    fn normalize_roots_does_not_match_the_basename_or_a_part() {
+        let d = scratch("roots-over");
+        let (a, b) = (d.join("A"), d.join("B"));
+        // A package directory named like the tree, and the tree's parent
+        // without the tree: neither is the root.
+        put(&a, "node_modules/A/f");
+        put(&b, "node_modules/B/f");
+        let parent = rel_of(&fs::canonicalize(&d).unwrap());
+        put(&a, &format!("y/{parent}/Ax/f"));
+        put(&b, &format!("y/{parent}/Ax/f"));
+        let r = diff_with(&a, &b, &[], None, true).unwrap();
+        assert_eq!(r.only_a, ["node_modules/A", "node_modules/A/f"]);
+        assert_eq!(r.only_b, ["node_modules/B", "node_modules/B/f"]);
+        // A form of one component is not used.
+        assert_eq!(RootForms::of(Path::new("/")).unwrap(), RootForms(vec![]));
+        let f = RootForms(vec![vec!["u".into(), "w".into(), "A".into()]]);
+        assert_eq!(f.apply("x/u/w/A/y/u/w/A"), "x/<root>/y/<root>", "every occurrence");
+        assert_eq!(f.apply("x/u/w/Ab/y"), "x/u/w/Ab/y", "whole components only");
+        assert_eq!(f.apply("u/w"), "u/w");
+    }
+
+    #[test]
+    fn normalize_roots_refuses_two_paths_that_become_one() {
+        let d = scratch("roots-clash");
+        let a = d.join("A");
+        put(&a, &format!("z/{}/f", rel_of(&fs::canonicalize(&d).unwrap().join("A"))));
+        put(&a, "z/<root>/f");
+        put(&d.join("B"), "z/<root>/f");
+        let e = diff_with(&a, &d.join("B"), &[], None, true).err().expect("an error, not a result");
+        assert!(e.to_string().contains("same path"), "{e}");
     }
 
     #[test]
