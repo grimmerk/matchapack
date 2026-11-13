@@ -14,6 +14,11 @@ mkdir -p "$work"
 # Every case runs inside the trial scope unless it sets its own (cases 14-15):
 # the user's ~/.config/matchapack/paths must not decide the outcome.
 export MATCHAPACK_PATHS=$(cd "$work" && pwd -P)
+# The classic engine's cases, whatever the caller set: the inject engine
+# (the default since PR C1) does not plan, gate or place this way; its own
+# cases are in scripts/test-inject.sh. These go with the classic engine (#33,
+# PR C2; which ones to port: NOTES "PR C1").
+export MATCHAPACK_ENGINE=classic
 fx=$here/fixtures/small
 pass=0; fail=0
 

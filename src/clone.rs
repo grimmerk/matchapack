@@ -113,23 +113,129 @@ fn touch_now(c: &std::ffi::CStr) -> Result<()> {
     Ok(())
 }
 
-/// Set atime/mtime to the current time on every path of `dst` that came from
-/// `src` (a store entry just placed there): `dst` itself and `dst/<p>` for
-/// every path `p` under `src`, symlinks not followed. The walk is over `src`,
-/// which nothing changes, so paths other packages are placing under
-/// `dst/node_modules` at the same moment are neither touched nor read.
-pub fn touch_placed(src: &Path, dst: &Path) -> Result<usize> {
+/// What the kernel gives a file or directory created in a directory, which
+/// is what npm's extraction gives every path of a package (node-tar runs
+/// with `preserveOwner: false` and pacote with `noChmod`, so neither sets a
+/// group or a directory's setgid bit itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewPaths {
+    /// Its group.
+    pub gid: u32,
+    /// Linux: a new directory inherits the setgid bit of a setgid parent.
+    pub setgid_dirs: bool,
+}
+
+/// `NewPaths` for paths created in `dir`:
+/// - macOS (BSD semantics): the group of the directory; no setgid bit is
+///   handed on;
+/// - Linux: the group of the directory when it is setgid, and then new
+///   directories are setgid too; else the creating process's effective group.
+///   (Measured as a non-root user in Docker: `npm ci` in a plain directory
+///   gave the user's group, in a setgid directory of another group that
+///   group and `drwxr-sr-x` directories.)
+///
+/// Every path of a package is created inside directories npm (or tar)
+/// created under the same rule, so it holds for the whole package.
+/// Not covered: a Linux filesystem mounted with `grpid` / `bsdgroups`
+/// (BSD semantics there).
+pub fn new_paths(dir: &Path) -> std::io::Result<NewPaths> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(dir)?;
+    let setgid = m.mode() & (libc::S_ISGID as u32) != 0;
+    if cfg!(target_os = "macos") {
+        Ok(NewPaths { gid: m.gid(), setgid_dirs: false })
+    } else if setgid {
+        Ok(NewPaths { gid: m.gid(), setgid_dirs: true })
+    } else {
+        Ok(NewPaths { gid: unsafe { libc::getegid() }, setgid_dirs: false })
+    }
+}
+
+/// Whether this process can give a file it owns the group `g` (lchown):
+/// root, or `g` is its effective group or one of its supplementary groups.
+/// The kernel gives a new file a group the user is not in (macOS: from its
+/// directory; Linux: a setgid directory's), but the user cannot set one.
+pub fn can_give_group(g: u32) -> bool {
+    if unsafe { libc::geteuid() } == 0 || unsafe { libc::getegid() } == g {
+        return true;
+    }
+    let mut v = vec![0 as libc::gid_t; 256];
+    let n = unsafe { libc::getgroups(v.len() as libc::c_int, v.as_mut_ptr()) };
+    v.truncate(n.max(0) as usize);
+    v.iter().any(|x| *x as u32 == g)
+}
+
+/// What `settle_placed` did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Settled {
+    /// Paths walked (each touched when asked to).
+    pub paths: usize,
+    /// Paths whose group (or, for a directory, setgid bit) was changed.
+    pub regrouped: usize,
+}
+
+/// Make the paths of `dst` that came from `src` (a store entry, or pacote's
+/// extraction, just placed there) look as npm's extraction leaves them:
+/// `dst` itself and `dst/<p>` for every path `p` under `src`, symlinks not
+/// followed.
+/// - `touch`: atime and mtime set to now (npm ci leaves every extracted path
+///   with the install time; a clone carries the source's).
+/// - `want`: the group (and setgid bit of directories) npm's extraction
+///   would have given them (`new_paths` of the destination's parent). A
+///   clone made directly at the destination already has it, but a placement
+///   moved in from the store's `tmp/` keeps what it got there, the store's
+///   (#41). Each path is `lstat`ed, and `lchown`ed (a directory: `chmod`ed)
+///   only when it differs.
+///
+/// The walk is over `src`, which nothing changes, so paths other packages
+/// are placing under `dst/node_modules` at the same moment are neither
+/// touched nor read.
+pub fn settle_placed(src: &Path, dst: &Path, touch: bool, want: Option<NewPaths>) -> Result<Settled> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    let mut n = 0;
+    let mut s = Settled::default();
     for ent in walkdir::WalkDir::new(src).follow_links(false).follow_root_links(false) {
         let ent = ent?;
         let rel = ent.path().strip_prefix(src).unwrap();
         let out = if rel.as_os_str().is_empty() { dst.to_path_buf() } else { dst.join(rel) };
-        touch_now(&CString::new(out.as_os_str().as_bytes())?)?;
-        n += 1;
+        let c = CString::new(out.as_os_str().as_bytes())?;
+        if let Some(w) = want {
+            if regroup(&c, w)? {
+                s.regrouped += 1;
+            }
+        }
+        if touch {
+            touch_now(&c)?;
+        }
+        s.paths += 1;
     }
-    Ok(n)
+    Ok(s)
+}
+
+/// Give `c` (not followed if a symlink) the group of `w` unless it has it
+/// already, and a directory the setgid bit when `w` hands it on. True when
+/// something was changed.
+fn regroup(c: &std::ffi::CStr, w: NewPaths) -> Result<bool> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(c.as_ptr(), &mut st) } != 0 {
+        bail!("lstat {:?}: {}", c, std::io::Error::last_os_error());
+    }
+    let mut changed = false;
+    if st.st_gid != w.gid {
+        // The owner stays (-1); a group the user is not in fails with EPERM.
+        if unsafe { libc::lchown(c.as_ptr(), u32::MAX as libc::uid_t, w.gid as libc::gid_t) } != 0 {
+            bail!("lchown {:?} to group {}: {}", c, w.gid, std::io::Error::last_os_error());
+        }
+        changed = true;
+    }
+    let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+    if w.setgid_dirs && is_dir && st.st_mode & libc::S_ISGID == 0 {
+        if unsafe { libc::chmod(c.as_ptr(), (st.st_mode & 0o7777) | libc::S_ISGID) } != 0 {
+            bail!("chmod g+s {:?}: {}", c, std::io::Error::last_os_error());
+        }
+        changed = true;
+    }
+    Ok(changed)
 }
 
 /// What a placed file's modification time should be.

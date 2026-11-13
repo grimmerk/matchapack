@@ -3,7 +3,8 @@
 #   docker run --rm --privileged -v "$PWD":/src:ro rust:1-bookworm bash /src/scripts/linux-test.sh
 # Builds matchapack, then for btrfs and XFS (reflink=1) on loop devices runs the
 # harness on fixtures/small and fixtures/optional-upward with both engines
-# (classic, then MATCHAPACK_ENGINE=inject) and the clone server's unit tests
+# (MATCHAPACK_ENGINE=classic, then the default, inject) and the clone
+# server's unit tests
 # with their scratch directory on that filesystem, checks that cloned
 # files share extents with the store, and checks that a filesystem WITHOUT
 # reflink (the container's overlayfs) makes matchapack fail loudly.
@@ -52,12 +53,12 @@ run_fs() {
   for f in small ou; do
     echo "== $fs / $f"
     filtered 'RESULT|only in|differ:|^A:|^B:|npm ls:|clone:|touch' \
-      /build/src/scripts/verify.sh $w/src-$f $w/v-$f --npm-cache $mnt/npmcache/_cacache
+      env MATCHAPACK_ENGINE=classic /build/src/scripts/verify.sh $w/src-$f $w/v-$f --npm-cache $mnt/npmcache/_cacache
     # The inject engine: npm's own npm ci, packages placed by the clone
     # server with per-file FICLONE (no directory reflink on Linux).
     echo "== $fs / $f, inject engine"
-    filtered 'RESULT|only in|differ:|^A:|^B:|npm ls:|inject:|cloned nothing|byte-identical' \
-      env MATCHAPACK_ENGINE=inject MATCHAPACK_VERIFY_CLONES=some MATCHAPACK_VERIFY_BYTES=1 /build/src/scripts/verify.sh $w/src-$f $w/vi-$f
+    filtered 'RESULT|only in|differ:|^A:|^B:|npm ls:|inject:|cloned nothing|byte-identical|^meta' \
+      env -u MATCHAPACK_ENGINE MATCHAPACK_VERIFY_CLONES=some MATCHAPACK_VERIFY_BYTES=1 MATCHAPACK_VERIFY_META=1 /build/src/scripts/verify.sh $w/src-$f $w/vi-$f
   done
   # The clone server's unit tests place packages only where the filesystem
   # can clone: run them with the temporary directory on this filesystem.
@@ -83,14 +84,14 @@ run_fs xfs
 
 log "negative: store and project on overlayfs (no reflink) must fail, not copy"
 mkdir -p /neg/p && cp /src/fixtures/small/package*.json /neg/p/
-if MATCHAPACK_STORE=/neg/store npm_config_cache=/mnt/btrfs/npmcache "$bin" install /neg/p --npm-cache /mnt/btrfs/npmcache/_cacache --no-rebuild 2>&1 | tail -2; then
+if MATCHAPACK_ENGINE=classic MATCHAPACK_STORE=/neg/store npm_config_cache=/mnt/btrfs/npmcache "$bin" install /neg/p --npm-cache /mnt/btrfs/npmcache/_cacache --no-rebuild 2>&1 | tail -2; then
   echo "NEGATIVE TEST FAILED: install succeeded on overlayfs"; failures=$((failures+1))
 else
   echo "refused as expected; files placed: $(find /neg/p/node_modules -type f 2>/dev/null | wc -l)"
 fi
 log "negative: store on btrfs, project on overlayfs (cross-device) must fail"
 rm -rf /neg/p/node_modules
-if MATCHAPACK_STORE=/mnt/btrfs/store "$bin" install /neg/p --npm-cache /mnt/btrfs/npmcache/_cacache --no-rebuild 2>&1 | tail -2; then
+if MATCHAPACK_ENGINE=classic MATCHAPACK_STORE=/mnt/btrfs/store "$bin" install /neg/p --npm-cache /mnt/btrfs/npmcache/_cacache --no-rebuild 2>&1 | tail -2; then
   echo "NEGATIVE TEST FAILED: cross-device install succeeded"; failures=$((failures+1))
 else
   echo "refused as expected; files placed: $(find /neg/p/node_modules -type f 2>/dev/null | wc -l)"

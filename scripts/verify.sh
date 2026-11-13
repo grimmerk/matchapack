@@ -8,11 +8,13 @@
 #      hidden lockfile as JSON; --normalize-roots: each tree's own path, where an
 #      install script wrote it into a file name, is written <root>)
 #   2. npm ls --all in B must exit 0
-# The engine in B is matchapack's own switch: MATCHAPACK_ENGINE=inject runs the
-# inject engine (npm's own `npm ci` with the extraction replaced by clones).
-# With it, MATCHAPACK_VERIFY_CLONES=some fails the run when B cloned nothing
+# The engine in B is matchapack's own switch: the inject engine by default
+# (npm's own `npm ci` with the extraction replaced by clones),
+# MATCHAPACK_ENGINE=classic for the classic engine. With the inject engine,
+# MATCHAPACK_VERIFY_CLONES=some fails the run when B cloned nothing
 # (the hook did not fire: the trees are then identical without testing
-# anything), =none when it cloned anything.
+# anything), =none when it cloned anything. MATCHAPACK_VERIFY_META=1 also
+# compares mtimes outside the two runs, uid, gid and xattr names (diff --meta).
 set -euo pipefail
 src=$1; work=$2; shift 2
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,7 +23,7 @@ bin=$here/target/release/matchapack
 rm -rf "${work:?}/A" "${work:?}/A2" "${work:?}/B"
 mkdir -p "$work"
 # Copy-on-write copies of the source (macOS: cp -c; Linux: --reflink=auto).
-if [ "$(uname)" = Darwin ]; then cpcow() { cp -c -R "$1" "$2"; }; else cpcow() { cp -a --reflink=auto "$1" "$2"; }; fi
+if [ "$(uname)" = Darwin ]; then cpcow() { cp -c -R -p "$1" "$2"; }; else cpcow() { cp -a --reflink=auto "$1" "$2"; }; fi
 cpcow "$src" "$work/A"
 cpcow "$src" "$work/B"
 
@@ -38,13 +40,13 @@ export MATCHAPACK_NPM_VERSIONS=${MATCHAPACK_NPM_VERSIONS:-any}
 # (~/.config/matchapack/paths) from deciding a wrapper run.
 export MATCHAPACK_PATHS=${MATCHAPACK_PATHS:-$(cd "$work" && pwd -P)}
 echo "== npm $base (A)"
-t0=$(python3 -c 'import time;print(time.time())')
+t0=$(python3 -c 'import time;print(time.time_ns())')
 (cd "$work/A" && npm "$base" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
 if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.json"; then
   echo "NOTE: npm $base rewrote package-lock.json"
 fi
-t1=$(python3 -c 'import time;print(time.time())')
-engine=${MATCHAPACK_ENGINE:-classic}
+t1=$(python3 -c 'import time;print(time.time_ns())')
+engine=${MATCHAPACK_ENGINE:-inject}
 echo "== matchapack install (B, $engine engine)"
 if [ "${MATCHAPACK_VERIFY_VIA:-install}" = wrapper ]; then
   # The path a user takes: plain `npm ci` in a shell that sourced the wrapper.
@@ -58,9 +60,9 @@ else
   npmflags=(); [ "$engine" = inject ] && npmflags=(-- --no-audit --no-fund)
   (cd "$work/B" && "$bin" install . "$@" ${npmflags[@]+"${npmflags[@]}"} > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
 fi
-t2=$(python3 -c 'import time;print(time.time())')
+t2=$(python3 -c 'import time;print(time.time_ns())')
 grep '^\[matchapack\]\|^matchapack:' "$work/B.log" | grep -v '\] skip ' || true
-python3 -c "print(f'npm ci: {$t1-$t0:.2f}s   matchapack: {$t2-$t1:.2f}s')" 2>/dev/null || true
+python3 -c "print(f'npm ci: {($t1-$t0)/1e9:.2f}s   matchapack: {($t2-$t1)/1e9:.2f}s')" 2>/dev/null || true
 
 rc=0
 if [ "$engine" = inject ] && [ -n "${MATCHAPACK_VERIFY_CLONES:-}" ]; then
@@ -91,6 +93,19 @@ echo "== diff A B"
 cat "$work/diff.txt"
 # MATCHAPACK_VERIFY_BYTES=1: the hidden lockfile must also be byte-identical, not
 # only equal as JSON (npm writes every entry in a fixed key order).
+# MATCHAPACK_VERIFY_META=1: also compare each path's mtime, uid, gid and
+# extended attribute names (`diff --meta`). A time written during its own
+# install (every extracted path: npm ci leaves them at the install time) may
+# differ between A and B; any other time must be equal (src/diff.rs,
+# MetaOpts).
+if [ "${MATCHAPACK_VERIFY_META:-0}" = 1 ]; then
+  "$bin" diff --meta --normalize-roots --a-run "$t0:$t1" --b-run "$t1:$t2" "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} > "$work/meta.txt" || rc=1
+  if grep -q '^RESULT: IDENTICAL' "$work/meta.txt"; then
+    echo "meta: identical ($(grep -m1 '^meta: [0-9]* paths' "$work/meta.txt" | cut -d' ' -f2) paths: mtime, uid, gid, xattr names)"
+  else
+    echo "meta: DIFFERENT"; sed -n '/by class/,$p' "$work/meta.txt" | head -30
+  fi
+fi
 if [ "${MATCHAPACK_VERIFY_BYTES:-0}" = 1 ] && grep -q 'hidden lockfile byte-identical: false' "$work/diff.txt"; then
   echo "hidden lockfile is not byte-identical (MATCHAPACK_VERIFY_BYTES=1)"; rc=1
 fi

@@ -1,4 +1,4 @@
-//! The inject engine (`MATCHAPACK_ENGINE=inject`; NOTES "Inject engine",
+//! The inject engine, the default (NOTES "Inject engine", "PR C1";
 //! grimmerk/matchapack-private#33): npm runs its own `npm ci`, in a node child started
 //! here, and only the per-package extraction is replaced by a clone from the
 //! store. This process keeps what must be decided before anything starts
@@ -20,20 +20,21 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// Which engine installs. The classic engine (matchapack orders every step of
-/// `npm ci` itself) stays the default until the inject engine replaces it.
+/// Which engine installs. The inject engine is the default; the classic
+/// engine (matchapack orders every step of `npm ci` itself) is still there
+/// with MATCHAPACK_ENGINE=classic until it is removed (#33, PR C2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
     Classic,
     Inject,
 }
 
-/// From MATCHAPACK_ENGINE: unset, empty or `classic` → Classic; `inject`.
+/// From MATCHAPACK_ENGINE: unset, empty or `inject` → Inject; `classic`.
 /// Anything else is an error, never a silent default.
 pub fn engine() -> std::result::Result<Engine, String> {
     match std::env::var("MATCHAPACK_ENGINE").as_deref() {
-        Err(_) | Ok("") | Ok("classic") => Ok(Engine::Classic),
-        Ok("inject") => Ok(Engine::Inject),
+        Err(_) | Ok("") | Ok("inject") => Ok(Engine::Inject),
+        Ok("classic") => Ok(Engine::Classic),
         Ok(other) => Err(format!("MATCHAPACK_ENGINE={other} is not an engine (classic, inject)")),
     }
 }
@@ -240,13 +241,14 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let kinds: Vec<String> = stats.kinds.iter().map(|(k, v)| format!("{k} {}", v.0)).collect();
     let falls: Vec<String> = stats.fallbacks.iter().map(|(k, n)| format!("{k} {n}")).collect();
     crate::info!(
-        "inject: cloned {} ({}), extracted by npm {} ({}), {} new in the store, {} checked against pacote; npm {:.2}s, clone requests {:.2}s",
+        "inject: cloned {} ({}), extracted by npm {} ({}), {} new in the store, {} checked against pacote, {} paths regrouped; npm {:.2}s, clone requests {:.2}s",
         stats.cloned,
         if kinds.is_empty() { "-".to_string() } else { kinds.join(", ") },
         stats.fallback_total(),
         if falls.is_empty() { "-".to_string() } else { falls.join(", ") },
         stats.filled.len(),
         stats.checked,
+        stats.paths_regrouped,
         npm_secs,
         stats.wall_secs()
     );

@@ -11,6 +11,7 @@ mod serve;
 mod store;
 mod trial;
 mod util;
+mod verify;
 mod wrapper;
 mod yarn1;
 
@@ -32,30 +33,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Replace `npm ci`: wipe node_modules, clone every package from the store, run npm rebuild.
+    /// Run `npm ci` with every package it can clone cloned from the store
+    ///
+    /// The inject engine (the default) runs npm's own `npm ci` and replaces
+    /// only the extraction of each package by a clone; npm's arguments go
+    /// after `--`. MATCHAPACK_ENGINE=classic selects the older engine, which
+    /// wipes node_modules, clones every package and runs npm rebuild itself
+    /// (--npm-cache, --mtime and --no-rebuild are its options).
     Install {
         #[arg(default_value = ".")]
         dir: PathBuf,
         /// Store root (default $MATCHAPACK_STORE or ~/.cache/matchapack/store).
         #[arg(long)]
         store: Option<PathBuf>,
-        /// npm content cache (default ~/.npm/_cacache).
+        /// Classic engine: npm content cache (default ~/.npm/_cacache). The
+        /// inject engine uses npm's own cache setting.
         #[arg(long)]
         npm_cache: Option<PathBuf>,
         /// Default: `dir` on macOS, `file` elsewhere (Linux has no directory reflink).
         #[arg(long, value_enum)]
         clone_mode: Option<clone::Mode>,
         /// Modification times of placed files: `now` (default) matches npm ci;
-        /// `keep` is faster and keeps each content's store time (see NOTES.md).
+        /// `keep` (classic engine only) is faster and keeps each content's
+        /// store time (see NOTES.md).
         #[arg(long, value_enum, default_value = "now")]
         mtime: clone::Mtime,
-        /// Pass --ignore-scripts to npm rebuild.
+        /// Run no install scripts (`npm ci --ignore-scripts`).
         #[arg(long)]
         ignore_scripts: bool,
-        /// Skip the npm rebuild step entirely (no scripts, no bin links).
+        /// Classic engine only: skip the npm rebuild step entirely (no
+        /// scripts, no bin links).
         #[arg(long)]
         no_rebuild: bool,
-        /// With MATCHAPACK_ENGINE=inject: arguments for npm's own `npm ci`,
+        /// Inject engine (the default): arguments for npm's own `npm ci`,
         /// after `--` (e.g. `matchapack install . -- --no-audit --omit=dev`).
         #[arg(last = true)]
         npm_args: Vec<String>,
@@ -93,7 +103,7 @@ enum Cmd {
         #[arg(value_parser = INIT_SHELLS)]
         shell: Option<String>,
     },
-    /// Print the install plan (counts and every skipped entry with its reason); installs nothing.
+    /// Print the classic engine's install plan (counts and every skipped entry with its reason); installs nothing.
     Plan {
         #[arg(default_value = ".")]
         dir: PathBuf,
@@ -176,9 +186,17 @@ enum StoreCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Compare every entry with its tarball in the npm cache; exit 1 when one differs
+    /// Compare every entry with npm's own extraction of its tarball; exit 1 when one differs
+    ///
+    /// Each tarball is taken from the npm cache and extracted by the pacote of
+    /// the npm on PATH, as `npm ci` (and the inject engine) would extract it,
+    /// and compared with the entry: the same paths, contents, file and
+    /// directory modes. A match records that pacote/tar version on the
+    /// entry; a difference is reported with who made the entry.
+    #[command(verbatim_doc_comment)]
     Verify {
-        /// Remove the entries that differ (the next install re-extracts them).
+        /// Replace the entries that differ with npm's extraction (entries
+        /// that are not directories are removed).
         #[arg(long)]
         fix: bool,
         /// npm content cache (default ~/.npm/_cacache).
@@ -623,13 +641,13 @@ fn main() -> Result<()> {
         {
             // npm does the whole install; these belong to the classic engine.
             if no_rebuild {
-                bail!("--no-rebuild is not available with MATCHAPACK_ENGINE=inject (npm ci runs as a whole)");
+                bail!("--no-rebuild is not available with the inject engine, the default (npm ci runs as a whole); MATCHAPACK_ENGINE=classic for the classic engine");
             }
             if mtime != clone::Mtime::Now {
-                bail!("--mtime keep is not available with MATCHAPACK_ENGINE=inject");
+                bail!("--mtime keep is not available with the inject engine, the default; MATCHAPACK_ENGINE=classic for the classic engine");
             }
             if npm_cache.is_some() {
-                info!("--npm-cache is ignored with MATCHAPACK_ENGINE=inject: npm's own cache setting decides");
+                info!("--npm-cache is ignored by the inject engine: npm's own cache setting decides");
             }
             let mut npm_args = vec!["ci".to_string()];
             if ignore_scripts {
@@ -648,7 +666,7 @@ fn main() -> Result<()> {
         }
         Cmd::Install { dir, store, npm_cache, clone_mode, mtime, ignore_scripts, no_rebuild, npm_args } => {
             if !npm_args.is_empty() {
-                bail!("arguments for npm (after --) need MATCHAPACK_ENGINE=inject; the classic engine reads npm's settings from its config");
+                bail!("arguments for npm (after --) are for the inject engine (the default; MATCHAPACK_ENGINE=classic is set): the classic engine reads npm's settings from its config");
             }
             let o = InstallOpts {
                 dir,
@@ -797,35 +815,49 @@ fn main() -> Result<()> {
                 }
                 Some(StoreCmd::Verify { fix, npm_cache }) => {
                     let cacache = npm_cache.unwrap_or(cacache);
-                    let st = if fix { Store::exclusive(s, cacache)? } else { Store::new(s, cacache)? };
-                    let all = st.entries();
-                    let checks: Vec<(Integrity, store::Check)> = all
-                        .par_iter()
-                        .map(|i| st.verify_entry(i).map(|c| (i.clone(), c)))
-                        .collect::<Result<_>>()?;
-                    let bad: Vec<&(Integrity, store::Check)> = checks.iter().filter(|(_, c)| matches!(c, store::Check::Differs(_))).collect();
-                    let missing = checks.iter().filter(|(_, c)| *c == store::Check::NoTarball).count();
+                    let st = if fix { Store::exclusive(s, cacache.clone())? } else { Store::new(s, cacache.clone())? };
+                    let (r, key) = verify::verify_store(&st, &cacache, fix)?;
                     println!(
-                        "{} entries: {} match their tarball, {} differ, {missing} not checked (tarball no longer in the npm cache)",
-                        all.len(),
-                        all.len() - bad.len() - missing,
-                        bad.len()
+                        "{} entries compared with npm's extraction ({key}) in {:.1}s: {} match, {} differ, {} not directories, {} not checked (tarball no longer in the npm cache), {} pacote could not extract",
+                        r.entries,
+                        r.secs,
+                        r.matched,
+                        r.differs.len(),
+                        r.not_dir.len(),
+                        r.no_tarball,
+                        r.failed.len()
                     );
-                    for (i, c) in &bad {
-                        if let store::Check::Differs(why) = c {
-                            println!("  {}/{}…: {why}", i.algo, &i.hex[..16]);
+                    if r.recorded > 0 {
+                        println!("{} matching entries recorded as known to {key} (an install then samples them instead of comparing them first)", r.recorded);
+                    }
+                    let what = |kind: &str| match kind {
+                        "extractor" => "made by the classic engine's extractor",
+                        "changed" => "changed after this pacote/tar had made or checked it",
+                        _ => "made under another pacote/tar version",
+                    };
+                    for (i, kind, why, _) in &r.differs {
+                        println!("  {}/{}…: {why} ({})", i.algo, &i.hex[..16], what(kind));
+                    }
+                    for (i, _) in &r.not_dir {
+                        println!("  {}/{}…: the entry is not a directory (a symlink?)", i.algo, &i.hex[..16]);
+                    }
+                    for (i, e) in &r.failed {
+                        println!("  {}/{}…: pacote could not extract it: {e}", i.algo, &i.hex[..16]);
+                    }
+                    let bad = r.differs.len() + r.not_dir.len();
+                    if bad > 0 {
+                        if fix {
+                            println!(
+                                "replaced {} entries with npm's extraction; removed {} that were not directories (the next install re-extracts them)",
+                                r.differs.len(),
+                                r.not_dir.len()
+                            );
+                        } else {
+                            println!("`matchapack store verify --fix` replaces them with npm's extraction");
                         }
                     }
-                    if !bad.is_empty() {
-                        if fix {
-                            for (i, _) in &bad {
-                                st.remove_entry(i)?;
-                            }
-                            println!("removed {} entries; the next install that needs one re-extracts it", bad.len());
-                        } else {
-                            println!("`matchapack store verify --fix` removes them (the next install re-extracts them)");
-                            std::process::exit(1);
-                        }
+                    if (bad > 0 && !fix) || !r.failed.is_empty() {
+                        std::process::exit(1);
                     }
                 }
             }

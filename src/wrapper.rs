@@ -1,9 +1,17 @@
 //! `matchapack npm <args>`: what the shell wrapper calls instead of npm.
 //!
-//! Only a bare `npm ci` (or one of its aliases, with output-only flags) is a
-//! candidate. Everything else, and every candidate that fails a check, runs the
-//! real npm with the original arguments, so the worst case is plain npm.
-//! Checks, all before anything in the project changes:
+//! Only `npm ci` (or one of its aliases) is a candidate. Everything else, and
+//! every candidate that fails a check, runs the real npm with the original
+//! arguments, so the worst case is plain npm.
+//!
+//! The inject engine (the default; `run_inject`) takes `npm ci` with any
+//! arguments and declines only what it must know before npm starts
+//! (`decide_inject`, `inject::gates`: npm major 10–12, umask 022, the
+//! project's node_modules not a symlink, the trial scope, the install
+//! staying in this directory).
+//!
+//! The classic engine (MATCHAPACK_ENGINE=classic) takes a bare `npm ci` with
+//! output-only flags. Its checks, all before anything in the project changes:
 //!   - npm's version is one the harness was run against (VERIFIED_NPM);
 //!   - no npm setting changes the shape of the tree (omit, install-strategy, …);
 //!   - the project has package.json + package-lock.json and no shrinkwrap;
@@ -21,7 +29,9 @@ use std::process::Command;
 
 const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "isntall-clean"];
 
-/// npm major.minor versions the harness was run against. Another version runs
+/// The classic engine's version gate (the inject engine has its own,
+/// INJECT_NPM_MAJORS): npm major.minor versions the harness was run against
+/// with the classic engine. Another version runs
 /// plain npm until the harness has been re-run: scripts/verify-npm.sh runs it
 /// on the npm on PATH and, when every case is identical, records the version
 /// in `<config dir>/npm-verified`, which is read as well (override:
@@ -437,7 +447,11 @@ pub fn npm_version_gate() -> Result<(), String> {
         }
     };
     if !ok {
-        return Err(format!("npm {version} has not been verified against npm ci"));
+        let majors: Vec<String> = INJECT_NPM_MAJORS.iter().map(u32::to_string).collect();
+        return Err(format!(
+            "npm {version} has not been verified against npm ci (the classic engine's list, MATCHAPACK_ENGINE=classic; the inject engine, the default, runs on npm {})",
+            majors.join(", ")
+        ));
     }
     Ok(())
 }
@@ -473,7 +487,7 @@ fn inject_version_allowed(version: &str, allowed: Option<&str>) -> Result<(), St
         Err(format!("npm {version} is not in MATCHAPACK_NPM_VERSIONS ({list})"))
     } else {
         let majors: Vec<String> = INJECT_NPM_MAJORS.iter().map(u32::to_string).collect();
-        Err(format!("npm {version}: the inject engine runs on npm {} (MATCHAPACK_NPM_VERSIONS=any to try another)", majors.join(", ")))
+        Err(format!("npm {version}: the inject engine (the default) runs on npm {} (MATCHAPACK_NPM_VERSIONS=any to try another)", majors.join(", ")))
     }
 }
 

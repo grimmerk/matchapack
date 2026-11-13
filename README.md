@@ -39,35 +39,15 @@ then type `npm ci` as usual:
 
 ```
 $ npm ci
-matchapack: npm ci from the store (MATCHAPACK=0 npm ci for plain npm)
-…lifecycle script output…
-matchapack: added 3383 packages from the store in 23.6s
+matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm)
+…npm's own output: warnings, script output, "added 347 packages in 1s", the audit summary…
+matchapack: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
 ```
 
-Only a bare `npm ci` (or `npm clean-install`, `npm ic`, `npm install-clean`,
-with output-only flags such as `--no-audit`) is taken over. Every other npm
-command runs npm directly and never starts matchapack. A Claude Code session
-picks the function up from its shell snapshot, so sessions started after the
-line was added use it.
-
-matchapack runs plain npm instead, and prints why, when:
-- a flag changes the tree (`--omit=dev`, `--workspace`, …), or an npm setting
-  is changed (in an `.npmrc` or the environment) that is not on matchapack's
-  list of settings known to be safe (registry, credentials, cache, output,
-  `legacy-peer-deps`, … ; `SAFE_CONFIG` in src/wrapper.rs), or
-  `NODE_ENV=production` makes npm omit dev dependencies;
-- a directory matchapack would write into resolves outside the project through
-  a symlink (the project's node_modules, a workspace or `file:` directory);
-- npm is a version the harness has not been run against (currently 11.19.x
-  and 11.17.x, so not npm 10 / Node 22; `MATCHAPACK_NPM_VERSIONS=any`
-  overrides; `matchapack report` counts these runs). After an npm upgrade, see
-  "After an npm upgrade";
-- the project is outside the trial scope (`~/.config/matchapack/paths`);
-- the lockfile has entries it does not support (git dependencies, `file:`
-  tarballs), or is out of sync with package.json;
-- the filesystem cannot clone.
-All of these are decided before anything in the project changes. A failing
-install script is reported like npm would report it, not retried.
+`npm ci` (or `npm clean-install`, `npm ic`, `npm install-clean`), with any
+of npm's flags, is taken over. Every other npm command runs npm directly and
+never starts matchapack. A Claude Code session picks the function up from its
+shell snapshot, so sessions started after the line was added use it.
 
 Bypass for one command: `MATCHAPACK=0 npm ci`, or `command npm ci`.
 Remove: delete the line. Installed node_modules keep working without the store
@@ -76,43 +56,45 @@ Remove: delete the line. Installed node_modules keep working without the store
 On macOS the same line also routes a bare `yarn` / `yarn install` in Yarn 1
 projects (see "Yarn 1 (classic) projects").
 
-## The inject engine (try it with `MATCHAPACK_ENGINE=inject`)
+## Engines: inject (the default) and classic
 
-A second way to install, built to replace the one above (grimmerk/matchapack-private#33;
-design and measurements in `NOTES.md`, "Inject engine"). The engine above (the
-"classic" engine) runs the steps of `npm ci` itself, calling npm for pieces.
-The inject engine runs npm's own `npm ci`, unchanged, and replaces one thing
-inside it: where npm would extract a package's tarball into a directory,
-matchapack clones the package from the store instead. Scripts, bin links, the
-hidden lockfile, the lockfile check, npm's flags and settings are all npm's
-own, so they behave exactly as in `npm ci`, on any npm version.
+matchapack has two ways to install. The **inject engine** is the default
+since PR C1 (grimmerk/matchapack-private#33; design and measurements in
+`NOTES.md`, "Inject engine" and "PR C1"). It runs npm's own `npm ci`,
+unchanged, and replaces one thing inside it: where npm would extract a
+package's tarball into a directory, matchapack clones the package from the
+store instead. Scripts, bin links, the hidden lockfile, the lockfile check,
+npm's flags and settings are all npm's own, so they behave exactly as in
+`npm ci`.
+
+The **classic engine**, the default until PR C1, runs the steps of `npm ci`
+itself, calling npm for pieces. It is still there for now and is removed in
+a later change (#33, PR C2):
 
 ```sh
-MATCHAPACK_ENGINE=inject npm ci       # one command, through the shell function
-export MATCHAPACK_ENGINE=inject       # or for the whole shell (classic: unset it)
-MATCHAPACK_ENGINE=inject matchapack install . -- --no-audit  # after `--`: npm's own arguments
+MATCHAPACK_ENGINE=classic npm ci      # one command, through the shell function
+export MATCHAPACK_ENGINE=classic      # or for the whole shell (unset it for the default)
+MATCHAPACK_ENGINE= matchapack install . -- --no-audit   # the default engine directly, whatever is exported; after `--`: npm's own arguments
 ```
 
-```
-$ MATCHAPACK_ENGINE=inject npm ci
-matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm)
-…npm's own output: warnings, script output, "added 347 packages in 1s", the audit summary…
-matchapack: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
-```
-
-What differs from the classic engine:
+How the inject engine installs:
 - Every `npm ci` flag and npm setting is npm's to read (`--omit=dev`,
-  `--workspace`, `NODE_ENV=production`, `.npmrc` settings; `--omit=dev` is in
-  the tests, the others take the same path). Projects the
-  classic engine hands to npm are installed too: the packages matchapack
-  cannot clone are extracted by npm, the rest are cloned (checked with a
-  `file:` tarball and bundled dependencies; git dependencies and a
-  shrinkwrap follow the same rule but have not been run yet).
+  `--workspace`, `--workspaces`, `--install-strategy`, `NODE_ENV=production`,
+  `.npmrc` settings; each of these is compared with plain `npm ci` on a
+  workspaces fixture in `scripts/test-inject.sh`). With
+  `--install-strategy=linked` npm extracts every package itself (its
+  fetchers there carry no integrity): the tree is npm's, nothing is cloned.
+  Packages matchapack cannot clone are extracted by npm, the rest are cloned
+  (checked with a `file:` tarball and bundled dependencies; git dependencies
+  and a shrinkwrap follow the same rule but have not been run yet).
 - A package is cloned only when the result is exactly what npm would extract:
   a registry tarball with an integrity in the lockfile, npm's default file
   modes, umask 022. A package missing from the store is extracted into it by
   npm's own pacote (from npm's cache, or downloaded as npm would), then
   cloned: the store holds exactly what npm extracts.
+- Cloned paths get the file group npm's extraction would give them (the
+  project directory's on macOS; the process's, or a setgid directory's, on
+  Linux), also when the store is under another group (#41).
 - The store is checked against npm's extraction: every entry is compared with
   pacote's extraction once under each npm (pacote and tar version) before
   that npm clones it, entries the classic engine made included, so the first
@@ -130,22 +112,51 @@ What differs from the classic engine:
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
   Docker, `scripts/linux-test.sh`).
 
-matchapack still runs plain npm instead, before anything starts, when: npm is
-not a major version this engine has been run on (10, 11 and 12; it has no code
-per npm version, so every 10.x, 11.x and 12.x is taken, unlike the classic
-engine's list
-of verified minors; `MATCHAPACK_NPM_VERSIONS` overrides it as for the classic
-engine), the umask is not 022, the project's
-`node_modules` is a symlink, the project is outside the trial scope,
-`--prefix` / `--global` point npm at another directory, the directory has no
-`package-lock.json` or `npm-shrinkwrap.json` (inside a workspace of a
-monorepo, `npm ci` installs into the root's `node_modules`; #36), or the
-command installs nothing (`--dry-run`, `--help`).
+The inject engine runs plain npm instead, and prints why, before anything
+starts, when:
+- npm is not a major version this engine has been run on: 10, 11 and 12. It
+  has no code per npm version, so every 10.x, 11.x and 12.x is taken
+  (`INJECT_NPM_MAJORS` in src/wrapper.rs; `MATCHAPACK_NPM_VERSIONS=any`, or a
+  list such as `13.1`, overrides it; `matchapack report` counts these runs);
+- the umask is not 022;
+- the project's `node_modules` is a symlink;
+- the project is outside the trial scope (`~/.config/matchapack/paths`);
+- `--prefix` / `--global` / `--location` point npm at another directory;
+- the directory has no `package-lock.json` or `npm-shrinkwrap.json` (inside
+  a workspace of a monorepo, `npm ci` installs into the root's
+  `node_modules`; #36);
+- the command installs nothing (`--dry-run`, `--help`).
+When the filesystem cannot clone, npm extracts every package itself, and
+matchapack says so.
 
-`matchapack report` shows a line for this engine: packages cloned, packages npm
-extracted and why, and a second line when npm placed packages that never
-reached matchapack's hook (the sign that the hook no longer fits a new npm:
-installs stay correct, only slower; the install itself prints a line too).
+The classic engine (`MATCHAPACK_ENGINE=classic`) takes only a bare `npm ci`
+with output-only flags such as `--no-audit`, and runs plain npm instead, and
+prints why, when:
+- a flag changes the tree (`--omit=dev`, `--workspace`, `--install-strategy`,
+  …), or an npm setting is changed (in an `.npmrc` or the environment) that
+  is not on its list of settings known to be safe (registry, credentials,
+  cache, output, `legacy-peer-deps`, … ; `SAFE_CONFIG` in src/wrapper.rs),
+  or `NODE_ENV=production` makes npm omit dev dependencies;
+- a directory it would write into resolves outside the project through a
+  symlink (the project's node_modules, a workspace or `file:` directory);
+- npm is not on its own list of verified versions (currently 11.19.x and
+  11.17.x, so not npm 10 / Node 22, nor npm 12; `VERIFIED_NPM` plus
+  `~/.config/matchapack/npm-verified`, see "After an npm upgrade";
+  `MATCHAPACK_NPM_VERSIONS=any` overrides);
+- the project is outside the trial scope;
+- the lockfile has entries it does not support (git dependencies, `file:`
+  tarballs), or is out of sync with package.json;
+- the filesystem cannot clone.
+Its known differences from `npm ci` that do not change the tree: the `npm
+audit` summary is not run; the output lines differ; the root dependency
+events are not run; the scripts it runs see `MATCHAPACK=0`.
+
+`matchapack report` shows how many runs each engine took, and for the inject
+engine: packages cloned, packages npm extracted and why, the store entries
+compared with npm's extraction, and a line when npm placed packages that
+never reached matchapack's hook (the sign that the hook no longer fits a new
+npm: installs stay correct, only slower; the install itself prints a line
+too).
 
 ## Yarn 1 (classic) projects (macOS)
 
@@ -283,8 +294,8 @@ own and complete).
   `~/.config/matchapack/paths` (e.g. `~/git/app` also covers `~/git/app-<topic>`
   worktrees). Elsewhere npm ci runs as usual.
 
-Known differences from `npm ci` that do not change the tree: the `npm audit`
-summary is not run; the output lines differ.
+Known differences from `npm ci`: see "Engines" (none for the inject engine's
+tree; the classic engine's are listed there).
 
 ## Existing node_modules
 
@@ -308,10 +319,12 @@ working directory in.
 
 ## After an npm upgrade
 
-matchapack uses npm's own internals (the ideal tree, rebuild, config), so it
-handles only npm versions the harness was run against. On any other version
-every `npm ci` runs plain npm: nothing breaks, nothing is saved. To verify the
-new npm and turn matchapack back on for it:
+The inject engine (the default) takes every npm 10, 11 and 12 release: it has
+no code per npm version, and what keeps it right on a new release is checked
+while it runs (pacote's shape before npm starts, every store entry compared
+with the new pacote/tar's extraction before its first use, packages npm
+placed that the hook never saw). After an upgrade the harness is still worth
+running:
 
 ```sh
 scripts/verify-npm.sh /tmp/verify-npm              # the fixtures
@@ -319,11 +332,18 @@ scripts/verify-npm.sh /tmp/verify-npm ~/git/app    # plus a real project (copied
 ```
 
 It runs `npm ci` and matchapack side by side on copies and compares the trees
-and the hidden lockfile byte for byte. When every case is identical it
-records the npm major.minor in `~/.config/matchapack/npm-verified`, which the
+and the hidden lockfile byte for byte (the workspaces fixture also file
+times, owner, group and extended attribute names). A new npm major goes into
+`INJECT_NPM_MAJORS` in src/wrapper.rs once it passes.
+
+The classic engine (`MATCHAPACK_ENGINE=classic`) uses npm's own internals
+(the ideal tree, rebuild, config), so it handles only npm versions its
+harness was run against; on any other version it runs plain npm.
+`MATCHAPACK_ENGINE=classic scripts/verify-npm.sh /tmp/verify-npm` runs the
+harness with it, and when every case is identical records the npm
+major.minor in `~/.config/matchapack/npm-verified`, which that engine's
 version gate reads next to the built-in list (`VERIFIED_NPM` in
-src/wrapper.rs, where a version goes for every machine). When a case differs
-it records nothing and shows the log.
+src/wrapper.rs). When a case differs it records nothing and shows the log.
 
 ## Store maintenance
 
@@ -338,17 +358,25 @@ it records nothing and shows the log.
   still shares blocks with, so the real run reports the volume's free space
   before and after. Packages extracted in the last hour are kept. Refused while
   an install is running.
-- `matchapack store verify [--fix]`: compare every package with its tarball in
-  the npm cache (files, contents, file modes, directories); exit 1 when one
-  differs. `--fix` removes those, and the next install re-extracts them. About
-  1.5 minutes for 8,700 packages (4.9 GiB): each tarball is extracted again.
+- `matchapack store verify [--fix]`: compare every package with what npm's
+  own pacote (the npm on PATH) extracts from its tarball in the npm cache, the
+  way the inject engine has it extracted: files, contents, file and directory
+  modes. Exit 1 when one differs; each difference names who made the entry
+  (the classic engine's extractor, this pacote/tar, or another version).
+  `--fix` replaces those with pacote's extraction. A matching entry is
+  recorded as known to that pacote/tar version, so the next install samples
+  it instead of comparing it first. About 3 minutes for 8,779 packages on a
+  busy machine (the classic engine's Rust extractor took about 1.5): each
+  tarball is extracted again, by node.
 
 ## Other commands
 
 - `matchapack init zsh|bash|fish`: print the shell integration (see "Use").
-- `matchapack install [dir]`: the install itself, with per-step timings (same
-  npm version gate as `npm ci`).
-- `matchapack plan [dir]`: what would be placed and what is skipped, and why.
+- `matchapack install [dir] [-- npm args]`: the install itself, with per-step
+  timings (same gates as `npm ci`; the classic engine's options `--no-rebuild`,
+  `--mtime`, `--npm-cache` need `MATCHAPACK_ENGINE=classic`).
+- `matchapack plan [dir]`: the classic engine's plan: what would be placed and
+  what is skipped, and why.
 - `matchapack diff A B`: the harness's tree comparison; exit 0 identical, 1
   they differ, 2 an error (nothing was decided). `--meta` also
   compares each path's mtime to the nanosecond, uid, gid and extended
@@ -372,19 +400,27 @@ it records nothing and shows the log.
   project (`MATCHAPACK_VERIFY_VIA=wrapper` goes through the shell function). It
   runs on any npm version and ignores the trial scope file, since it is how a
   new npm version gets verified. `MATCHAPACK_VERIFY_BYTES=1` also requires the
-  hidden lockfile to be byte-identical (CI sets it). `MATCHAPACK_ENGINE=inject`
-  makes B (and `scripts/verify-npm.sh`'s whole list, plus the cases only that
-  engine handles) use the inject engine; nothing is recorded then.
+  hidden lockfile to be byte-identical (CI sets it); `MATCHAPACK_VERIFY_META=1`
+  also compares file times outside the two runs, owner, group and extended
+  attribute names (`diff --meta`). B uses the default engine, inject;
+  `MATCHAPACK_ENGINE=classic` makes B (and `scripts/verify-npm.sh`'s list) use
+  the classic engine, and only then does verify-npm.sh record a version.
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
-  `test-shells.sh` on Linux; safety, routing, store, the inject engine's tests,
-  the fixture harness with both engines and the Yarn 1 harness tests on macOS.
+  `test-shells.sh` on Linux; on macOS the classic engine's safety and routing
+  tests, the store tests with each engine, the inject engine's tests, the
+  fixture harness with both engines and the Yarn 1 harness tests.
 - `scripts/test-inject.sh <work>`: the inject engine end to end (the hook
   cloned, a disabled hook and a store miss give the same tree, the gates,
-  npm's own failures, the store lock, the project record) and the hook's
-  eligibility rules against the real pacote (`scripts/test-inject-hook.js`).
-- `scripts/test-wrapper.sh <work>`: routing tests for the shell integration.
+  npm's own failures, the store lock, the project record, the file group
+  with a store under another group, npm's flags on the workspaces fixture)
+  and the hook's eligibility rules against the real pacote
+  (`scripts/test-inject-hook.js`).
+- `scripts/test-wrapper.sh <work>` and `scripts/test-safety.sh <work>`: the
+  classic engine's routing and safety tests (they set
+  `MATCHAPACK_ENGINE=classic`).
 - `scripts/test-store.sh <work>`: project records, `store gc`, `store verify`,
-  the store lock and the tmp cleanup, on a store of its own.
+  the store lock and the tmp cleanup, on a store of its own (installs with the
+  default engine, or `MATCHAPACK_ENGINE=classic`).
 - `scripts/test-shells.sh`: the same routing in bash, zsh and fish with stubs,
   in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash
   /src/scripts/test-shells.sh`).

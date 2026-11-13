@@ -1,0 +1,7 @@
+{
+  "name": "ws-lib",
+  "version": "1.0.0",
+  "dependencies": {
+    "y1-script": "http://127.0.0.1:48321/y1-script-1.0.0.tgz"
+  }
+}
