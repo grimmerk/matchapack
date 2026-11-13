@@ -23,8 +23,24 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: cargo test --release
-      - name: shell routing in bash, zsh and fish (Docker)
+      # Right after cargo test, with the same RUSTFLAGS: the dependencies are
+      # already compiled, so only matchapack itself is (seconds, not the
+      # minutes a fresh container's build takes).
+      - name: build
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo build --release
+      - name: shell routing in bash, zsh and fish (Docker, stubs)
         run: docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash /src/scripts/test-shells.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - name: fish with the real binary (npm ci and the yarn function, real npm and Yarn 1)
+        # On the runner, not in a container: the binary built above, Yarn
+        # 1.22.22 into a scratch prefix under RUNNER_TEMP.
+        run: |
+          sudo apt-get install -y -qq fish zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq fish zsh >/dev/null; }
+          MATCHAPACK_BIN=target/release/matchapack bash scripts/test-shells.sh --real
 
   macos:
     runs-on: macos-15

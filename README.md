@@ -425,5 +425,8 @@ src/wrapper.rs). When a case differs it records nothing and shows the log.
   in Docker (`docker run --rm -v "$PWD":/src:ro debian:bookworm-slim bash
   /src/scripts/test-shells.sh`). With `--real`, in `rust:1-bookworm` (it
   builds the binary and needs the network), fish also runs the real binary
-  with real npm and Yarn 1. `scripts/test-yarn1.sh` runs the macOS yarn
-  function under fish when `MATCHAPACK_FISH` names a fish binary.
+  with real npm and Yarn 1; on a Linux host with fish and Node 24 (the CI
+  job), `MATCHAPACK_BIN=target/release/matchapack scripts/test-shells.sh
+  --real` runs those cases against a built binary: no apt and no build, and
+  Yarn 1 goes into a scratch prefix. `scripts/test-yarn1.sh` runs the macOS
+  yarn function under fish when `MATCHAPACK_FISH` names a fish binary.
