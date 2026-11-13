@@ -1,0 +1,17 @@
+{
+  "name": "matchapack-fixture-workspaces",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "y1-a": "http://127.0.0.1:48321/y1-a-1.0.0.tgz",
+    "y1-b": "http://127.0.0.1:48321/y1-b-2.0.0.tgz",
+    "y1-many": "http://127.0.0.1:48321/y1-many-2.0.0.tgz"
+  },
+  "devDependencies": {
+    "@y1/scoped": "http://127.0.0.1:48321/y1-scoped-1.0.0.tgz"
+  },
+  "allowScripts": {
+    "y1-script": true
+  }
+}
