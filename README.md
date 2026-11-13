@@ -139,10 +139,12 @@ Limits that do not change the tree, only what is saved:
 - Removing the old `node_modules` on a reinstall is npm's own step, which
   runs on Node's thread pool (4 threads by default), as with plain `npm ci`.
   To make it faster on a large project, `export UV_THREADPOOL_SIZE=16` (or
-  your core count) in your shell: on a 3,466-package project it took the
-  removal from about 20 s to about 18 s on a busy machine (NOTES, "PR C2").
-  matchapack passes the environment through to npm unchanged, so your
-  install scripts see the variable too, as with plain npm.
+  your core count) in your shell. This is npm's own step, so it speeds up
+  plain `npm ci` the same way. On a 3,466-package project, in only 4 rounds
+  on a busy machine, npm's removal went from about 12 % slower than a
+  10-thread removal to about 7 % faster (NOTES, "PR C2"). matchapack passes
+  the environment through to npm unchanged, so your install scripts see the
+  variable too, as with plain npm.
 
 `matchapack report` shows the runs (and, from logs older than PR C2, how many
 the classic engine took), packages cloned, packages npm extracted and why,
