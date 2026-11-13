@@ -21,6 +21,22 @@ The tarballs are made by `make-tarballs.py` (deterministic).
   removed, one added, one removed) for an incremental install over the tree.
 - `yarn1-workspaces` (Yarn 1 engine): two workspaces linked from the root
   `node_modules`, one with its own nested `node_modules`.
+- `yarn1-nohoist` (Yarn 1 engine): `yarn1-workspaces` with `nohoist:
+  ["**/y1-many"]` and `y1-many` in both workspaces, so each workspace has its
+  own copy of it (two copies of 302 files: `--link-duplicates` hardlinks
+  one to the other). Same `yarn.lock` as `yarn1-workspaces`.
+- `yarn1-focus` (Yarn 1 engine): workspace `app` depends on its sibling
+  workspace `y1-c` 1.0.0. `yarn install --focus` in `packages/app` fetches a
+  sibling from the registry instead of linking it; the `y1-c@1.0.0` entry
+  in `yarn.lock` (added by hand, Yarn keeps it) resolves that to the
+  `y1-c-1.0.0.tgz` on the local tarball server, so no registry is needed.
+  The workspace's own `index.js` differs from the tarball's, so a tree
+  shows which one it got.
+- `yarn1-flat` (Yarn 1 engine): `yarn1-many` with `resolutions: {"y1-b":
+  "2.0.0"}`, so `--flat` has its answer for the one package with two
+  versions and does not prompt. `yarn.lock` as `yarn --flat` wrote it, from
+  `yarn1-many`'s plus a `y1-b@2.0.0` entry added by hand (the resolution's
+  pattern would otherwise be asked of the registry).
 - `yarn1-rootpath` (Yarn 1 engine): `y1-many` and `y1-rootpath`, whose
   install script writes `built/<its own absolute directory>/marker`, so each
   tree has another path there, as node-gyp's `build/Release/.deps/` (issue
