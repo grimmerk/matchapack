@@ -11,6 +11,8 @@
 #     [ -f "$HOME/git/matchapack/shell/matchapack.sh" ] && . "$HOME/git/matchapack/shell/matchapack.sh"
 # Bypass for one command:  MATCHAPACK=0 npm ci     or     command npm ci
 # Remove: delete that line; already installed node_modules keep working.
+# On macOS `matchapack init` also prints shell/matchapack-yarn.sh after this
+# file: a `yarn` function for Yarn 1 projects.
 # `function name {` rather than `name() {`: zsh would expand an existing
 # `alias npm=…` inside `npm() {` and fail. An alias still wins over this
 # function when both exist, so remove such an alias to use matchapack.

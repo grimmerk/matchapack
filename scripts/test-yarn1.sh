@@ -101,8 +101,10 @@ groups_other() { # a group the user is in, other than the one of $1
   for x in $(id -G); do [ "$x" != "$g" ] && { echo "$x"; return; }; done
 }
 
-# TEST_YARN1_PART=engine runs only the engine's tests (mutation runs).
-if [ "${TEST_YARN1_PART:-all}" != engine ]; then
+# TEST_YARN1_PART=engine runs only the engine's tests (mutation runs);
+# TEST_YARN1_PART=route only `matchapack yarn` run directly, corepack, the
+# shell route and convert-existing.sh (not the engine's fixture cases).
+if [ "${TEST_YARN1_PART:-all}" = all ]; then
 # --- Plain against plain -----------------------------------------------------
 verify small "$here/fixtures/yarn1-small"
 n=$(classified 'written during both runs')
@@ -277,6 +279,7 @@ copied() { ejson "$1" "y.get('copied', {}).get('$2', 0)"; }
 everify() { local c=$1; shift; verify "$c" --engine yarn1 "$@"; }
 same() { grep -q 'plain vs engine: IDENTICAL' "$work/out"; }
 
+if [ "${TEST_YARN1_PART:-all}" != route ]; then
 everify e-many "$here/fixtures/yarn1-many"
 n=$(ejson e-many "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && [ "$(copied e-many first-copies)" = "$(ejson e-many "y['first']")" ] \
@@ -398,6 +401,8 @@ MATCHAPACK_YARN_HOOK=none everify e-nohook "$here/fixtures/yarn1-many"
 if [ $rc = 1 ] && grep -q 'engine: cloned 0 files, expected at least 1' "$work/out"; then ok "harness: an engine run that cloned nothing fails"
 else bad "harness on a run that cloned nothing (exit $rc)"; fi
 
+fi # TEST_YARN1_PART != route
+
 # --- matchapack yarn run directly: gates, the hook's checks, the report -------
 y1env() {
   env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK YARN_DISABLE_SELF_UPDATE_CHECK=true \
@@ -427,9 +432,26 @@ gate() { # gate <name> <expected reason text> <dir> [VAR=value...] -- [yarn args
   else bad "gate $name (exit $rc)"; fi
 }
 d=$(project yarnpath); printf 'yarn-path "%s"\n' "$yarnjs" > "$d/.yarnrc"; gate yarn-path 'sets yarn-path' "$d" --
-d=$(project yarnrcyml); touch "$d/.yarnrc.yml"; gate .yarnrc.yml 'Yarn 2+ project' "$d" --
-d=$(project pm); python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["packageManager"]="yarn@4.5.0"; json.dump(d, open(p,"w"))' "$d/package.json"; gate packageManager 'packageManager is yarn@4.5.0' "$d" --
-d=$(project berry); printf '__metadata:\n  version: 8\n' > "$d/yarn.lock"; gate berry-lockfile 'Yarn 2+ lockfile' "$d" --
+# A Yarn 2+ project is told from its files before anything else, and is
+# plain Yarn unlogged (NOTES "Yarn 1 shell route"): exit 3 here, the reason
+# printed, no log line.
+yarn2() { # yarn2 <name> <expected reason text> <dir>
+  local n0; n0=$(wc -l < "$work/y1/log/log.jsonl" 2>/dev/null || echo 0)
+  myarn "$3" MATCHAPACK_NO_FALLBACK=1 --
+  if [ $rc = 3 ] && [ ! -e "$3/node_modules" ] && grep -q "not handled, left unchanged (.*$2" "$work/out" \
+    && [ "$(wc -l < "$work/y1/log/log.jsonl" 2>/dev/null || echo 0)" = "$n0" ]; then ok "Yarn 2+ $1: plain yarn ($2), not logged"
+  else bad "Yarn 2+ $1 (exit $rc)"; fi
+}
+setpm() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["packageManager"]=sys.argv[2]; json.dump(d, open(p,"w"))' "$1/package.json" "$2"; }
+d=$(project yarnrcyml); touch "$d/.yarnrc.yml"; yarn2 .yarnrc.yml 'Yarn 2+ project' "$d"
+d=$(project pm); setpm "$d" yarn@4.5.0; yarn2 packageManager 'packageManager is yarn@4.5.0' "$d"
+d=$(project berry); printf '__metadata:\n  version: 8\n' > "$d/yarn.lock"; yarn2 berry-lockfile 'Yarn 2+ lockfile' "$d"
+d=$(project nolockyml); rm "$d/yarn.lock"; touch "$d/.yarnrc.yml"; yarn2 no-yarn.lock-with-.yarnrc.yml 'Yarn 2+ project' "$d"
+# A ~/.yarnrc.yml-like file above the lockfile folder does not make it one.
+d=$(project ymlabove); mkdir -p "$d/sub"; mv "$d/package.json" "$d/yarn.lock" "$d/sub/"; touch "$d/.yarnrc.yml"; myarn "$d/sub" MATCHAPACK_NO_FALLBACK=1 --
+if [ $rc = 0 ] && [ -f "$d/sub/node_modules/.yarn-integrity" ]; then ok "a .yarnrc.yml above the lockfile folder: still Yarn 1, installed"; else bad ".yarnrc.yml above the project (exit $rc)"; fi
+# Another package manager's project: an ordinary gate (printed and logged).
+d=$(project pnpm); setpm "$d" pnpm@10.0.0; gate packageManager-pnpm 'packageManager is pnpm@10.0.0' "$d" --
 d=$(project nolock); rm "$d/yarn.lock"; gate no-yarn.lock 'no yarn.lock' "$d" --
 d=$(project nmlink); mkdir -p "$work/g-nm-target"; ln -s "$work/g-nm-target" "$d/node_modules"; gate node_modules-symlink 'node_modules is a symlink' "$d" --
 d=$(project modfolder); gate --modules-folder 'moves the install' "$d" -- --modules-folder "$d/elsewhere"
@@ -482,6 +504,370 @@ if grep -q "Yarn linked node_modules but the hook never saw its link step" "$wor
   && grep -q 'files cloned from Yarn' "$work/out" && grep -q 'runs 0: installed 0' "$work/out"; then
   ok "matchapack report: yarn lines (outcomes, clones, the unseen link step), none in the npm counts"
 else bad "matchapack report"; fi
+
+# TEST_YARN1_PART=engine: the engine's cases only (not corepack, the shell
+# route or convert-existing.sh).
+if [ "${TEST_YARN1_PART:-all}" != engine ]; then
+# --- corepack (`yarn` linked to corepack's dist/yarn.js) ----------------------
+# corepack chooses the project's Yarn and starts its bin/yarn.js in the same
+# process; the hook takes over at that start. A scratch COREPACK_HOME,
+# seeded from the Yarn 1 package under test (never the real one; no network:
+# COREPACK_ENABLE_NETWORK=0). MATCHAPACK_COREPACK_JS names corepack's
+# dist/yarn.js; default: the one bundled with $node (Node <= 24).
+cpjs=${MATCHAPACK_COREPACK_JS:-$(dirname "$node")/../lib/node_modules/corepack/dist/yarn.js}
+yv=$("$node" -p 'require(process.argv[1]).version' "$(dirname "$(dirname "$yarnjs")")/package.json")
+if [ ! -f "$cpjs" ]; then
+  echo "SKIP corepack: no corepack next to $node (Node >= 25 does not bundle it; set MATCHAPACK_COREPACK_JS to a userland one's dist/yarn.js)"
+else
+  cpjs=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$cpjs")
+  ch=$work/corepack-home
+  rm -rf "${ch:?}"; mkdir -p "$ch/v1/yarn/$yv"; cp -R "$(dirname "$(dirname "$yarnjs")")/." "$ch/v1/yarn/$yv/"
+  printf '{"locator":{"name":"yarn","reference":"%s"},"bin":{"yarn":"./bin/yarn.js","yarnpkg":"./bin/yarn.js"},"hash":"sha512.seeded-by-test-yarn1"}' "$yv" > "$ch/v1/yarn/$yv/.corepack"
+  printf '{"yarn":"%s"}' "$yv" > "$ch/lastKnownGood.json"
+  # A release corepack could choose that is not Yarn 1's package (the shape
+  # of a Yarn 2+ one: name @yarnpkg/cli-dist), with a bundle that would pass
+  # the hook's other checks.
+  fk=$ch/v1/yarn/1.99.0; mkdir -p "$fk/bin" "$fk/lib"
+  printf '{"locator":{"name":"yarn","reference":"1.99.0"},"bin":{"yarn":"./bin/yarn.js"},"hash":"sha512.fake"}' > "$fk/.corepack"
+  printf '{"name":"@yarnpkg/cli-dist","version":"4.5.0"}' > "$fk/package.json"
+  printf "#!/usr/bin/env node\nrequire('../lib/cli')\n" > "$fk/bin/yarn.js"
+  printf "const CONCURRENT_QUEUE_ITEMS = require('fs').copyFile ? 128 : 4;\nconsole.log('FAKE-YARN ' + process.argv.slice(2).join(' '))\n" > "$fk/lib/cli.js"
+  export COREPACK_ENABLE_NETWORK=0 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0
+  cpsrc=$work/cp-src; rm -rf "${cpsrc:?}"; mkdir -p "$cpsrc"; cp "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$cpsrc/"
+  setpm "$cpsrc" "yarn@$yv"
+  if [ "$(cd "$cpsrc" && COREPACK_HOME=$ch "$node" "$cpjs" --version 2>&1)" != "$yv" ]; then
+    bad "corepack does not run the seeded Yarn $yv offline: $(cd "$cpsrc" && COREPACK_HOME=$ch "$node" "$cpjs" --version 2>&1 | tail -1)"
+  else
+    # plain (through corepack) vs engine (through corepack), same cache.
+    COREPACK_HOME=$ch MATCHAPACK_YARN_JS=$cpjs everify cp-many "$cpsrc"
+    n=$(ejson cp-many "y['cloned']")
+    x=$work/cp-many/engine/node_modules/y1-execpath/execpath.txt
+    if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && [ "$(ejson cp-many "r.get('launcher')")" = corepack ] && [ "$(ejson cp-many "r['yarn']")" = "$yv" ] \
+      && [ "$(head -1 "$x" 2>/dev/null)" = "$ch/v1/yarn/$yv/bin/yarn.js" ]; then
+      ok "corepack: the Yarn it chose ($yv) runs with the hook, identical to plain corepack; $n files cloned; npm_execpath is corepack's copy"
+    else bad "corepack engine (exit $rc, cloned ${n:-?}, execpath $(head -1 "$x" 2>/dev/null))"; fi
+    # corepack chose a release that is not Yarn 1's package: declined before
+    # Yarn starts, then plain corepack runs it.
+    d=$(project cpfake); setpm "$d" yarn@1.99.0
+    myarn "$d" COREPACK_HOME="$ch" MATCHAPACK_YARN_JS="$cpjs" MATCHAPACK_NO_FALLBACK=1 --
+    if [ $rc = 3 ] && grep -q "not Yarn 1's npm package (corepack chose yarn 4.5.0)" "$work/out" && ! grep -q FAKE-YARN "$work/out" && [ "$(lastlog 'r["outcome"]')" = declined ]; then
+      myarn "$d" COREPACK_HOME="$ch" MATCHAPACK_YARN_JS="$cpjs" --
+      if [ $rc = 0 ] && grep -q 'running plain yarn instead' "$work/out" && grep -q '^FAKE-YARN install' "$work/out"; then ok "corepack chose a release that is not Yarn 1: declined, then plain corepack runs it"
+      else bad "corepack non-Yarn-1, plain run (exit $rc)"; fi
+    else bad "corepack non-Yarn-1 declined (exit $rc)"; fi
+  fi
+fi
+
+# --- The shell route: the `yarn` function `matchapack init` prints ------------
+# The real binary's init, in zsh and bash; `yarn` on PATH linked to Yarn 1's
+# bin/yarn.js as an npm-global install links it, no MATCHAPACK_YARN_JS. A
+# `matchapack` shim on PATH records every start, so "never started" is
+# proved, not assumed.
+rt=$work/route; rm -rf "${rt:?}"; mkdir -p "$rt/bin" "$rt/stub"
+ln -s "$yarnjs" "$rt/bin/yarn"; ln -s "$node" "$rt/bin/node"
+printf '#!/bin/sh\necho "$*" >> "%s/starts"\nexec "%s" "$@"\n' "$rt" "$bin" > "$rt/bin/matchapack"
+cp "$rt/bin/matchapack" "$rt/stub/matchapack"
+# The Yarn 4 case: a `yarn` that is not Yarn 1 and a `node` that must not run.
+printf '#!/bin/sh\nprintf STUB-YARN; for a in "$@"; do printf " [%%s]" "$a"; done; echo; exit "${STUB_RC:-0}"\n' > "$rt/stub/yarn"
+printf '#!/bin/sh\necho "$*" >> "%s/nodes"\nexit 99\n' "$rt" > "$rt/stub/node"
+chmod +x "$rt/bin/matchapack" "$rt/stub/matchapack" "$rt/stub/yarn" "$rt/stub/node"
+# rrun <dir> <zsh|bash> <PATH> <commands> [VAR=value...]: output in $work/out, exit in $rc.
+rrun() {
+  local d=$1 sh=$2 p=$3 c=$4; shift 4
+  local run; case $sh in zsh) run="zsh -f -c" ;; bash) run="bash --norc --noprofile -c" ;; esac
+  : > "$rt/starts"; rm -f "$rt/nodes"
+  (cd "$d" && env -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK -u GITHUB_TOKEN PATH="$p" \
+    YARN_CACHE_FOLDER="$work/e-many/cache" YARN_DISABLE_SELF_UPDATE_CHECK=true MATCHAPACK_STORE="$work/y1/store" \
+    MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" "$@" \
+    $run "command -v matchapack >/dev/null && eval \"\$(matchapack init $sh)\"; $c") > "$work/out" 2>&1; rc=$?
+}
+starts() { grep -c '^yarn' "$rt/starts"; }
+engine_ran() { grep -q "matchapack: yarn with clones of Yarn's cache" "$work/out"; }
+quiet() { ! grep -q '^matchapack' "$work/out"; }
+for sh in zsh bash; do
+  rrun "$work" $sh "$rt/bin:/usr/bin:/bin" 'type yarn'
+  case $(uname) in
+    Darwin) want='yarn is a .*function' ;;
+    *) want='yarn is /' ;;
+  esac
+  if [ $rc = 0 ] && head -1 "$work/out" | grep -q "$want"; then ok "route $sh: \`type yarn\` after the eval line: $(head -1 "$work/out")"
+  else bad "route $sh: type yarn (exit $rc)"; fi
+done
+if [ "$(uname)" != Darwin ]; then echo "SKIP the shell route's cases: no yarn function off macOS"
+else
+  d=$(project rbare); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn'
+  if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && grep -q 'files cloned from Yarn' "$work/out" && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route: bare yarn → matchapack yarn, cloned"
+  else bad "route: bare yarn (exit $rc, starts $(starts))"; fi
+  d=$(project rinstall); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn install --frozen-lockfile'
+  if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && [ "$(lastlog 'r["args"]')" = "['install', '--frozen-lockfile']" ]; then ok "route: yarn install --frozen-lockfile → matchapack yarn, arguments unchanged"
+  else bad "route: yarn install --frozen-lockfile (exit $rc, starts $(starts))"; fi
+  d=$(project rflag); rrun "$d" bash "$rt/bin:/usr/bin:/bin" 'yarn --frozen-lockfile'
+  if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route (bash): yarn --frozen-lockfile → matchapack yarn"
+  else bad "route (bash): yarn --frozen-lockfile (exit $rc, starts $(starts))"; fi
+  d=$(project radd); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn add http://127.0.0.1:48321/y1-c-1.0.0.tgz --non-interactive'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && quiet && grep -q '"y1-c"' "$d/package.json"; then ok "route: yarn add x → plain yarn, matchapack never started"
+  else bad "route: yarn add (exit $rc, starts $(starts))"; fi
+  rrun "$work" zsh "$rt/bin:/usr/bin:/bin" 'yarn --version'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && [ "$(cat "$work/out")" = "$yv" ]; then ok "route: yarn --version → plain yarn, matchapack never started"
+  else bad "route: yarn --version (exit $rc, starts $(starts))"; fi
+  d=$(project roptout); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'MATCHAPACK=0 yarn'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && quiet && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route: MATCHAPACK=0 yarn → plain yarn, matchapack never started"
+  else bad "route: MATCHAPACK=0 yarn (exit $rc, starts $(starts))"; fi
+  d=$(project rcommand); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'command yarn install --frozen-lockfile'
+  if [ $rc = 0 ] && [ "$(starts)" = 0 ] && quiet && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route: command yarn → plain yarn, matchapack never started"
+  else bad "route: command yarn (exit $rc, starts $(starts))"; fi
+  # A failing install (the root postinstall exits 7): Yarn's status comes
+  # back through the function, the same as plain Yarn's.
+  rootfail() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"process.exit(7)\""}; json.dump(d, open(p,"w"))' "$1/package.json"; }
+  d=$(project rfailplain); rootfail "$d"; rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'command yarn install --frozen-lockfile; echo "status $?"'
+  want=$(tail -1 "$work/out")
+  d=$(project rfail); rootfail "$d"; rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn install --frozen-lockfile; echo "status $?"'
+  if [ "$(starts)" = 1 ] && engine_ran && [ "$want" != "status 0" ] && [ "$(tail -1 "$work/out")" = "$want" ] && [ "$(lastlog 'r["outcome"]')" = yarn_failed ]; then ok "route: a failing install's status ($want) passes through the function, as plain Yarn's"
+  else bad "route: failing install (starts $(starts), plain $want, got $(tail -1 "$work/out"))"; fi
+  # A Yarn 4 project: told from its files; the `yarn` on PATH is not Yarn 1
+  # and `node` must not start. Plain yarn, with its status, nothing printed
+  # or logged.
+  d=$work/g-ryarn4; rm -rf "${d:?}"; mkdir -p "$d"; printf '{"name":"y4","packageManager":"yarn@4.5.0"}' > "$d/package.json"
+  printf 'nodeLinker: node-modules\n' > "$d/.yarnrc.yml"; printf '__metadata:\n  version: 8\n' > "$d/yarn.lock"
+  n0=$(wc -l < "$work/y1/log/log.jsonl")
+  rrun "$d" zsh "$rt/stub:/usr/bin:/bin" 'yarn install; echo "status $?"' STUB_RC=4
+  if [ "$(starts)" = 1 ] && [ "$(cat "$work/out")" = "STUB-YARN [install]
+status 4" ] && [ ! -e "$rt/nodes" ] && [ "$(wc -l < "$work/y1/log/log.jsonl")" = "$n0" ]; then ok "route: a Yarn 4 project → plain yarn, decided from files (no node start, nothing printed or logged), status 4 passed"
+  else bad "route: Yarn 4 project ($(tr '\n' '|' < "$work/out"); node: $(cat "$rt/nodes" 2>/dev/null))"; fi
+  # corepack, as `corepack enable` links it: `yarn` → corepack's dist/yarn.js.
+  if [ -n "${ch-}" ] && [ -f "$cpjs" ]; then
+    mkdir -p "$rt/cpbin"; ln -sf "$cpjs" "$rt/cpbin/yarn"; ln -sf "$node" "$rt/cpbin/node"; cp "$rt/bin/matchapack" "$rt/cpbin/"
+    d=$(project rcorepack); setpm "$d" "yarn@$yv"
+    rrun "$d" zsh "$rt/cpbin:/usr/bin:/bin" 'yarn' COREPACK_HOME="$ch"
+    if [ $rc = 0 ] && [ "$(starts)" = 1 ] && grep -q 'files cloned from Yarn' "$work/out" && [ "$(lastlog 'r.get("launcher")')" = corepack ]; then ok "route: bare yarn with yarn linked to corepack → matchapack yarn through corepack, cloned"
+    else bad "route: corepack (exit $rc, starts $(starts))"; fi
+  fi
+fi
+
+# --- scripts/convert-existing.sh on Yarn 1 projects (macOS) -------------------
+# Scratch projects installed by plain Yarn; the backups go to a scratch HOME.
+if [ "$(uname)" = Darwin ]; then
+  cv=$work/conv; rm -rf "${cv:?}"; mkdir -p "$cv"
+  # cinstall <dir> [yarn args]: plain Yarn installs it.
+  cinstall() { local d=$1; shift; (cd "$d" && y1env "$node" "$yarnjs" install --non-interactive --ignore-scripts --cache-folder "$work/e-many/cache" "$@") > /dev/null 2>&1; }
+  # cproj <name> <fixture> [root]: a copy installed by plain Yarn.
+  cproj() {
+    local d=${3:-$cv}/$1; mkdir -p "$d"; cp -R "$here/fixtures/$2/." "$d/"; rm -f "$d/README.md"
+    cinstall "$d" --frozen-lockfile; echo "$d"
+  }
+  y1=$(cproj y1 yarn1-many)
+  ws=$(cproj ws yarn1-workspaces); echo keep > "$ws/packages/w1/node_modules/y1-b/SENTINEL"
+  # Workspace patterns Yarn expands itself: `**` (any depth) and `{x,y}`.
+  wg=$cv/wsglob; mkdir -p "$wg/group/sub/deep" "$wg/x" "$wg/y"
+  printf '{"name":"wsglob","private":true,"workspaces":["group/**","{x,y}"],"dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-2.0.0.tgz","y1-many":"http://127.0.0.1:48321/y1-many-1.0.0.tgz"}}' > "$wg/package.json"
+  printf '{"name":"deep","version":"1.0.0","dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-1.0.0.tgz"}}' > "$wg/group/sub/deep/package.json"
+  printf '{"name":"wx","version":"1.0.0","dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-1.0.0.tgz"}}' > "$wg/x/package.json"
+  printf '{"name":"wy","version":"1.0.0"}' > "$wg/y/package.json"
+  cinstall "$wg"; echo keep > "$wg/group/sub/deep/node_modules/y1-b/SENTINEL"; echo keep > "$wg/x/node_modules/y1-b/SENTINEL"
+  # `yarn link`-like: an installed package replaced by a symlink (its name
+  # is in yarn.lock), plain and scoped; a package that is not in yarn.lock.
+  mkdir -p "$work/linked-src"; cp -R "$here/fixtures/yarn1-many/package.json" "$work/linked-src/"
+  lk=$(cproj linked yarn1-many); rm -rf "${lk:?}/node_modules/y1-a"; ln -s "$work/linked-src" "$lk/node_modules/y1-a"
+  ls2=$(cproj linkedscoped yarn1-many); rm -rf "${ls2:?}/node_modules/@y1/scoped"; ln -s "$work/linked-src" "$ls2/node_modules/@y1/scoped"
+  ex=$(cproj extra yarn1-many); mkdir -p "$ex/node_modules/manual-copy"
+  fl=$(cproj fail yarn1-many); rootfail "$fl"; echo keep > "$fl/node_modules/y1-a/SENTINEL"
+  dc=$(cproj declined yarn1-many); printf 'yarn-path "%s"\n' "$yarnjs" > "$dc/.yarnrc"; echo keep > "$dc/node_modules/y1-a/SENTINEL"
+  # A backup that cannot be made (an unreadable file): nothing is removed.
+  nb=$(cproj nobackup yarn1-many); echo keep > "$nb/node_modules/y1-a/UNREADABLE"; chmod 000 "$nb/node_modules/y1-a/UNREADABLE"
+  # The same for an npm project (the npm path had the same unchecked backup).
+  nbn=$cv/nobackup-npm; mkdir -p "$nbn/node_modules/lodash"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$nbn/"
+  echo keep > "$nbn/node_modules/lodash/UNREADABLE"; chmod 000 "$nbn/node_modules/lodash/UNREADABLE"
+  y4=$cv/yarn4; mkdir -p "$y4/node_modules/x"; printf '{"name":"y4","packageManager":"yarn@4.5.0"}' > "$y4/package.json"; printf '__metadata:\n  version: 8\n' > "$y4/yarn.lock"
+  y1ino=$(ls -di "$y1/node_modules" | awk '{print $1}')
+  conv() { # conv <root> [script args]   (CONV_PREFIX: a directory put first on PATH)
+    local r=$1; shift
+    (cd "$work" && env -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK -u GITHUB_TOKEN PATH="${CONV_PREFIX:+$CONV_PREFIX:}$rt/bin:$PATH" \
+      HOME="$work/convhome" YARN_CACHE_FOLDER="$work/e-many/cache" YARN_DISABLE_SELF_UPDATE_CHECK=true MATCHAPACK_STORE="$work/y1/store" \
+      MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" "$here/scripts/convert-existing.sh" "$@" "$r") > "$work/out" 2>&1
+  }
+  conv "$cv"; rc=$?
+  if [ $rc = 0 ] && grep -q "^CANDIDATE yarn *$y1\$" "$work/out" && grep -q "^CANDIDATE yarn *$ws\$" "$work/out" && grep -q "^CANDIDATE yarn *$wg\$" "$work/out" \
+    && grep -q "^SKIP Yarn 2+ *$y4 " "$work/out" && grep -q "^SKIP not in lock $ex .*manual-copy" "$work/out" \
+    && [ "$(ls -di "$y1/node_modules" | awk '{print $1}')" = "$y1ino" ] && [ -f "$ws/packages/w1/node_modules/y1-b/SENTINEL" ]; then
+    ok "convert-existing (dry run): Yarn 1 candidates listed (workspaces with ** and {x,y} included), Yarn 2+ and unlisted packages skipped, nothing changed"
+  else bad "convert-existing dry run (exit $rc)"; fi
+  if grep -q "^SKIP linked *$lk .*y1-a" "$work/out" && grep -q "^SKIP linked *$ls2 .*@y1/scoped" "$work/out"; then
+    ok "convert-existing: a package replaced by a symlink (yarn link), plain or scoped, skips the project"
+  else bad "convert-existing: linked packages"; fi
+  n0=$(wc -l < "$work/y1/log/log.jsonl")
+  conv "$cv" --apply; rc=$?
+  chmod 644 "$nb/node_modules/y1-a/UNREADABLE" "$nbn/node_modules/lodash/UNREADABLE"
+  inst=$(tail -n +$((n0+1)) "$work/y1/log/log.jsonl" | grep -c '"outcome":"installed"')
+  if grep -q "^CONVERTED *$y1 .*files cloned from Yarn" "$work/out" && grep -q "^CONVERTED *$ws " "$work/out" && [ "$inst" = 3 ] \
+    && [ ! -e "$ws/packages/w1/node_modules/y1-b/SENTINEL" ] && [ -f "$ws/packages/w1/node_modules/y1-b/package.json" ] \
+    && grep -q "^FAILED (rc=7) *$fl " "$work/out" && [ -f "$fl/node_modules/y1-a/SENTINEL" ] \
+    && grep -q "^SKIP not handled $dc .*yarn-path" "$work/out" && [ -f "$dc/node_modules/y1-a/SENTINEL" ] \
+    && [ -d "$y4/node_modules/x" ] && [ -L "$lk/node_modules/y1-a" ] && [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; then
+    ok "convert-existing --apply: Yarn 1 root and workspace node_modules rebuilt with clones; a failed and a declined install put back; no backup left"
+  else bad "convert-existing --apply (exit $rc)"; fi
+  if grep -q "^CONVERTED *$wg " "$work/out" && [ ! -e "$wg/group/sub/deep/node_modules/y1-b/SENTINEL" ] && [ ! -e "$wg/x/node_modules/y1-b/SENTINEL" ] \
+    && [ -f "$wg/group/sub/deep/node_modules/y1-b/package.json" ] && [ -f "$wg/x/node_modules/y1-b/package.json" ]; then
+    ok "convert-existing --apply: workspaces matched by group/** and {x,y} (as Yarn lists them) rebuilt too"
+  else bad "convert-existing: workspace patterns"; fi
+  if grep -q "^SKIP no backup *$nb .*copying .* failed" "$work/out" && [ -f "$nb/node_modules/y1-a/UNREADABLE" ] && [ -f "$nb/node_modules/.yarn-integrity" ] \
+    && grep -q "^SKIP no backup *$nbn .*copying .* failed" "$work/out" && [ -f "$nbn/node_modules/lodash/UNREADABLE" ]; then
+    ok "convert-existing --apply: a backup that cannot be made skips the project (Yarn and npm), node_modules untouched"
+  else bad "convert-existing: failed backup"; fi
+  # Interrupted during the install (SIGINT to the script's process group, as
+  # Ctrl-C sends it): the previous node_modules is put back.
+  ci=$work/conv-intr; rm -rf "${ci:?}"; mkdir -p "$ci"
+  it=$(cproj intr yarn1-many "$ci"); echo keep > "$it/node_modules/y1-a/SENTINEL"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"require(\x27fs\x27).writeFileSync(\x27started\x27,\x27\x27); setTimeout(()=>{},60000)\""}; json.dump(d, open(p,"w"))' "$it/package.json"
+  set -m; conv "$ci" --apply & pid=$!; set +m
+  for _ in $(seq 600); do [ -e "$it/started" ] && break; sleep 0.1; done
+  started=no; [ -e "$it/started" ] && started=yes
+  kill -INT -- -"$pid" 2>/dev/null; wait "$pid"; rc=$?
+  if [ $started = yes ] && [ $rc = 130 ] && grep -q "^INTERRUPTED *$it " "$work/out" && [ -f "$it/node_modules/y1-a/SENTINEL" ] \
+    && [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; then
+    ok "convert-existing --apply interrupted during the install: previous node_modules put back, exit 130"
+  else bad "convert-existing interrupted (started $started, exit $rc)"; fi
+  # Review round 2. croot <name>: a fresh root of its own for one conv run.
+  croot() { local r=$work/conv-$1; rm -rf "${r:?}"; mkdir -p "$r"; echo "$r"; }
+  nobackups() { [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; }
+  # (1) Workspace planning reads Yarn's JSON from stdout only, and a plan that
+  # cannot be made skips the project. A Yarn 1 package whose bin/yarn
+  # launcher (a Homebrew-like layout) prints a warning on stderr for every
+  # command and, with FAKE_WS_JSON=bad, prints something that is not JSON
+  # for `workspaces info`; installs run its bin/yarn.js directly.
+  fy=$work/fake-yarn; rm -rf "${fy:?}"; mkdir -p "$fy/bin"; cp -R "$(dirname "$(dirname "$yarnjs")")/." "$fy/"
+  printf '#!/bin/sh\necho "warning: a warning from Yarn" >&2\ncase "$FAKE_WS_JSON $*" in "bad "*workspaces*) echo "{not json"; exit 0 ;; esac\nexec node "%s/bin/yarn.js" "$@"\n' "$fy" > "$fy/bin/yarn"
+  chmod +x "$fy/bin/yarn"; mkdir -p "$work/fybin"; ln -sf "$fy/bin/yarn" "$work/fybin/yarn"
+  r=$(croot warn); w1=$(cproj ws yarn1-workspaces "$r"); echo keep > "$w1/packages/w1/node_modules/y1-b/SENTINEL"
+  CONV_PREFIX=$work/fybin conv "$r" --apply; rc=$?
+  if [ $rc = 0 ] && grep -q "^CONVERTED *$w1 " "$work/out" && [ ! -e "$w1/packages/w1/node_modules/y1-b/SENTINEL" ]; then
+    ok "convert-existing: Yarn's warnings on stderr do not reach the workspace list (workspace node_modules rebuilt)"
+  else bad "convert-existing: workspace list with warnings (exit $rc)"; fi
+  r=$(croot badjson); w2=$(cproj ws yarn1-workspaces "$r"); echo keep > "$w2/node_modules/y1-b/SENTINEL"
+  CONV_PREFIX=$work/fybin FAKE_WS_JSON=bad conv "$r" --apply; rc=$?
+  if grep -q "^SKIP no plan *$w2 " "$work/out" && [ -f "$w2/node_modules/y1-b/SENTINEL" ] && nobackups; then
+    ok "convert-existing: a workspace list that is not JSON skips the project before anything changes"
+  else bad "convert-existing: bad workspace list (exit $rc)"; fi
+  # (2) A signal while a failed install is being rolled back (between two
+  # put-backs): each node_modules goes back exactly once.
+  r=$(croot rollback); w3=$(cproj ws yarn1-workspaces "$r"); rootfail "$w3"
+  echo keep > "$w3/node_modules/y1-b/SENTINEL"; echo keep > "$w3/packages/w1/node_modules/y1-b/SENTINEL"
+  set -m; MATCHAPACK_CONVERT_TEST_PAUSE_RESTORE=3 conv "$r" --apply & pid=$!; set +m
+  for _ in $(seq 600); do [ -f "$w3/node_modules/y1-b/SENTINEL" ] && [ ! -e "$w3/packages/w1/node_modules/y1-b/SENTINEL" ] && break; sleep 0.05; done
+  kill -INT -- -"$pid" 2>/dev/null; wait "$pid"; rc=$?
+  if grep -q "^FAILED (rc=7) *$w3 .*previous node_modules restored" "$work/out" && [ -f "$w3/node_modules/y1-b/SENTINEL" ] \
+    && [ -f "$w3/packages/w1/node_modules/y1-b/SENTINEL" ] && nobackups; then
+    ok "convert-existing: a signal during a rollback does not undo what was put back (both node_modules restored)"
+  else bad "convert-existing: signal during rollback (exit $rc)"; fi
+  # (3) The tree a failed install left cannot be removed (an immutable file):
+  # the backup is kept where it is, never moved inside that tree.
+  r=$(croot stuck); w4=$(cproj stuck yarn1-many "$r"); echo keep > "$w4/node_modules/y1-a/SENTINEL"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"mkdir -p node_modules/stuck && touch node_modules/stuck/f && chflags uchg node_modules/stuck/f && exit 7"}; json.dump(d, open(p,"w"))' "$w4/package.json"
+  conv "$r" --apply; rc=$?
+  kept=$(sed -n 's/.*could not remove .*: its previous node_modules is kept at \(.*\)$/\1/p' "$work/out" | head -1)
+  chflags nouchg "$w4/node_modules/stuck/f" 2>/dev/null
+  if grep -q "^FAILED (rc=7) *$w4 .*NOT fully restored" "$work/out" && [ -n "$kept" ] && [ -f "$kept/y1-a/SENTINEL" ] && [ ! -e "$w4/node_modules/0" ]; then
+    ok "convert-existing: a tree that cannot be removed keeps the backup in place (said where), not moved inside it"
+  else bad "convert-existing: unremovable tree (exit $rc)"; fi
+  # (round 3) The next run neither removes nor reuses a backup an earlier run
+  # kept: the project is skipped, pointing at it.
+  conv "$r" --apply; rc=$?
+  if [ -n "$kept" ] && grep -q "^SKIP old backup *$w4 .*$(dirname "$kept");" "$work/out" && [ -f "$kept/y1-a/SENTINEL" ]; then
+    ok "convert-existing: a backup kept by an earlier run is left alone and its project skipped, pointing at it"
+  else bad "convert-existing: kept backup on the next run (exit $rc)"; fi
+  rm -rf "${work:?}/convhome/.cache/matchapack/backup"
+  # (4) A process enters a project after the start: checked again just before
+  # its node_modules is removed. Project a waits for `go`; meanwhile a
+  # process starts in project b.
+  r=$(croot inuse); wa=$(cproj a yarn1-many "$r"); wb=$(cproj b yarn1-many "$r"); echo keep > "$wb/node_modules/y1-a/SENTINEL"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"const fs=require(\x27fs\x27); fs.writeFileSync(\x27started\x27,\x27\x27); const t=setInterval(()=>{ if (fs.existsSync(\x27go\x27)) clearInterval(t) }, 50)\""}; json.dump(d, open(p,"w"))' "$wa/package.json"
+  conv "$r" --apply & pid=$!
+  for _ in $(seq 600); do [ -e "$wa/started" ] && break; sleep 0.1; done
+  (cd "$wb" && exec sleep 60) & sp=$!
+  sleep 0.5; touch "$wa/go"; wait "$pid"; rc=$?; kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  if [ $rc = 0 ] && grep -q "^CONVERTED *$wa " "$work/out" && grep -q "^SKIP in use *$wb .*entered it during this run" "$work/out" && [ -f "$wb/node_modules/y1-a/SENTINEL" ] && nobackups; then
+    ok "convert-existing: a project a process entered during the run is skipped just before removal, untouched"
+  else bad "convert-existing: in use during the run (exit $rc)"; fi
+  # (5) A file whose group differs from the backup folder's: a clone takes
+  # the folder's group; the backup must keep the file's, so the rollback of a
+  # failed install restores it.
+  g=$(groups_other "$work")
+  r=$(croot group); w5=$(cproj grp yarn1-many "$r"); rootfail "$w5"
+  if [ -z "$g" ]; then echo "SKIP convert-existing groups: the user has only one group"
+  else
+    chgrp "$g" "$w5/node_modules/y1-a/package.json"
+    conv "$r" --apply; rc=$?
+    if grep -q "^FAILED (rc=7) *$w5 .*previous node_modules restored" "$work/out" && [ "$(stat -f %g "$w5/node_modules/y1-a/package.json")" = "$g" ]; then
+      ok "convert-existing: the backup keeps each file's group (a clone takes its folder's); restored with it"
+    else bad "convert-existing: group in the backup (exit $rc, group $(stat -f %g "$w5/node_modules/y1-a/package.json"), want $g)"; fi
+  fi
+  # (round 3) A workspace without node_modules at planning time: the failed
+  # install made one; the rollback removes it (it was not there before).
+  r=$(croot newnm); w7=$(cproj ws yarn1-workspaces "$r"); rootfail "$w7"; echo keep > "$w7/node_modules/y1-b/SENTINEL"
+  rm -rf "${w7:?}/packages/w1/node_modules"
+  conv "$r" --apply; rc=$?
+  if grep -q "^FAILED (rc=7) *$w7 .*previous node_modules restored" "$work/out" && [ -f "$w7/node_modules/y1-b/SENTINEL" ] && [ ! -e "$w7/packages/w1/node_modules" ] && nobackups; then
+    ok "convert-existing: a rollback removes a workspace node_modules the install made where there was none"
+  else bad "convert-existing: new workspace node_modules on rollback (exit $rc)"; fi
+  # (round 3) npm: "added N" is the number of clones (src/wrapper.rs), and
+  # only N = 0 is nothing cloned. A stand-in `matchapack` prints the inject
+  # engine's summary line (its format checked against the source).
+  if grep -qF '"matchapack: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})"' "$here/src/wrapper.rs"; then
+    mkdir -p "$work/fakemp"
+    printf '#!/bin/sh\ncase "$1 $2" in "npm ci") rm -rf node_modules; mkdir -p node_modules/lodash; echo new > node_modules/lodash/NEW\n  echo "matchapack: added $FAKE_ADDED packages from the store in 0.1s (inject engine; npm extracted $FAKE_EXTRACTED)" >&2; exit 0 ;; esac\nexit 9\n' > "$work/fakemp/matchapack"
+    chmod +x "$work/fakemp/matchapack"
+    npmproj() { local d=$1/n; mkdir -p "$d/node_modules/lodash"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo keep > "$d/node_modules/lodash/SENTINEL"; echo "$d"; }
+    r=$(croot npm-some); n1=$(npmproj "$r"); CONV_PREFIX=$work/fakemp FAKE_ADDED=2 FAKE_EXTRACTED=3 conv "$r" --apply; o1=$(cat "$work/out")
+    r=$(croot npm-none); n2=$(npmproj "$r"); CONV_PREFIX=$work/fakemp FAKE_ADDED=0 FAKE_EXTRACTED=5 conv "$r" --apply; o2=$(cat "$work/out")
+    if printf '%s\n' "$o1" | grep -q "^CONVERTED *$n1 " && [ -f "$n1/node_modules/lodash/NEW" ] \
+      && printf '%s\n' "$o2" | grep -q "^NOT CONVERTED *$n2 .*previous node_modules restored" && [ -f "$n2/node_modules/lodash/SENTINEL" ] && [ ! -e "$n2/node_modules/lodash/NEW" ] && nobackups; then
+      ok "convert-existing (npm, inject summary): 2 cloned and 3 extracted is a conversion; 0 cloned is not, and is rolled back"
+    else bad "convert-existing: npm clone count ($(printf '%s' "$o1$o2" | grep -E 'CONVERTED|FAILED|SKIP' | tr '\n' '|'))"; fi
+  else bad "convert-existing: the inject engine's summary line in src/wrapper.rs changed; update this test and the script"; fi
+  # (round 4) Planning skips what it cannot back up or check as planned: a
+  # workspace node_modules that is a symlink; a nested linked package; a
+  # nested package not in yarn.lock.
+  r=$(croot odd); w8=$(cproj ws yarn1-workspaces "$r"); mkdir -p "$work/odd-target"
+  mv "$w8/packages/w1/node_modules" "$work/odd-target/nm"; ln -s "$work/odd-target/nm" "$w8/packages/w1/node_modules"
+  n9=$(cproj nestlink yarn1-many "$r"); mkdir -p "$n9/node_modules/y1-a/node_modules"; ln -s "$work/linked-src" "$n9/node_modules/y1-a/node_modules/linked-nested"
+  n10=$(cproj nestextra yarn1-many "$r"); mkdir -p "$n10/node_modules/y1-a/node_modules/not-in-lock"
+  conv "$r"; rc=$?
+  if [ $rc = 0 ] && grep -q "^SKIP odd *$w8 .*packages/w1/node_modules" "$work/out" && grep -q "^SKIP linked *$n9 .*node_modules/y1-a/node_modules/linked-nested" "$work/out" \
+    && grep -q "^SKIP not in lock $n10 .*node_modules/y1-a/node_modules/not-in-lock" "$work/out"; then
+    ok "convert-existing: a symlinked workspace node_modules, and a linked or unlisted package in a nested node_modules, skip the project"
+  else bad "convert-existing: odd and nested node_modules (exit $rc)"; fi
+  # (round 4) Interrupted while a process that ignores SIGINT stays in the
+  # project: no restore under it; the backup is kept and its place said.
+  # (Its output goes elsewhere: a process that keeps the install's output
+  # pipe open holds the script until it exits; NOTES, residual risk.)
+  r=$(croot stay); w11=$(cproj stay yarn1-many "$r"); echo keep > "$w11/node_modules/y1-a/SENTINEL"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"sh -c \"trap \x27\x27 INT; exec sleep 60\" </dev/null >/dev/null 2>&1 & echo $! > stayer.pid; touch started; sleep 60"}; json.dump(d, open(p,"w"))' "$w11/package.json"
+  set -m; MATCHAPACK_CONVERT_TEST_WAIT_TICKS=4 conv "$r" --apply & pid=$!; set +m
+  for _ in $(seq 600); do [ -e "$w11/started" ] && break; sleep 0.1; done
+  kill -INT -- -"$pid" 2>/dev/null; wait "$pid"; rc=$?
+  stayer=$(cat "$w11/stayer.pid" 2>/dev/null)
+  kb=$(sed -n 's/.*not restored automatically; the previous node_modules is kept at \([^,]*\),.*/\1/p' "$work/out")
+  if [ $rc = 130 ] && [ -n "$kb" ] && [ -f "$kb/0/y1-a/SENTINEL" ] && [ ! -f "$w11/node_modules/y1-a/SENTINEL" ]; then
+    ok "convert-existing: interrupted while a project process stays: not restored under it, the backup kept and named"
+  else bad "convert-existing: interrupt with a process staying (exit $rc)"; fi
+  [ -n "$stayer" ] && kill "$stayer" 2>/dev/null
+  rm -rf "${work:?}/convhome/.cache/matchapack/backup"
+  # (round 4) A root given through a symlink: the in-use check still matches
+  # lsof's physical working directories.
+  r=$(croot viasym); w12=$(cproj p yarn1-many "$r"); ln -sfn "$r" "$work/conv-viasym-link"
+  (cd "$w12" && exec sleep 60) & sp=$!
+  sleep 0.3; conv "$work/conv-viasym-link"; rc=$?; kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  if [ $rc = 0 ] && grep -q "^SKIP in use *$w12\$" "$work/out"; then ok "convert-existing: a root given through a symlink: a project in use is still seen as in use"
+  else bad "convert-existing: root through a symlink (exit $rc)"; fi
+  # (6) An install that cloned nothing (every file a Node copy; the hook in
+  # `off` mode, as when Yarn's cache is on another volume) is not a
+  # conversion: the previous node_modules is put back.
+  r=$(croot noclone); w6=$(cproj nc yarn1-many "$r"); echo keep > "$w6/node_modules/y1-a/SENTINEL"
+  MATCHAPACK_YARN_HOOK=off conv "$r" --apply; rc=$?
+  if [ $rc = 0 ] && grep -q "^NOT CONVERTED *$w6 .*nothing was cloned.*previous node_modules restored" "$work/out" && [ -f "$w6/node_modules/y1-a/SENTINEL" ] && nobackups; then
+    ok "convert-existing: an install that cloned nothing is reported as not converted, previous node_modules put back"
+  else bad "convert-existing: zero clones (exit $rc)"; fi
+fi
+fi # TEST_YARN1_PART != engine
 
 # Two volumes: the project on a disk image, Yarn's cache on the data volume.
 # Nothing can be cloned; the install is plain Yarn's copies.
