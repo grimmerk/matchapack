@@ -266,8 +266,12 @@ own and complete).
 - `matchapack report [--days N]`: what happened (installed / handed to npm and
   why / failed), install times, space not written, store size, free space.
   Every `npm ci` that reaches matchapack appends one line to
-  `~/.cache/matchapack/log.jsonl` (`MATCHAPACK_LOG=0` turns it off). Lines
-  that are not readable JSON are skipped and counted.
+  `~/.cache/matchapack/log.jsonl` (`MATCHAPACK_LOG=0` turns it off). Each
+  line carries the 1- and 5-minute load average at the start and the end of
+  the run (`load_start`, `load_end`); the report's recent runs show the
+  1-minute pair (`load 3.1→5.4`), so a slow install can be read against what
+  else the machine was doing. Lines that are not readable JSON are skipped
+  and counted.
 - `scripts/verify-sample.sh [N]`: re-checks the N most recent matchapack
   installs against a real `npm ci` on copies (npm ci runs twice so build noise
   is told apart); results show up in `matchapack report`.

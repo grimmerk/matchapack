@@ -112,6 +112,16 @@ fn redact(v: &mut Value) {
     }
 }
 
+/// The 1- and 5-minute load averages, to 0.01 (None where the system
+/// gives none). Recorded at the start (`load_start`, by the caller) and
+/// the end (`load_end`, by `append`) of an install, so a slow install can
+/// be read against what else the machine was doing.
+pub fn loadavg() -> Option<[f64; 2]> {
+    let mut l = [0f64; 2];
+    let n = unsafe { libc::getloadavg(l.as_mut_ptr(), 2) };
+    (n == 2).then(|| l.map(|x| (x * 100.0).round() / 100.0))
+}
+
 /// Append one record; never fails the install (MATCHAPACK_LOG=0 disables).
 pub fn append(rec: Value) {
     if std::env::var("MATCHAPACK_LOG").as_deref() == Ok("0") {
@@ -128,6 +138,7 @@ fn append_to(p: &Path, mut rec: Value) {
         // The git commit of this binary (build.rs): trial numbers from two
         // builds must not be mixed.
         m.insert("build".into(), json!(env!("MATCHAPACK_BUILD")));
+        m.insert("load_end".into(), json!(loadavg()));
     }
     let _ = std::fs::create_dir_all(p.parent().unwrap());
     append_line(p, format!("{rec}\n").as_bytes());
@@ -210,6 +221,13 @@ fn skipped(bad: usize, p: &Path) {
     if bad > 0 {
         println!("{bad} unreadable line{} skipped ({})", if bad == 1 { "" } else { "s" }, p.display());
     }
+}
+
+/// `load 3.1→5.4`: the 1-minute load average when the install started and
+/// when it ended (records from before both were logged: None).
+fn load_note(r: &Value) -> Option<String> {
+    let (a, b) = (r["load_start"][0].as_f64()?, r["load_end"][0].as_f64()?);
+    Some(format!("load {a:.1}→{b:.1}"))
 }
 
 fn gib(b: f64) -> String {
@@ -493,6 +511,10 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             }
             _ => r["reason"].as_str().unwrap_or("").chars().take(70).collect(),
         };
+        let extra = match load_note(r) {
+            Some(l) => format!("{extra}; {l}"),
+            None => extra,
+        };
         println!("  {}  {:<13} {}  ({extra})", when(r["ts"].as_f64().unwrap_or(0.0)), r["outcome"].as_str().unwrap_or("?"), r["dir"].as_str().unwrap_or("?"));
     }
     let (ver, bad) = read_jsonl(&verify_log_path(), since);
@@ -589,6 +611,20 @@ mod tests {
         let (recs, bad) = read_jsonl(&log, 0.0);
         assert_eq!((recs.len(), bad), (2, 1));
         assert_eq!(read_jsonl(&log, 6.0).0.len(), 1, "the window still applies");
+    }
+
+    #[test]
+    fn records_carry_the_load_average() {
+        let l = loadavg().expect("getloadavg answers on macOS and Linux");
+        assert!(l.iter().all(|x| *x >= 0.0 && ((x * 100.0).round() - x * 100.0).abs() < 1e-6), "two decimals: {l:?}");
+        let log = scratch("trial-load").join("log.jsonl");
+        append_to(&log, json!({ "outcome": "installed", "load_start": [3.14, 2.0] }));
+        let (recs, _) = read_jsonl(&log, 0.0);
+        let r = &recs[0];
+        assert!(r["load_end"].as_array().is_some_and(|a| a.len() == 2 && a.iter().all(|x| x.is_f64())), "{r}");
+        let end = r["load_end"][0].as_f64().unwrap();
+        assert_eq!(load_note(r), Some(format!("load 3.1→{end:.1}")));
+        assert_eq!(load_note(&json!({ "outcome": "installed" })), None, "an older record: no load note");
     }
 
     #[test]
