@@ -37,7 +37,13 @@
 #                      yarn.lock into each tree and install again (an
 #                      incremental install over the first tree); the
 #                      comparison is of the second install
-#   --engine yarn1     also install a third copy with `matchapack yarn` and
+#   --before-then CMD  with --then: run CMD (sh -c) in each tree between
+#                      the two installs (remove part of node_modules, ...)
+#   --subdir DIR       run each install in DIR, a directory of the project
+#                      (a workspace: Yarn installs at the workspace root, or
+#                      with --focus that workspace); the trees compared are
+#                      still the whole projects
+#   --engine yarn1    also install a third copy with `matchapack yarn` and
 #                      compare it with plain1; a path that also differs
 #                      between plain1 and plain2 counts as "plain varies",
 #                      not as the engine's
@@ -63,7 +69,7 @@
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin=$here/target/release/matchapack
-work= cache_mode=warm cache_group= cache_xattr=0 engine= prime_node= then= min_clones=1 cache_dir=
+work= cache_mode=warm cache_group= cache_xattr=0 engine= prime_node= then= min_clones=1 cache_dir= before_then= subdir=.
 while [ $# -gt 0 ]; do
   case $1 in
     --work) work=${2:?--work needs a directory}; shift 2 ;;
@@ -73,6 +79,8 @@ while [ $# -gt 0 ]; do
     --cache-dir) cache_dir=${2:?--cache-dir needs a directory}; shift 2 ;;
     --prime-node) prime_node=${2:?--prime-node needs a node binary}; shift 2 ;;
     --then) then=${2:?--then needs a directory}; shift 2 ;;
+    --before-then) before_then=${2:?--before-then needs a command}; shift 2 ;;
+    --subdir) subdir=${2:?--subdir needs a directory}; shift 2 ;;
     --engine) engine=${2:?--engine needs a name}; shift 2 ;;
     --engine-min-clones) min_clones=${2:?--engine-min-clones needs a number}; shift 2
       case $min_clones in ''|*[!0-9]*) echo "--engine-min-clones $min_clones: a number" >&2; exit 2 ;; esac ;;
@@ -94,6 +102,9 @@ case $engine in
   *) echo "--engine $engine: the Yarn 1 engine is yarn1" >&2; exit 2 ;;
 esac
 [ -z "$then" ] || { [ -f "$then/package.json" ] && [ -f "$then/yarn.lock" ]; } || { echo "--then $then: needs package.json and yarn.lock" >&2; exit 2; }
+[ -z "$before_then" ] || [ -n "$then" ] || { echo "--before-then needs --then" >&2; exit 2; }
+case $subdir in /*|..|../*|*/..|*/../*) echo "--subdir $subdir: a relative path inside the project" >&2; exit 2 ;; esac
+[ -d "$src/$subdir" ] || { echo "--subdir $subdir: no such directory in $src" >&2; exit 2; }
 node=${MATCHAPACK_YARN_NODE:-$(command -v node)}
 yarnjs=${MATCHAPACK_YARN_JS:-}
 if [ -z "$yarnjs" ]; then
@@ -150,12 +161,12 @@ install() {
   local name=$1 cache=$2 n=$3 how=$4
   shift 4
   if [ "$how" = plain ]; then
-    (cd "$work/$name" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true \
+    (cd "$work/$name/$subdir" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true \
       "$n" "$yarnjs" install --frozen-lockfile --non-interactive --cache-folder "$cache" "$@") >> "$work/$name.log" 2>&1
   else
     # The engine runs the node on PATH and the yarn.js given; a decline
     # exits 3 (MATCHAPACK_NO_FALLBACK) instead of running plain Yarn.
-    (cd "$work/$name" && env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK \
+    (cd "$work/$name/$subdir" && env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK \
       YARN_DISABLE_SELF_UPDATE_CHECK=true PATH="$(dirname "$n"):$PATH" MATCHAPACK_YARN_JS="$yarnjs" \
       MATCHAPACK_STORE="$work/mp/store" MATCHAPACK_LOG_DIR="$work/mp/log" MATCHAPACK_CONFIG_DIR="$work/mp/config" MATCHAPACK_NO_FALLBACK=1 \
       "$bin" yarn install --frozen-lockfile --non-interactive --cache-folder "$cache" "$@") >> "$work/$name.log" 2>&1
@@ -172,7 +183,9 @@ yarn_run() {
   s=$(now_ns)
   install "$name" "$cache" "$n" "$how" "$@"; rc=$?
   if [ $rc = 0 ] && [ -n "$then" ]; then
-    cp -p "$then/package.json" "$then/yarn.lock" "$work/$name/" && install "$name" "$cache" "$n" "$how" "$@"; rc=$?
+    cp -p "$then/package.json" "$then/yarn.lock" "$work/$name/" \
+      && { [ -z "$before_then" ] || (cd "$work/$name" && sh -c "$before_then") >> "$work/$name.log" 2>&1; } \
+      && install "$name" "$cache" "$n" "$how" "$@"; rc=$?
   fi
   e=$(now_ns)
   if [ $rc != 0 ]; then echo "$how yarn failed in $name (exit $rc):"; tail -15 "$work/$name.log"; exit 1; fi
