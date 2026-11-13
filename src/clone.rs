@@ -113,23 +113,102 @@ fn touch_now(c: &std::ffi::CStr) -> Result<()> {
     Ok(())
 }
 
-/// Set atime/mtime to the current time on every path of `dst` that came from
-/// `src` (a store entry just placed there): `dst` itself and `dst/<p>` for
-/// every path `p` under `src`, symlinks not followed. The walk is over `src`,
-/// which nothing changes, so paths other packages are placing under
-/// `dst/node_modules` at the same moment are neither touched nor read.
-pub fn touch_placed(src: &Path, dst: &Path) -> Result<usize> {
+/// The group a file or directory created in `dir` gets from the kernel, which
+/// is what npm's extraction gives every path of a package (node-tar runs
+/// with `preserveOwner: false`, so it never sets a group itself):
+/// - macOS (BSD semantics): the group of the directory it is created in;
+/// - Linux: the group of that directory when the directory is setgid, else
+///   the creating process's effective group.
+///
+/// Every path of a package is created inside directories npm (or tar)
+/// created under the same rule, so one group holds for the whole package.
+/// Not covered: a Linux filesystem mounted with `grpid` / `bsdgroups`
+/// (BSD semantics there).
+pub fn new_path_gid(dir: &Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(dir)?;
+    if cfg!(target_os = "macos") || m.mode() & (libc::S_ISGID as u32) != 0 {
+        Ok(m.gid())
+    } else {
+        Ok(unsafe { libc::getegid() })
+    }
+}
+
+/// Whether this process can give a file it owns the group `g` (lchown):
+/// root, or `g` is its effective group or one of its supplementary groups.
+/// The kernel gives a new file a group the user is not in (macOS: from its
+/// directory; Linux: a setgid directory's), but the user cannot set one.
+pub fn can_give_group(g: u32) -> bool {
+    if unsafe { libc::geteuid() } == 0 || unsafe { libc::getegid() } == g {
+        return true;
+    }
+    let mut v = vec![0 as libc::gid_t; 256];
+    let n = unsafe { libc::getgroups(v.len() as libc::c_int, v.as_mut_ptr()) };
+    v.truncate(n.max(0) as usize);
+    v.iter().any(|x| *x as u32 == g)
+}
+
+/// What `settle_placed` did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Settled {
+    /// Paths walked (each touched when asked to).
+    pub paths: usize,
+    /// Paths whose group was changed.
+    pub regrouped: usize,
+}
+
+/// Make the paths of `dst` that came from `src` (a store entry, or pacote's
+/// extraction, just placed there) look as npm's extraction leaves them:
+/// `dst` itself and `dst/<p>` for every path `p` under `src`, symlinks not
+/// followed.
+/// - `touch`: atime and mtime set to now (npm ci leaves every extracted path
+///   with the install time; a clone carries the source's).
+/// - `gid`: the group npm's extraction would have given them
+///   (`new_path_gid` of the destination's parent). A clone made directly at
+///   the destination already has it, but a placement moved in from the
+///   store's `tmp/` keeps the group it got there, the store's (#41). Each
+///   path is `lstat`ed and `lchown`ed only when its group differs.
+///
+/// The walk is over `src`, which nothing changes, so paths other packages
+/// are placing under `dst/node_modules` at the same moment are neither
+/// touched nor read.
+pub fn settle_placed(src: &Path, dst: &Path, touch: bool, gid: Option<u32>) -> Result<Settled> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    let mut n = 0;
+    let mut s = Settled::default();
     for ent in walkdir::WalkDir::new(src).follow_links(false).follow_root_links(false) {
         let ent = ent?;
         let rel = ent.path().strip_prefix(src).unwrap();
         let out = if rel.as_os_str().is_empty() { dst.to_path_buf() } else { dst.join(rel) };
-        touch_now(&CString::new(out.as_os_str().as_bytes())?)?;
-        n += 1;
+        let c = CString::new(out.as_os_str().as_bytes())?;
+        if let Some(g) = gid {
+            if regroup(&c, g)? {
+                s.regrouped += 1;
+            }
+        }
+        if touch {
+            touch_now(&c)?;
+        }
+        s.paths += 1;
     }
-    Ok(n)
+    Ok(s)
+}
+
+/// Give `c` (not followed if a symlink) the group `g` unless it has it
+/// already. True when it was changed.
+fn regroup(c: &std::ffi::CStr, g: u32) -> Result<bool> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(c.as_ptr(), &mut st) } != 0 {
+        bail!("lstat {:?}: {}", c, std::io::Error::last_os_error());
+    }
+    if st.st_gid == g {
+        return Ok(false);
+    }
+    // The owner stays (-1); a group the user is not in fails with EPERM.
+    if unsafe { libc::lchown(c.as_ptr(), u32::MAX as libc::uid_t, g as libc::gid_t) } != 0 {
+        bail!("lchown {:?} to group {g}: {}", c, std::io::Error::last_os_error());
+    }
+    Ok(true)
 }
 
 /// What a placed file's modification time should be.

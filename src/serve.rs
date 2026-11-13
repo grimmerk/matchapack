@@ -100,7 +100,12 @@ pub enum Outcome {
         entry: Integrity,
         place_secs: f64,
         touch_secs: f64,
+        /// Paths touched.
         paths: usize,
+        /// Paths given the group npm's extraction would have given them
+        /// (#41: a placement moved in from the store's tmp/ keeps the
+        /// store's group).
+        regrouped: usize,
     },
     /// The hook is to run pacote's extract into `to`, then ask again.
     Extract { to: PathBuf, why: &'static str },
@@ -131,6 +136,7 @@ pub struct Stats {
     /// and the first few as "<integrity>: <first difference>".
     pub differs: BTreeMap<String, (usize, Vec<String>)>,
     pub paths_touched: usize,
+    pub paths_regrouped: usize,
     /// The first few refusal messages, for the log.
     pub errors: Vec<String>,
     first: Option<Instant>,
@@ -165,6 +171,7 @@ impl Stats {
             "checked": self.checked,
             "differs": self.differs.iter().map(|(k, (n, first))| (k.clone(), json!({ "n": n, "first": first }))).collect::<serde_json::Map<_, _>>(),
             "paths_touched": self.paths_touched,
+            "paths_regrouped": self.paths_regrouped,
             "serve_wall_secs": r(self.wall_secs()),
             "errors": self.errors,
             "pacote": self.hello.as_ref().and_then(|h| h.get("pacote")).cloned().unwrap_or(Value::Null),
@@ -202,7 +209,7 @@ impl CheckPolicy {
 }
 
 /// Why an entry differed from pacote's extraction (module comment).
-fn differs_kind(made_by: &[String], key: &str) -> &'static str {
+pub(crate) fn differs_kind(made_by: &[String], key: &str) -> &'static str {
     if made_by.is_empty() {
         "extractor"
     } else if made_by.iter().any(|k| k == key) {
@@ -295,6 +302,18 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
         }
     }
     std::fs::remove_dir(from).with_context(|| format!("removing {}", from.display()))
+}
+
+/// The group npm's extraction gives the paths of a package placed at `dst`
+/// (`clone::new_path_gid` of its parent, which npm made).
+fn npm_gid(dst: &Path) -> Result<u32> {
+    let parent = dst.parent().context("the destination has no parent")?;
+    clone::new_path_gid(parent).with_context(|| format!("reading {}", parent.display()))
+}
+
+/// Whether `p` (not followed) has the group `g`.
+fn has_gid(p: &Path, g: u32) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| std::os::unix::fs::MetadataExt::gid(&m) == g)
 }
 
 /// The error means "the path already exists" (a destination that reappeared
@@ -442,6 +461,14 @@ impl<'a> Server<'a> {
         }
         // The destination holds node_modules (nested packages, placed by
         // their own requests at the same time): clone aside, move entries in.
+        // What is moved in keeps the group of the store's tmp/, and is given
+        // the destination's afterwards (#41, `finish`): not possible for a
+        // group this user is not in, and then npm extracts the package.
+        match npm_gid(dst) {
+            Ok(g) if clone::can_give_group(g) => {}
+            Ok(g) => return Err(refused("group", format!("{} needs group {g}, which this user cannot give a file", dst.display()))),
+            Err(e) => return Err(refused("clone-error", format!("{e:#}"))),
+        }
         let tmp = self.tmp.path.join(format!("m{}", self.seq.fetch_add(1, Ordering::Relaxed)));
         let cleanup = || {
             let _ = std::fs::remove_dir_all(&tmp);
@@ -687,32 +714,8 @@ impl<'a> Server<'a> {
                 }
             };
             let Some(d) = differs else {
-                let t0 = Instant::now();
-                let kind = match self.place_move(&cand, dst) {
-                    Ok(k) => k,
-                    Err(o) => {
-                        drop_cand();
-                        discard();
-                        return o;
-                    }
-                };
-                let t1 = Instant::now();
-                // The candidate carries the entry's times; pacote's
-                // extraction has the same paths (just compared).
-                let paths = match clone::touch_placed(extracted, dst) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        discard();
-                        return refused("clone-error", format!("{e:#}"));
-                    }
-                };
-                discard();
                 // The record says this pacote extracts the entry to the same
-                // tree; written only if the entry is still the one compared
-                // (a replacement by another install changes its inode and
-                // its record). A replacement between this check and the write
-                // is not excluded (NOTES).
-                // Exclusive: the record is written only for the tree that was
+                // tree. Exclusive: written only for the tree that was
                 // compared (same inode, same record as when it was cloned),
                 // and no replacement can come in between.
                 if known_key(self.k()) && !made_by.iter().any(|k| k == self.k()) {
@@ -724,6 +727,47 @@ impl<'a> Server<'a> {
                         }
                     }
                 }
+                // The candidate was cloned into the store's tmp/ and has its
+                // group; npm's extraction gives the destination's (#41). A
+                // group this user cannot give (a project under a directory
+                // of a group the user is not in, such as /tmp's wheel on
+                // macOS): pacote's extraction is cloned at the destination
+                // instead, where the kernel gives it that group.
+                let g = match npm_gid(dst) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        drop_cand();
+                        discard();
+                        return refused("clone-error", format!("{e:#}"));
+                    }
+                };
+                if !clone::can_give_group(g) {
+                    drop_cand();
+                    let o = self.finish(i.clone(), extracted, dst, false, true, None, true);
+                    discard();
+                    return o;
+                }
+                let t0 = Instant::now();
+                let kind = match self.place_move(&cand, dst) {
+                    Ok(k) => k,
+                    Err(o) => {
+                        drop_cand();
+                        discard();
+                        return o;
+                    }
+                };
+                let t1 = Instant::now();
+                // The candidate carries the entry's times, and the group of
+                // the store's tmp/ it was cloned into; pacote's extraction
+                // has the same paths (just compared).
+                let settled = match clone::settle_placed(extracted, dst, true, Some(g)) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        discard();
+                        return refused("clone-error", format!("{e:#}"));
+                    }
+                };
+                discard();
                 return Outcome::Placed {
                     kind,
                     filled: false,
@@ -732,7 +776,8 @@ impl<'a> Server<'a> {
                     entry: i,
                     place_secs: t1.duration_since(t0).as_secs_f64(),
                     touch_secs: t1.elapsed().as_secs_f64(),
-                    paths,
+                    paths: settled.paths,
+                    regrouped: settled.regrouped,
                 };
             };
             drop_cand();
@@ -873,13 +918,23 @@ impl<'a> Server<'a> {
         // extracts with noMtime); a clone carries the store's. Done here, per
         // package and before the answer, so every touch is over before npm
         // runs an install script, whose files must keep their later times.
-        let paths = if fresh {
-            0
-        } else {
-            match clone::touch_placed(src, dst) {
-                Ok(n) => n,
-                Err(e) => return refused("clone-error", format!("{e:#}")),
+        // In the same walk, each path gets the group npm's extraction would
+        // give it: a merge placement moved its paths in from the store's
+        // tmp/, whose group they kept (#41). A fresh extraction needs no
+        // touch; it is walked for the group only after a merge, or when the
+        // placed directory shows another group (a clone made at the
+        // destination gets the destination's group from the kernel).
+        let settled = match npm_gid(dst).and_then(|g| {
+            if !fresh {
+                clone::settle_placed(src, dst, true, Some(g))
+            } else if kind == Kind::Merge || !has_gid(dst, g) {
+                clone::settle_placed(src, dst, false, Some(g)).map(|s| clone::Settled { paths: 0, ..s })
+            } else {
+                Ok(clone::Settled::default())
             }
+        }) {
+            Ok(s) => s,
+            Err(e) => return refused("clone-error", format!("{e:#}")),
         };
         Outcome::Placed {
             kind,
@@ -889,7 +944,8 @@ impl<'a> Server<'a> {
             entry,
             place_secs: t1.duration_since(t0).as_secs_f64(),
             touch_secs: t1.elapsed().as_secs_f64(),
-            paths,
+            paths: settled.paths,
+            regrouped: settled.regrouped,
         }
     }
 
@@ -906,7 +962,7 @@ impl<'a> Server<'a> {
         let mut s = self.stats.lock().unwrap();
         s.last = Some(Instant::now());
         match o {
-            Outcome::Placed { kind, entry, place_secs, touch_secs, paths, checked, differs, .. } => {
+            Outcome::Placed { kind, entry, place_secs, touch_secs, paths, regrouped, checked, differs, .. } => {
                 s.cloned += 1;
                 if *checked {
                     s.checked += 1;
@@ -923,6 +979,7 @@ impl<'a> Server<'a> {
                 k.1 += place_secs;
                 k.2 += touch_secs;
                 s.paths_touched += paths;
+                s.paths_regrouped += regrouped;
                 s.used.push(entry.clone());
             }
             Outcome::Refused { reason, message, .. } => {
@@ -1103,7 +1160,7 @@ mod tests {
     use crate::store::tests::{cached_tarball, scratch};
     use crate::store::Ensure;
     use std::fs;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     struct Fx {
         dir: PathBuf,
@@ -1403,6 +1460,99 @@ mod tests {
         }
         // The store keeps its own times.
         assert!(mtime(&fx.store.dir_for(&i).join("lib/deep/x.js")) < start);
+    }
+
+    /// A group the user is in other than `not`, if any.
+    fn other_group(not: u32) -> Option<u32> {
+        let groups = unsafe {
+            let mut g = vec![0 as libc::gid_t; 64];
+            let n = libc::getgroups(g.len() as i32, g.as_mut_ptr());
+            g.truncate(n.max(0) as usize);
+            g
+        };
+        groups.into_iter().map(|g| g as u32).find(|g| *g != not)
+    }
+
+    /// #41. npm's extraction gives every path the group the kernel gives a
+    /// new file in the destination (clone::new_path_gid); a placement moved
+    /// in from the store's tmp/ (a merge, a checked candidate, a merged
+    /// fill) kept the store's group. Each kind of placement, with the store
+    /// under another group than the project.
+    #[test]
+    fn placed_paths_get_the_group_npms_extraction_gives_them() {
+        let fx = Fx::new("serve-gid");
+        if !fx.can_clone() {
+            return;
+        }
+        let nm = fx.root.join("node_modules");
+        let want = clone::new_path_gid(&nm).unwrap();
+        let Some(other) = other_group(want) else {
+            eprintln!("skipped: the user is in one group only");
+            return;
+        };
+        let (i, sri) = fx.entry(&[("package.json", 0o644, "{}\n"), ("lib/deep/x.js", 0o644, "x\n"), ("node_modules/inner/i.js", 0o644, "i\n")]);
+        let regroup = |p: &Path| {
+            for e in walkdir::WalkDir::new(p) {
+                std::os::unix::fs::lchown(e.unwrap().path(), None, Some(other)).unwrap();
+            }
+        };
+        // The whole store (entries and tmp/, where the servers below make
+        // their directories) under the other group.
+        regroup(&fx.store.root);
+        // On Linux a new path takes the creating process's group unless its
+        // directory is setgid: setgid makes tmp/ hand on its group there too.
+        let tmp = fx.store.root.join("tmp");
+        let m = fs::metadata(&tmp).unwrap().permissions().mode();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(m | libc::S_ISGID as u32)).unwrap();
+        let groups = |d: &Path| -> Vec<String> {
+            walkdir::WalkDir::new(d)
+                .sort_by_file_name()
+                .into_iter()
+                .map(|e| e.unwrap())
+                .filter(|e| fs::symlink_metadata(e.path()).unwrap().gid() != want)
+                .map(|e| e.path().strip_prefix(d).unwrap().display().to_string())
+                .collect()
+        };
+        for mode in modes() {
+            let s = fx.server(mode);
+            // The entry placed by a clone: at the destination (fast), and
+            // into tmp/ then moved in (merge). Another package's file in the
+            // destination's node_modules is left as it is.
+            let fast = nm.join(format!("fast-{mode:?}"));
+            assert_eq!(placed(s.place_entry(&sri, &fast)).0, Kind::Fast);
+            assert_eq!(groups(&fast), Vec::<String>::new(), "{mode:?} fast");
+            let merge = nm.join(format!("merge-{mode:?}"));
+            let foreign = merge.join("node_modules/other/o.js");
+            fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+            fs::write(&foreign, "o\n").unwrap();
+            std::os::unix::fs::lchown(&foreign, None, Some(other)).unwrap();
+            let Outcome::Placed { kind: Kind::Merge, regrouped, .. } = s.place_entry(&sri, &merge) else { panic!("{mode:?}: not a merge") };
+            assert_eq!(groups(&merge), ["node_modules/other/o.js"], "{mode:?} merge: only the other package's file keeps its group");
+            assert_eq!(regrouped, 6, "{mode:?}: the merge regrouped its six paths (not the destination, npm's)");
+            // One server per process at a time (its tmp/ directory's name).
+            drop(s);
+            // A check that matched: the candidate cloned into tmp/, moved in.
+            let sc = fx.server_with(mode, CheckPolicy::All);
+            let checked = nm.join(format!("checked-{mode:?}"));
+            let to = extract_to(sc.place_entry(&sri, &checked), "check");
+            fx.pacote_extract(&i, &to);
+            regroup(&to);
+            assert_eq!(placed_full(sc.place_extracted(&sri, &checked, &to)), (Kind::Fast, false, true, None));
+            assert_eq!(groups(&checked), Vec::<String>::new(), "{mode:?} checked");
+            drop(sc);
+            let s = fx.server(mode);
+            // A fill (pacote's extraction in tmp/, no touch), placed by merge.
+            let j = cached_tarball(&fx.cacache, &[("package.json", 0o644, &format!("{{\"m\":\"{mode:?}\"}}\n")), ("a/b.js", 0o644, "b\n")]);
+            let filled = nm.join(format!("filled-{mode:?}"));
+            fs::create_dir_all(filled.join("node_modules")).unwrap();
+            let to = extract_to(s.place_entry(&sri_of(&j), &filled), "fill");
+            fx.pacote_extract(&j, &to);
+            regroup(&to);
+            assert_eq!(placed_full(s.place_extracted(&sri_of(&j), &filled, &to)), (Kind::Merge, true, false, None));
+            assert_eq!(groups(&filled), Vec::<String>::new(), "{mode:?} filled by merge");
+        }
+        // The store keeps its own group.
+        assert_eq!(fs::metadata(fx.store.dir_for(&i).join("lib/deep/x.js")).unwrap().gid(), other);
     }
 
     fn extract_to(o: Outcome, want: &str) -> PathBuf {
