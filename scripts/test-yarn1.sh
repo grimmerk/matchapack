@@ -67,6 +67,7 @@ classified() { grep -Eo "$1 [0-9]+" "$work/out" | grep -Eo '[0-9]+$'; }
 # copy2 <case> <name>: a copy of <case>'s plain2 (times, modes, xattrs kept).
 # Not a clone (cp -c): a clone takes the directory's group, not the file's.
 if [ "$(uname)" = Darwin ]; then cpp() { cp -p -R "$1" "$2"; }; else cpp() { cp -a "$1" "$2"; }; fi
+now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 copy2() { local d=$work/$1-$2; rm -rf "${d:?}"; cpp "$work/$1/${3:-plain2}" "$d"; echo "$d"; }
 set_ns() { python3 -c 'import os,sys; t=int(sys.argv[2]); os.utime(sys.argv[1], ns=(t, t), follow_symlinks=False)' "$1" "$2"; }
 mtime_of() { python3 -c 'import os,sys; print(os.lstat(sys.argv[1]).st_mtime_ns)' "$1"; }
@@ -327,7 +328,6 @@ sy=$work/sync; rm -rf "${sy:?}"; mkdir -p "$sy/src/node_modules/keepme"
 cp -p "$here/fixtures/yarn1-small/yarn.lock" "$sy/src/"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["dependencies"]["y1-many"]="http://127.0.0.1:48321/y1-many-1.0.0.tgz"; json.dump(d, open(sys.argv[2],"w"), indent=2)' \
   "$here/fixtures/yarn1-small/package.json" "$sy/src/package.json"
-now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 # sync_run <name> plain|engine [yarn args]: a fresh copy $sy/<name>, one
 # install; exit status in $rc, START:END in $win, output in $sy/<name>.log.
 sync_run() {
@@ -809,6 +809,72 @@ else
       else bad "corepack non-Yarn-1, plain run (exit $rc)"; fi
     else bad "corepack non-Yarn-1 declined (exit $rc)"; fi
   fi
+fi
+
+# --- Homebrew's yarn (homebrew-core Formula/y/yarn.rb) -------------------------
+# Built here as the formula builds it, without brew: Yarn 1's package in
+# <keg>/libexec with the formula's two edits (/usr/local → the prefix in
+# lib/cli.js; installationMethod in package.json), <keg>/bin/yarn the script
+# Pathname#write_env_script writes (PREFIX="<prefix>" exec <yarn.js>), and
+# <prefix>/bin/yarn a relative link to it. `yarn` on PATH is that link, no
+# MATCHAPACK_YARN_JS. Plain Homebrew Yarn against `matchapack yarn`, same
+# cache: identical trees; the root postinstall records PREFIX and
+# npm_execpath as Yarn's scripts see them.
+if [ "$(uname)" != Darwin ]; then echo "SKIP Homebrew's yarn: macOS only (matchapack yarn is plain Yarn elsewhere)"
+else
+  hb=$work/hb; rm -rf "${hb:?}"; hbp=$hb/brew; keg=$hbp/Cellar/yarn/$yv
+  mkdir -p "$keg/libexec" "$keg/bin" "$hbp/bin"
+  cp -R "$(dirname "$(dirname "$yarnjs")")/." "$keg/libexec/"
+  # (each edit must change something, as `inreplace` requires)
+  python3 -c '
+import sys
+k, p = sys.argv[1], sys.argv[2]
+f = k + "/libexec/lib/cli.js"; s = open(f).read(); assert "/usr/local" in s; open(f, "w").write(s.replace("/usr/local", p))
+f = k + "/libexec/package.json"; s = open(f).read(); a = "\"installationMethod\": \"tar\""; assert a in s
+open(f, "w").write(s.replace(a, "\"installationMethod\": \"homebrew\""))' "$keg" "$hbp" || bad "Homebrew layout: the formula's edits did not apply"
+  # write_env_script: "#!/bin/bash\n#{env_export}exec \"#{target}\" #{args} \"$@\"\n", no args.
+  hbjs=$keg/libexec/bin/yarn.js
+  printf '#!/bin/bash\nPREFIX="%s" exec "%s"  "$@"\n' "$hbp" "$hbjs" > "$keg/bin/yarn"; chmod 0555 "$keg/bin/yarn"
+  ln -s yarn "$keg/bin/yarnpkg"; ln -s "../Cellar/yarn/$yv/bin/yarn" "$hbp/bin/yarn"
+  mkdir -p "$hb/src"; cp -p "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$hb/src/"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"require(\x27fs\x27).writeFileSync(\x27node_modules/.hb-env\x27, process.env.PREFIX + \x27\\n\x27 + process.env.npm_execpath)\""}; json.dump(d, open(p,"w"))' "$hb/src/package.json"
+  # hbrun <name> plain|engine [PATH dir]: a fresh copy $hb/<name>, one install
+  # with `yarn` from PATH (default the Homebrew prefix); $rc, $win, $hb/<name>.log.
+  hbrun() {
+    local d=$hb/$1 how=$2 pd=${3:-$hbp/bin} s; cpp "$hb/src" "$d"; s=$(now_ns)
+    local run=(yarn); [ "$how" = engine ] && run=("$bin" yarn)
+    (cd "$d" && env -u GITHUB_TOKEN -u PREFIX -u MATCHAPACK_YARN_JS -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK \
+      YARN_DISABLE_SELF_UPDATE_CHECK=true PATH="$pd:$(dirname "$node"):/usr/bin:/bin" MATCHAPACK_STORE="$hb/mp/store" \
+      MATCHAPACK_LOG_DIR="$hb/mp/log" MATCHAPACK_CONFIG_DIR="$hb/mp/config" ${HB_VARS-} \
+      "${run[@]}" install --frozen-lockfile --non-interactive --cache-folder "$hb/cache") > "$d.log" 2>&1; rc=$?
+    win=$s:$(now_ns)
+  }
+  hrec() { python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); y=r.get("yarn1") or {}; print(eval(sys.argv[2]))' "$hb/mp/log/log.jsonl" "$1" 2>/dev/null; }
+  hbrun prime plain; r0=$rc
+  hbrun plain plain; rp=$rc wp=$win
+  HB_VARS=MATCHAPACK_NO_FALLBACK=1 hbrun engine engine; re=$rc we=$win
+  n=$(hrec 'y["cloned"]')
+  "$bin" diff --meta --normalize-roots "$hb/plain" "$hb/engine" --a-run "$wp" --b-run "$we" --a-cache "$hb/cache" --b-cache "$hb/cache" > "$hb/diff.txt" 2>&1; rd=$?
+  want=$(printf '%s\n%s' "$hbp" "$hbjs")
+  if [ "$r0" = 0 ] && [ "$rp" = 0 ] && [ "$re" = 0 ] && [ "$rd" = 0 ] && [ "$(hrec 'r["outcome"]')" = installed ] && [ "${n:-0}" -gt 0 ] \
+    && [ "$(cat "$hb/plain/node_modules/.hb-env")" = "$want" ] && [ "$(cat "$hb/engine/node_modules/.hb-env")" = "$want" ] \
+    && [ "$(head -1 "$hb/engine/node_modules/y1-execpath/execpath.txt")" = "$hbjs" ] \
+    && cmp -s "$hb/plain/node_modules/y1-execpath/execpath.txt" "$hb/engine/node_modules/y1-execpath/execpath.txt"; then
+    ok "Homebrew's yarn: plain vs matchapack yarn identical (diff --meta); $n files cloned; scripts see the launcher's PREFIX and npm_execpath = its libexec/bin/yarn.js"
+  else bad "Homebrew's yarn (prime $r0, plain $rp, engine $re, diff $rd, cloned ${n:-?}; env $(tr '\n' ' ' < "$hb/engine/node_modules/.hb-env" 2>/dev/null))"; sed 's/^/    /' "$hb/engine.log" | tail -4; grep -v '^      ' "$hb/diff.txt" | tail -15; fi
+  # A launcher of another shape (it works, and runs the same Yarn) is not
+  # recognized: declined, and without MATCHAPACK_NO_FALLBACK plain yarn runs it.
+  hbo=$hb/other; mkdir -p "$hbo/Cellar/yarn/$yv/bin" "$hbo/bin"; ln -s "$keg/libexec" "$hbo/Cellar/yarn/$yv/libexec"
+  printf '#!/bin/bash\nexport PREFIX="%s"\nexec "%s" "$@"\n' "$hbp" "$hbjs" > "$hbo/Cellar/yarn/$yv/bin/yarn"; chmod 0555 "$hbo/Cellar/yarn/$yv/bin/yarn"
+  ln -s "../Cellar/yarn/$yv/bin/yarn" "$hbo/bin/yarn"
+  HB_VARS=MATCHAPACK_NO_FALLBACK=1 hbrun other-declined engine "$hbo/bin"
+  if [ $rc = 3 ] && grep -q "neither Yarn 1's npm package, Homebrew's launcher for it, nor corepack's launcher" "$hb/other-declined.log" \
+    && [ ! -e "$hb/other-declined/node_modules" ] && [ "$(hrec 'r["outcome"]')" = declined ]; then
+    hbrun other-plain engine "$hbo/bin"
+    if [ $rc = 0 ] && grep -q 'running plain yarn instead' "$hb/other-plain.log" && [ "$(cat "$hb/other-plain/node_modules/.hb-env" 2>/dev/null)" = "$want" ]; then
+      ok "a Homebrew-like launcher of another shape: declined, then plain yarn runs it (PREFIX $hbp)"
+    else bad "other launcher shape, plain run (exit $rc)"; fi
+  else bad "other launcher shape declined (exit $rc)"; sed 's/^/    /' "$hb/other-declined.log" | tail -4; fi
 fi
 
 # --- The shell route: the `yarn` function `matchapack init` prints ------------

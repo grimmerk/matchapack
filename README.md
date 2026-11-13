@@ -216,8 +216,8 @@ it.
 
 **When it runs plain Yarn instead.** matchapack decides before Yarn starts
 and prints why when:
-- the `yarn` on PATH is neither Yarn 1's npm package nor corepack's launcher
-  (for example Yarn 2+ installed globally, or another launcher;
+- the `yarn` on PATH is neither Yarn 1's npm package, Homebrew's `yarn`
+  (its launcher for that package), nor corepack's launcher (for example Yarn 2+ installed globally, or another launcher;
   `MATCHAPACK_YARN_JS` can name a `yarn.js`), or corepack chose a Yarn that is
   not Yarn 1;
 - there is no `yarn.lock` in the directory or above it;
