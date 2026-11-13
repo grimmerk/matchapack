@@ -148,7 +148,7 @@ lentry=$cs/v2/sha512/${lhex:0:2}/${lhex:2}
 chmod 600 "$lentry/package.json"
 p=$(project changed small)
 MATCHAPACK_STORE=$cs MATCHAPACK_INJECT_CHECK=all install "$p" && [ "$(cloned)" = "$n_small" ] && grep -q '1 store entries had changed since' "$work/out" \
-  && [ "$(stat -f %Lp "$lentry/package.json" 2>/dev/null || stat -c %a "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
+  && [ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
   && ok "a store entry changed since it was made: found, replaced by pacote's extraction, tree identical" || bad "changed entry: $(grep -c 'had changed' "$work/out")"
 
 # 4d. Entries known only to another pacote/tar version (an install under
@@ -161,7 +161,7 @@ chmod 600 "$lentry/package.json"
 p=$(project other-version small)
 MATCHAPACK_STORE=$cs MATCHAPACK_INJECT_CHECK=1000000 install "$p" && [ "$(checked)" = "$n_small" ] \
   && grep -q "extracts 1 package(s) differently from what another pacote/tar version put in the store" "$work/out" \
-  && [ "$(stat -f %Lp "$lentry/package.json" 2>/dev/null || stat -c %a "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
+  && [ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$lentry/package.json")" = 644 ] && same "$ref_small" "$p" \
   && ok "entries of another pacote/tar version: all $n_small compared once under this one, the differing one replaced, tree identical" \
   || bad "other version: checked $(checked), $(tail -2 "$work/out")"
 python3 - "$cs/made-by" "$old" "$want_key" <<'PY' \
@@ -210,7 +210,7 @@ else
   ref_gid=$(gproject ref); (cd "$ref_gid" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci for the gid reference"
   p=$(gproject fill)
   MATCHAPACK_STORE=$gs install "$p" && [ "$(cloned)" = "$n_small" ] && [ "$(gid_diffs "$ref_gid" "$p")" = 0 ] && same "$ref_gid" "$p" \
-    && [ "$(stat -f %g "$gs/v2" 2>/dev/null || stat -c %g "$gs/v2")" = "$other_gid" ] \
+    && [ "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_gid)' "$gs/v2")" = "$other_gid" ] \
     && ok "store under group $other_gid, empty: all $n_small cloned, every path has npm ci's group ($(grep -Eo '[0-9]+ paths regrouped' "$work/out"))" \
     || bad "gid, empty store: cloned $(cloned), $(gid_diffs "$ref_gid" "$p") paths differ in group"
   p=$(gproject checked)
@@ -224,7 +224,7 @@ else
   # clone made at the destination gets it too; a placement that would be
   # moved in from tmp/ (a merge) is extracted by npm instead.
   fd=$work.foreign; rm -rf "${fd:?}"; mkdir -p "$fd"
-  fgid=$(stat -f %g "$fd" 2>/dev/null || stat -c %g "$fd")
+  fgid=$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_gid)' "$fd")
   if python3 -c "import os,sys;sys.exit(0 if $fgid in os.getgroups() or $fgid==os.getegid() or os.geteuid()==0 else 1)"; then
     echo "SKIP a project of a group the user is not in: $fd's group $fgid is one of the user's"
   else

@@ -126,7 +126,7 @@ vdir=$(dirname "$victim"); chmod 700 "$vdir"
 verify; rc=$?
 [ $rc = 1 ] && grep -q "directory mode 700" "$work/out" && ok "verify: a changed directory mode is reported" || bad "verify: directory mode (rc=$rc)"
 verify --fix && grep -q 'replaced 1 entries with npm' "$work/out" && [ "$(entries)" = "$n" ] && ! grep -q '^x' "$victim" && [ "$(tail -c 1 "$victim")" != x ] \
-  && [ "$(stat -f %Lp "$vdir" 2>/dev/null || stat -c %a "$vdir")" = 755 ] && ok "verify --fix: the entry is replaced by npm's extraction" || bad "verify --fix"
+  && [ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$vdir")" = 755 ] && ok "verify --fix: the entry is replaced by npm's extraction" || bad "verify --fix"
 verify && grep -q "$n match, 0 differ" "$work/out" && ok "verify: after --fix, every entry matches" || bad "verify: after --fix"
 
 # 8b. Entries made by the classic engine's extractor are judged by npm's

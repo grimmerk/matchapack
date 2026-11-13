@@ -74,7 +74,7 @@ a later change (#33, PR C2):
 ```sh
 MATCHAPACK_ENGINE=classic npm ci      # one command, through the shell function
 export MATCHAPACK_ENGINE=classic      # or for the whole shell (unset it for the default)
-matchapack install . -- --no-audit    # the default engine directly; after `--`: npm's own arguments
+MATCHAPACK_ENGINE= matchapack install . -- --no-audit   # the default engine directly, whatever is exported; after `--`: npm's own arguments
 ```
 
 How the inject engine installs:
