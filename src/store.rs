@@ -55,6 +55,11 @@ impl Integrity {
         best.map(|(_, i)| i).ok_or_else(|| anyhow!("no usable hash in integrity {s:?}"))
     }
 
+    /// The SRI string (`sha512-<base64>`), as a lockfile gives it.
+    pub fn sri(&self) -> String {
+        format!("{}-{}", self.algo, base64::engine::general_purpose::STANDARD.encode(hex::decode(&self.hex).unwrap_or_default()))
+    }
+
     /// `<algo>-<hex>`: how project records name an entry.
     pub fn key(&self) -> String {
         format!("{}-{}", self.algo, self.hex)
@@ -207,17 +212,6 @@ pub enum Ensure {
     Extracted,
     /// No tarball in the npm cache; the caller must fetch it.
     Missing,
-}
-
-/// What `verify_entry` found.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Check {
-    Match,
-    /// The entry is not what its tarball extracts to (the first difference).
-    Differs(String),
-    /// The tarball is no longer in the npm cache (or no longer matches its
-    /// integrity): nothing to compare with.
-    NoTarball,
 }
 
 impl Store {
@@ -517,41 +511,13 @@ impl Store {
         }
     }
 
-    /// Compare an entry with what its tarball in the npm cache extracts to:
-    /// the tarball is extracted again into tmp/ on the same filesystem, and
-    /// the two trees must hold the same files (contents, modes), the same
-    /// directories and nothing else; the entry itself must be a directory.
-    /// Directory modes are not compared: they follow the umask of the process
-    /// that extracted the entry (as npm's do), so the tarball does not fix
-    /// them, and a verify under another umask would condemn every entry.
-    /// File modes are set explicitly and are compared. Extracting rather than
-    /// modelling the result keeps the filesystem's own name rules (a
-    /// case-insensitive volume keeps one of `README.md` and `readme.md`).
-    /// Catches an entry left truncated or changed (entries are renamed into
-    /// place without fsync, and a person or a tool could write into one).
-    /// Found by content address only; an entry whose lockfile had only sha1
-    /// (cacache keeps those under sha512) reads as NoTarball.
-    pub fn verify_entry(&self, i: &Integrity) -> Result<Check> {
-        let dir = self.dir_for(i);
-        let m = fs::symlink_metadata(&dir).with_context(|| format!("reading {}", dir.display()))?;
-        if !m.is_dir() {
-            return Ok(Check::Differs("the entry is not a directory (a symlink?)".into()));
-        }
-        let Some(tgz) = self.find_tarball(&self.cacache, i, None) else { return Ok(Check::NoTarball) };
-        let data = fs::read(&tgz)?;
-        if i.digest(&data) != i.hex {
-            return Ok(Check::NoTarball);
-        }
-        let seq = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
-        let fresh = TmpDir::create(self.root.join("tmp").join(format!("{}-v{seq}-{}", process_tag(), &i.hex[..16])), 0o755)?;
-        let r = extract(&data, &fresh.path)
-            .with_context(|| format!("extracting {}", tgz.display()))
-            .and_then(|()| Ok(match compare_trees(&fresh.path, &dir, false)? {
-                Some(d) => Check::Differs(d),
-                None => Check::Match,
-            }));
-        let _ = fs::remove_dir_all(&fresh.path);
-        r
+    /// Whether npm's cache holds the tarball of `i`, found by its content
+    /// address and with the bytes its integrity names: what `store verify`
+    /// compares an entry with (src/verify.rs). An entry whose lockfile had
+    /// only sha1 (cacache keeps those under sha512) has none.
+    pub fn cached_tarball_ok(&self, i: &Integrity) -> Result<bool> {
+        let Some(tgz) = self.find_tarball(&self.cacache, i, None) else { return Ok(false) };
+        Ok(i.digest(&fs::read(&tgz)?) == i.hex)
     }
 
     /// Forget an entry's cached size (its contents were replaced).
@@ -564,9 +530,9 @@ impl Store {
 /// The first difference between two extracted trees, `want` the reference
 /// (what the tarball extracts to) and `got` the one checked: the same files
 /// (contents, modes), the same directories and nothing else. Directory modes
-/// are compared only with `dir_modes`: `verify_entry` leaves them out (they
-/// follow the umask of whoever extracted), the inject engine compares them
-/// (its umask is gated to 022, and a clone carries them into the project).
+/// are compared only with `dir_modes`; the inject engine's checks and
+/// `store verify` compare them (the umask is 022 for both, and a clone
+/// carries them into the project).
 /// None when they are the same.
 pub fn compare_trees(want: &Path, got: &Path, dir_modes: bool) -> Result<Option<String>> {
     let (want, got) = (tree(want, dir_modes)?, tree(got, dir_modes)?);
@@ -823,8 +789,19 @@ pub(crate) mod tests {
         i
     }
 
+    /// `store verify` (src/verify.rs) with matchapack's own extractor
+    /// standing in for pacote: the tarball of `i` from the fake npm cache.
+    const KEY: &str = "pacote@1.0.0 tar@2.0.0";
+    fn rust_extract(cacache: &Path) -> impl Fn(&Integrity, &Path) -> Result<()> + '_ {
+        move |i, to| extract(&fs::read(i.split_path(&cacache.join("content-v2")))?, to)
+    }
+    fn verify_entry(store: &Store, i: &Integrity) -> crate::verify::Found {
+        crate::verify::verify_entry(store, KEY, i, &rust_extract(&store.cacache), false).unwrap()
+    }
+
     #[test]
     fn verify_finds_changed_missing_and_extra_files_and_modes() {
+        use crate::verify::Found;
         let d = scratch("verify");
         let cacache = d.join("cacache");
         let i = cached_tarball(&cacache, &[("index.js", 0o644, "module.exports = 1\n"), ("bin/cli", 0o755, "#!/bin/sh\n"), (".gitignore", 0o644, "x\n")]);
@@ -834,11 +811,11 @@ pub(crate) mod tests {
                 fs::remove_dir_all(store.dir_for(&i)).unwrap();
             }
             assert!(matches!(store.ensure(&i, "http://x/p.tgz").unwrap(), Ensure::Extracted));
-            assert_eq!(store.verify_entry(&i).unwrap(), Check::Match, "a fresh extraction matches");
+            assert!(matches!(verify_entry(&store, &i), Found::Match { .. }), "a fresh extraction matches");
             store.dir_for(&i)
         };
-        let differs = |what: &str| match store.verify_entry(&i).unwrap() {
-            Check::Differs(why) => why,
+        let differs = |what: &str| match verify_entry(&store, &i) {
+            Found::Differs { why, .. } => why,
             c => panic!("{what}: expected Differs, got {c:?}"),
         };
         let e = fresh();
@@ -862,18 +839,21 @@ pub(crate) mod tests {
         let e = fresh();
         std::os::unix::fs::symlink("index.js", e.join("link")).unwrap();
         assert!(differs("symlink").contains("link"));
-        // Directory modes follow the extracting process's umask: not a difference.
+        // Directory modes are compared, as the inject engine's checks do (a
+        // clone carries them into the project; the umask is 022 for both).
         let e = fresh();
         fs::set_permissions(e.join("bin"), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(differs("dir mode").contains("bin: directory mode 700"));
+        let e = fresh();
         fs::set_permissions(&e, fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(store.verify_entry(&i).unwrap(), Check::Match);
+        assert!(differs("root dir mode").contains("(entry root): directory mode 700"));
         fs::set_permissions(&e, fs::Permissions::from_mode(0o755)).unwrap();
         // The entry root replaced by a symlink to a valid copy.
         let e = fresh();
         let moved = d.join("moved");
         fs::rename(&e, &moved).unwrap();
         std::os::unix::fs::symlink(&moved, &e).unwrap();
-        assert!(differs("root symlink").contains("not a directory"));
+        assert_eq!(verify_entry(&store, &i), Found::NotDir { fixed: false }, "root symlink");
         assert_eq!(store.entries(), vec![i.clone()], "listed, so the CLI verify and gc see it");
         assert!(store.ensure(&i, "http://x/p.tgz").is_err(), "never used for an install");
         fs::remove_file(&e).unwrap();
@@ -884,7 +864,7 @@ pub(crate) mod tests {
         fs::write(store.dir_for(&i).parent().unwrap().join("0123456789abcdef"), "").unwrap();
         assert_eq!(store.entries(), vec![i.clone()]);
         fs::remove_file(i.split_path(&cacache.join("content-v2"))).unwrap();
-        assert_eq!(store.verify_entry(&i).unwrap(), Check::NoTarball);
+        assert_eq!(verify_entry(&store, &i), Found::NoTarball);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -897,7 +877,7 @@ pub(crate) mod tests {
         let i = cached_tarball(&cacache, &[("README.md", 0o644, "upper\n"), ("readme.md", 0o644, "lower\n")]);
         let store = Store::new(d.join("store"), cacache).unwrap();
         assert!(matches!(store.ensure(&i, "http://x/p.tgz").unwrap(), Ensure::Extracted));
-        assert_eq!(store.verify_entry(&i).unwrap(), Check::Match);
+        assert!(matches!(verify_entry(&store, &i), crate::verify::Found::Match { .. }));
         let _ = fs::remove_dir_all(&d);
     }
 

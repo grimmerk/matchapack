@@ -11,6 +11,7 @@ mod serve;
 mod store;
 mod trial;
 mod util;
+mod verify;
 mod wrapper;
 mod yarn1;
 
@@ -176,9 +177,17 @@ enum StoreCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Compare every entry with its tarball in the npm cache; exit 1 when one differs
+    /// Compare every entry with npm's own extraction of its tarball; exit 1 when one differs
+    ///
+    /// Each tarball is taken from the npm cache and extracted by the pacote of
+    /// the npm on PATH, as `npm ci` (and the inject engine) would extract it,
+    /// and compared with the entry: the same paths, contents, file and
+    /// directory modes. A match records that pacote/tar version on the
+    /// entry; a difference is reported with who made the entry.
+    #[command(verbatim_doc_comment)]
     Verify {
-        /// Remove the entries that differ (the next install re-extracts them).
+        /// Replace the entries that differ with npm's extraction (entries
+        /// that are not directories are removed).
         #[arg(long)]
         fix: bool,
         /// npm content cache (default ~/.npm/_cacache).
@@ -797,35 +806,49 @@ fn main() -> Result<()> {
                 }
                 Some(StoreCmd::Verify { fix, npm_cache }) => {
                     let cacache = npm_cache.unwrap_or(cacache);
-                    let st = if fix { Store::exclusive(s, cacache)? } else { Store::new(s, cacache)? };
-                    let all = st.entries();
-                    let checks: Vec<(Integrity, store::Check)> = all
-                        .par_iter()
-                        .map(|i| st.verify_entry(i).map(|c| (i.clone(), c)))
-                        .collect::<Result<_>>()?;
-                    let bad: Vec<&(Integrity, store::Check)> = checks.iter().filter(|(_, c)| matches!(c, store::Check::Differs(_))).collect();
-                    let missing = checks.iter().filter(|(_, c)| *c == store::Check::NoTarball).count();
+                    let st = if fix { Store::exclusive(s, cacache.clone())? } else { Store::new(s, cacache.clone())? };
+                    let (r, key) = verify::verify_store(&st, &cacache, fix)?;
                     println!(
-                        "{} entries: {} match their tarball, {} differ, {missing} not checked (tarball no longer in the npm cache)",
-                        all.len(),
-                        all.len() - bad.len() - missing,
-                        bad.len()
+                        "{} entries compared with npm's extraction ({key}) in {:.1}s: {} match, {} differ, {} not directories, {} not checked (tarball no longer in the npm cache), {} pacote could not extract",
+                        r.entries,
+                        r.secs,
+                        r.matched,
+                        r.differs.len(),
+                        r.not_dir.len(),
+                        r.no_tarball,
+                        r.failed.len()
                     );
-                    for (i, c) in &bad {
-                        if let store::Check::Differs(why) = c {
-                            println!("  {}/{}…: {why}", i.algo, &i.hex[..16]);
+                    if r.recorded > 0 {
+                        println!("{} matching entries recorded as known to {key} (an install then samples them instead of comparing them first)", r.recorded);
+                    }
+                    let what = |kind: &str| match kind {
+                        "extractor" => "made by the classic engine's extractor",
+                        "changed" => "changed after this pacote/tar had made or checked it",
+                        _ => "made under another pacote/tar version",
+                    };
+                    for (i, kind, why, _) in &r.differs {
+                        println!("  {}/{}…: {why} ({})", i.algo, &i.hex[..16], what(kind));
+                    }
+                    for (i, _) in &r.not_dir {
+                        println!("  {}/{}…: the entry is not a directory (a symlink?)", i.algo, &i.hex[..16]);
+                    }
+                    for (i, e) in &r.failed {
+                        println!("  {}/{}…: pacote could not extract it: {e}", i.algo, &i.hex[..16]);
+                    }
+                    let bad = r.differs.len() + r.not_dir.len();
+                    if bad > 0 {
+                        if fix {
+                            println!(
+                                "replaced {} entries with npm's extraction; removed {} that were not directories (the next install re-extracts them)",
+                                r.differs.len(),
+                                r.not_dir.len()
+                            );
+                        } else {
+                            println!("`matchapack store verify --fix` replaces them with npm's extraction");
                         }
                     }
-                    if !bad.is_empty() {
-                        if fix {
-                            for (i, _) in &bad {
-                                st.remove_entry(i)?;
-                            }
-                            println!("removed {} entries; the next install that needs one re-extracts it", bad.len());
-                        } else {
-                            println!("`matchapack store verify --fix` removes them (the next install re-extracts them)");
-                            std::process::exit(1);
-                        }
+                    if (bad > 0 && !fix) || !r.failed.is_empty() {
+                        std::process::exit(1);
                     }
                 }
             }

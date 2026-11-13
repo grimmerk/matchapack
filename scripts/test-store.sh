@@ -2,21 +2,45 @@
 # Store maintenance tests: project records, `store gc`, `store verify`, the
 # store lock and the tmp cleanup, end to end with the release binary.
 #   test-store.sh <work-dir>
-# Uses its own store and log directory, never the real ones.
+# Uses its own store and log directory, never the real ones. The installs
+# use matchapack's default engine (inject), or MATCHAPACK_ENGINE=classic.
+# `store verify` extracts with the pacote of the npm on PATH.
 set -uo pipefail
 work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
+# Projects in a directory of the user's own group: under one of a group the
+# user is not in (macOS /tmp: wheel), the inject engine leaves merge
+# placements to npm (#41), and the entry counts below would differ.
+chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs
+engine=${MATCHAPACK_ENGINE:-inject}; export MATCHAPACK_ENGINE=$engine
+echo "installs with the $engine engine"
 store=$work/store
 # moved-entry: left by the last case; a third run over the same work
 # directory failed on it (the `mv` into it found a non-empty directory).
-rm -rf "${store:?}" "${work:?}/logs" "${work:?}/moved-entry"
+rm -rf "${store:?}" "${work:?}/logs" "${work:?}/moved-entry" "${work:?}/store-odd"
+# The odd-tarballs case installs from the fixtures' tarball server.
+server=
+if ! curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; then
+  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
+  server=$!
+  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz && break; sleep 0.1; done
+fi
+trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -5; }
 
 project() { local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo "$d"; }
-install() { "$bin" install "$1" --no-rebuild > "$work/out" 2>&1; }
+# install: no scripts (classic: no npm rebuild step); full_install: scripts,
+# bin links and the hidden lockfile.
+if [ "$engine" = classic ]; then
+  install() { "$bin" install "$1" --no-rebuild > "$work/out" 2>&1; }
+  full_install() { "$bin" install "$1" > "$work/out" 2>&1; }
+else
+  install() { "$bin" install "$1" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1; }
+  full_install() { "$bin" install "$1" -- --no-audit --no-fund > "$work/out" 2>&1; }
+fi
 entries() { find "$store/v2" -mindepth 3 -maxdepth 3 -type d | wc -l | tr -d ' '; }
 records() { find "$store/projects" -name '*.json' 2>/dev/null | wc -l | tr -d ' '; }
 # Entries extracted by these tests are minutes old; gc keeps entries younger
@@ -71,7 +95,7 @@ gc && grep -q "removed 0 of $n" "$work/out" && grep -q "kept $n unused entries e
 # 6. A project installed by a build without records (only in the trial log)
 #    keeps the entries its hidden lockfile lists.
 # The hidden lockfile is written by the post-install step: no --no-rebuild here.
-p3=$(project p3); "$bin" install "$p3" > "$work/out" 2>&1; rm -f "$store"/projects/*.json; age_entries
+p3=$(project p3); full_install "$p3"; rm -f "$store"/projects/*.json; age_entries
 mkdir -p "$work/logs"
 python3 -c "import json,time;open('$work/logs/log.jsonl','a').write(json.dumps({'outcome':'installed','dir':'$p3','ts':time.time()})+'\\n')"
 listed=$(python3 -c "import json;print(len({v['integrity'] for v in json.load(open('$p3/node_modules/.package-lock.json'))['packages'].values() if 'integrity' in v}))")
@@ -83,15 +107,44 @@ gc; rc=$?
 release
 [ $rc != 0 ] && grep -q 'in use by a running install' "$work/out" && ok "gc: refused while an install holds the store" || bad "gc: ran during an install (rc=$rc)"
 
-# 8. verify: all match; a changed file is found, --fix removes the entry,
-#    the next install puts it back.
-"$bin" store verify > "$work/out" 2>&1 && grep -q "$n match" "$work/out" && ok "verify: $n entries match their tarballs" || bad "verify: clean store"
+# 8. verify (with npm's own pacote): all match; a changed file and a
+#    changed directory mode are found and named with who made the entry;
+#    --fix replaces the entry with npm's extraction.
+verify() { "$bin" store verify "$@" > "$work/out" 2>&1; }
+# The entries carry no made-by record when the classic engine's extractor
+# made them: this verify then records them as known to npm's pacote/tar.
+[ "$engine" = classic ] && recorded="$n matching entries recorded as known to pacote@" || recorded=""
+verify && grep -q "$n match, 0 differ" "$work/out" && { [ -z "$recorded" ] || grep -q "$recorded" "$work/out"; } \
+  && ok "verify: $n entries match npm's extraction${recorded:+, and are recorded as known to it}" || bad "verify: clean store"
+# Every entry is now known to this pacote/tar: a difference is a change.
+made="changed after this pacote/tar had made or checked it"
 victim=$(find "$store/v2" -path '*/lodash.js' -type f | head -1)
 printf 'x' >> "$victim"
-"$bin" store verify > "$work/out" 2>&1; rc=$?
-[ $rc = 1 ] && grep -q 'lodash.js: contents differ' "$work/out" && ok "verify: a changed file is reported (exit 1)" || bad "verify: changed file not found (rc=$rc)"
-"$bin" store verify --fix > "$work/out" 2>&1 && grep -q 'removed 1 entries' "$work/out" && [ "$(entries)" = $((n - 1)) ] && ok "verify --fix: the entry is removed" || bad "verify --fix"
-p4=$(project p4); install "$p4" && "$bin" store verify > "$work/out" 2>&1 && grep -q "$n match" "$work/out" && ok "verify: the next install re-extracts it" || bad "verify: re-extract after --fix"
+verify; rc=$?
+[ $rc = 1 ] && grep -q "lodash.js: contents differ ($made)" "$work/out" && ok "verify: a changed file is reported (exit 1), with who made the entry" || bad "verify: changed file not found (rc=$rc)"
+vdir=$(dirname "$victim"); chmod 700 "$vdir"
+verify; rc=$?
+[ $rc = 1 ] && grep -q "directory mode 700" "$work/out" && ok "verify: a changed directory mode is reported" || bad "verify: directory mode (rc=$rc)"
+verify --fix && grep -q 'replaced 1 entries with npm' "$work/out" && [ "$(entries)" = "$n" ] && ! grep -q '^x' "$victim" && [ "$(tail -c 1 "$victim")" != x ] \
+  && [ "$(stat -f %Lp "$vdir" 2>/dev/null || stat -c %a "$vdir")" = 755 ] && ok "verify --fix: the entry is replaced by npm's extraction" || bad "verify --fix"
+verify && grep -q "$n match, 0 differ" "$work/out" && ok "verify: after --fix, every entry matches" || bad "verify: after --fix"
+
+# 8b. Entries made by the classic engine's extractor are judged by npm's
+#     extraction too: odd-tarballs' lc-dup (a path listed twice) differs and
+#     is replaced; the matching one is recorded as known to this pacote.
+if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
+  os=$work/store-odd; rm -rf "${os:?}"
+  po=$work/odd; rm -rf "${po:?}"; mkdir -p "$po"; cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$po/"
+  MATCHAPACK_STORE=$os MATCHAPACK_ENGINE=classic "$bin" install "$po" --no-rebuild > "$work/out" 2>&1 || bad "odd-tarballs: classic install"
+  MATCHAPACK_STORE=$os "$bin" store verify > "$work/out" 2>&1; rc=$?
+  [ $rc = 1 ] && grep -q "2 entries compared.*: 1 match, 1 differ" "$work/out" && grep -q "run.sh: mode 644, the tarball gives 755 (made by the classic engine's extractor)" "$work/out" \
+    && grep -q '1 matching entries recorded as known to pacote@' "$work/out" \
+    && ok "verify: the classic engine's entry for a path listed twice differs from npm's extraction; the other is recorded" || bad "verify odd-tarballs (rc=$rc)"
+  MATCHAPACK_STORE=$os "$bin" store verify --fix > "$work/out" 2>&1 && MATCHAPACK_STORE=$os "$bin" store verify > "$work/out" 2>&1 && grep -q '2 match, 0 differ' "$work/out" \
+    && ok "verify --fix: replaced by npm's extraction, then both match" || bad "verify --fix odd-tarballs"
+else
+  echo "SKIP verify odd-tarballs: the fixtures' tarball server is not running (127.0.0.1:48321)"
+fi
 
 # 9. tmp cleanup: an old directory nobody holds goes; one a process holds stays.
 mkdir -p "$store/tmp/1-left/sub" "$store/tmp/1-held"; touch -t 202001010000 "$store/tmp/1-left" "$store/tmp/1-held"
@@ -104,13 +157,13 @@ release
 #     (run by the post-install step, the last one) tries a gc, which is refused.
 p5=$(project p5)
 python3 -c "import json;p='$p5/package.json';d=json.load(open(p));d['scripts']['postinstall']='\"$bin\" store gc > gc.txt 2>&1; true';json.dump(d,open(p,'w'))"
-"$bin" install "$p5" > "$work/out" 2>&1 && grep -q 'in use by a running install' "$p5/gc.txt" && ok "lock: held through the root scripts (a gc from postinstall is refused)" || bad "lock: gc ran inside an install ($(cat "$p5/gc.txt" 2>/dev/null | head -1))"
+full_install "$p5" && grep -q 'in use by a running install' "$p5/gc.txt" && ok "lock: held through the root scripts (a gc from postinstall is refused)" || bad "lock: gc ran inside an install ($(cat "$p5/gc.txt" 2>/dev/null | head -1))"
 
 # 11. An install started while a gc holds the store waits for it: it is
 #     still running when the lock is released, then completes.
 p6=$(project p6)
 hold "$store/lock" ex
-"$bin" install "$p6" --no-rebuild > "$work/out" 2>&1 & inst=$!
+install "$p6" & inst=$!
 for _ in $(seq 1200); do grep -q 'waiting for a `matchapack store` command' "$work/out" 2>/dev/null && break; sleep 0.05; done
 sleep 1   # time it would need to get past the lock if it did not wait
 kill -0 "$inst" 2>/dev/null && waited=yes || waited=no
@@ -119,13 +172,15 @@ wait "$inst"; rc=$?
 [ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `matchapack store` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
 
 # 12. An entry replaced by a symlink: verify reports it, --fix removes it,
-#     and an install never clones it (it goes to npm instead of placing a link).
+#     and an install never clones it (classic: refused; inject: npm extracts
+#     that package itself instead of placing a link).
 # The lodash entry: lodash.js sits at the package root, four levels down.
 victim=$(dirname "$(find "$store/v2" -mindepth 4 -maxdepth 4 -name lodash.js | head -1)")
 mv "$victim" "$work/moved-entry"; ln -s "$work/moved-entry" "$victim"
 p7=$(project p7); install "$p7"; irc=$?
+if [ "$engine" = classic ]; then [ $irc != 0 ]; else [ $irc = 0 ] && grep -q 'rejected-source' "$work/out" && [ ! -L "$p7/node_modules/lodash" ] && [ -f "$p7/node_modules/lodash/lodash.js" ]; fi; iok=$?
 "$bin" store verify > "$work/out" 2>&1; rc=$?
-[ $irc != 0 ] && [ $rc = 1 ] && grep -q 'not a directory' "$work/out" && "$bin" store verify --fix > "$work/out" 2>&1 && [ ! -L "$victim" ] && [ -d "$work/moved-entry" ] \
+[ $iok = 0 ] && [ $rc = 1 ] && grep -q 'not a directory' "$work/out" && "$bin" store verify --fix > "$work/out" 2>&1 && [ ! -L "$victim" ] && [ -d "$work/moved-entry" ] \
   && ok "verify: a symlinked entry is reported and removed (the link only); an install refuses it" || bad "verify: symlinked entry (install rc=$irc, verify rc=$rc)"
 
 echo "== $pass passed, $fail failed"
