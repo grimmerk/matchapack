@@ -26,7 +26,6 @@ pub fn now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// Append one record; never fails the install (MATCHAPACK_LOG=0 disables).
 /// Options whose value is a secret, by a word in their name (npm's `--otp`,
 /// `--_auth`, `--//host/:_authToken=…`, `--password`; Yarn's `--otp`).
 fn secret_option(name: &str) -> bool {
@@ -113,10 +112,15 @@ fn redact(v: &mut Value) {
     }
 }
 
-pub fn append(mut rec: Value) {
+/// Append one record; never fails the install (MATCHAPACK_LOG=0 disables).
+pub fn append(rec: Value) {
     if std::env::var("MATCHAPACK_LOG").as_deref() == Ok("0") {
         return;
     }
+    append_to(&log_path(), rec);
+}
+
+fn append_to(p: &Path, mut rec: Value) {
     redact(&mut rec);
     if let Value::Object(m) = &mut rec {
         m.insert("ts".into(), json!(now()));
@@ -125,11 +129,35 @@ pub fn append(mut rec: Value) {
         // builds must not be mixed.
         m.insert("build".into(), json!(env!("MATCHAPACK_BUILD")));
     }
-    let p = log_path();
     let _ = std::fs::create_dir_all(p.parent().unwrap());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-        let _ = writeln!(f, "{rec}");
+    append_line(p, format!("{rec}\n").as_bytes());
+}
+
+/// Add one whole line to a log that several processes append to (two
+/// installs can end at the same moment). The line goes out in one
+/// `write_all` (`writeln!` on a File writes each JSON token on its own,
+/// and two records interleaved mid-line on 2026-11-11), under an exclusive
+/// flock on the log: O_APPEND keeps one write(2) in one piece on Linux's
+/// local filesystems in practice, but no filesystem promises it, APFS does
+/// not document it, and a short write would be finished by a second call.
+/// The lock is waited for at most about two seconds, then the line is
+/// written anyway (as at once where flock is not supported): a log line
+/// never holds an install back.
+fn append_line(p: &Path, line: &[u8]) {
+    use std::os::fd::AsRawFd;
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) else { return };
+    for _ in 0..200 {
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        let e = std::io::Error::last_os_error().raw_os_error();
+        if e != Some(libc::EWOULDBLOCK) && e != Some(libc::EINTR) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    let _ = f.write_all(line);
+    // Closing the file releases the lock.
 }
 
 /// Trial scope: if ~/.config/matchapack/paths (or MATCHAPACK_PATHS, `:`-separated)
@@ -159,13 +187,29 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
     Err("outside the trial scope (~/.config/matchapack/paths or MATCHAPACK_PATHS)".into())
 }
 
-fn read_jsonl(p: &Path, since: f64) -> Vec<Value> {
-    std::fs::read_to_string(p)
-        .unwrap_or_default()
+/// The records from `since` on, and how many lines (of any date) were not
+/// readable JSON: a line cut short or two interleaved lines are skipped,
+/// never the whole report.
+fn read_jsonl(p: &Path, since: f64) -> (Vec<Value>, usize) {
+    let text = std::fs::read_to_string(p).unwrap_or_default();
+    let mut bad = 0;
+    let recs = text
         .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| {
+            let v = serde_json::from_str::<Value>(l).ok();
+            bad += v.is_none() as usize;
+            v
+        })
         .filter(|v| v.get("ts").and_then(|t| t.as_f64()).unwrap_or(0.0) >= since)
-        .collect()
+        .collect();
+    (recs, bad)
+}
+
+fn skipped(bad: usize, p: &Path) {
+    if bad > 0 {
+        println!("{bad} unreadable line{} skipped ({})", if bad == 1 { "" } else { "s" }, p.display());
+    }
 }
 
 fn gib(b: f64) -> String {
@@ -249,12 +293,13 @@ fn report_yarn1(runs: &[Value]) {
 
 pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     let since = days.map(|d| now() - d * 86400.0).unwrap_or(0.0);
-    let all = read_jsonl(&log_path(), since);
+    let (all, bad) = read_jsonl(&log_path(), since);
     // `matchapack yarn` runs (src/yarn1.rs) are reported apart: they use no
     // store entry, so none of the npm lines below (store, space) count them.
     let (yruns, runs): (Vec<Value>, Vec<Value>) = all.iter().cloned().partition(|r| r["engine"] == "yarn1");
     let window = days.map(|d| format!("last {d} days")).unwrap_or_else(|| "all time".into());
     println!("matchapack report ({window}; {})", log_path().display());
+    skipped(bad, &log_path());
     if !yruns.is_empty() {
         report_yarn1(&yruns);
     }
@@ -450,7 +495,8 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         };
         println!("  {}  {:<13} {}  ({extra})", when(r["ts"].as_f64().unwrap_or(0.0)), r["outcome"].as_str().unwrap_or("?"), r["dir"].as_str().unwrap_or("?"));
     }
-    let ver = read_jsonl(&verify_log_path(), since);
+    let (ver, bad) = read_jsonl(&verify_log_path(), since);
+    skipped(bad, &verify_log_path());
     if ver.is_empty() {
         println!("verification samples: none yet (scripts/verify-sample.sh)");
     } else {
@@ -474,9 +520,75 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::tests::scratch;
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// A record about the size of a real one (500–2000 bytes, many keys:
+    /// serde_json writes each token on its own).
+    fn sized_record(writer: usize, seq: usize) -> Value {
+        let phases: serde_json::Map<String, Value> = (0..12 + seq % 20).map(|i| (format!("phase-{i}"), json!(i as f64 * 0.37))).collect();
+        json!({ "outcome": "installed", "writer": writer, "seq": seq, "dir": format!("/Users/someone/git/project-{writer}"),
+                "args": ["ci", "--no-audit"], "phases": phases, "reason": "x".repeat(seq * 37 % 900) })
+    }
+
+    /// Run as a child process by `concurrent_appends_stay_whole_lines`
+    /// (nothing to do otherwise): wait for the start file, then append.
+    #[test]
+    fn append_child() {
+        let Ok(log) = std::env::var("MATCHAPACK_TEST_APPEND_TO") else { return };
+        let writer: usize = std::env::var("MATCHAPACK_TEST_WRITER").unwrap().parse().unwrap();
+        let go = Path::new(&log).with_extension("go");
+        while !go.exists() {
+            std::thread::yield_now();
+        }
+        for seq in 0..150 {
+            append_to(Path::new(&log), sized_record(writer, seq));
+        }
+    }
+
+    /// Installs that end together (separate processes) append whole lines,
+    /// none lost. Before, `writeln!` interleaved two records mid-line.
+    #[test]
+    fn concurrent_appends_stay_whole_lines() {
+        let log = scratch("trial-concurrent").join("log.jsonl");
+        let exe = std::env::current_exe().unwrap();
+        let writers = 12;
+        let children: Vec<_> = (0..writers)
+            .map(|w| {
+                std::process::Command::new(&exe)
+                    .args(["--exact", "trial::tests::append_child", "--test-threads=1", "-q"])
+                    .env("MATCHAPACK_TEST_APPEND_TO", &log)
+                    .env("MATCHAPACK_TEST_WRITER", w.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        std::fs::write(log.with_extension("go"), "").unwrap();
+        for mut c in children {
+            assert!(c.wait().unwrap().success());
+        }
+        let text = std::fs::read_to_string(&log).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for (i, l) in text.lines().enumerate() {
+            let r: Value = serde_json::from_str(l).unwrap_or_else(|e| panic!("line {} is not one record ({e}): {:.200}", i + 1, l));
+            assert!(seen.insert((r["writer"].as_u64().unwrap(), r["seq"].as_u64().unwrap())), "line {} written twice", i + 1);
+        }
+        assert_eq!(seen.len(), writers * 150, "every record once");
+        let (recs, bad) = read_jsonl(&log, 0.0);
+        assert_eq!((recs.len(), bad), (writers * 150, 0));
+    }
+
+    #[test]
+    fn unreadable_lines_are_counted_and_skipped() {
+        let log = scratch("trial-unreadable").join("log.jsonl");
+        std::fs::write(&log, "{\"ts\":5,\"outcome\":\"installed\"}\n{\"outcome\":\"installed\"{,\"\"outcome\"\n\n{\"ts\":9}\n").unwrap();
+        let (recs, bad) = read_jsonl(&log, 0.0);
+        assert_eq!((recs.len(), bad), (2, 1));
+        assert_eq!(read_jsonl(&log, 6.0).0.len(), 1, "the window still applies");
     }
 
     #[test]
