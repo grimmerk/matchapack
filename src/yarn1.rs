@@ -160,6 +160,11 @@ pub struct YarnBin {
     /// installs it into its cache when needed, and starts that Yarn's
     /// `bin/yarn.js` in the same process, where the hook takes over.
     pub corepack: bool,
+    /// What the user's `yarn` adds to Yarn's environment before it starts
+    /// `js`: Homebrew's launcher sets PREFIX (`homebrew_launcher`). Given to
+    /// every Yarn started here (the install, `yarn cache dir`, plain Yarn on
+    /// a decline), so Yarn and its scripts see what plain Homebrew Yarn sees.
+    pub env: Vec<(String, String)>,
 }
 
 /// The version of Yarn 1's npm package whose `bin/yarn.js` is `js`, or why
@@ -191,10 +196,51 @@ fn is_corepack_launcher(real: &Path) -> bool {
             .is_some_and(|v| v["name"] == "corepack")
 }
 
+/// Homebrew's launcher for Yarn 1 (homebrew-core Formula/y/yarn.rb): Yarn
+/// 1's package in `<keg>/libexec`, and `<keg>/bin/yarn` the script
+/// `Pathname#write_env_script` writes (Homebrew/brew,
+/// Library/Homebrew/extend/pathname.rb), byte for byte:
+///
+/// ```text
+/// #!/bin/bash
+/// PREFIX="<HOMEBREW_PREFIX>" exec "<keg>/libexec/bin/yarn.js"  "$@"
+/// ```
+///
+/// (two spaces: the formula passes no arguments). `real` is that script,
+/// symlinks resolved. Returns the `yarn.js` as the script names it (Yarn's
+/// argv[1] under plain Homebrew Yarn) and the PREFIX it sets. Only this exact
+/// text, with a PREFIX and a path that bash takes literally inside double
+/// quotes (no `"`, `$`, backquote, backslash or newline), naming its own
+/// keg's `libexec/bin/yarn.js`; anything else is not recognized.
+fn homebrew_launcher(real: &Path) -> Option<(PathBuf, String)> {
+    const HEAD: &str = "#!/bin/bash\nPREFIX=\"";
+    const MID: &str = "\" exec \"";
+    const TAIL: &str = "\"  \"$@\"\n";
+    let bin = real.parent()?;
+    if real.file_name()? != "yarn" || bin.file_name()? != "bin" {
+        return None;
+    }
+    let meta = std::fs::metadata(real).ok()?;
+    if !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    let text = String::from_utf8(std::fs::read(real).ok()?).ok()?;
+    let (prefix, target) = text.strip_prefix(HEAD)?.strip_suffix(TAIL)?.split_once(MID)?;
+    let literal = |s: &str| s.starts_with('/') && !s.contains(['"', '$', '`', '\\', '\n']);
+    if !literal(prefix) || !literal(target) {
+        return None;
+    }
+    let target = PathBuf::from(target);
+    let own = bin.parent()?.join("libexec/bin/yarn.js");
+    let same = std::fs::canonicalize(&target).ok()? == std::fs::canonicalize(own).ok()?;
+    same.then(|| (target, prefix.to_string()))
+}
+
 /// The Yarn the user's `yarn` runs: MATCHAPACK_YARN_JS, or `yarn` on PATH,
-/// resolved to a file of Yarn 1's npm package (an npm-global or Homebrew
-/// install: `…/yarn/bin/yarn.js`, or the `bin/yarn` sh launcher beside it)
-/// or to corepack's launcher. Yarn 2+ or another launcher is not handled.
+/// resolved to a file of Yarn 1's npm package (an npm-global install:
+/// `…/yarn/bin/yarn.js`, or the `bin/yarn` sh launcher beside it), to
+/// Homebrew's launcher for it (`homebrew_launcher`), or to corepack's
+/// launcher. Yarn 2+ or another launcher is not handled.
 pub fn find_yarn_js() -> std::result::Result<YarnBin, String> {
     let p = match std::env::var_os("MATCHAPACK_YARN_JS") {
         Some(p) => PathBuf::from(p),
@@ -205,17 +251,25 @@ pub fn find_yarn_js() -> std::result::Result<YarnBin, String> {
     };
     let real = std::fs::canonicalize(&p).map_err(|e| format!("resolving {}: {e}", p.display()))?;
     if is_corepack_launcher(&real) {
-        return Ok(YarnBin { js: real, version: String::new(), corepack: true });
+        return Ok(YarnBin { js: real, version: String::new(), corepack: true, env: Vec::new() });
     }
-    let js = if real.file_name().is_some_and(|n| n == "yarn.js") { real.clone() } else { real.with_file_name("yarn.js") };
+    let mut env = Vec::new();
+    let js = if real.file_name().is_some_and(|n| n == "yarn.js") {
+        real.clone()
+    } else if let (false, Some((js, prefix))) = (real.with_file_name("yarn.js").exists(), homebrew_launcher(&real)) {
+        env.push(("PREFIX".to_string(), prefix));
+        js
+    } else {
+        real.with_file_name("yarn.js")
+    };
     let version = yarn1_package(&js).map_err(|e| {
         if e.ends_with("npm package") {
-            format!("{} is neither Yarn 1's npm package nor corepack's launcher (Yarn 2+ or another launcher is not handled)", real.display())
+            format!("{} is neither Yarn 1's npm package, Homebrew's launcher for it, nor corepack's launcher (Yarn 2+ or another launcher is not handled)", real.display())
         } else {
             e
         }
     })?;
-    Ok(YarnBin { js, version, corepack: false })
+    Ok(YarnBin { js, version, corepack: false, env })
 }
 
 /// Whether the project at `cwd` is a Yarn 2+ one, decided from files only:
@@ -926,7 +980,7 @@ struct CacheDirAsk {
 /// install (CI run 43306715867; NOTES "The cause"). The other way round,
 /// `yarn cache dir` could hold the pipe on which the install's node reports
 /// its exec, and the install started only when `yarn cache dir` ended.
-fn start_yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String]) -> std::result::Result<CacheDirAsk, String> {
+fn start_yarn_cache_dir(node: &Path, yarn_js: &Path, env: &[(String, String)], cwd: &Path, args: &[String]) -> std::result::Result<CacheDirAsk, String> {
     use std::io::Read;
     let started = Instant::now();
     let mut child = std::process::Command::new(node)
@@ -934,6 +988,7 @@ fn start_yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String]
         .arg("cache")
         .arg("dir")
         .args(cache_args(args))
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1067,6 +1122,7 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
         .arg(&yarn.js)
         .args(args)
         .current_dir(cwd)
+        .envs(yarn.env.iter().map(|(k, v)| (k, v)))
         .env("MATCHAPACK_YARN_FD", crate::inject::CHILD_FD.to_string())
         .env("MATCHAPACK_YARN_PROBE_DIR", &run_dir)
         .env_remove("MATCHAPACK_YARN_FAIL_EVERY")
@@ -1096,12 +1152,12 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // workers clone, open with O_CLOEXEC, set times, groups and xattrs; the
     // socket and its clone were made before the install's node). NOTES
     // "Yarn 1 shell route", decision 4.
-    let ask = if yarn.corepack { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, cwd, args)) };
+    let ask = if yarn.corepack { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, args)) };
     let status = std::thread::scope(|s| {
         s.spawn(|| {
             let ask = match ask {
                 Some(a) => a,
-                None => server.chosen_yarn(&install_ended).and_then(|js| start_yarn_cache_dir(&node, &js, cwd, args)),
+                None => server.chosen_yarn(&install_ended).and_then(|js| start_yarn_cache_dir(&node, &js, &yarn.env, cwd, args)),
             };
             server.set_cache(ask.and_then(|a| a.answer(deadline, &install_ended)))
         });
@@ -1142,27 +1198,28 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
 /// matchapack will not handle this install and nothing has been changed: run
 /// plain Yarn (or exit 3 under MATCHAPACK_NO_FALLBACK=1, leaving the project
 /// as it is).
-fn decline(args: &[String], yarn_js: Option<&Path>, reason: &str) -> i32 {
+fn decline(args: &[String], yarn: Option<&YarnBin>, reason: &str) -> i32 {
     if std::env::var("MATCHAPACK_NO_FALLBACK").as_deref() == Ok("1") {
         eprintln!("matchapack: not handled, left unchanged ({reason})");
         return 3;
     }
     eprintln!("matchapack: running plain yarn instead ({reason})");
-    exec_yarn(args, yarn_js)
+    exec_yarn(args, yarn)
 }
 
 /// Replace this process with plain Yarn: the yarn.js matchapack would have
-/// run (`yarn_js`), else MATCHAPACK_YARN_JS, else the `yarn` on PATH, the same
-/// order `find_yarn_js` uses, so an install and any other command (or the
-/// `MATCHAPACK=0` bypass) run the same Yarn. `MATCHAPACK=0` keeps any wrapper
-/// from routing back here.
-fn exec_yarn(args: &[String], yarn_js: Option<&Path>) -> i32 {
+/// run (`yarn`, with the environment its launcher sets), else
+/// MATCHAPACK_YARN_JS, else the `yarn` on PATH, the same order `find_yarn_js`
+/// uses, so an install and any other command (or the `MATCHAPACK=0` bypass)
+/// run the same Yarn. `MATCHAPACK=0` keeps any wrapper from routing back
+/// here.
+fn exec_yarn(args: &[String], yarn: Option<&YarnBin>) -> i32 {
     util::remove_run_dir();
-    let chosen = yarn_js.map(Path::to_path_buf).or_else(|| std::env::var_os("MATCHAPACK_YARN_JS").map(PathBuf::from));
+    let chosen = yarn.map(|y| y.js.clone()).or_else(|| std::env::var_os("MATCHAPACK_YARN_JS").map(PathBuf::from));
     let mut cmd = match chosen.as_deref() {
         Some(js) => {
             let mut c = std::process::Command::new("node");
-            c.arg(js);
+            c.arg(js).envs(yarn.iter().flat_map(|y| y.env.iter().map(|(k, v)| (k, v))));
             c
         }
         None => std::process::Command::new("yarn"),
@@ -1201,7 +1258,7 @@ pub fn cli(args: Vec<String>) -> i32 {
         return exec_yarn(&args, None);
     }
     let found = find_yarn_js();
-    let yarn_js = found.as_ref().ok().map(|y| y.js.clone());
+    let plain = found.as_ref().ok().cloned();
     let yarn_version = found.as_ref().map(|y| y.version.clone()).unwrap_or_default();
     let corepack = found.as_ref().is_ok_and(|y| y.corepack);
     let log = |outcome: &str, extra: Value| {
@@ -1227,7 +1284,7 @@ pub fn cli(args: Vec<String>) -> i32 {
         Ok(x) => x,
         Err(reason) => {
             log("declined", json!({ "reason": reason }));
-            return decline(&args, yarn_js.as_deref(), &reason);
+            return decline(&args, plain.as_ref(), &reason);
         }
     };
     util::set_quiet(true);
@@ -1260,7 +1317,7 @@ pub fn cli(args: Vec<String>) -> i32 {
         }
         Ok(Err(RunError::Declined(reason))) => {
             log("declined", json!({ "reason": reason }));
-            decline(&args, Some(&yarn.js), &reason)
+            decline(&args, Some(&yarn), &reason)
         }
         // Yarn ran and failed, and has said why: its status is the answer
         // (plain Yarn would have failed the same way; nothing is retried).
@@ -1367,6 +1424,47 @@ mod tests {
         assert_eq!(yarn1_package(&bin).unwrap(), "1.22.22");
         std::fs::write(d.join("yarn/package.json"), r#"{"name":"yarn","version":"4.5.0"}"#).unwrap();
         assert!(yarn1_package(&bin).unwrap_err().contains("not Yarn 1"));
+    }
+
+    /// Homebrew's `bin/yarn` is recognized only as `write_env_script` writes
+    /// it, naming its own keg's `libexec/bin/yarn.js`.
+    #[test]
+    fn homebrew_launcher_shape() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("y1-homebrew")).unwrap();
+        let keg = d.join("Cellar/yarn/1.22.22");
+        let js = keg.join("libexec/bin/yarn.js");
+        std::fs::create_dir_all(js.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(keg.join("bin")).unwrap();
+        std::fs::write(&js, "").unwrap();
+        let other = d.join("Cellar/yarn/1.0.0/libexec/bin/yarn.js");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "").unwrap();
+        let launcher = keg.join("bin/yarn");
+        let with = |text: &str| {
+            std::fs::write(&launcher, text).unwrap();
+            homebrew_launcher(&launcher)
+        };
+        let (j, k) = (js.display(), d.display());
+        assert_eq!(with(&format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{j}\"  \"$@\"\n")), Some((js.clone(), k.to_string())));
+        for bad in [
+            format!("#!/bin/sh\nPREFIX=\"{k}\" exec \"{j}\"  \"$@\"\n"),
+            format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{j}\" \"$@\"\n"),
+            format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{j}\"  \"$@\""),
+            format!("#!/bin/bash\nexport X=1\nPREFIX=\"{k}\" exec \"{j}\"  \"$@\"\n"),
+            format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{j}\"  \"$@\"\necho\n"),
+            format!("#!/bin/bash\nOTHER=\"{k}\" exec \"{j}\"  \"$@\"\n"),
+            format!("#!/bin/bash\nPREFIX=\"{k}\" X=\"1\" exec \"{j}\"  \"$@\"\n"),
+            format!("#!/bin/bash\nPREFIX=\"$HOME\" exec \"{j}\"  \"$@\"\n"),
+            format!("#!/bin/bash\nPREFIX=\"relative\" exec \"{j}\"  \"$@\"\n"),
+            format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{}\"  \"$@\"\n", other.display()),
+            format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{j}\" --x \"$@\"\n"),
+        ] {
+            assert_eq!(with(&bad), None, "{bad}");
+        }
+        // Only a `bin/yarn`.
+        let elsewhere = keg.join("bin/yarnpkg-copy");
+        std::fs::write(&elsewhere, format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{j}\"  \"$@\"\n")).unwrap();
+        assert_eq!(homebrew_launcher(&elsewhere), None);
     }
 
     #[test]
@@ -1632,7 +1730,7 @@ mod tests {
     }
 
     fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], deadline: Duration, cancel: &AtomicBool) -> std::result::Result<PathBuf, String> {
-        start_yarn_cache_dir(node, yarn_js, cwd, args)?.answer(deadline, cancel)
+        start_yarn_cache_dir(node, yarn_js, &[], cwd, args)?.answer(deadline, cancel)
     }
 
     /// A `yarn cache dir` that does not answer is killed at its deadline, or
@@ -1693,7 +1791,7 @@ mod tests {
             require('fs').writeFileSync(process.argv[1] + '.pid', String(c.pid)); setTimeout(() => {}, 60000)\n";
         std::fs::write(&held, script).unwrap();
         let pid_file = d.join("held-slow.js.pid");
-        let ask = start_yarn_cache_dir(Path::new("node"), &held, &d, &[]).unwrap();
+        let ask = start_yarn_cache_dir(Path::new("node"), &held, &[], &d, &[]).unwrap();
         let t = Instant::now();
         while !pid_file.exists() && t.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(20));
@@ -1713,7 +1811,7 @@ mod tests {
         let script = "const c = require('child_process').spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }); c.unref(); \
             require('fs').writeFileSync(process.argv[1] + '.pid', String(c.pid)); console.log('/held/cache/v6')\n";
         std::fs::write(&done, script).unwrap();
-        let mut ask = start_yarn_cache_dir(Path::new("node"), &done, &d, &[]).unwrap();
+        let mut ask = start_yarn_cache_dir(Path::new("node"), &done, &[], &d, &[]).unwrap();
         let t = Instant::now();
         while matches!(ask.child.try_wait(), Ok(None)) && t.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(20));
