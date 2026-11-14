@@ -14,7 +14,7 @@
 //   result  <version dir>                           result.json from the files above + suites.json
 //   decide  <results dir> <out dir>                 {"macos": [...], "advise": bool}; llm-input.txt
 //   report  <state.json> <plan.json> <results dir> <out dir> [--run URL] [--advise STATUS]
-//                                                   new state.json, body.md, comment.md (when a
+//                                                   new state.json, body.md, comments/NN.md (when a
 //                                                   person should look)
 //
 // State (one JSON object, kept in the tracking issue's body; see the
@@ -155,6 +155,18 @@ function baselineFor (state, version, all) {
   return older.length ? older[older.length - 1] : null
 }
 
+// A release tested before is tested again when its check was incomplete
+// (on the next poll), or when it was red and matchapack changed since.
+function retryReason (line, head) {
+  if (line.suites === 'incomplete') {
+    return 'was incomplete (no comparison); again'
+  }
+  if (line.suites !== 'pass' && head && line.head !== head) {
+    return `was ${line.suites}; matchapack changed since`
+  }
+  return null
+}
+
 async function poll (stateFile, opts) {
   const state = readJson(stateFile)
   const all = (await registryVersions(opts.registryJson)).filter(isVersion).sort(cmp)
@@ -195,12 +207,9 @@ async function poll (stateFile, opts) {
       for (const v of unseen.slice(-3)) {
         add(v, 'new release')
       }
-      // A red release is tested once; again only when matchapack changed.
-      // An incomplete one (a planned comparison missing) on the next poll.
-      if (!unseen.length && line.suites === 'incomplete') {
-        add(line.newest, 'was incomplete (no comparison); again')
-      } else if (!unseen.length && line.suites !== 'pass' && opts.head && line.head !== opts.head) {
-        add(line.newest, `was ${line.suites}; matchapack changed since`)
+      const again = !unseen.length && retryReason(line, opts.head)
+      if (again) {
+        add(line.newest, again)
       }
     }
     // A new major: the poll says so and tests its newest release once, with
@@ -211,6 +220,11 @@ async function poll (stateFile, opts) {
       const line = state.lines[top]
       if (!line || cmp(newest, line.newest) > 0) {
         add(newest, `npm ${top} is not in INJECT_NPM_MAJORS`, { newMajor: true })
+      } else {
+        const again = retryReason(line, opts.head)
+        if (again) {
+          add(line.newest, again, { newMajor: true })
+        }
       }
     }
   }
@@ -567,7 +581,7 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
   const rows = []
   let attention = false
   let red = false
-  const comment = []
+  const sections = []
   for (const t of plan.todo) {
     const r = res.linux[t.version]
     const mac = Object.prototype.hasOwnProperty.call(res.macos, t.version) ? res.macos[t.version] : undefined
@@ -609,7 +623,7 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     }
     if (action !== 'none') {
       attention = true
-      comment.push(...versionSection(t, r, macMissing ? null : mac, row))
+      sections.push(versionSection(t, r, macMissing ? null : mac, row).join('\n'))
     }
   }
   state.polled = plan.date
@@ -621,18 +635,44 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
   writeJson(path.join(outDir, 'state.json'), state)
   fs.writeFileSync(path.join(outDir, 'body.md'), body(state, plan))
   if (attention || plan.skipped.length) {
-    const head = [`## npm canary, ${plan.date}${run ? ` ([run](${run}))` : ''}`, '']
+    const intro = []
     if (plan.skipped.length) {
-      head.push(`Not tested (more than three new releases of a line since the last run): ${plan.skipped.join(', ')}. Run the workflow with \`versions\` to test them.`, '')
+      intro.push(`Not tested (more than three new releases of a line since the last run): ${plan.skipped.join(', ')}. Run the workflow with \`versions\` to test them.`, '')
     }
     if (opts.advise) {
-      head.push(`Advisory LLM summary: ${opts.advise}.`, '')
+      intro.push(`Advisory LLM summary: ${opts.advise}.`, '')
     }
-    fs.writeFileSync(path.join(outDir, 'comment.md'), [...head, ...comment, '---', '_Posted by the npm-canary workflow._'].join('\n') + '\n')
+    // comments/NN.md, each under GitHub's comment limit; the workflow posts
+    // them in order, before it writes the state.
+    const dir = path.join(outDir, 'comments')
+    fs.mkdirSync(dir, { recursive: true })
+    packComments(plan, run, intro.join('\n'), sections).forEach((c, k) => fs.writeFileSync(path.join(dir, `${String(k + 1).padStart(2, '0')}.md`), c))
   }
   writeJson(path.join(outDir, 'flags.json'), { red, attention })
   console.log(`${rows.length} versions reported; ${attention ? 'a comment asks for a person' : 'nothing for a person'}${red ? '; at least one red' : ''}`)
   return { red, attention }
+}
+
+// GitHub refuses a comment over 65,536 characters; keep well under it.
+const COMMENT_MAX = 60000
+function packComments (plan, run, intro, sections) {
+  const title = (k, n) => `## npm canary, ${plan.date}${n > 1 ? ` (${k} of ${n})` : ''}${run ? ` ([run](${run}))` : ''}\n\n`
+  const foot = '\n---\n_Posted by the npm-canary workflow._\n'
+  const room = COMMENT_MAX - 200 - foot.length
+  const cut = (s) => (s.length <= room ? s : s.slice(0, room - 200) + `\n\n… (cut to fit a comment; the whole report is in the run's artifacts${run ? `: ${run}` : ''})\n`)
+  const groups = []
+  let cur = intro ? intro + '\n' : ''
+  for (const s of sections.map(cut)) {
+    if (cur && cur.length + s.length + 1 > room) {
+      groups.push(cur)
+      cur = ''
+    }
+    cur += s + '\n'
+  }
+  if (cur || !groups.length) {
+    groups.push(cur)
+  }
+  return groups.map((g, k) => title(k + 1, groups.length) + g + foot)
 }
 
 function fence (text, max) {
@@ -679,10 +719,16 @@ function versionSection (t, r, mac, row) {
       }
     }
     out.push('')
-    let budget = 40000
+    // At most 20,000 characters of diffs per release (packComments keeps
+    // each comment under GitHub's limit); the rest is in the artifacts.
+    let budget = 20000
     for (const i of c.changed) {
       const f = path.join(r.dir, i.file)
-      if (!fs.existsSync(f) || budget <= 0) {
+      if (!fs.existsSync(f)) {
+        continue
+      }
+      if (budget <= 0) {
+        out.push(`- ${i.name}: diff not shown here (too long); see the run's artifacts.`)
         continue
       }
       const d = fs.readFileSync(f, 'utf8')

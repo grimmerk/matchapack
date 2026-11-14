@@ -107,8 +107,10 @@ jobs:
         if: steps.poll.outputs.any == 'false'
         run: |
           node scripts/npm-canary.js report canary/state.json canary/plan.json "$RUNNER_TEMP/none" canary/out --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # Comments first, the state last: a failed post leaves the state
+          # as it was, so the next poll tries again (bash -e stops here).
+          for f in canary/out/comments/*.md; do [ -f "$f" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$f"; done
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file canary/out/body.md
-          if [ -f canary/out/comment.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file canary/out/comment.md; fi
       - uses: actions/upload-artifact@v4
         if: steps.poll.outputs.any == 'true'
         with:
@@ -280,8 +282,11 @@ jobs:
           else note=${ADVISE_STATUS:-"failed (the advise job left no status)"}; fi
           node scripts/npm-canary.js report results/canary-plan/state.json results/canary-plan/plan.json results out \
             --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --advise "$note"
+          # Comments first, the state last: a failed post leaves the releases
+          # unseen, so the next poll tests and reports them again (bash -e
+          # stops at the failed post). The advisory summary may fail.
+          for f in out/comments/*.md; do [ -f "$f" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$f"; done
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file out/body.md
-          if [ -f out/comment.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file out/comment.md; fi
-          if [ -s results/canary-advice/advice.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file results/canary-advice/advice.md; fi
+          if [ -s results/canary-advice/advice.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file results/canary-advice/advice.md || echo "::warning::advisory summary not posted"; fi
       - name: red when a release is red
         run: jq -e '.red == false' out/flags.json

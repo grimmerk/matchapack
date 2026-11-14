@@ -36,22 +36,33 @@ const state0 = { version: 1, polled: '2026-11-13', monthly: '2026-11', lines: { 
 
 // report: one release, a Linux result (or none), a macOS result (or none).
 let n = 0
-function report ({ item, linux, macos }) {
+function report ({ item, linux, macos, items }) {
   const d = path.join(tmp, `r${n++}`)
   write(path.join(d, 'state.json'), state0)
-  write(path.join(d, 'plan.json'), { date: '2026-11-14', month: null, head: 'h', supported: [10, 11, 12], newMajor: null, skipped: [], todo: [item] })
-  if (linux) {
-    write(path.join(d, 'results', `canary-linux-${item.version}`, 'result.json'), { version: item.version, baseline: item.baseline, newMajor: !!item.newMajor, suitesPass: true, suites: suitesOk, fingerprint: 'f'.repeat(64), fingerprintError: null, bareAwait: true, ...linux })
+  const todo = items || [{ item, linux }]
+  write(path.join(d, 'plan.json'), { date: '2026-11-14', month: null, head: 'h', supported: [10, 11, 12], newMajor: null, skipped: [], todo: todo.map((x) => x.item) })
+  for (const x of todo) {
+    if (x.linux) {
+      const rd = path.join(d, 'results', `canary-linux-${x.item.version}`)
+      write(path.join(rd, 'result.json'), { version: x.item.version, baseline: x.item.baseline, newMajor: !!x.item.newMajor, suitesPass: true, suites: suitesOk, fingerprint: 'f'.repeat(64), fingerprintError: null, bareAwait: true, ...x.linux })
+      for (const [f, text] of Object.entries(x.files || {})) {
+        fs.mkdirSync(path.dirname(path.join(rd, f)), { recursive: true })
+        fs.writeFileSync(path.join(rd, f), text)
+      }
+    }
   }
   if (macos) {
     write(path.join(d, 'results', `canary-macos-${item.version}`, 'suites.json'), { suites: macos })
   }
   run('report', path.join(d, 'state.json'), path.join(d, 'plan.json'), path.join(d, 'results'), path.join(d, 'out'))
   const out = path.join(d, 'out')
+  const cdir = path.join(out, 'comments')
+  const comments = fs.existsSync(cdir) ? fs.readdirSync(cdir).sort().map((f) => fs.readFileSync(path.join(cdir, f), 'utf8')) : []
   return {
+    comments,
     state: JSON.parse(fs.readFileSync(path.join(out, 'state.json'), 'utf8')),
     flags: JSON.parse(fs.readFileSync(path.join(out, 'flags.json'), 'utf8')),
-    comment: fs.existsSync(path.join(out, 'comment.md')) ? fs.readFileSync(path.join(out, 'comment.md'), 'utf8') : '',
+    comment: comments.join('\n'),
   }
 }
 const item = (version, extra = {}) => ({ version, major: Number(version.split('.')[0]), reason: 'new release', baseline: `${version.split('.').slice(0, 2).join('.')}.1`, newMajor: false, ...extra })
@@ -92,6 +103,38 @@ check('no baseline planned: pass, verified', r.state.lines[11].suites === 'pass'
 // 7. No Linux result at all: error, red.
 r = report({ item: item('11.21.2') })
 check('no Linux result: error, not verified, red', r.state.lines[11].suites === 'error' && r.state.lines[11].verified === '11.21.1' && r.flags.red, JSON.stringify(r.state.lines[11]))
+
+// 8. Many releases with long diffs: every comment stays under GitHub's
+//    65,536-character limit, and every release is in one of them.
+const big = (v, k) => ({
+  item: item(v),
+  linux: { known: false, compare: { ...cmpSame(`${v.split('.').slice(0, 2).join('.')}.1`), callerChanged: true, changed: [0, 1, 2].map((j) => ({ name: `f${k}${j}`, status: 'changed', file: `diffs/f${j}.diff`, lines: 900 })) } },
+  files: Object.fromEntries([0, 1, 2].map((j) => [`diffs/f${j}.diff`, ('+' + 'x'.repeat(79) + '\n').repeat(400)])),
+})
+r = report({ items: ['10.9.11', '11.21.3', '11.22.0', '12.2.3', '12.3.0'].map(big) })
+const lens = r.comments.map((c) => c.length)
+check('long diffs of five releases: several comments, each under 65,536', r.comments.length > 1 && lens.every((l) => l < 65536), JSON.stringify(lens))
+check('long diffs of five releases: every release reported', ['10.9.11', '11.21.3', '11.22.0', '12.2.3', '12.3.0'].every((v) => r.comment.includes(`### npm ${v} `)))
+
+// 9. The workflow posts the comments before it writes the state, so a failed
+//    post leaves the releases unseen (and the next poll reports them).
+const wf = fs.readFileSync(path.join(__dirname, '../.github/workflows/npm-canary.yml'), 'utf8')
+const posts = [...wf.matchAll(/for f in \S*comments\/\*\.md; do[^\n]*gh issue comment|gh issue edit [^\n]*body\.md/g)].map((m) => (m[0].startsWith('gh issue edit') ? 'state' : 'comments'))
+check('workflow: comments posted before the state is written, in both places', posts.join(',') === 'comments,state,comments,state', posts.join(','))
+
+// 10. A new major (not in INJECT_NPM_MAJORS) is retried like a supported
+//     line: incomplete on the next poll, red when matchapack changed.
+write(reg, { versions: Object.fromEntries(['10.9.10', '11.21.1', '12.2.1', '13.0.0'].map((v) => [v, {}])) })
+const poll13 = (suites, head) => {
+  write(path.join(tmp, 'state13.json'), { ...state0, lines: { ...state0.lines, 13: { ...L('13.0.0', suites, 'h'), newMajor: true } } })
+  return JSON.parse(run('poll', path.join(tmp, 'state13.json'), '--registry-json', reg, '--date', '2026-11-15', '--head', head)).todo.filter((t) => t.version === '13.0.0')
+}
+let t13 = poll13('incomplete', 'h')
+check('new major, incomplete: the next poll runs it again', t13.length === 1 && t13[0].newMajor === true, JSON.stringify(t13))
+t13 = poll13('fail', 'h2')
+check('new major, red, matchapack changed: run again', t13.length === 1 && t13[0].newMajor === true, JSON.stringify(t13))
+t13 = poll13('fail', 'h')
+check('new major, red, matchapack unchanged: not run again', t13.length === 0, JSON.stringify(t13))
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`${pass} passed, ${fail} failed`)
