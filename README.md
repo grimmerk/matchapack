@@ -113,9 +113,13 @@ In detail:
 matchapack runs plain npm instead, and prints why, before anything starts,
 when:
 - npm is not a major version this engine has been run on: 10, 11 and 12. It
-  has no code per npm version, so every 10.x, 11.x and 12.x is taken
+  has no code per npm version, so every 10.x, 11.x and 12.x passes this check
   (`INJECT_NPM_MAJORS` in src/wrapper.rs; `MATCHAPACK_NPM_VERSIONS=any`, or a
   list such as `13.1`, overrides it; `matchapack report` counts these runs);
+- npm's pacote code (the part matchapack replaces) is not code this build of
+  matchapack was tested with, as after a new npm release: the message names
+  its fingerprint; update matchapack, or set `MATCHAPACK_NPM_FINGERPRINT=any`
+  (or that fingerprint) to try it;
 - the umask is not 022;
 - the project's `node_modules` is a symlink;
 - the project is outside the trial scope (`~/.config/matchapack/paths`);
@@ -313,12 +317,13 @@ working directory in.
 
 ## After an npm upgrade
 
-matchapack takes every npm 10, 11 and 12 release: it has
-no code per npm version, and what keeps it right on a new release is checked
-while it runs (pacote's shape before npm starts, every store entry compared
-with the new pacote/tar's extraction before its first use, packages npm
-placed that the hook never saw). After an upgrade the harness is still worth
-running:
+matchapack takes every npm 10, 11 and 12 release whose pacote code it was
+tested with: it has no code per npm version, and what keeps it right on a new
+release is checked while it runs (pacote's shape and its fingerprint before
+npm starts, every store entry compared with the new pacote/tar's extraction
+before its first use, packages npm placed that the hook never saw, npm reading
+what the hook returns). Most npm releases do not change that pacote code. After
+an upgrade the harness is still worth running:
 
 ```sh
 scripts/verify-npm.sh /tmp/verify-npm              # the fixtures
@@ -327,8 +332,11 @@ scripts/verify-npm.sh /tmp/verify-npm ~/git/app    # plus a real project (copied
 
 It runs `npm ci` and matchapack side by side on copies and compares the trees
 and the hidden lockfile byte for byte (the workspaces fixture also file
-times, owner, group and extended attribute names). A new npm major goes into
-`INJECT_NPM_MAJORS` in src/wrapper.rs once it passes.
+times, owner, group and extended attribute names), and says whether this npm's
+pacote fingerprint is on the list. A new npm major goes into
+`INJECT_NPM_MAJORS` in src/wrapper.rs once it passes, and a new fingerprint
+into `src/npm-fingerprints.json` (after `scripts/test-inject.sh` passes too;
+NOTES "G-lite").
 
 ## Store maintenance
 

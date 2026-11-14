@@ -52,9 +52,12 @@ pub(crate) const HELPER_DECLINED: i32 = 90;
 
 /// The checks that must hold before npm starts. A refusal changes nothing in
 /// the project, so the caller can run plain npm.
-fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy)> {
+fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy, String)> {
     let root = std::fs::canonicalize(&o.dir).with_context(|| format!("resolving {}", o.dir.display()))?;
     wrapper::inject_npm_version_gate().map_err(|e| anyhow!(e))?;
+    // The pacote fingerprints the hook may be installed on; the hook checks
+    // its npm's before npm starts (src/inject.js).
+    let fingerprints = wrapper::inject_fingerprints().map_err(|e| anyhow!(e))?;
     // Clones carry the modes the store was extracted with under umask 022;
     // npm's files follow the process umask. (The hook checks it again per
     // package; here it also guards what this process extracts into the store.)
@@ -74,7 +77,7 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy)> {
         }
     }
     let policy = CheckPolicy::from_env().map_err(|e| anyhow!(e))?;
-    Ok((root, npm_dir, policy))
+    Ok((root, npm_dir, policy, fingerprints))
 }
 
 /// A hidden-lockfile key that names a package directory inside a
@@ -103,6 +106,20 @@ fn installed_packages(root: &std::path::Path) -> Option<usize> {
     let v: serde_json::Value = serde_json::from_slice(&text).ok()?;
     let flag = |p: &serde_json::Value, k: &str| p.get(k).and_then(|x| x.as_bool()) == Some(true);
     Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| is_package_key(k) && !flag(p, "link") && !flag(p, "inBundle")).count())
+}
+
+/// The error for reads of unexpected keys of the hook's result, or None.
+/// `matchapack report` finds these runs by the words "of what matchapack's
+/// hook returned".
+fn trap_fired(unexpected: &std::collections::BTreeMap<String, usize>) -> Option<anyhow::Error> {
+    if unexpected.is_empty() {
+        return None;
+    }
+    let keys: Vec<String> = unexpected.iter().map(|(k, n)| format!("`{k}` ({n}×)")).collect();
+    Some(anyhow!(
+        "npm read {} of what matchapack's hook returned for a cloned package instead of pacote's extract: this npm uses the result, so node_modules may not be npm ci's",
+        keys.join(", ")
+    ))
 }
 
 pub(crate) fn threads() -> usize {
@@ -164,7 +181,7 @@ pub(crate) fn run_serving(
 
 pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
-    let (root, npm_dir, policy) = gates(o).map_err(InstallError::Declined)?;
+    let (root, npm_dir, policy, fingerprints) = gates(o).map_err(InstallError::Declined)?;
     let prepared = (|| -> Result<_> {
         // The shared lock: no entry is removed while npm may ask for it. The
         // cache path is unused: every request names the cache of the npm
@@ -193,7 +210,12 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // scripts it starts must see the user's environment, without a
     // MATCHAPACK=0 of ours. (The helper removes MATCHAPACK_INJECT_FD.)
     let mut cmd = std::process::Command::new("node");
-    cmd.arg(&helper).arg(&npm_dir).args(&o.npm_args).current_dir(&root).env("MATCHAPACK_INJECT_FD", CHILD_FD.to_string());
+    cmd.arg(&helper)
+        .arg(&npm_dir)
+        .args(&o.npm_args)
+        .current_dir(&root)
+        .env("MATCHAPACK_INJECT_FD", CHILD_FD.to_string())
+        .env("MATCHAPACK_INJECT_FINGERPRINTS", &fingerprints);
     let t_npm = Instant::now();
     let serve = |sock| {
         let _ = server.serve(sock, threads());
@@ -216,11 +238,14 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         Ok(s) => s,
         Err(e) => return Err(InstallError::Broke(anyhow!("waiting for npm: {e}"))),
     };
-    // The helper exits with HELPER_DECLINED (and says why on stderr) when it
-    // stops before npm starts: nothing in the project has changed. Both
-    // signs are required, so that npm, once started, is never run twice.
+    // The helper exits with HELPER_DECLINED when it stops before npm starts
+    // (its pacote has not the shape the hook needs, or a fingerprint not on
+    // the list), having told this process why: nothing in the project has
+    // changed. Both signs are required, so that npm, once started, is never
+    // run twice.
     if stats.hello.is_none() && status.code() == Some(HELPER_DECLINED) {
-        return Err(InstallError::Declined(anyhow!("the inject helper could not start npm ({status})")));
+        let why = stats.declined.clone().unwrap_or_else(|| format!("the inject helper could not start npm ({status})"));
+        return Err(InstallError::Declined(anyhow!(why)));
     }
     // From here on the project holds clones of these entries, whatever npm's
     // exit status. gc cannot run before this record is written: it needs the
@@ -281,6 +306,15 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     }
     let mut inject = stats.to_json();
     inject["key"] = serde_json::json!(key);
+    // npm read a key of what the hook's extract resolved to other than the
+    // three pacote's own value has (src/inject.js `resultTrap`): this npm
+    // uses something of the result that a clone may not give as pacote
+    // would. The tree must be npm's, so this is a broken install: through
+    // the shell function npm ci runs again, plain (wrapper.rs), also when
+    // npm failed (the hook may be why).
+    if let Some(e) = trap_fired(&stats.result_unexpected) {
+        return Err(InstallError::Broke(e));
+    }
     if !status.success() {
         // npm reported its own failure (a script, the lockfile, the network);
         // `npm ci` would have failed the same way. Not retried.
@@ -343,5 +377,14 @@ mod tests {
         }});
         std::fs::write(d.join("node_modules/.package-lock.json"), hidden.to_string()).unwrap();
         assert_eq!(installed_packages(&d), Some(2), "a and packages/w/node_modules/c");
+    }
+
+    #[test]
+    fn an_unexpected_read_of_the_hooks_result_is_a_broken_install() {
+        let mut m = std::collections::BTreeMap::new();
+        assert!(trap_fired(&m).is_none());
+        m.insert("files".to_string(), 3);
+        let e = format!("{:#}", trap_fired(&m).unwrap());
+        assert!(e.contains("npm read `files` (3×) of what matchapack's hook returned"), "{e}");
     }
 }

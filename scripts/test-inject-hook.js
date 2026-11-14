@@ -1,5 +1,6 @@
 // Unit checks of the inject hook's eligibility rules (src/inject.js
-// `ineligible`), against the fetcher objects of the npm given: the real
+// `ineligible`), its result trap (`resultTrap`) and its fingerprint, against
+// the fetcher objects of the npm given: the real
 // pacote classes are constructed, so a renamed field or a changed default in
 // a new pacote fails here instead of silently turning every package into a
 // fallback (or worse, into a clone npm would have extracted differently).
@@ -8,7 +9,10 @@
 'use strict'
 const path = require('path')
 const npmDir = process.argv[2]
-const { ineligible } = require(path.join(__dirname, '..', 'src', 'inject.js'))
+const util = require('util')
+const { execFileSync } = require('child_process')
+const injectJs = path.join(__dirname, '..', 'src', 'inject.js')
+const { ineligible, resultTrap, fingerprint, fetcherBase } = require(injectJs)
 const pacote = require(require.resolve('pacote', {
   paths: [path.join(npmDir, 'node_modules', '@npmcli', 'arborist')],
 }))
@@ -34,8 +38,9 @@ check('a registry spec with `resolved` is eligible', ineligible(pacote, registry
 // The hook reads these fields; the real fetcher must carry them.
 const f = remote()
 check('fetcher fields exist with pacote\'s defaults',
-  [typeof f.integrity, f.resolved, f.fmode, f.dmode, f.umask, f.allowGitIgnore, f.cache].join(' '),
-  ['object', url, 0o666, 0o777, 0, false, '/nonexistent/_cacache'].join(' '))
+  [typeof f.integrity, f.resolved, f.fmode, f.dmode, f.umask, f.allowGitIgnore, f.cache, f.package].join(' '),
+  ['object', url, 0o666, 0o777, 0, false, '/nonexistent/_cacache', null].join(' '))
+check('a new fetcher has no manifest loaded (`package` is null)', f.package, null)
 check('the integrity is sent as the SRI string', String(f.integrity), sri)
 
 check('a registry spec without `resolved` (manifest fetch, bin modes) is npm\'s',
@@ -52,5 +57,80 @@ check('a directory mode option is npm\'s', ineligible(pacote, remote({ dmode: 0o
 check('process umask 002 is npm\'s', ineligible(pacote, remote(), 0o002), 'process-umask')
 check('process umask 077 is npm\'s', ineligible(pacote, remote(), 0o077), 'process-umask')
 check('allowGitIgnore is npm\'s', ineligible(pacote, remote({ allowGitIgnore: true }), 0o022), 'allowGitIgnore')
+// A fetcher whose manifest is loaded: pacote marks the declared bins
+// executable while extracting (#entryMode), the store entry does not.
+const withManifest = (spec) => {
+  const x = spec
+  x.package = { name: 'x', version: '1.0.0', bin: { x: 'cli.js' } }
+  return x
+}
+check('a remote fetcher with its manifest loaded is npm\'s', ineligible(pacote, withManifest(remote()), 0o022), 'manifest-loaded')
+check('a registry fetcher with `resolved` and its manifest loaded is npm\'s',
+  ineligible(pacote, withManifest(registry({ resolved: url })), 0o022), 'manifest-loaded')
+check('a manifest without bins is npm\'s too (any loaded manifest)',
+  ineligible(pacote, Object.assign(remote(), { package: { name: 'x', version: '1.0.0' } }), 0o022), 'manifest-loaded')
 
-process.exit(failed ? 1 : 0)
+// The trap on the hook's result: it changes nothing a caller sees, and it
+// reports reads of keys other than resolved / integrity / from.
+const plain = () => ({ resolved: url, integrity: sri, from: 'x@1.0.0' })
+const trapped = () => {
+  const reads = []
+  return { reads, value: resultTrap(plain(), (key, expected) => reads.push(`${key}:${expected}`)) }
+}
+const quiet = async (name, use) => {
+  const t = trapped()
+  const got = await use(t.value)
+  const want = await use(plain())
+  check(`trap: ${name} gives what the plain object gives, and reads nothing unexpected`,
+    JSON.stringify([got, t.reads.filter(r => r.endsWith(':false'))]), JSON.stringify([want, []]))
+}
+;(async () => {
+  await quiet('await of an async function\'s result', async (v) => JSON.stringify(await (async () => v)()))
+  await quiet('Promise.resolve', async (v) => JSON.stringify(await Promise.resolve(v)))
+  await quiet('util.inspect', (v) => util.inspect(v))
+  await quiet('util.format %j', (v) => util.format('%j', v))
+  {
+    // %o (and inspect's showProxy) print the object as a Proxy: a difference
+    // in a debug line only, and nothing is read through the trap.
+    const t = trapped()
+    check('trap: util.format %o reads nothing through the trap', [util.format('%o', t.value).startsWith('Proxy ['), t.reads.length].join(), 'true,0')
+  }
+  await quiet('JSON.stringify', (v) => JSON.stringify(v))
+  await quiet('object spread', (v) => JSON.stringify({ ...v }))
+  await quiet('string conversion', (v) => `${v} ${String(v)}`)
+  await quiet('Object.keys and hasOwnProperty', (v) => Object.keys(v).join() + Object.prototype.hasOwnProperty.call(v, 'files'))
+  await quiet('instanceof, constructor', (v) => `${v instanceof Object} ${v.constructor === Object}`)
+  await quiet('assert.deepStrictEqual', (v) => { require('assert').deepStrictEqual(v, plain()); return 'equal' })
+  {
+    const t = trapped()
+    const r = await (async () => t.value)()
+    check('trap: awaiting the result resolves to the trapped object itself', r === t.value, true)
+  }
+  {
+    const t = trapped()
+    void t.value.resolved; void t.value.integrity; void t.value.from
+    check('trap: reads of resolved, integrity and from are noted as expected', t.reads.join(), 'resolved:true,integrity:true,from:true')
+  }
+  {
+    const t = trapped()
+    const got = [t.value.files, 'unpacked' in t.value]
+    check('trap: reads of any other key are reported (get and `in`), and give what the plain object gives',
+      JSON.stringify([got, t.reads]), JSON.stringify([[undefined, false], ['files:false', 'unpacked:false']]))
+  }
+  {
+    const t = trapped()
+    const v = resultTrap({ a: 1 }, () => { throw new Error('x') })
+    check('trap: a failing report does not fail the read', v.b === undefined && t.reads.length === 0, true)
+  }
+
+  // The fingerprint: the hook's own function and `--fingerprint` agree (CI
+  // and run time hash the same thing), and it is the class text's SHA-256.
+  const fp = fingerprint(fetcherBase(pacote))
+  const printed = execFileSync(process.execPath, [injectJs, '--fingerprint', npmDir], { encoding: 'utf8' }).trim()
+  check('fingerprint: --fingerprint prints what the hook computes', printed, fp)
+  check('fingerprint: SHA-256 of FetcherBase\'s class text', fp,
+    require('crypto').createHash('sha256').update(Function.prototype.toString.call(Object.getPrototypeOf(pacote.RemoteFetcher))).digest('hex'))
+
+  process.exit(failed ? 1 : 0)
+})()
+

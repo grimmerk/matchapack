@@ -373,6 +373,39 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             list.join(", ")
         );
     }
+    // The fingerprint gate (src/inject.js): an npm whose pacote code this
+    // build was not tested with ran as plain npm. Grouped by npm version and
+    // fingerprint (its first 16 digits), from the reason the hook gave.
+    let mut unknown: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in runs.iter().filter(|r| r["outcome"] == "declined") {
+        let Some(why) = r["reason"].as_str().filter(|w| w.contains("has pacote code this matchapack was not tested with")) else { continue };
+        let fp: String = why.rsplit("fingerprint ").next().unwrap_or("?").chars().take(16).collect();
+        *unknown.entry(format!("npm {} {fp}…", r["npm"].as_str().unwrap_or("?"))).or_default() += 1;
+    }
+    if !unknown.is_empty() {
+        let list: Vec<String> = unknown.iter().map(|(v, n)| format!("{v}: {n}")).collect();
+        println!(
+            "npm fingerprint gate: {} runs went to plain npm, pacote code not tested with this build ({}); update matchapack, or run scripts/test-inject.sh and verify-npm.sh with that npm and add it (NOTES \"G-lite\")",
+            unknown.values().sum::<usize>(),
+            list.join(", ")
+        );
+    }
+    // The trap on the hook's result (src/inject.js `resultTrap`): npm read a
+    // key of it other than resolved / integrity / from, and npm ci rebuilt
+    // node_modules (inject.rs `trap_fired`).
+    let trapped: Vec<&str> = runs
+        .iter()
+        .filter(|r| r["outcome"] == "broke")
+        .filter_map(|r| r["reason"].as_str())
+        .filter(|w| w.contains("of what matchapack's hook returned"))
+        .collect();
+    if !trapped.is_empty() {
+        println!(
+            "inject engine: in {} runs npm read an unexpected key of the hook's result, and npm ci rebuilt node_modules; first: {}",
+            trapped.len(),
+            trapped[0].chars().take(120).collect::<String>()
+        );
+    }
     // One line per matchapack build, in order of first use, so numbers from
     // different binaries are never read as one series.
     let mut builds: Vec<(String, usize, Vec<f64>)> = vec![];
@@ -454,6 +487,21 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             if let Some((n, first)) = differs.get(kind) {
                 println!("inject engine: {n} differing entries {what}; first: {first}");
             }
+        }
+        // Reads of resolved / integrity / from of the hook's result: harmless
+        // (the hook gives what pacote does), but npm does not read them
+        // today, so a new one is worth a look.
+        let mut reads: std::collections::BTreeMap<String, u64> = Default::default();
+        for r in &inj {
+            if let Some(m) = r["inject"]["result_reads"].as_object() {
+                for (k, n) in m {
+                    *reads.entry(k.clone()).or_default() += n.as_u64().unwrap_or(0);
+                }
+            }
+        }
+        if !reads.is_empty() {
+            let list: Vec<String> = reads.iter().map(|(k, n)| format!("{k} {n}")).collect();
+            println!("inject engine: npm read the hook's result ({}): expected keys, but not read by npm so far", list.join(", "));
         }
         // npm placed packages the hook never saw: the patched method is no
         // longer (the only) way this npm extracts. Installs stay correct;
