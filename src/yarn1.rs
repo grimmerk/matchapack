@@ -24,6 +24,8 @@
 //!     {"id":0,"probe":["/…/nonempty","/…/nonempty.copy"]}  before Yarn starts
 //!     {"declined":"why"}                     the hook stops; plain Yarn runs
 //!     {"hello":true,"yarn":"1.22.22","first":128,"facts":{…},"hook":"on"}
+//!       (a workspace command's Yarn adds "child":true and "cwd"; its facts
+//!       must be the parent's, or its requests are answered "copy", fatal)
 //!     {"link_step":"start"} / {"link_step":"end","counts":{"first-copies":128}}
 //!     {"id":7,"src":"/cache/…/f.js","dest":"/project/node_modules/…/f.js"}
 //!   matchapack → node
@@ -537,6 +539,9 @@ pub struct Stats {
     pub hello: Option<Value>,
     /// The hello of the Yarn a workspace command started (its hook's).
     pub child_hello: Option<Value>,
+    /// Why that Yarn's requests were left to its Node: its hook measured
+    /// other facts than the parent's (`Server::record_message`).
+    pub child_facts_differ: Option<String>,
     pub declined: Option<String>,
     pub cloned: u64,
     pub cloned_bytes: u64,
@@ -577,6 +582,7 @@ impl Stats {
             // Set when Yarn ran: the hook in the Yarn a workspace command
             // started declined, and that Yarn ran without clones.
             "declined": self.declined,
+            "child_facts_differ": self.child_facts_differ,
             "serve_wall_secs": (wall * 100.0).round() / 100.0,
             "errors": self.errors,
         })
@@ -621,6 +627,9 @@ pub struct Server {
     cache_wait: Duration,
     started: Instant,
     facts: OnceLock<Facts>,
+    /// Set when the hello of a workspace command's Yarn (its hook's) names
+    /// other facts than the parent's.
+    child_differs: AtomicBool,
     /// Set once a clone failed because the filesystem pair cannot clone.
     unsupported: AtomicBool,
     stopping: AtomicBool,
@@ -652,6 +661,7 @@ impl Server {
             cache_wait: CACHE_WAIT,
             started: Instant::now(),
             facts: OnceLock::new(),
+            child_differs: AtomicBool::new(false),
             unsupported: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             dest_dirs: Mutex::new(HashMap::new()),
@@ -779,6 +789,14 @@ impl Server {
 
     fn clone_file(&self, src: &Path, dest: &Path) -> Outcome {
         let Some(facts) = self.facts.get().copied() else { return copy("no-hello") };
+        // A workspace command's Yarn whose hook measured other facts: a clone
+        // made to the parent's facts would not look like its Node's copy. In
+        // a workspace command the parent Yarn links nothing (it starts that
+        // Yarn and waits), so every request after the child's hello is the
+        // child's; fatal: its hook stops asking.
+        if self.child_differs.load(Ordering::Relaxed) {
+            return Outcome::Copy { reason: "child-facts-differ".into(), fatal: true, message: None };
+        }
         let cache = {
             let g = self.cache.lock().unwrap();
             // Until it is known, the deadline has passed, or the node child is
@@ -867,13 +885,28 @@ impl Server {
     /// A message that needs no answer. Returns false when `v` is something else.
     fn record_message(&self, v: &Value) -> bool {
         if v.get("hello").is_some() {
-            if let Some(f) = v.get("facts").and_then(Facts::from_json) {
-                let _ = self.facts.set(f);
-            }
+            let facts = v.get("facts").and_then(Facts::from_json);
             let mut s = self.stats.lock().unwrap();
             if v.get("child") == Some(&Value::Bool(true)) {
+                // The clones are made to the parent's facts (the only ones
+                // kept); the child's own Node measured its own. Compared, not
+                // assumed: on a mismatch (or no facts) its files are its
+                // Node's copies.
+                let parent = self.facts.get().copied();
+                if facts.is_none() || facts != parent {
+                    self.child_differs.store(true, Ordering::Relaxed);
+                    let shown = |h: Option<&Value>| h.and_then(|h| h.get("facts")).map_or("none".to_string(), |f| f.to_string());
+                    s.child_facts_differ = Some(format!(
+                        "the workspace's Yarn measured other facts than the command's Yarn ({} against {}): its files are its Node's copies",
+                        shown(Some(v)),
+                        shown(s.hello.as_ref())
+                    ));
+                }
                 s.child_hello = Some(v.clone());
             } else {
+                if let Some(f) = facts {
+                    let _ = self.facts.set(f);
+                }
                 s.hello = Some(v.clone());
             }
             return true;
@@ -1467,6 +1500,9 @@ pub fn cli(args: Vec<String>) -> i32 {
                 eprintln!("matchapack: the workspace's Yarn ran as plain Yarn, without clones ({why})");
                 log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats }), chosen(&s.stats)));
                 return 0;
+            }
+            if let Some(why) = s.stats["child_facts_differ"].as_str() {
+                eprintln!("matchapack: {why}");
             }
             if s.stats["linked"] == true || n("cloned") > 0 {
                 eprintln!(
@@ -2183,6 +2219,55 @@ mod tests {
         assert_eq!((a["ok"].clone(), a["reason"].clone()), (json!(false), json!("cache-dir-pending")));
         assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
         assert!(!dest.exists());
+    }
+
+    /// A workspace command's Yarn runs in its own Node, which measured its
+    /// own facts: compared with the parent's, and on a mismatch its requests
+    /// are Node's copies (fatal), with the reason recorded. Its facts never
+    /// stand in for the parent's.
+    #[test]
+    fn a_workspace_childs_facts_must_be_the_parents() {
+        let parent = json!({ "empty_atime": true, "empty_mtime": true, "atime": true, "mtime": false, "group": null });
+        let child = |facts: Value| json!({ "hello": true, "first": 128, "facts": facts, "child": true, "cwd": "/x" });
+        let f = fx("y1-child-facts");
+        let dest = f.root.join("node_modules/a/index.js");
+
+        // The same facts: nothing recorded, requests go on to be cloned.
+        let s = server(&f);
+        hello(&s, parent.clone());
+        assert!(s.record_message(&child(parent.clone())));
+        let a = ask(&s, &src(&f), &dest);
+        assert_ne!(a["reason"], "child-facts-differ", "{a}");
+        assert!(s.stats.lock().unwrap().child_facts_differ.is_none());
+        let _ = std::fs::remove_file(&dest);
+
+        // Other facts (its copy keeps an empty file's mtime, the parent's
+        // does not): copy, fatal, the reason in the stats and the log record.
+        let s = server(&f);
+        hello(&s, parent.clone());
+        let other = json!({ "empty_atime": true, "empty_mtime": false, "atime": true, "mtime": false, "group": null });
+        assert!(s.record_message(&child(other)));
+        let a = ask(&s, &src(&f), &dest);
+        assert_eq!((a["ok"].clone(), a["reason"].clone(), a["fatal"].clone()), (json!(false), json!("child-facts-differ"), json!(true)));
+        assert!(!dest.exists());
+        let st = s.stats.lock().unwrap();
+        assert_eq!(st.copied.get("child-facts-differ"), Some(&1));
+        assert_eq!(st.cloned, 0);
+        let why = st.to_json()["child_facts_differ"].as_str().unwrap_or("").to_string();
+        assert!(why.contains("other facts") && why.contains("\"empty_mtime\":false"), "{why}");
+        drop(st);
+
+        // No facts in the child's hello: the same.
+        let s = server(&f);
+        hello(&s, parent.clone());
+        assert!(s.record_message(&json!({ "hello": true, "child": true, "cwd": "/x" })));
+        assert_eq!(ask(&s, &src(&f), &dest)["reason"], "child-facts-differ");
+
+        // No facts from the parent: the child's do not take their place.
+        let s = server(&f);
+        assert!(s.record_message(&json!({ "hello": true, "first": 128 })));
+        assert!(s.record_message(&child(parent.clone())));
+        assert_eq!(ask(&s, &src(&f), &dest)["reason"], "no-hello");
     }
 
     #[test]
