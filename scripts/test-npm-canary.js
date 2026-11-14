@@ -212,6 +212,13 @@ pl = plan(wpoll(watchState(steady), nodeIndex('n27', [...lines, ['27.0.0', '2026
 check('watch: v27.0.0 appears: one item, a new major, npm and Yarn suites', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '27.0.0' && pl.node.todo[0].newMajor === true && pl.node.todo[0].npm && pl.node.todo[0].yarn &&
   pl.nodeLinux.length === 3 && pl.nodeMacos.length === 1, JSON.stringify(pl.node || pl))
 
+// 14b. Two new majors since the last poll (the canary was off): both
+//      tested, not only the highest.
+const upTo24 = { lines: { 22: steady.lines[22], 24: steady.lines[24] } }
+uvh('25.9.1', '1.51.0')
+pl = plan(wpoll(watchState(upTo24), nodeIndex('n25-26', [...lines, ['25.9.1', '2026-10-01']])))
+check('watch: Node 25 and 26 both new since the last poll: both tested as new majors', pl.node && JSON.stringify(pl.node.todo.map((t) => [t.line, t.newMajor])) === '[[25,true],[26,true]]' && pl.nodeMacos.length === 2, JSON.stringify(pl.node || pl))
+
 // 15. A new 26.x with the same libuv: recorded, no job. With another libuv:
 //     one item, both suites.
 uvh('26.13.2', '1.52.1')

@@ -390,10 +390,14 @@ async function watchPoll (state, opts, npmAll, supported, date) {
       }
     }
   } else {
+    // Every watched line the state does not know (more than one new major
+    // when the canary was off for a while; a line missing from an edited
+    // state): tested, and known from then on.
     const known = Object.keys(lines).map(Number)
-    if (top > Math.max(0, ...known)) {
-      const r = newestOf(top)
-      add({ node: r.version, line: top, uv: await uvOf(r.version, opts.nodeUvDir), reason: `Node ${top} is new`, newMajor: true })
+    const maxKnown = Math.max(0, ...known)
+    for (const m of [...new Set([...watched, top])].filter((k) => !known.includes(k)).sort((a, b) => a - b)) {
+      const r = newestOf(m)
+      add({ node: r.version, line: m, uv: await uvOf(r.version, opts.nodeUvDir), reason: m > maxKnown ? `Node ${m} is new` : `Node ${m} is not in the state`, newMajor: m > maxKnown })
     }
     for (const m of known.filter((k) => watched.includes(k))) {
       const line = lines[m]
