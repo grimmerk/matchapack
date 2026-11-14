@@ -69,6 +69,15 @@ projects (see "Yarn 1 (classic) projects").
   file and stops node before npm or Yarn runs. This adds about 40–110 ms to
   each routed install (measured, medians of two runs on a busy machine:
   volta 40–60 ms, mise 80–90 ms, asdf 100–110 ms). Tested with volta 2.0.2, mise 2026.10.24, asdf 0.20.2.
+- Only these launchers are asked, each recognised by its install layout:
+  volta's shim, mise's shims, asdf's shims for its nodejs plugin, and
+  corepack's own `yarn` wrapper. They pass your arguments to npm or Yarn
+  unchanged, whatever the command. Any other launcher or wrapper script on
+  PATH is not run by matchapack: it runs plain npm or Yarn and names the
+  launcher. A question with `--version` cannot show what such a wrapper
+  would add to an install (`--ignore-scripts`, say). The shim must also
+  start npm's own `bin/npm-cli.js` or Yarn 1's `bin/yarn.js` (or
+  corepack's launcher) itself, not another script beside it.
 - matchapack then starts npm or Yarn exactly as the shim starts it: the
   same node binary, with the shim's whole environment (its PATH, its own
   variables), so install scripts see what they see with plain npm or Yarn.
