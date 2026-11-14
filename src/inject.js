@@ -377,10 +377,12 @@ function main () {
     const to = path.resolve(dest)
     // Not an install into the project: pacote extracts a package given as
     // a URL, a local tarball or a git repository into a temporary directory
-    // in npm's cache to read its manifest, through this same method; a
-    // workspace that is a symlink to a directory outside the project gets
-    // its own node_modules there. pacote's own extract, and counted apart
-    // (not a package npm extracted into the project; src/serve.rs).
+    // in npm's cache to read its manifest, through this same method.
+    // pacote's own extract, counted apart (not a package npm extracted into
+    // the project; src/serve.rs). Compared as npm names the path: a
+    // workspace symlinked to a directory outside the project is under the
+    // root by name, and its packages go to matchapack, whose destination
+    // check refuses them (resolved, they are outside).
     if (roots && !insideRoot(to)) {
       send({ aside: 'outside-root' })
       return origExtract.call(this, dest)

@@ -108,8 +108,8 @@ fn is_package_key(key: &str) -> bool {
 /// A hidden lockfile's packages that npm extracts, inside the root: the
 /// entries that sit in a node_modules, without links and bundled packages
 /// (those come inside their bundler's tarball), and without the ones outside
-/// the root (`../ws/node_modules/a`: a workspace symlinked out of the
-/// project, whose packages the hook sets aside). Key → (version, integrity),
+/// the root (a key such as `../x/node_modules/a`, if npm ever writes one:
+/// the hook never asks for a destination outside the root). Key → (version, integrity),
 /// what npm's diff compares (arborist `lib/diff.js`: version, then
 /// integrity; a changed `resolved` alone extracts nothing).
 type Packages = BTreeMap<String, (Option<String>, Option<String>)>;
@@ -329,8 +329,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         if kinds.is_empty() { "-".to_string() } else { kinds.join(", ") },
         stats.fallback_total(),
         if falls.is_empty() { "-".to_string() } else { falls.join(", ") },
-        // Extractions outside the root: pacote reading a manifest, a
-        // workspace symlinked out of the project.
+        // Extractions outside the root: pacote reading a manifest.
         if asides > 0 { format!(", {asides} outside the root left to pacote") } else { String::new() },
         stats.filled.len(),
         stats.checked,

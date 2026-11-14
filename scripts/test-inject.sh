@@ -587,20 +587,18 @@ wrapped "$p" "npm ci --dry-run --no-audit --no-fund"; rc=$?
 
 # 11b. A workspace directory that is a symlink to a directory outside the
 #      project: npm installs the workspace's own dependency there, as npm ci
-#      does; the hook leaves it to pacote without asking (a destination
-#      outside the root npm reported: "outside the root left to pacote"),
-#      so that package is npm's own extraction, and it is not counted as a
-#      package of the project the hook missed.
+#      does; matchapack refuses to clone outside the project (rejected-dest),
+#      so that package is npm's own extraction.
 p=$work/wslink; rm -rf "${p:?}" "${work:?}/outside-ws"; mkdir -p "$p/packages" "$work/outside-ws"
 echo '{"name":"wsroot","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}' > "$p/package.json"
 echo '{"name":"ws","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}' > "$work/outside-ws/package.json"
 ln -s "$work/outside-ws" "$p/packages/ws"
 (cd "$p" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$work/out" 2>&1)
 install "$p"; rc=$?
-[ $rc = 0 ] && [ "$(cloned)" = 1 ] && [ "$(by_npm)" = 0 ] && grep -q ', 1 outside the root left to pacote' "$work/out" \
+[ $rc = 0 ] && [ "$(cloned)" = 1 ] && grep -q 'rejected-dest 1' "$work/out" && grep -q 'outside the project' "$work/out" \
   && ! grep -q "went through matchapack's hook" "$work/out" \
   && grep -q '"version":"2.0.0"' "$work/outside-ws/node_modules/lc-s/package.json" && grep -q '"version":"1.0.0"' "$p/node_modules/lc-s/package.json" \
-  && ok "a workspace symlinked out of the project: its dependency is left to pacote by the hook, never asked for" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
+  && ok "a workspace symlinked out of the project: its dependency is refused by the clone server and extracted by npm" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
 
 # 11b. `npm ci` inside a workspace of a monorepo: npm installs into the
 #      root's node_modules (the workspace's subset). npm reports that root,

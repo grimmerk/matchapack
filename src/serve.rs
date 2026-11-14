@@ -28,8 +28,8 @@
 //!     {"id":8,"integrity":"sha512-…","dest":"/abs/dir","extracted":"/…/tmp/…/x3"}
 //!     {"note":"type-FileFetcher","dest":"/abs/dir"} a package the hook left to npm, and why
 //!     {"aside":"outside-root"}                       an extraction outside the root left to
-//!                                                    pacote (a manifest read, a workspace
-//!                                                    symlinked out of the project)
+//!                                                    pacote (pacote reading a manifest in
+//!                                                    a temporary directory)
 //!     {"result_read":"foo","expected":false}         npm read this key of what the hook's
 //!                                                    extract resolved to (`expected`:
 //!                                                    resolved, integrity or from)
@@ -196,7 +196,7 @@ pub struct Stats {
     /// Extractions the hook left to pacote because their destination is
     /// outside the root (`aside`), by reason: not installs into the project
     /// (pacote reading a URL, file or git package's manifest in a temporary
-    /// directory; a workspace symlinked out of the project).
+    /// directory in npm's cache).
     pub asides: BTreeMap<String, usize>,
     /// The root's hidden lockfile as it was when npm reported the root,
     /// before its command ran (commands other than `ci`; None: there was
