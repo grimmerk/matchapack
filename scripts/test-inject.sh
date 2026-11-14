@@ -506,8 +506,8 @@ p=$(project key-mtime-empty2 small)
   && ok "key: the next install there: npm extracts every package, tree identical" || bad "key: empty store, second install: rc=$rc"
 # Clearing a decline by hand: remove its file; the next install clones again
 # (from the original npm's code here, which was never declined).
-rm -f "$(grep -lxF "$mt_key" "$es"/declined/*)"
-[ -z "$(declined_keys "$es")" ] && ok "key: removing the key's file in <store>/declined clears the decline" || bad "key: clearing a decline"
+dk=$(grep -lxF "$mt_key" "$es"/declined/* 2>/dev/null)
+[ -n "$dk" ] && rm -f "$dk" && [ -z "$(declined_keys "$es")" ] && ok "key: removing the key's file in <store>/declined clears the decline" || bad "key: clearing a decline (${dk:-no file for the key})"
 
 # 10c. The fingerprint gate: an npm whose pacote class has one statement more
 #      inside a private method (#entryMode: not part of extract's own text)
