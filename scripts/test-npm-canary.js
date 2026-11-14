@@ -147,6 +147,17 @@ check('new release, function changed: read the diff, a comment, the run notifies
 r = report({ items: [{ item: item('11.20.0', { reason: 'requested', baseline: '11.19.1' }), linux: { known: true, compare: changedFn('11.19.1') }, files: { 'diffs/f.diff': '+x\n' } }] })
 check('older release requested by hand (below the verified one), function changed: still asks', r.state.history[0].action === 'read the diff' && r.flags.notify === true && r.comments.length === 1, JSON.stringify({ history: r.state.history[0], flags: r.flags }))
 
+// 12. New tar code (Q9 of the C plan): reported in the history, the body and
+//     a comment, and it changes no action: a release otherwise green and
+//     known is verified, nobody is asked.
+const cmpTar = (base, changed) => ({ ...cmpSame(base), tar: { base: 'a'.repeat(64), new: (changed ? 'b' : 'a').repeat(64), changed } })
+r = report({ item: item('11.21.2'), linux: { known: true, tarFingerprint: 'b'.repeat(64), compare: cmpTar('11.21.1', true) } })
+check('new tar code: reported, no action, verified', r.state.history[0].tar === 'new' && r.state.lines[11].verified === '11.21.2' && r.state.lines[11].action === 'none' && r.flags.notify === false, JSON.stringify({ h: r.state.history[0], flags: r.flags }))
+const bodyTar = fs.readFileSync(path.join(tmp, `r${n - 1}`, 'out', 'body.md'), 'utf8')
+check('new tar code: the history table has a tar code column', /\| class \| tar code \| caller \|/.test(bodyTar) && /\| known \| new \| same \| none \|/.test(bodyTar), bodyTar.split('\n').filter((l) => l.includes('11.21.2')).join(' / '))
+r = report({ item: item('11.21.2'), linux: { known: false, tarFingerprint: 'b'.repeat(64), compare: cmpTar('11.21.1', false) } })
+check('tar code the same, shown in the comment of a release that asks', r.state.history[0].tar === 'same' && /tar code \(part of the store key; compared per store entry at run time, no action\): the same \(`bbbbbbbbbbbbbbbb…`\)/.test(r.comment), r.comment.split('\n').filter((l) => l.includes('tar code')).join(' / '))
+
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

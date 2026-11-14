@@ -17,7 +17,7 @@ const npmDir = fs.realpathSync(process.argv[2])
 const util = require('util')
 const { execFileSync, spawn } = require('child_process')
 const injectJs = path.join(__dirname, '..', 'src', 'inject.js')
-const { ineligible, resultTrap, fingerprint, fetcherBase } = require(injectJs)
+const { ineligible, resultTrap, fingerprint, fetcherBase, tarFingerprint, extractionKey } = require(injectJs)
 const pacoteMain = require.resolve('pacote', { paths: [path.join(npmDir, 'node_modules', '@npmcli', 'arborist')] })
 const pacote = require(pacoteMain)
 
@@ -187,6 +187,111 @@ process.on('exit', () => {
   })
 }
 
+// The first line src/store-verify.js prints for this npm (its hello), with
+// no job given.
+function storeVerifyHello () {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'store-verify.js'), npmDir, '/nonexistent/_cacache'], { stdio: ['pipe', 'pipe', 'inherit'] })
+    let out = ''
+    child.stdout.on('data', d => { out += d })
+    child.on('close', () => {
+      try {
+        resolve(JSON.parse(out.split('\n')[0]))
+      } catch {
+        resolve(null)
+      }
+    })
+    child.stdin.end()
+  })
+}
+
+// The tar fingerprint and the key (NOTES "PR C1: the key is the code").
+function keyCases () {
+  // Recomputed here from its definition, against what this process loaded
+  // with pacote (it loads tar): tar as pacote resolves it and the packages
+  // in its `dependencies`, transitively, each found as Node finds it.
+  const pacoteDir = path.dirname(path.dirname(pacoteMain))
+  const sha = (b) => crypto.createHash('sha256').update(b).digest('hex')
+  const roots = new Map()
+  const find = (name, from) => {
+    for (let d = from; ; d = path.dirname(d)) {
+      const c = path.join(d, 'node_modules', name)
+      if (path.basename(d) !== 'node_modules' && fs.existsSync(path.join(c, 'package.json'))) {
+        return fs.realpathSync(c)
+      }
+      if (path.dirname(d) === d) {
+        throw new Error('no ' + name)
+      }
+    }
+  }
+  const walk = (name, from) => {
+    const dir = find(name, from)
+    if (!roots.has(dir)) {
+      roots.set(dir, name)
+      for (const dep of Object.keys(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).dependencies || {})) {
+        walk(dep, dir)
+      }
+    }
+  }
+  walk('tar', pacoteDir)
+  const lines = []
+  for (const f of Object.keys(require.cache)) {
+    const owner = [...roots.keys()].filter(r => f.startsWith(r + '/')).sort((a, b) => b.length - a.length)[0]
+    if (owner && !path.relative(owner, f).split('/').includes('node_modules') && path.relative(owner, f) !== 'package.json') {
+      lines.push(roots.get(owner) + '/' + path.relative(owner, f) + '\0' + sha(fs.readFileSync(f)) + '\n')
+    }
+  }
+  lines.sort()
+  const tarVersion = JSON.parse(fs.readFileSync(path.join([...roots.keys()][0], 'package.json'), 'utf8')).version
+  check(`key: the tar fingerprint is the SHA-256 over the ${lines.length} loaded files of tar ${tarVersion} and its dependencies`,
+    tarFingerprint(pacoteDir), sha(lines.join('')))
+
+  // A made-up layout: a `tar` that requires a `dep` package, both loaded. A
+  // byte changed in the dependency's file changes the fingerprint; a tar
+  // with none of its files loaded has none.
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'matchapack-tarfp-test-'))
+  try {
+    const nm = path.join(tmp, 'node_modules')
+    const write = (rel, text) => {
+      fs.mkdirSync(path.dirname(path.join(nm, rel)), { recursive: true })
+      fs.writeFileSync(path.join(nm, rel), text)
+    }
+    write('pacote/package.json', JSON.stringify({ name: 'pacote', version: '1.0.0' }))
+    write('tar/package.json', JSON.stringify({ name: 'tar', version: '1.0.0', dependencies: { dep: '*' } }))
+    write('tar/index.js', "module.exports = require('dep')\n")
+    write('dep/package.json', JSON.stringify({ name: 'dep', version: '1.0.0' }))
+    write('dep/index.js', 'module.exports = 1\n')
+    write('other/package.json', JSON.stringify({ name: 'other', version: '1.0.0' }))
+    write('other/index.js', 'module.exports = 2\n')
+    const fakePacote = path.join(nm, 'pacote')
+    let none = null
+    try {
+      tarFingerprint(fakePacote)
+    } catch (e) {
+      none = e.message
+    }
+    check('key: no tar fingerprint while no file of tar is loaded', /no file of tar/.test(none || ''), true)
+    require(path.join(nm, 'tar', 'index.js'))
+    require(path.join(nm, 'other', 'index.js'))
+    const a = tarFingerprint(fakePacote)
+    fs.writeFileSync(path.join(nm, 'other', 'index.js'), 'module.exports = 3\n')
+    require(path.join(nm, 'dep', 'package.json'))
+    check('key: a loaded file of a package outside tar\'s dependencies, and a package.json read as a module, do not count', tarFingerprint(fakePacote), a)
+    fs.writeFileSync(path.join(nm, 'dep', 'index.js'), 'module.exports = 4\n')
+    const b = tarFingerprint(fakePacote)
+    check('key: a byte changed in a dependency of tar changes the tar fingerprint', a !== b && /^[0-9a-f]{64}$/.test(b), true)
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+
+  // The key: each part named; libuv's version is a part of it.
+  const f = 'a'.repeat(64)
+  const t = 'b'.repeat(64)
+  check('key: the shape is fetcher:<32 hex> tar:<32 hex> uv:<version>', extractionKey(f, t, '1.52.1'), `fetcher:${'a'.repeat(32)} tar:${'b'.repeat(32)} uv:1.52.1`)
+  check('key: another libuv gives another key', extractionKey(f, t, '1.51.0') !== extractionKey(f, t, '1.52.1'), true)
+  check('key: a missing part gives no key', JSON.stringify([extractionKey(null, t, '1.52.1'), extractionKey(f, 'b', '1.52.1'), extractionKey(f, t, undefined), extractionKey(f, t, '1.52 1')]), JSON.stringify([null, null, null, null]))
+}
+
 async function helperCases () {
   const tmp = helperRun.tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'matchapack-hook-test-'))
   fs.writeFileSync(path.join(tmp, 'npmrc'), '')
@@ -221,6 +326,17 @@ async function helperCases () {
         JSON.stringify([0, 1, d, 'ci', false]))
       const hooks = r.messages.filter(m => m.hook !== undefined && !m.hello)
       check('helper: the hook is installed when npm has loaded pacote, and said once', JSON.stringify(hooks), JSON.stringify([{ hook: 'on' }]))
+      // The store key, sent once, before the hook (so before any request),
+      // equal to `--key` and to store verify's (src/store-verify.js): one
+      // key for the same npm on the same Node, whoever computes it.
+      const keys = r.messages.filter(m => m.key !== undefined)
+      const order = r.messages.findIndex(m => m.key !== undefined) < r.messages.findIndex(m => m.hook === 'on')
+      check('helper: the store key is sent once, before the hook is installed', JSON.stringify([keys.length, order]), JSON.stringify([1, true]))
+      const printed = execFileSync(process.execPath, [injectJs, '--key', npmDir], { encoding: 'utf8' }).trim().split('\n')
+      check('key: the hook\'s key is what `--key` prints', JSON.stringify(keys[0] && [keys[0].key, keys[0].tar_fingerprint]), JSON.stringify(printed))
+      const verifyHello = await storeVerifyHello()
+      check('key: store verify\'s helper gives the same key and tar fingerprint',
+        JSON.stringify(verifyHello && [verifyHello.key, verifyHello.tar_fingerprint]), JSON.stringify(printed))
       check('helper: only arborist\'s pacote, the one hashed, carries the hook',
         JSON.stringify(r.probe && r.probe.hooked.filter(([, on]) => on).map(([k]) => k)),
         JSON.stringify([path.relative(npmDir, pacoteMain)]))
@@ -323,6 +439,8 @@ async function helperCases () {
   check('fingerprint: SHA-256 of pacote\'s lib/fetcher.js', fp, crypto.createHash('sha256').update(fetcherText).digest('hex'))
   check('fingerprint: that file holds the FetcherBase class the hook is installed on',
     fetcherText.toString('utf8').includes(Function.prototype.toString.call(fetcherBase(pacote))), true)
+
+  keyCases()
 
   // The helper itself, started as matchapack starts it (a socket as fd 3),
   // with a stand-in for matchapack that answers its messages.

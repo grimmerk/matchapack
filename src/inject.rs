@@ -116,6 +116,34 @@ fn installed_packages(root: &std::path::Path) -> Option<usize> {
     Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| is_package_key(k) && !flag(p, "link") && !flag(p, "inBundle")).count())
 }
 
+/// The error for an extraction of pacote's that the clones do not
+/// reproduce (serve.rs `halt_on_extraction`), or None. `matchapack report`
+/// finds these runs by the words "not what matchapack's clones reproduce".
+fn extraction_broke(odd: Option<&str>, key: &str) -> Option<anyhow::Error> {
+    odd.map(|odd| {
+        anyhow!(
+            "pacote's extraction is not what matchapack's clones reproduce ({odd}): node_modules may not be npm ci's; \
+             this extraction code ({key}) is left to npm in this store from now on (its declined-keys file)"
+        )
+    })
+}
+
+/// The line that says why an install was slow (NOTES "PR C1: the key is
+/// the code"): more than half of the cloned packages were compared because
+/// their records did not know the running extraction code. None otherwise.
+fn new_code_line(new_key_checks: usize, cloned: usize, key: &str) -> Option<String> {
+    if cloned == 0 || new_key_checks * 2 <= cloned {
+        return None;
+    }
+    Some(if key.contains('?') {
+        format!("matchapack: the extraction code of this npm could not be named: {new_key_checks} packages were compared with npm's own extraction, as in every install under it")
+    } else {
+        format!(
+            "matchapack: this npm's extraction code was new to the store: {new_key_checks} packages were compared with npm's own extraction, once (matchapack store verify does this ahead of time)"
+        )
+    })
+}
+
 /// The error for reads of unexpected keys of the hook's result, or None.
 /// `matchapack report` finds these runs by the words "of what matchapack's
 /// hook returned".
@@ -241,7 +269,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let npm_secs = t_npm.elapsed().as_secs_f64();
     let _ = std::fs::remove_file(&helper);
     let stats = std::mem::take(&mut *server.stats.lock().unwrap());
-    // The pacote and tar versions from the hook's hello (what node loaded).
+    // The key of the extraction code, from the hook (what node loaded).
     let key = server.key();
     drop(server);
 
@@ -306,10 +334,17 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
             stats.hook_reason.as_deref().unwrap_or("?")
         );
     }
+    if let Some(why) = &stats.key_declined {
+        eprintln!("matchapack: no clones from the store, npm extracted the packages itself (this npm's extraction code is on the store's decline list: {why})");
+    }
+    if let Some(why) = &stats.key_error {
+        crate::info!("inject: the extraction code could not be named ({why}); every package is compared with npm's extraction");
+    }
     if stats.fallbacks.contains_key("clone-unsupported") {
         let why = stats.errors.iter().find(|e| e.starts_with("clone-unsupported")).map(String::as_str).unwrap_or("clone-unsupported");
         eprintln!("matchapack: no clones from the store here, npm extracted the packages itself ({why})");
     }
+    let version = |k: &str| stats.hello.as_ref().and_then(|h| h.get(k)).and_then(|v| v.as_str()).unwrap_or("?").to_string();
     // Entries that differed from pacote's extraction were replaced and the
     // packages placed from pacote's: this install is right. What it says
     // about the store depends on who made them (serve.rs).
@@ -323,11 +358,13 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
                 "matchapack: {n} store entries had changed since npm's pacote made them; replaced with npm's extraction (first: {})",
                 first[0]
             ),
-            // Every entry is compared once under each pacote/tar version before
+            // Every entry is compared once under each extraction code before
             // it is cloned, so nothing that differs was placed unchecked.
             _ => eprintln!(
-                "matchapack: npm's {key} extracts {n} package(s) differently from what another pacote/tar version put in the store \
+                "matchapack: npm's extraction code (pacote {}, tar {}) extracts {n} package(s) differently from what other extraction code put in the store \
                  (first: {}); replaced with npm's extraction",
+                version("pacote"),
+                version("tar"),
                 first[0]
             ),
         }
@@ -341,6 +378,12 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // the shell function npm ci runs again, plain (wrapper.rs), also when
     // npm failed (the hook may be why).
     if let Some(e) = trap_fired(&stats.result_unexpected) {
+        return Err(InstallError::Broke(e));
+    }
+    // pacote's extraction was not what a clone gives (a file older than
+    // this install, or not a file or directory): the clones placed before it
+    // was seen may differ from npm's files, so the same answer.
+    if let Some(e) = extraction_broke(stats.extraction_unexpected.as_deref(), &key) {
         return Err(InstallError::Broke(e));
     }
     if !status.success() {
@@ -366,6 +409,9 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
                  this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)"
             );
         }
+    }
+    if let Some(line) = new_code_line(stats.new_key_checks, stats.cloned, &key) {
+        eprintln!("{line}");
     }
     let bytes_logical = stats.used.par_iter().map(|i| store.entry_size(i)).sum();
     let bytes_store_new = stats.filled.iter().map(|i| store.entry_size(i)).sum();
@@ -407,6 +453,19 @@ mod tests {
         }});
         std::fs::write(d.join("node_modules/.package-lock.json"), hidden.to_string()).unwrap();
         assert_eq!(installed_packages(&d), Some(2), "a and packages/w/node_modules/c");
+    }
+
+    #[test]
+    fn the_slow_install_line_and_the_extraction_error() {
+        let key = "fetcher:11111111111111111111111111111111 tar:22222222222222222222222222222222 uv:1.52.1";
+        assert_eq!(new_code_line(0, 0, key), None);
+        assert_eq!(new_code_line(5, 10, key), None, "half is not more than half");
+        let l = new_code_line(6, 10, key).unwrap();
+        assert!(l.contains("was new to the store: 6 packages were compared") && l.contains("matchapack store verify"), "{l}");
+        assert!(new_code_line(6, 10, crate::serve::UNKNOWN_KEY).unwrap().contains("could not be named"));
+        assert!(extraction_broke(None, key).is_none());
+        let e = format!("{:#}", extraction_broke(Some("sha512-x: a: modified at 1"), key).unwrap());
+        assert!(e.contains("not what matchapack's clones reproduce (sha512-x: a: modified at 1)") && e.contains(key), "{e}");
     }
 
     #[test]

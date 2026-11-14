@@ -9,8 +9,10 @@
 //! Also under the store: `sizes/` (cached entry sizes), `projects/` (one
 //! record per installed project, for `matchapack store gc`), `lock` (held
 //! shared by every install, exclusively by commands that remove entries), and
-//! for the inject engine `made-by/` (per entry: the pacote and tar versions
-//! under which it is known to be what pacote extracts; see serve.rs).
+//! for the inject engine `made-by/` (per entry: the keys of the extraction
+//! code under which it is known to be what pacote extracts; see serve.rs)
+//! and `declined-keys` (extraction code whose extraction the clones cannot
+//! reproduce: installs under it are npm's own).
 //!
 //! Tarballs come from npm's own content-addressed cache (`~/.npm/_cacache`).
 
@@ -252,10 +254,11 @@ impl Store {
         self.root.join("made-by").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
     }
 
-    /// The pacote and tar versions (`pacote@… tar@…`, one per line) under
-    /// which this entry is known to be what pacote extracts: the one that
-    /// made it, and every one that later extracted its tarball to the same
-    /// tree. Empty: made by matchapack's own extractor (the classic engine,
+    /// The keys of the extraction code (serve.rs `code_key`, one per line;
+    /// `pacote@… tar@…` in records written before PR C1 of #39) under which
+    /// this entry is known to be what pacote extracts: the one that made it,
+    /// and every one that later extracted its tarball to the same tree.
+    /// Empty: made by matchapack's own extractor (the classic engine,
     /// removed in PR C2), or before this was recorded.
     pub fn made_by(&self, i: &Integrity) -> Vec<String> {
         fs::read_to_string(self.made_by_file(i))
@@ -309,6 +312,37 @@ impl Store {
         let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
         let mut text = keys.join("\n");
         text.push('\n');
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, &f)?;
+        Ok(())
+    }
+
+    fn declined_file(&self) -> PathBuf {
+        self.root.join("declined-keys")
+    }
+
+    /// Why installs under extraction-code `key` are left to npm in this
+    /// store (`decline_key`), or None.
+    pub fn declined(&self, key: &str) -> Option<String> {
+        let text = fs::read_to_string(self.declined_file()).ok()?;
+        text.lines().find_map(|l| l.split_once('\t').filter(|(k, _)| *k == key).map(|(_, why)| why.to_string()))
+    }
+
+    /// Put `key` on the store's decline list (`<store>/declined-keys`, one
+    /// `<key>\t<why>` line each), so that later installs under that code
+    /// let npm extract every package. Written whole (tmp, then rename).
+    pub fn decline_key(&self, key: &str, why: &str) -> Result<()> {
+        if self.declined(key).is_some() {
+            return Ok(());
+        }
+        let f = self.declined_file();
+        let mut text = fs::read_to_string(&f).unwrap_or_default();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        let why: String = why.chars().map(|c| if c.is_control() { ' ' } else { c }).take(300).collect();
+        text.push_str(&format!("{key}\t{why}\n"));
+        let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
         fs::write(&tmp, text)?;
         fs::rename(&tmp, &f)?;
         Ok(())
@@ -542,8 +576,50 @@ impl Store {
 /// carries them into the project).
 /// None when they are the same.
 pub fn compare_trees(want: &Path, got: &Path, dir_modes: bool) -> Result<Option<String>> {
-    let (want, got) = (tree(want, dir_modes)?, tree(got, dir_modes)?);
-    Ok(match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
+    let (want, got) = (tree(want, dir_modes, None)?.0, tree(got, dir_modes, None)?.0);
+    Ok(first_difference(&want, &got))
+}
+
+/// What comparing a store entry with pacote's extraction found
+/// (`compare_extraction`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Compared {
+    Same,
+    /// The first difference.
+    Differs(String),
+    /// pacote's extraction is not what a clone, touched to the install's
+    /// time, reproduces: a file older than the install, or something other
+    /// than files and directories. Nothing was compared.
+    Unexpected(String),
+}
+
+/// How much older than the install's start a file of pacote's extraction
+/// may be before it counts as not written by this install (`Unexpected`):
+/// room for a clock set back during the install, and for filesystems that
+/// keep coarse times. A tar that applied the tarball's times would give
+/// npm's 1985 dates.
+pub const EXTRACTION_TIME_SLACK: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// `compare_trees(extracted, entry, true)`, where `extracted` is pacote's
+/// extraction made by this install, which began at `started`. In the same
+/// walk (the metadata is read there anyway), every path of `extracted` must
+/// be a file or a directory, and every file at most EXTRACTION_TIME_SLACK
+/// older than `started`: pacote extracts with `noMtime` and no links, which
+/// is what the placement of a clone (then touched to now) reproduces.
+pub fn compare_extraction(extracted: &Path, entry: &Path, started: std::time::SystemTime) -> Result<Compared> {
+    let (want, odd) = tree(extracted, true, Some(started.checked_sub(EXTRACTION_TIME_SLACK).unwrap_or(std::time::UNIX_EPOCH)))?;
+    if let Some(odd) = odd {
+        return Ok(Compared::Unexpected(odd));
+    }
+    let got = tree(entry, true, None)?.0;
+    Ok(match first_difference(&want, &got) {
+        Some(d) => Compared::Differs(d),
+        None => Compared::Same,
+    })
+}
+
+fn first_difference(want: &[(PathBuf, Node)], got: &[(PathBuf, Node)]) -> Option<String> {
+    match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
         Some((w, g)) => Some(describe(w, g)),
         None if want.len() != got.len() => {
             let (longer, what) = if got.len() > want.len() { (&got, "not in the tarball") } else { (&want, "missing") };
@@ -551,7 +627,7 @@ pub fn compare_trees(want: &Path, got: &Path, dir_modes: bool) -> Result<Option<
             Some(format!("{}: {what}", show_rel(p)))
         }
         None => None,
-    })
+    }
 }
 
 /// One path in a tree: its kind, its mode (a directory's only when compared),
@@ -563,14 +639,30 @@ enum Node {
     Other,
 }
 
-/// Every path under `root` (`root` itself as ""), sorted, symlinks not followed.
-fn tree(root: &Path, dir_modes: bool) -> Result<Vec<(PathBuf, Node)>> {
+/// Every path under `root` (`root` itself as ""), sorted, symlinks not
+/// followed. With `fresh_since`: the walk stops at the first path that is
+/// neither a file nor a directory, or the first file last modified before
+/// it, and says which (the second value).
+fn tree(root: &Path, dir_modes: bool, fresh_since: Option<std::time::SystemTime>) -> Result<(Vec<(PathBuf, Node)>, Option<String>)> {
     let mut v = vec![];
     for e in walkdir::WalkDir::new(root).follow_links(false).follow_root_links(false).sort_by_file_name() {
         let e = e?;
         let rel = e.path().strip_prefix(root).unwrap().to_path_buf();
         let ft = e.file_type();
-        let mode = e.metadata()?.permissions().mode() & 0o7777;
+        let meta = e.metadata()?;
+        let mode = meta.permissions().mode() & 0o7777;
+        if let Some(since) = fresh_since {
+            if !ft.is_dir() && !ft.is_file() {
+                return Ok((v, Some(format!("{}: neither a file nor a directory", show_rel(&rel)))));
+            }
+            if ft.is_file() {
+                let mtime = meta.modified()?;
+                if mtime < since {
+                    let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(-1);
+                    return Ok((v, Some(format!("{}: modified at {} (seconds since 1970), before this install began", show_rel(&rel), secs(mtime)))));
+                }
+            }
+        }
         let n = if ft.is_dir() {
             Node::Dir(dir_modes.then_some(mode))
         } else if ft.is_file() {
@@ -582,7 +674,7 @@ fn tree(root: &Path, dir_modes: bool) -> Result<Vec<(PathBuf, Node)>> {
         };
         v.push((rel, n));
     }
-    Ok(v)
+    Ok((v, None))
 }
 
 fn show_rel(p: &Path) -> String {

@@ -406,6 +406,23 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             trapped[0].chars().take(120).collect::<String>()
         );
     }
+    // pacote's extraction held a file older than the install, or something
+    // other than files and directories: npm ci rebuilt node_modules, and the
+    // extraction code went on the store's decline list (serve.rs,
+    // inject.rs `extraction_broke`).
+    let odd: Vec<&str> = runs
+        .iter()
+        .filter(|r| r["outcome"] == "broke")
+        .filter_map(|r| r["reason"].as_str())
+        .filter(|w| w.contains("not what matchapack's clones reproduce"))
+        .collect();
+    if !odd.is_empty() {
+        println!(
+            "inject engine: in {} runs pacote's extraction was not what the clones reproduce, npm ci rebuilt node_modules, and that extraction code is left to npm in the store; first: {}",
+            odd.len(),
+            odd[0].chars().take(160).collect::<String>()
+        );
+    }
     // One line per matchapack build, in order of first use, so numbers from
     // different binaries are never read as one series.
     let mut builds: Vec<(String, usize, Vec<f64>)> = vec![];
@@ -459,6 +476,23 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) },
             sum("filled"),
         );
+        // The tar code each run loaded (its fingerprint is part of the store
+        // key: a new one means every entry is compared once under it). No
+        // list, no gate: said so that a new tar shows the day it is used.
+        let mut tars: Vec<(String, String, usize)> = vec![];
+        for r in &inj {
+            let Some(fp) = r["inject"]["tar_fingerprint"].as_str() else { continue };
+            let fp: String = fp.chars().take(16).collect();
+            let ver = r["inject"]["tar"].as_str().unwrap_or("?").to_string();
+            match tars.iter_mut().find(|(f, v, _)| *f == fp && *v == ver) {
+                Some(t) => t.2 += 1,
+                None => tars.push((fp, ver, 1)),
+            }
+        }
+        if !tars.is_empty() {
+            let list: Vec<String> = tars.iter().map(|(f, v, n)| format!("{f}… (tar {v}) {n} runs")).collect();
+            println!("inject engine: tar code loaded, by fingerprint: {}", list.join(", "));
+        }
         // Store entries compared with npm's own extraction before use (serve.rs),
         // and the ones that differed, by who had made them.
         let mut differs: std::collections::BTreeMap<String, (u64, String)> = Default::default();
@@ -482,7 +516,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         for (kind, what) in [
             ("extractor", "made by the classic engine's extractor (expected for odd tarballs)"),
             ("changed", "changed after npm's pacote had made them: look at what writes into the store"),
-            ("pacote", "made under another npm's pacote/tar, which extracted differently"),
+            ("pacote", "made under other extraction code (pacote, tar, libuv), which extracted differently"),
         ] {
             if let Some((n, first)) = differs.get(kind) {
                 println!("inject engine: {n} differing entries {what}; first: {first}");

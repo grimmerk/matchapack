@@ -185,8 +185,9 @@ enum StoreCmd {
     /// Each tarball is taken from the npm cache and extracted by the pacote of
     /// the npm on PATH, as `npm ci` (and the inject engine) would extract it,
     /// and compared with the entry: the same paths, contents, file and
-    /// directory modes. A match records that pacote/tar version on the
-    /// entry; a difference is reported with who made the entry.
+    /// directory modes. A match records that extraction code (its key:
+    /// pacote's lib/fetcher.js, tar's code, libuv) on the entry; a difference
+    /// is reported with who made the entry.
     #[command(verbatim_doc_comment)]
     Verify {
         /// Replace the entries that differ with npm's extraction (entries
@@ -485,8 +486,8 @@ fn main() -> Result<()> {
                     }
                     let what = |kind: &str| match kind {
                         "extractor" => "made by the classic engine's extractor",
-                        "changed" => "changed after this pacote/tar had made or checked it",
-                        _ => "made under another pacote/tar version",
+                        "changed" => "changed after this extraction code had made or checked it",
+                        _ => "made under other extraction code",
                     };
                     for (i, kind, why, _) in &r.differs {
                         println!("  {}/{}…: {why} ({})", i.algo, &i.hex[..16], what(kind));
