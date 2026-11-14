@@ -260,6 +260,11 @@ async function helperCases () {
       const other = project('prefixed')
       const r2 = await helperRun({ args: ['ci', '--prefix', other], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
       check('helper: --prefix <dir> is reported as the root', JSON.stringify(roots(r2).map(m => m.root)), JSON.stringify([other]))
+      // npm's package-lock setting (what a repair after a broken run can
+      // rebuild from): true by default, false with --no-package-lock.
+      const r4 = await helperRun({ args: ['install', '--no-package-lock'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
+      check('helper: package-lock is reported (true for npm ci, false with --no-package-lock)',
+        JSON.stringify([roots(r).map(m => m.package_lock), roots(r4).map(m => [m.command, m.package_lock])]), JSON.stringify([[true], [['install', false]]]))
       const ws = path.join(tmp, 'ws')
       fs.mkdirSync(path.join(ws, 'packages', 'a'), { recursive: true })
       fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify({ name: 'ws', version: '1.0.0', workspaces: ['packages/*'] }))
@@ -267,6 +272,16 @@ async function helperCases () {
       const r3 = await helperRun({ args: ['ci', '--dry-run'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: path.join(ws, 'packages', 'a') })
       check('helper: in a workspace member, npm\'s root is the workspace root; --dry-run is reported',
         JSON.stringify(roots(r3).map(m => [m.root, m.dry_run])), JSON.stringify([[ws, true]]))
+    }
+    // The probe of the tarball server gives up on a listener that accepts
+    // and never answers.
+    {
+      const silent = require('net').createServer(() => {})
+      await new Promise(resolve => silent.listen(0, '127.0.0.1', resolve))
+      const t0 = Date.now()
+      const got = await reachable(`http://127.0.0.1:${silent.address().port}/x.tgz`)
+      silent.close()
+      check('the tarball-server probe gives up on a listener that never answers', JSON.stringify([got, Date.now() - t0 < 5000]), JSON.stringify([false, true]))
     }
     // A package given as a URL (the fixtures' tarball server, which
     // test-inject.sh starts): pacote reads its manifest by extracting it
@@ -296,9 +311,14 @@ async function helperCases () {
   }
 }
 
+// Whether the fixtures' tarball server answers, within a second: a stale
+// listener that accepts and never answers must not hang the cases (a
+// request's 'timeout' event alone does not abort it).
 function reachable (url) {
   return new Promise((resolve) => {
-    require('http').get(url, (res) => { res.resume(); resolve(res.statusCode === 200) }).on('error', () => resolve(false))
+    const req = require('http').get(url, (res) => { res.resume(); clearTimeout(t); resolve(res.statusCode === 200) })
+    const t = setTimeout(() => { req.destroy(); resolve(false) }, 1000)
+    req.on('error', () => { clearTimeout(t); resolve(false) })
   })
 }
 

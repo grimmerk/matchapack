@@ -480,6 +480,10 @@ function main () {
           typed: String(cmd),
           dry_run: flag('dry-run'),
           package_lock_only: flag('package-lock-only'),
+          // Whether npm writes package-lock.json in this run (false with
+          // --no-package-lock or package-lock=false): what a repair after
+          // a broken run can rebuild from (wrapper.rs).
+          package_lock: flag('package-lock'),
           usage: flag('usage'),
         }
       } catch (e) {

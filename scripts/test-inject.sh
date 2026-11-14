@@ -774,6 +774,15 @@ p=$(project fam-trap small)
   && [ "$(last_log_in "$tr_log" "r['outcome'], r['repair'], r['command'], '\`files\`' in r['reason']")" = "broke stopped install True" ] \
   && ok "trap during npm install: stopped loudly (status 1), the key and the repair command said, npm not run again, logged" \
   || bad "family trap: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+# With --no-package-lock npm writes no lockfile in the run, so npm ci has
+# nothing current to rebuild from: the repair is the same command with
+# plain npm on an emptied node_modules.
+p=$(project fam-trap-nolock small)
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap, no lockfile: npm ci"
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm install --no-package-lock left-pad@1.3.0 --no-audit --no-fund"); rc=$?
+[ $rc = 1 ] && grep -qF "There is no package-lock.json from this run for npm ci to rebuild from: check \`git diff\` of package.json, then remove $p/node_modules and run the command again with plain npm: MATCHAPACK=0 npm install --no-package-lock left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
+  && ok "trap during npm install --no-package-lock: the repair is the same command with plain npm on an emptied node_modules, not npm ci" \
+  || bad "family trap, no lockfile: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
 MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
   && grep -q 'failed and stopped 1' "$work/report" \
   && grep -q "in 1 runs npm read an unexpected key of the hook's result, and the run stopped with the repair command" "$work/report" \

@@ -15,7 +15,7 @@
 //!     {"hello":true,"pacote":"21.5.1","fingerprint":"…","hook":"pending"}
 //!                                                    once, before npm starts
 //!     {"id":0,"root":"/abs/dir","global":false,"command":"ci","typed":"ic",
-//!      "dry_run":false,"package_lock_only":false,"usage":false}
+//!      "dry_run":false,"package_lock_only":false,"usage":false,"package_lock":true}
 //!                                                    npm's install root and command,
 //!                                                    once, before the command runs
 //!     {"no_root":"…"}                                npm's root could not be read: no
@@ -153,6 +153,9 @@ pub struct Stats {
     pub root: Option<PathBuf>,
     /// npm's name of the command (`ci`), with the root.
     pub command: Option<String>,
+    /// npm's `package-lock` setting at the root report (false: npm writes
+    /// no package-lock.json in this run).
+    pub package_lock: Option<bool>,
     /// Why npm's root could not be read (the helper's `no_root`).
     pub no_root: Option<String>,
     /// The hook's state once npm loaded pacote: `on`, `off`, `none`, or
@@ -243,6 +246,7 @@ impl Stats {
             "fingerprint": self.hello.as_ref().and_then(|h| h.get("fingerprint")).cloned().unwrap_or(Value::Null),
             "root": self.root.as_ref().map(|r| r.display().to_string()),
             "command": self.command,
+            "package_lock": self.package_lock,
             "hook": self.hook,
             "hook_reason": self.hook_reason,
             "no_root": self.no_root,
@@ -1253,6 +1257,7 @@ impl<'a> Server<'a> {
             };
             let mut s = self.stats.lock().unwrap();
             s.command = command;
+            s.package_lock = v.get("package_lock").and_then(|b| b.as_bool());
             return vec![match verdict {
                 Ok(root) => {
                     let _ = self.root.set(root.clone());

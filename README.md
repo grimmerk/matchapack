@@ -223,8 +223,13 @@ adds or changes is replaced by clones. So:
   rebuild from the lockfile, not what plain `npm install` would have left
   (NOTES). It stops with a non-zero status and says what to do: check
   `git diff` of `package.json` and `package-lock.json`, then
-  `MATCHAPACK=0 npm ci <the same arguments>`. (`npm ci` itself is rebuilt
-  with plain `npm ci` automatically, as before.)
+  `MATCHAPACK=0 npm ci <the same arguments>`. When the run left no
+  lockfile to rebuild from (no `package-lock.json` or
+  `npm-shrinkwrap.json`, or `--no-package-lock` / `package-lock=false`),
+  `npm ci` would refuse or install an old one, so it says instead: remove
+  `node_modules` and run the same command with plain npm
+  (`MATCHAPACK=0 npm install …`). (`npm ci` itself is rebuilt with plain
+  `npm ci` automatically, as before.)
 
 matchapack runs plain npm instead, and prints why, when (before npm starts,
 unless marked "npm's root": those are decided on the root npm reports, after
