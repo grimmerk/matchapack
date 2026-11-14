@@ -73,7 +73,9 @@ flush
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
-npm_dir=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd)
+# npm's package directory as npm itself reports it (as verify-npm.sh: also
+# right behind a version manager's shim).
+npm_dir=$(cd "$(dirname "$(npm exec -c 'printf %s "$npm_execpath"')")/.." && pwd)
 rm -rf "${work:?}/A" "${work:?}/B"
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 export MATCHAPACK_LOG_DIR=$work/logs
