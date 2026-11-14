@@ -196,8 +196,9 @@ pub struct Stats {
     /// be named.
     pub tar_fingerprint: Option<String>,
     pub key_error: Option<String>,
-    /// Comparisons made because the entry's record lacked the running key
-    /// (not the sample): the work a new extraction code costs.
+    /// Comparisons asked for because the entry's record lacked the running
+    /// key (not the sample), counted when decided: the work a new
+    /// extraction code costs.
     pub new_key_checks: usize,
     /// pacote's extraction was not what a clone reproduces (serve.rs module
     /// comment): the run is broken, the key declined.
@@ -738,8 +739,12 @@ impl<'a> Server<'a> {
                     Ok(l) => l,
                     Err(e) => return one(refused("store-error", format!("{e:#}"))),
                 };
-                if self.should_check(&self.store.made_by(&i)) {
+                let made_by = self.store.made_by(&i);
+                if self.should_check(&made_by) {
                     drop(shared);
+                    if !made_by.iter().any(|k| k == self.k()) {
+                        self.stats.lock().unwrap().new_key_checks += 1;
+                    }
                     return one(self.issue(i, "check"));
                 }
                 if !is_real_dir(&dir) {
@@ -902,9 +907,6 @@ impl<'a> Server<'a> {
                     return Outcome::Refused { reason: "clone-unsupported", message: format!("{e:#}"), fatal: true };
                 }
                 return refused("clone-error", format!("{e:#}"));
-            }
-            if !made_by.iter().any(|k| k == self.k()) {
-                self.stats.lock().unwrap().new_key_checks += 1;
             }
             let differs = match crate::store::compare_extraction(extracted, &cand, self.started) {
                 Ok(crate::store::Compared::Same) => None,
@@ -2345,7 +2347,7 @@ mod tests {
         let fresh = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, Some(KEY.replace("uv:1.52.1", "uv:9")), CheckPolicy::All).unwrap();
         let to = extract_to(fresh.place_entry(&sri, &fx.root.join("node_modules/f")), "check");
         fx.pacote_extract(&i, &to);
-        assert_eq!(placed_full(fresh.place_extracted(&sri, &fx.root.join("node_modules/f"), &to)).2, true, "a fresh extraction is compared and placed");
+        assert!(placed_full(fresh.place_extracted(&sri, &fx.root.join("node_modules/f"), &to)).2, "a fresh extraction is compared and placed");
         assert_eq!(fresh.stats.lock().unwrap().new_key_checks, 1);
     }
 
