@@ -6,6 +6,22 @@
 // / allow-directory / allow-registry run in FetcherBase.get, before a fetcher
 // exists), so npm's refusals stay npm's.
 //
+// Nothing of npm is loaded before npm's own start-up code runs
+// (grimmerk/matchapack-private#59; NOTES "The lazy hook and npm's install
+// root"). In order:
+//   1. before npm: find npm's pacote (resolved, not loaded) and hash its
+//      lib/fetcher.js; a file not on the list is "tell matchapack, exit 90",
+//      and matchapack runs plain npm;
+//   2. a watcher on Module.prototype.require, then npm's lib/cli.js;
+//   3. when npm has loaded lib/npm.js: wrap Npm.prototype.exec (first call
+//      only). npm calls it once its config is loaded, with the command; the
+//      wrapper reports npm's own install root (npm.prefix, npm.global) and
+//      the command to matchapack, which runs its gates on that root and pins
+//      it (#36). A refusal is exit 90 before the command ran;
+//   4. when npm has loaded the pacote hashed in 1: check its shape and
+//      replace extract; then the watcher removes itself. A pacote of an
+//      unexpected shape gets no hook: npm extracts every package itself.
+//
 // For a package the hook can reproduce exactly (see `ineligible`), it asks
 // the matchapack process that started this one to place the package's store
 // entry at the destination (clone, then set every placed path's time to now)
@@ -29,8 +45,10 @@
 //                              `none`: do not install it at all (tests: what
 //                              an npm that no longer calls the method looks
 //                              like to matchapack)
-// Exit status: npm's. 90 before npm starts: the hook could not be installed
-// (matchapack then runs plain npm), also on an unexpected error up to there.
+// Exit status: npm's. 90 when the helper stops before npm's command runs:
+// before npm starts (unknown fingerprint, no pacote; also on an unexpected
+// error up to there), or when matchapack refuses the install root npm
+// reported. matchapack then runs plain npm.
 //
 // `node inject.js --fingerprint <npm install dir>` prints the fingerprint of
 // that npm's pacote and exits: the one way it is computed, for the list and
@@ -40,10 +58,18 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 
-// The pacote that npm's arborist loads: one copy, in npm's node_modules.
-function loadPacote (npmDir) {
-  const from = path.join(npmDir, 'node_modules', '@npmcli', 'arborist')
-  return require(require.resolve('pacote', { paths: [from] }))
+// The exit status of a stop before npm's command runs (inject.rs
+// HELPER_DECLINED).
+const DECLINED = 90
+
+// The pacote that npm's arborist loads (one copy that extracts, in npm's
+// node_modules; npm 10.9.1–10.9.9 carry a second one for audit metadata),
+// resolved, not loaded: `main`, the file npm's require of it loads, and
+// `fetcher`, lib/fetcher.js next to it, which holds the class the hook
+// replaces the work of. Real paths, as require.cache keys them.
+function pacotePaths (npmDir) {
+  const main = require.resolve('pacote', { paths: [path.join(npmDir, 'node_modules', '@npmcli', 'arborist')] })
+  return { main, fetcher: path.join(path.dirname(main), 'fetcher.js') }
 }
 
 // FetcherBase, when this pacote has the shape the hook needs: one
@@ -63,12 +89,19 @@ function fetcherBase (pacote) {
 
 // What the hook replaces is the work of FetcherBase: extract() and the
 // private methods it calls (#extract, #tarxOptions, #entryMode, #mkdir,
-// #empty), which no code outside the class can reach. The whole class text
-// holds them all, comments included, as it is in the file: its SHA-256 is
-// the fingerprint. The hook is installed only on a fingerprint the harness
-// has run on (src/npm-fingerprints.json; NOTES "G-lite: npm release safety").
-function fingerprint (FetcherBase) {
-  return crypto.createHash('sha256').update(Function.prototype.toString.call(FetcherBase)).digest('hex')
+// #empty), which no code outside the class can reach. They are all in
+// pacote's lib/fetcher.js, read as bytes from disk before npm starts, so
+// nothing of npm has to be loaded to decide (#59): its SHA-256 is the
+// fingerprint. The hook is installed only on a fingerprint the harness has
+// run on (src/npm-fingerprints.json; NOTES "G-lite: npm release safety").
+// Until 2026-11 it was the text of the loaded class alone; the file holds
+// that text, so the gate only became stricter.
+function fingerprintFile (file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+}
+
+function fingerprint (npmDir) {
+  return fingerprintFile(pacotePaths(npmDir).fetcher)
 }
 
 // Why this fetcher must use pacote's own extract, or null when a clone gives
@@ -186,22 +219,23 @@ function fail (message) {
   if (!tellMatchapack(message)) {
     process.stderr.write(`matchapack inject helper: ${message}\n`)
   }
-  process.exit(90)
+  process.exit(DECLINED)
 }
 
 function printFingerprint (npmDir) {
-  let FetcherBase
+  let fp
   try {
-    FetcherBase = fetcherBase(loadPacote(npmDir))
+    fp = fingerprint(npmDir)
   } catch (e) {
-    process.stderr.write(`cannot load npm's pacote from ${npmDir}: ${e.message}\n`)
+    process.stderr.write(`cannot read npm's pacote lib/fetcher.js from ${npmDir}: ${e.message}\n`)
     process.exit(1)
   }
-  if (!FetcherBase) {
-    process.stderr.write('this npm\'s pacote has no FetcherBase.prototype.extract shared by its fetchers\n')
-    process.exit(1)
-  }
-  process.stdout.write(fingerprint(FetcherBase) + '\n')
+  process.stdout.write(fp + '\n')
+}
+
+// A package.json's version, read as JSON: no code of npm runs for it.
+function versionOf (file) {
+  return JSON.parse(fs.readFileSync(file, 'utf8')).version
 }
 
 function main () {
@@ -219,29 +253,49 @@ function main () {
   }
   rawFd = fd
 
-  let pacote
+  // 1. Nothing of npm is loaded here (#59): pacote's files are found and
+  // read, and npm's lib/npm.js is found.
+  let paths
   try {
-    pacote = loadPacote(npmDir)
+    paths = pacotePaths(npmDir)
   } catch (e) {
-    fail(`cannot load npm's pacote: ${e.message}`)
+    fail(`cannot find npm's pacote: ${e.message}`)
   }
-  const FetcherBase = fetcherBase(pacote)
-  if (!FetcherBase) {
-    fail('this npm\'s pacote has no FetcherBase.prototype.extract shared by its fetchers')
+  let fp
+  try {
+    fp = fingerprintFile(paths.fetcher)
+  } catch (e) {
+    fail(`cannot read npm's pacote (${paths.fetcher}): ${e.code || e.message}`)
   }
   // pacote code the harness has not run on: plain npm, before anything
-  // changes (the same path as the shape check above).
-  const fp = fingerprint(FetcherBase)
+  // changes.
   if (allowed !== 'any' && !allowed.split(',').includes(fp)) {
     let npmVersion = '?'
     try {
-      npmVersion = require(path.join(npmDir, 'package.json')).version
+      npmVersion = versionOf(path.join(npmDir, 'package.json'))
     } catch {
       // the message names the fingerprint either way
     }
     fail(`npm ${npmVersion} has pacote code this matchapack was not tested with; update matchapack, or set MATCHAPACK_NPM_FINGERPRINT=any to try it; fingerprint ${fp}`)
   }
-  const origExtract = FetcherBase.prototype.extract
+  // As require.cache keys it: the real path (npm's lib may be a symlink).
+  let npmJs
+  try {
+    npmJs = fs.realpathSync(path.join(npmDir, 'lib', 'npm.js'))
+  } catch (e) {
+    fail(`cannot find npm's lib/npm.js: ${e.code || e.message}`)
+  }
+  // The pacote and tar npm will load: matchapack keys its checks of the
+  // store on them (src/serve.rs).
+  let pacoteVersion = null
+  let tarVersion = null
+  try {
+    const pacoteDir = path.dirname(path.dirname(paths.main))
+    pacoteVersion = versionOf(path.join(pacoteDir, 'package.json'))
+    tarVersion = versionOf(require.resolve('tar/package.json', { paths: [pacoteDir] }))
+  } catch {
+    // unknown: every entry is compared, as under a new version
+  }
   const processUmask = process.umask()
 
   const net = require('net')
@@ -312,7 +366,10 @@ function main () {
     send({ id, ...req })
   })
 
-  const hook = async function (dest) {
+  // Set in step 4, when npm has loaded pacote.
+  let pacote = null
+  let origExtract = null
+  const matchapackExtract = async function (dest) {
     let why
     try {
       why = down || ineligible(pacote, this, processUmask)
@@ -325,8 +382,9 @@ function main () {
     }
     // npm's own project root, as it passes it to pacote (ci.js builds the
     // Arborist with `path: npm.prefix`; reify spreads its options into
-    // pacote's): for diagnosis only, matchapack never widens its checks with
-    // it (grimmerk/matchapack-private#36).
+    // pacote's): matchapack refuses a request whose root is not the one npm
+    // reported in step 3 (`npm-root-elsewhere`); the destination check uses
+    // the pinned root.
     const npmRoot = this.opts && typeof this.opts.path === 'string' && path.isAbsolute(this.opts.path) ? this.opts.path : undefined
     const req = { integrity: String(this.integrity), dest: path.resolve(dest), npm_root: npmRoot }
     let answer
@@ -365,26 +423,140 @@ function main () {
       (key, expected) => send({ result_read: key, expected }))
   }
 
-  if (hookMode !== 'none') {
-    FetcherBase.prototype.extract = hook
+  // Step 3: npm's own install root, when npm starts the command (#36).
+  const wrapExec = (Npm) => {
+    const origExec = Npm && Npm.prototype && Npm.prototype.exec
+    if (typeof origExec !== 'function') {
+      // No root is reported: matchapack refuses every clone, npm extracts
+      // every package itself, and the run says why.
+      send({ no_root: 'npm\'s lib/npm.js has no Npm.prototype.exec' })
+      return
+    }
+    Npm.prototype.exec = async function (cmd) {
+      // The first call only: a command that runs another one (install-test
+      // runs test) calls exec again, and that passes through.
+      Npm.prototype.exec = origExec
+      let report
+      try {
+        const { deref } = require(path.join(path.dirname(npmJs), 'utils', 'cmd-list.js'))
+        if (typeof deref !== 'function') {
+          throw new Error('lib/utils/cmd-list.js has no deref')
+        }
+        const flag = (k) => {
+          try {
+            return !!this.config.get(k)
+          } catch {
+            return false
+          }
+        }
+        const root = this.prefix
+        if (typeof root !== 'string' || !path.isAbsolute(root)) {
+          throw new Error(`npm.prefix is not an absolute path (${typeof root})`)
+        }
+        report = {
+          root,
+          global: !!this.global,
+          command: deref(cmd) || null,
+          typed: String(cmd),
+          dry_run: flag('dry-run'),
+          package_lock_only: flag('package-lock-only'),
+          usage: flag('usage'),
+        }
+      } catch (e) {
+        send({ no_root: `could not read npm's install root: ${e && e.message}` })
+        return origExec.apply(this, arguments)
+      }
+      let answer = null
+      try {
+        answer = await request(report)
+      } catch {
+        // matchapack is gone: every later request falls back to pacote
+      }
+      if (answer && answer.ok === false) {
+        // Refused (the reason is recorded): npm has loaded its config and
+        // opened its log file, the command has not run. npm's own unload
+        // stops its timers, display and log file; without its exit
+        // listeners npm does not print "Exit handler never called!".
+        try {
+          if (typeof this.unload === 'function') {
+            this.unload()
+          }
+        } catch {
+          // exiting either way
+        }
+        process.removeAllListeners('exit')
+        process.exit(DECLINED)
+      }
+      return origExec.apply(this, arguments)
+    }
   }
 
-  // The pacote and tar this process really loaded: matchapack keys its
-  // checks of the store on them (src/serve.rs).
-  let pacoteVersion = null
-  let tarVersion = null
-  try {
-    const pacoteDir = path.dirname(path.dirname(require.resolve('pacote', {
-      paths: [path.join(npmDir, 'node_modules', '@npmcli', 'arborist')],
-    })))
-    pacoteVersion = require(path.join(pacoteDir, 'package.json')).version
-    tarVersion = require(require.resolve('tar/package.json', { paths: [pacoteDir] })).version
-  } catch {
-    // unknown: every entry is compared, as under a new version
+  // Step 4: npm has loaded the pacote whose lib/fetcher.js was hashed.
+  const hookPacote = (p) => {
+    if (hookMode === 'none') {
+      send({ hook: 'none' })
+      return
+    }
+    let why = null
+    let FetcherBase = null
+    try {
+      FetcherBase = fetcherBase(p)
+      if (!FetcherBase) {
+        why = 'this npm\'s pacote has no FetcherBase.prototype.extract shared by its fetchers'
+      }
+    } catch (e) {
+      why = `checking npm's pacote: ${e && e.message}`
+    }
+    if (why) {
+      // npm is running: no "exit 90, plain npm" any more. No hook: npm
+      // extracts every package itself, and the run says why.
+      send({ hook: 'not-installed', reason: why })
+      return
+    }
+    pacote = p
+    origExtract = FetcherBase.prototype.extract
+    FetcherBase.prototype.extract = matchapackExtract
+    send({ hook: hookOff ? 'off' : 'on' })
   }
-  // From here on npm is running: matchapack reports its exit status as npm's.
+
+  // Step 2: watch npm's own requires for the two files. Nothing is resolved
+  // or loaded here; after each require returns, two cache lookups. The
+  // watcher removes itself once both were seen.
+  const Module = require('module')
+  const origRequire = Module.prototype.require
+  let needNpm = true
+  let needPacote = true
+  const watcher = function () {
+    const exports = origRequire.apply(this, arguments)
+    if (needNpm) {
+      const m = require.cache[npmJs]
+      if (m && m.loaded) {
+        needNpm = false
+        try {
+          wrapExec(m.exports)
+        } catch (e) {
+          send({ no_root: `wrapping npm's exec: ${e && e.message}` })
+        }
+      }
+    }
+    if (needPacote) {
+      const m = require.cache[paths.main]
+      if (m && m.loaded) {
+        needPacote = false
+        hookPacote(m.exports)
+      }
+    }
+    if (!needNpm && !needPacote && Module.prototype.require === watcher) {
+      Module.prototype.require = origRequire
+    }
+    return exports
+  }
+  Module.prototype.require = watcher
+
+  // From here on npm is running: matchapack reports its exit status as npm's
+  // (unless the root is refused in step 3).
   npmStarted = true
-  send({ hello: true, pacote: pacoteVersion, tar: tarVersion, fingerprint: fp, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'on' })
+  send({ hello: true, pacote: pacoteVersion, tar: tarVersion, fingerprint: fp, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'pending' })
   process.argv = [process.argv[0], path.join(npmDir, 'bin', 'npm-cli.js'), ...npmArgs]
   require(path.join(npmDir, 'lib', 'cli.js'))(process)
 }
@@ -402,5 +574,5 @@ if (require.main === module && process.argv[2] === '--fingerprint') {
     fail(`before npm started: ${e && e.stack ? e.stack : e}`)
   }
 } else {
-  module.exports = { ineligible, resultTrap, fingerprint, fetcherBase, loadPacote, RESULT_KEYS }
+  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, RESULT_KEYS }
 }
