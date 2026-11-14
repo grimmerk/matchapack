@@ -122,12 +122,12 @@ check root-killed "a root script killed by a signal → npm's failure, not retri
 
 # 31. The install family is routed; other commands, a flag first, and the
 #     two bypasses never start matchapack (it would log a line).
-logn() { { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl"; } 2>/dev/null || echo 0; }
+logn() { { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl" | tr -d ' '; } 2>/dev/null || echo 0; }
 lastrec() { tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
 d=$work/ci
 for w in "i --no-audit --no-fund" "update --no-audit --no-fund" "rm left-pad --no-audit --no-fund"; do
   n0=$(logn); CMD="npm $w"; rc=$(run "$d")
-  want=$(case ${w%% *} in i) echo install;; update) echo update;; rm) echo uninstall;; esac)
+  want=install; [ "${w%% *}" = update ] && want=update; [ "${w%% *}" = rm ] && want=uninstall
   [ "$rc" = 0 ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"], r["command"], r["args"][0]')" = "('installed', '$want', '${w%% *}')" ] && r=ok || r=bad
   check "routed-${w%% *}" "npm $w → matchapack npm, npm's $want" $r "$d"
 done
