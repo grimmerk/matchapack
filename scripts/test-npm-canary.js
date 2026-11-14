@@ -10,6 +10,7 @@
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const crypto = require('node:crypto')
 const { execFileSync, spawnSync } = require('node:child_process')
 
 const canary = path.join(__dirname, 'npm-canary.js')
@@ -34,8 +35,9 @@ const run = (...args) => execFileSync(process.execPath, [canary, ...args], { enc
 const runStatus = (...args) => spawnSync(process.execPath, [canary, ...args], { encoding: 'utf8', env })
 
 // The watch's inputs, hand-made: Node's release list (500 old 10.x releases
-// as filler, then the lines of a test), libuv's version.h per release, and
-// Yarn's version list.
+// as filler, then the lines of a test), libuv's version.h and fs.c per
+// release (fs.c: by default one text per libuv version), and Yarn's version
+// list.
 const W = path.join(tmp, 'watch')
 fs.mkdirSync(path.join(W, 'uv'), { recursive: true })
 const filler = Array.from({ length: 500 }, (_, i) => ({ version: `v10.0.${i}`, date: '2019-01-01', lts: false }))
@@ -44,9 +46,14 @@ const nodeIndex = (name, entries) => {
   write(f, [...entries.map(([v, date]) => ({ version: `v${v}`, date, lts: false })), ...filler])
   return f
 }
-const uvh = (version, uv) => {
+const fsc = (uv) => `/* libuv ${uv}: src/unix/fs.c */\n`
+const sha = (text) => crypto.createHash('sha256').update(text).digest('hex')
+const uvh = (version, uv, src = fsc(uv)) => {
   const [a, b, c] = uv.split('.')
   fs.writeFileSync(path.join(W, 'uv', `v${version}.h`), `#define UV_VERSION_MAJOR ${a}\n#define UV_VERSION_MINOR ${b}\n#define UV_VERSION_PATCH ${c}\n#define UV_VERSION_IS_RELEASE 1\n`)
+  if (src !== null) {
+    fs.writeFileSync(path.join(W, 'uv', `v${version}.fs.c`), src)
+  }
 }
 const yarnReg = path.join(W, 'yarn.json')
 const yarnVersions = (extra = []) => write(yarnReg, { versions: Object.fromEntries([...Array.from({ length: 60 }, (_, i) => `1.${Math.floor(i / 5)}.${i % 5}`), '1.22.22', '2.4.3', '4.5.0', ...extra].map((v) => [v, {}])) })
@@ -59,7 +66,7 @@ for (const [v, uv] of [['20.20.2', '1.46.0'], ['22.23.5', '1.51.0'], ['24.22.3',
 const npmReg = path.join(W, 'npm.json')
 write(npmReg, { versions: Object.fromEntries(['10.9.10', '11.21.1', '12.2.1'].map((v) => [v, {}])) })
 const watchState = (node, yarn = { newest: '1.22.22', checked: '2026-11-13' }) => ({ ...state0, node, yarn })
-const nl = (newest, uv, extra = {}) => ({ newest, uv, checked: '2026-11-13', ...extra })
+const nl = (newest, uv, extra = {}) => ({ newest, uv, uvSrc: sha(fsc(uv)), checked: '2026-11-13', ...extra })
 const steady = { lines: { 22: nl('22.23.5', '1.51.0'), 24: nl('24.22.3', '1.52.1'), 26: nl('26.13.1', '1.52.1', { tested: '26.13.1', uvTested: '1.52.1', suites: 'pass', verified: '26.13.1', head: 'h', facts: { empty_atime: true, empty_mtime: true, atime: true, mtime: false, group: true } }) } }
 let pk = 0
 function wpoll (state, index, extra = []) {
@@ -223,7 +230,7 @@ check('watch: Node 25 and 26 both new since the last poll: both tested as new ma
 //     one item, both suites.
 uvh('26.13.2', '1.52.1')
 pl = plan(wpoll(watchState(steady), nodeIndex('same-uv', [...lines, ['26.13.2', '2026-11-14']])))
-check('watch: a new 26.x, same libuv: recorded, no job', pl.node && pl.node.todo.length === 0 && JSON.stringify(pl.node.record) === JSON.stringify([{ line: 26, newest: '26.13.2', uv: '1.52.1' }]) && pl.nodeMacos.length === 0, JSON.stringify(pl.node || pl))
+check('watch: a new 26.x, same libuv: recorded, no job', pl.node && pl.node.todo.length === 0 && JSON.stringify(pl.node.record) === JSON.stringify([{ line: 26, newest: '26.13.2', uv: '1.52.1', uvSrc: sha(fsc('1.52.1')) }]) && pl.nodeMacos.length === 0, JSON.stringify(pl.node || pl))
 uvh('26.14.0', '1.54.0')
 pl = plan(wpoll(watchState(steady), nodeIndex('new-uv', [...lines, ['26.14.0', '2026-11-14']])))
 check('watch: a new 26.x with another libuv: one item, npm and Yarn suites', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '26.14.0' && pl.node.todo[0].uvBefore === '1.52.1' && pl.node.todo[0].uv === '1.54.0' &&
@@ -276,6 +283,56 @@ const inc20 = { lines: { ...steady.lines, 20: nl('20.20.2', '1.46.0', { tested: 
 pl = plan(wpoll(watchState(inc20), nodeIndex('ordinary', lines)))
 check('watch: an incomplete test of a line no longer watched is repeated', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '20.20.2' && /incomplete/.test(pl.node.todo[0].reason), JSON.stringify(pl.node || pl))
 
+// 17f. libuv's fs.c (Node cherry-picks libuv fixes without changing
+//      libuv's version: fs.c changed at v26.0.0 -> v26.1.0 -> v26.2.0 with
+//      version.h at 1.52.1): a new release with the same version and
+//      another fs.c is an item, both suites; both changed, the reason names
+//      both.
+uvh('26.13.4', '1.52.1', '/* libuv 1.52.1, src/unix/fs.c with a cherry-picked copyfile fix */\n')
+pl = plan(wpoll(watchState(steady), nodeIndex('new-src', [...lines, ['26.13.4', '2026-11-14']])))
+check('watch: a new 26.x, same libuv version, another fs.c: one item, npm and Yarn suites, the reason names fs.c', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '26.13.4' && pl.node.todo[0].uvChange === true &&
+  pl.node.todo[0].uvBefore === null && pl.node.todo[0].uvSrcBefore === sha(fsc('1.52.1')) && pl.node.todo[0].uvSrc === sha('/* libuv 1.52.1, src/unix/fs.c with a cherry-picked copyfile fix */\n') &&
+  /libuv's fs\.c [0-9a-f]{12} → [0-9a-f]{12} \(libuv still 1\.52\.1\) in Node 26/.test(pl.node.todo[0].reason) && pl.nodeLinux.length === 3 && pl.nodeMacos.length === 1, JSON.stringify(pl.node || pl))
+uvh('26.14.1', '1.54.0', '/* libuv 1.54.0, patched */\n')
+pl = plan(wpoll(watchState(steady), nodeIndex('new-both', [...lines, ['26.14.1', '2026-11-14']])))
+check('watch: a new 26.x, another libuv version and fs.c: one item, the reason names both', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].uvBefore === '1.52.1' &&
+  /^libuv 1\.52\.1 → 1\.54\.0, libuv's fs\.c [0-9a-f]{12} → [0-9a-f]{12} in Node 26$/.test(pl.node.todo[0].reason), JSON.stringify(pl.node || pl))
+
+// 17g. A state from before the hash was kept: each watched line's hash is
+//      seeded from its newest release (recorded, no test); a new release is
+//      compared with that seed.
+const noSrc = { lines: Object.fromEntries(Object.entries(steady.lines).map(([k, l]) => [k, Object.fromEntries(Object.entries(l).filter(([f]) => f !== 'uvSrc'))])) }
+pl = plan(wpoll(watchState(noSrc), nodeIndex('ordinary', lines)))
+check('watch: lines with no fs.c hash yet: each seeded from its newest release, no item', pl.node && pl.node.todo.length === 0 && pl.nodeMacos.length === 0 &&
+  JSON.stringify(pl.node.record.map((r) => [r.line, r.newest, r.uv, r.uvSrc])) === JSON.stringify([[22, '22.23.5', '1.51.0', sha(fsc('1.51.0'))], [24, '24.22.3', '1.52.1', sha(fsc('1.52.1'))], [26, '26.13.1', '1.52.1', sha(fsc('1.52.1'))]]), JSON.stringify(pl.node || pl))
+pl = plan(wpoll(watchState(noSrc), nodeIndex('same-uv', [...lines, ['26.13.2', '2026-11-14']])))
+check('watch: no fs.c hash yet, a new 26.x with the same libuv and fs.c: recorded with its hash, no item', pl.node && pl.node.todo.length === 0 &&
+  pl.node.record.some((r) => r.line === 26 && r.newest === '26.13.2' && r.uvSrc === sha(fsc('1.52.1'))), JSON.stringify(pl.node || pl))
+pl = plan(wpoll(watchState(noSrc), nodeIndex('new-src', [...lines, ['26.13.4', '2026-11-14']])))
+check('watch: no fs.c hash yet, a new 26.x whose fs.c differs from the newest release\'s: an item', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '26.13.4' && pl.node.todo[0].uvChange === true, JSON.stringify(pl.node || pl))
+
+// 17h. Fail closed on fs.c as on version.h: missing for a new release,
+//      missing for a seed, empty.
+uvh('26.15.2', '1.52.1', null)
+r16 = wpoll(watchState(steady), nodeIndex('no-src', [...lines, ['26.15.2', '2026-11-14']]))
+check('watch: fs.c of a new release cannot be read: the poll fails', r16.status !== 0 && /libuv source of Node 26\.15\.2/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+r16 = wpoll(watchState({ lines: { ...noSrc.lines, 26: { ...noSrc.lines[26], newest: '26.15.2' } } }), nodeIndex('no-src', [...lines, ['26.15.2', '2026-11-14']]))
+check('watch: fs.c of the release a hash is seeded from cannot be read: the poll fails', r16.status !== 0 && /libuv source of Node 26\.15\.2/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+uvh('26.15.3', '1.52.1', '')
+r16 = wpoll(watchState(steady), nodeIndex('empty-src', [...lines, ['26.15.3', '2026-11-14']]))
+check('watch: an empty fs.c: the poll fails', r16.status !== 0 && /fs\.c is empty/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+
+// 17i. A release whose date does not parse fails the poll (its line would
+//      otherwise drop out of the watched lines).
+r16 = wpoll(watchState(steady), nodeIndex('undated', [...lines, ['26.13.2', 'soon']]))
+check('watch: a release with a date that does not parse: the poll fails', r16.status !== 0 && /v26\.13\.2 has no readable date/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+
+// 17j. `node: { lines: {} }` (an edited state) is a first run, not three
+//      new majors.
+pl = plan(wpoll(watchState({ lines: {} }), nodeIndex('ordinary', lines)))
+check('watch: a state with no Node line is a first run: 22 and 24 recorded, 26 tested, no new major', pl.node && JSON.stringify(pl.node.record.map((r) => r.line)) === '[22,24]' &&
+  pl.node.todo.length === 1 && pl.node.todo[0].node === '26.13.1' && pl.node.todo[0].newMajor === false, JSON.stringify(pl.node || pl))
+
 // 18. Yarn: a new stable 1.x is an item; 2.x and prereleases are not.
 yarnVersions(['1.22.23', '1.23.0-rc.1', '2.4.4'])
 pl = plan(wpoll(watchState(steady), nodeIndex('ordinary', lines)))
@@ -306,7 +363,7 @@ function wreport (state, pl, results) {
     body: fs.readFileSync(path.join(out, 'body.md'), 'utf8'),
   }
 }
-const uvItem = { node: '26.14.0', line: 26, uv: '1.54.0', uvBefore: '1.52.1', reason: 'libuv 1.52.1 → 1.54.0 in Node 26', npm: true, yarn: true, newMajor: false }
+const uvItem = { node: '26.14.0', line: 26, uv: '1.54.0', uvSrc: sha(fsc('1.54.0')), uvBefore: '1.52.1', uvSrcBefore: sha(fsc('1.52.1')), uvChange: true, reason: 'libuv 1.52.1 → 1.54.0 in Node 26', npm: true, yarn: true, newMajor: false }
 const uvJobs = { nodeLinux: ['10.9.10', '11.21.1', '12.2.1'].map((v) => ({ key: `node26.14.0-npm${v}`, node: '26.14.0', npm: v })), nodeMacos: [{ key: 'node26.14.0', node: '26.14.0', yarn: '1.22.22' }] }
 const linuxOk = Object.fromEntries(uvJobs.nodeLinux.map((e) => [`nodelinux-${e.key}`, { npm: e.npm, node: `v${e.node}`, suites: suitesOk }]))
 const wplan = (todo, extra = {}) => ({ node: { todo, record: [], watched: [22, 24, 26] }, yarn: { todo: [], record: null }, ...uvJobs, ...extra })
@@ -314,7 +371,7 @@ const wplan = (todo, extra = {}) => ({ node: { todo, record: [], watched: [22, 2
 // 19. libuv change, every suite green, the facts as recorded: nobody asked.
 let w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites() })
 check('watch report: libuv change, green, facts as recorded: no comment, green run, uv and verified updated', w.comment === '' && w.flags.notify === false && w.state.node.lines[26].uv === '1.54.0' && w.state.node.lines[26].verified === '26.14.0' && w.state.node.lines[26].action === 'none', JSON.stringify({ l: w.state.node.lines[26], f: w.flags }))
-check('watch report: the body has the Node table and the Yarn line', /\| 26 \| 26\.14\.0 \| 1\.54\.0 \|/.test(w.body) && /Yarn 1 release watch\*\*: newest release seen 1\.22\.22/.test(w.body), w.body.split('\n').filter((l) => /Node|Yarn/.test(l)).join(' / '))
+check('watch report: the body has the Node table and the Yarn line', /\| 26 \| 26\.14\.0 \| 1\.54\.0 \(fs\.c [0-9a-f]{12}\) \|/.test(w.body) && w.state.node.lines[26].uvSrc === sha(fsc('1.54.0')) && /Yarn 1 release watch\*\*: newest release seen 1\.22\.22/.test(w.body), w.body.split('\n').filter((l) => /Node|Yarn/.test(l)).join(' / '))
 
 // 20. libuv change, the facts differ: a comment, notify.
 w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(true, { ...factsOk, mtime: true }) })
@@ -359,6 +416,24 @@ check('watch report: a Linux result of another npm: fail', w.state.node.lines[26
 //      job whose Node reports another asks for a person.
 w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(true, factsOk, 'v26.14.0', '1.22.22', '1.54.0-dev') })
 check('watch report: runtime libuv 1.54.0-dev, version.h 1.54.0: the line keeps 1.54.0, a person is asked', w.state.node.lines[26].uv === '1.54.0' && w.state.node.lines[26].uvRuntime === '1.54.0-dev' && w.flags.notify && /the job's Node reports 1\.54\.0-dev/.test(w.comment), JSON.stringify(w.state.node.lines[26]))
+
+// 22e. A libuv change on a line recorded without facts (24 after the first
+//      run): nothing to compare the new facts with, so a person is asked,
+//      green or not; the same for an fs.c change.
+const jobs24 = (v) => ({ nodeLinux: ['10.9.10', '11.21.1', '12.2.1'].map((x) => ({ key: `node${v}-npm${x}`, node: v, npm: x })), nodeMacos: [{ key: `node${v}`, node: v, yarn: '1.22.22' }] })
+const res24 = (v, uv) => ({ ...Object.fromEntries(['10.9.10', '11.21.1', '12.2.1'].map((x) => [`nodelinux-node${v}-npm${x}`, { npm: x, node: `v${v}`, suites: suitesOk }])), [`nodemacos-node${v}`]: ysuites(true, factsOk, `v${v}`, '1.22.22', uv) })
+const uv24 = { node: '24.23.0', line: 24, uv: '1.53.0', uvSrc: sha(fsc('1.53.0')), uvBefore: '1.52.1', uvSrcBefore: sha(fsc('1.52.1')), uvChange: true, reason: 'libuv 1.52.1 → 1.53.0 in Node 24', npm: true, yarn: true, newMajor: false }
+w = wreport(watchState(steady), { ...wplan([uv24]), ...jobs24('24.23.0') }, res24('24.23.0', '1.53.0'))
+check('watch report: a libuv change on a line recorded without facts: verified, but action needed, said in the comment', w.state.node.lines[24].suites === 'pass' && w.state.node.lines[24].verified === '24.23.0' &&
+  w.state.node.lines[24].action === 'action needed' && w.flags.notify && /No facts to compare with\*\*: Node 24 was recorded without a test/.test(w.comment) && w.state.node.lines[24].facts && w.state.node.lines[24].facts.atime === true, JSON.stringify({ l: w.state.node.lines[24], f: w.flags }))
+const src24 = { ...uv24, node: '24.22.4', uv: '1.52.1', uvSrc: sha('patched'), uvBefore: null, reason: "libuv's fs.c … in Node 24" }
+w = wreport(watchState(steady), { ...wplan([src24]), ...jobs24('24.22.4') }, res24('24.22.4', '1.52.1'))
+check('watch report: an fs.c change on a line recorded without facts: action needed; the line keeps the new hash', w.state.node.lines[24].action === 'action needed' && /No facts to compare with/.test(w.comment) && /fs\.c [0-9a-f]{12} → [0-9a-f]{12}/.test(w.comment) && w.state.node.lines[24].uvSrc === sha('patched'), JSON.stringify({ l: w.state.node.lines[24], c: w.comment.slice(0, 400) }))
+
+// 22f. An item with no job at all (a plan that names none for it) is not
+//      a pass: verdict of no jobs is incomplete.
+w = wreport(watchState(steady), { node: { todo: [], record: [], watched: [22, 24, 26] }, yarn: { todo: [{ yarn: '1.22.22', reason: 'requested' }], record: null }, nodeLinux: [], nodeMacos: [] }, {})
+check('watch report: an item with no job: incomplete, not verified, red', w.state.yarn.suites === 'incomplete' && !w.state.yarn.verified && w.flags.red, JSON.stringify({ y: w.state.yarn, f: w.flags }))
 
 // 23. Recorded releases only (the "nothing to test" path): state updated,
 //     green.

@@ -19,10 +19,10 @@
 #           be told) or for a new major.
 #   macos   the same suites, for those releases only (macOS bills 10x).
 #   node-linux / node-macos  the Node and Yarn 1 release watch (the poll reads
-#           nodejs.org/dist/index.json, libuv's version.h at each new
-#           release's tag, and Yarn's version list): when a new Node major
-#           appears, or the libuv version of a watched line's newest release
-#           changes, the npm suites on Linux (btrfs; each supported npm line at
+#           nodejs.org/dist/index.json, libuv's version.h and fs.c at each
+#           new release's tag, and Yarn's version list): when a new Node major
+#           appears, or the libuv of a watched line's newest release changes
+#           (its version, or its fs.c: Node cherry-picks libuv fixes), the npm suites on Linux (btrfs; each supported npm line at
 #           its last verified release, the real gates) and the Yarn suites on
 #           macOS (test-yarn1.sh, scripts/yarn-suites.sh, with the hook's
 #           facts) on that Node; a new stable Yarn 1 release, the Yarn suites

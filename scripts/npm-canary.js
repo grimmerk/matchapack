@@ -25,7 +25,7 @@
 // the last monthly run, and per npm major the newest release tested, its
 // results, and the last release that passed (the baseline of the next diff).
 // `node`: per watched Node line its newest release seen, that release's
-// libuv, the release last tested, its results and the hook's facts; `yarn`:
+// libuv (version, and the sha256 of its fs.c: `uvSrc`), the release last tested, its results and the hook's facts; `yarn`:
 // the newest Yarn 1 release seen and the one last tested (NOTES "The Node and
 // Yarn 1 release watch").
 'use strict'
@@ -264,9 +264,9 @@ async function poll (stateFile, opts) {
 // libuv's uv_fs_copyfile, and libuv changes inside a Node line, not only at a
 // major (22.11.0 -> 22.12.0: libuv 1.48.0 -> 1.49.1 made copies keep times).
 // So a Node line is tested again when a new major appears or when the libuv
-// version of its newest release changes; either runs the Yarn suites (macOS)
-// and the npm suites (Linux, btrfs, one job per supported npm line at its
-// last verified release) on that Node. A new stable Yarn 1 release runs the
+// of its newest release changes (its version, or its fs.c: uvSrcOf); either
+// runs the Yarn suites (macOS) and the npm suites (Linux, btrfs, one job per
+// supported npm line at its last verified release) on that Node. A new stable Yarn 1 release runs the
 // Yarn suites with it (none expected: the line is frozen at 1.22.22).
 
 // A line is watched while it has had a release in this many days: on
@@ -303,6 +303,12 @@ async function nodeReleases (file) {
   if (out.length < 500) {
     die(`nodejs.org/dist/index.json: only ${out.length} releases, refusing to decide on that`)
   }
+  // A date that does not parse would drop its line from the watched lines
+  // (an age of NaN days is never within NODE_WATCH_DAYS): fail instead.
+  const undated = out.find((r) => Number.isNaN(Date.parse(r.date)))
+  if (undated) {
+    die(`nodejs.org/dist/index.json: v${undated.version} has no readable date (${JSON.stringify(undated.date)}), refusing to decide which lines are watched`)
+  }
   return out.sort((a, b) => cmp(a.version, b.version))
 }
 
@@ -333,6 +339,39 @@ async function uvOf (version, dir) {
   return v.join('.')
 }
 
+// The sha256 of libuv's deps/uv/src/unix/fs.c (uv_fs_copyfile's file) at a
+// Node release's tag (in tests: <dir>/v<version>.fs.c). Node cherry-picks
+// libuv fixes without changing libuv's version: fs.c changed at v26.0.0 ->
+// v26.1.0 -> v26.2.0 while version.h stayed 1.52.1 (nodejs/node da7f2c8cc,
+// "unix: treat futimens() as best-effort in copyfile"; measured 2026-11-15).
+// So a changed hash is a trigger as a changed version is. Any failure fails
+// the poll, as for version.h.
+async function uvSrcOf (version, dir) {
+  let text
+  if (dir) {
+    const f = path.join(dir, `v${version}.fs.c`)
+    if (!fs.existsSync(f)) {
+      die(`libuv source of Node ${version}: ${f} not found`)
+    }
+    text = fs.readFileSync(f)
+  } else {
+    const url = `https://raw.githubusercontent.com/nodejs/node/v${version}/deps/uv/src/unix/fs.c`
+    const res = await netFetch(url)
+    if (!res.ok) {
+      die(`libuv source of Node ${version}: ${url}: HTTP ${res.status}`)
+    }
+    text = Buffer.from(await res.arrayBuffer())
+  }
+  if (!text.length) {
+    die(`libuv source of Node ${version}: fs.c is empty`)
+  }
+  return crypto.createHash('sha256').update(text).digest('hex')
+}
+
+const short = (h) => (h ? h.slice(0, 12) : '?')
+// Both libuv facts of a release: its version and its fs.c.
+const libuvOf = async (version, dir) => ({ uv: await uvOf(version, dir), uvSrc: await uvSrcOf(version, dir) })
+
 // The stable Yarn 1 releases (1.x.y), oldest first.
 async function yarn1Versions (file) {
   let vs
@@ -359,15 +398,20 @@ const watchRetry = (line, head) => (line && line.tested ? retryReason(line, head
 async function watchPoll (state, opts, npmAll, supported, date) {
   const releases = await nodeReleases(opts.nodeIndexJson)
   const lines = (state.node && state.node.lines) || {}
+  // A state with no Node line (no `node` yet, or `node: { lines: {} }`, an
+  // edited state) is a first run: read as a known state, every watched line
+  // would be enrolled as a new major.
+  const firstRun = !Object.keys(lines).length
   const majors = [...new Set(releases.map((r) => major(r.version)))].sort((a, b) => a - b)
   const newestOf = (m) => releases.filter((r) => major(r.version) === m).pop()
   const watched = majors.filter((m) => days(newestOf(m).date, date) <= NODE_WATCH_DAYS)
   const top = majors[majors.length - 1]
+  const libuv = (v) => libuvOf(v, opts.nodeUvDir)
   const todo = []
   const record = []
   const add = (t) => {
     if (!todo.some((x) => x.node === t.node)) {
-      todo.push({ npm: true, yarn: true, newMajor: false, uvBefore: null, ...t })
+      todo.push({ npm: true, yarn: true, newMajor: false, uvBefore: null, uvSrcBefore: null, uvChange: false, ...t })
     }
   }
   if (opts.node) {
@@ -378,18 +422,18 @@ async function watchPoll (state, opts, npmAll, supported, date) {
     // A new major only above every line the state knows (a first run, with
     // no state, tests the newest line as an ordinary one).
     const knownLines = Object.keys(lines).map(Number)
-    add({ node: opts.node, line: m, uv: await uvOf(opts.node, opts.nodeUvDir), reason: 'requested', newMajor: !!state.node && !lines[m] && m > Math.max(0, ...knownLines) })
+    add({ node: opts.node, line: m, ...(await libuv(opts.node)), reason: 'requested', newMajor: !firstRun && !lines[m] && m > Math.max(0, ...knownLines) })
   }
-  if (!state.node) {
+  if (firstRun) {
     // First run: record the watched lines; test only the newest once (Node
     // 22 and 24 run in pull-request CI already; 26 in no workflow).
     for (const m of watched) {
       const r = newestOf(m)
-      const uv = await uvOf(r.version, opts.nodeUvDir)
+      const u = await libuv(r.version)
       if (m === top) {
-        add({ node: r.version, line: m, uv, reason: `first run: Node ${m}, the newest line` })
+        add({ node: r.version, line: m, ...u, reason: `first run: Node ${m}, the newest line` })
       } else {
-        record.push({ line: m, newest: r.version, uv })
+        record.push({ line: m, newest: r.version, ...u })
       }
     }
   } else {
@@ -400,7 +444,7 @@ async function watchPoll (state, opts, npmAll, supported, date) {
     const maxKnown = Math.max(0, ...known)
     for (const m of [...new Set([...watched, top])].filter((k) => !known.includes(k)).sort((a, b) => a - b)) {
       const r = newestOf(m)
-      add({ node: r.version, line: m, uv: await uvOf(r.version, opts.nodeUvDir), reason: m > maxKnown ? `Node ${m} is new` : `Node ${m} is not in the state`, newMajor: m > maxKnown })
+      add({ node: r.version, line: m, ...(await libuv(r.version)), reason: m > maxKnown ? `Node ${m} is new` : `Node ${m} is not in the state`, newMajor: m > maxKnown })
     }
     for (const m of known) {
       const line = lines[m]
@@ -410,28 +454,42 @@ async function watchPoll (state, opts, npmAll, supported, date) {
         // to be repeated (one requested by hand) is repeated.
         const again = watchRetry(line, opts.head)
         if (again) {
-          add({ node: line.newest || line.tested, line: m, uv: line.uv, reason: `${line.tested} ${again}`, newMajor: !!line.newMajor })
+          add({ node: line.newest || line.tested, line: m, uv: line.uv, uvSrc: line.uvSrc || null, reason: `${line.tested} ${again}`, newMajor: !!line.newMajor })
         }
         continue
       }
+      // A watched line with no fs.c hash yet (a state from before the hash
+      // was kept): the hash of its newest release is read and recorded (a
+      // seed, no test), and a new release is compared with it.
+      const seed = !line.uvSrc && line.newest ? await uvSrcOf(line.newest, opts.nodeUvDir) : null
+      const srcBefore = line.uvSrc || seed
       if (!line.newest || cmp(r.version, line.newest) > 0) {
-        const uv = await uvOf(r.version, opts.nodeUvDir)
+        const u = await libuv(r.version)
         // A line whose last test is to be repeated (incomplete, or red with
         // matchapack changed) tests the new release instead.
         const again = watchRetry(line, opts.head)
-        if (uv !== line.uv) {
-          add({ node: r.version, line: m, uv, uvBefore: line.uv || null, reason: `libuv ${line.uv || '?'} → ${uv} in Node ${m}` })
+        const changed = []
+        if (u.uv !== line.uv) {
+          changed.push(`libuv ${line.uv || '?'} → ${u.uv}`)
+        }
+        if (srcBefore && u.uvSrc !== srcBefore) {
+          changed.push(`libuv's fs.c ${short(srcBefore)} → ${short(u.uvSrc)}${u.uv === line.uv ? ` (libuv still ${u.uv})` : ''}`)
+        }
+        if (changed.length) {
+          add({ node: r.version, line: m, ...u, uvBefore: u.uv !== line.uv ? line.uv || null : null, uvSrcBefore: srcBefore !== u.uvSrc ? srcBefore : null, uvChange: true, reason: `${changed.join(', ')} in Node ${m}` })
         } else if (again) {
-          add({ node: r.version, line: m, uv, reason: `${line.tested} ${again}: the newest release instead`, newMajor: !!line.newMajor })
+          add({ node: r.version, line: m, ...u, reason: `${line.tested} ${again}: the newest release instead`, newMajor: !!line.newMajor })
         } else {
-          record.push({ line: m, newest: r.version, uv })
+          record.push({ line: m, newest: r.version, ...u })
         }
       } else {
         // Again: the line's newest release (recorded releases share the
-        // line's libuv), not an older one tested before.
+        // line's libuv and fs.c), not an older one tested before.
         const again = watchRetry(line, opts.head)
         if (again) {
-          add({ node: line.newest, line: m, uv: line.uv, reason: `${line.tested} ${again}`, newMajor: !!line.newMajor })
+          add({ node: line.newest, line: m, uv: line.uv, uvSrc: srcBefore, reason: `${line.tested} ${again}`, newMajor: !!line.newMajor })
+        } else if (seed) {
+          record.push({ line: m, newest: line.newest, uv: line.uv, uvSrc: seed })
         }
       }
     }
@@ -924,6 +982,10 @@ function jobResults (entries, results) {
   })
 }
 function verdict (jobs) {
+  // No job at all is no check: never a pass.
+  if (!jobs.length) {
+    return 'incomplete'
+  }
   if (jobs.some((j) => j.s && (j.wrong || !suitesPass(j.s)))) {
     return 'fail'
   }
@@ -941,7 +1003,7 @@ function watchReport (state, plan, res, run) {
   // Releases seen with the libuv of the line's last: only recorded.
   for (const r of N.record) {
     const l = state.node.lines[r.line] || {}
-    state.node.lines[r.line] = { ...l, newest: r.newest, uv: r.uv, checked: plan.date }
+    state.node.lines[r.line] = { ...l, newest: r.newest, uv: r.uv, uvSrc: r.uvSrc || l.uvSrc || null, checked: plan.date }
   }
   for (const t of N.todo) {
     const lin = jobResults((plan.nodeLinux || []).filter((e) => e.node === t.node), res.nodelinux)
@@ -956,6 +1018,10 @@ function watchReport (state, plan, res, run) {
     }
     const prev = state.node.lines[t.line] || {}
     const factsChanged = !!(prev.facts && facts && !sameFacts(prev.facts, facts))
+    // A libuv change (its version or its fs.c) on a line with no facts from
+    // an earlier test (22 and 24 after the first run were recorded without
+    // one): nothing to compare the new facts with, so a person compares.
+    const noFactsBefore = !!t.uvChange && !prev.facts
     // The libuv version the next poll compares with is the one read from
     // version.h (t.uv); the one the job's Node reports is shown, and asks for
     // a person when the two differ.
@@ -963,7 +1029,7 @@ function watchReport (state, plan, res, run) {
     const uvDiffers = !!(uvRuntime && t.uv && uvRuntime !== t.uv)
     // A new major always asks for a person (enabling it in pull-request CI
     // is a person's change); a libuv change only when something differs.
-    const action = t.newMajor || suites !== 'pass' || factsChanged || uvDiffers || (t.yarn && !facts) ? 'action needed' : 'none'
+    const action = t.newMajor || suites !== 'pass' || factsChanged || noFactsBefore || uvDiffers || (t.yarn && !facts) ? 'action needed' : 'none'
     const newer = !prev.newest || cmp(t.node, prev.newest) >= 0
     // An older release than the one the line last tested (one requested by
     // hand): its row and comment only; the line keeps the newer release's
@@ -974,6 +1040,7 @@ function watchReport (state, plan, res, run) {
         ...prev,
         newest: newer ? t.node : prev.newest,
         uv: newer ? t.uv : prev.uv,
+        uvSrc: newer ? t.uvSrc || null : prev.uvSrc || null,
         tested: t.node,
         uvTested: t.uv,
         uvRuntime,
@@ -997,7 +1064,7 @@ function watchReport (state, plan, res, run) {
     out.red = out.red || suites !== 'pass'
     if (action !== 'none') {
       out.attention = true
-      out.sections.push(nodeSection(t, lin, mac, prev, facts, factsChanged, suites, action, uvRuntime).join('\n'))
+      out.sections.push(nodeSection(t, lin, mac, prev, facts, factsChanged, suites, action, uvRuntime, noFactsBefore).join('\n'))
     }
   }
   if (Y.record) {
@@ -1034,9 +1101,9 @@ function watchReport (state, plan, res, run) {
   return out
 }
 
-function nodeSection (t, lin, mac, prev, facts, factsChanged, suites, action, uvRuntime) {
+function nodeSection (t, lin, mac, prev, facts, factsChanged, suites, action, uvRuntime, noFactsBefore) {
   const out = [`### Node ${t.node} (${t.reason}): ${action}`, '']
-  out.push(`- libuv: ${t.uvBefore ? `${t.uvBefore} → ` : ''}${t.uv} (version.h at the tag)${uvRuntime && uvRuntime !== t.uv ? `; **the job's Node reports ${uvRuntime}**` : ''}`)
+  out.push(`- libuv: ${t.uvBefore ? `${t.uvBefore} → ` : ''}${t.uv} (version.h at the tag)${uvRuntime && uvRuntime !== t.uv ? `; **the job's Node reports ${uvRuntime}**` : ''}; fs.c ${t.uvSrcBefore ? `${short(t.uvSrcBefore)} → ` : ''}${short(t.uvSrc)}`)
   for (const j of [...mac, ...lin].filter((x) => x.wrong)) {
     out.push(`- **${j.e.key}: the result is not of the release asked for** (${j.wrong}): counted as a failure`)
   }
@@ -1048,6 +1115,9 @@ function nodeSection (t, lin, mac, prev, facts, factsChanged, suites, action, uv
     }
   }
   out.push(`- What Node's fs.copyFile keeps (the Yarn hook's probe): ${factsText(facts)}${factsChanged ? ` — **changed** (was: ${factsText(prev.facts)})` : ''}`)
+  if (noFactsBefore) {
+    out.push(`- **No facts to compare with**: Node ${t.line} was recorded without a test, so whether this libuv change changed what fs.copyFile keeps is not known. Compare by hand: the hook's facts on the line's previous release (\`scripts/yarn-suites.sh\` on Node ${prev.newest || prev.tested || '?'}) against these. From now on the line's facts are these.`)
+  }
   if (t.newMajor) {
     out.push(`- Node ${t.line} is a new major: adding it to pull-request CI is a person's change.`)
   }
@@ -1160,7 +1230,7 @@ function body (state, plan) {
     for (const m of Object.keys(state.node.lines).map(Number).sort((a, b) => a - b)) {
       const l = state.node.lines[m]
       const watched = !plan.node || !plan.node.watched || plan.node.watched.includes(m)
-      L.push(`| ${m}${watched ? '' : ' (no longer watched)'} | ${l.newest || '-'} | ${l.uv || '-'} | ${l.tested ? `${l.tested}, ${l.testedOn || l.checked}${l.run ? ` ([run](${l.run}))` : ''}` : '-'} | ${l.tested ? l.yarn || '-' : '-'} | ${l.tested ? l.npm || '-' : '-'} | ${factsText(l.facts)} | ${l.verified || '-'} | ${l.action || '-'} |`)
+      L.push(`| ${m}${watched ? '' : ' (no longer watched)'} | ${l.newest || '-'} | ${l.uv || '-'}${l.uvSrc ? ` (fs.c ${short(l.uvSrc)})` : ''} | ${l.tested ? `${l.tested}, ${l.testedOn || l.checked}${l.run ? ` ([run](${l.run}))` : ''}` : '-'} | ${l.tested ? l.yarn || '-' : '-'} | ${l.tested ? l.npm || '-' : '-'} | ${factsText(l.facts)} | ${l.verified || '-'} | ${l.action || '-'} |`)
     }
   }
   if (state.yarn) {
