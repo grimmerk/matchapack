@@ -240,16 +240,38 @@ fn homebrew_launcher(real: &Path) -> Option<(PathBuf, String)> {
 /// resolved to a file of Yarn 1's npm package (an npm-global install:
 /// `…/yarn/bin/yarn.js`, or the `bin/yarn` sh launcher beside it), to
 /// Homebrew's launcher for it (`homebrew_launcher`), or to corepack's
-/// launcher. Yarn 2+ or another launcher is not handled.
+/// launcher. A `yarn` on PATH that is none of these (a version manager's
+/// shim: volta, asdf, mise in shim mode) is asked what it starts in this
+/// directory (`util::probe_launcher`), and that is resolved the same way.
+/// Yarn 2+ or another launcher is not handled.
 pub fn find_yarn_js() -> std::result::Result<YarnBin, String> {
-    let p = match std::env::var_os("MATCHAPACK_YARN_JS") {
-        Some(p) => PathBuf::from(p),
+    match std::env::var_os("MATCHAPACK_YARN_JS") {
+        Some(p) => yarn_bin(Path::new(&p)),
         None => {
             let path = std::env::var_os("PATH").ok_or("no PATH")?;
-            std::env::split_paths(&path).map(|d| d.join("yarn")).find(|p| p.is_file()).ok_or("no yarn on PATH")?
+            let cwd = std::env::current_dir().map_err(|e| format!("the current directory: {e}"))?;
+            find_yarn_on(&path, &cwd, &|| util::private_run_dir().map_err(|e| format!("{e:#}")))
         }
-    };
-    let real = std::fs::canonicalize(&p).map_err(|e| format!("resolving {}: {e}", p.display()))?;
+    }
+}
+
+/// `find_yarn_js` for the `yarn` on `path`, run in `cwd`.
+fn find_yarn_on(path: &std::ffi::OsStr, cwd: &Path, run_dir: &dyn Fn() -> std::result::Result<PathBuf, String>) -> std::result::Result<YarnBin, String> {
+    let p = std::env::split_paths(path).map(|d| d.join("yarn")).find(|p| p.is_file()).ok_or("no yarn on PATH")?;
+    match yarn_bin(&p) {
+        Err(e) if e.contains(NOT_HANDLED) => {
+            let target = util::probe_launcher(&p, "yarn", path, cwd, &run_dir()?).map_err(|why| format!("{e}; {why}"))?;
+            yarn_bin(&target).map_err(|why| format!("the yarn on PATH ({}) starts {}: {why}", p.display(), target.display()))
+        }
+        r => r,
+    }
+}
+
+const NOT_HANDLED: &str = "is neither Yarn 1's npm package, Homebrew's launcher for it, nor corepack's launcher";
+
+/// `find_yarn_js` for the file `p`.
+fn yarn_bin(p: &Path) -> std::result::Result<YarnBin, String> {
+    let real = std::fs::canonicalize(p).map_err(|e| format!("resolving {}: {e}", p.display()))?;
     if is_corepack_launcher(&real) {
         return Ok(YarnBin { js: real, version: String::new(), corepack: true, env: Vec::new() });
     }
@@ -264,7 +286,7 @@ pub fn find_yarn_js() -> std::result::Result<YarnBin, String> {
     };
     let version = yarn1_package(&js).map_err(|e| {
         if e.ends_with("npm package") {
-            format!("{} is neither Yarn 1's npm package, Homebrew's launcher for it, nor corepack's launcher (Yarn 2+ or another launcher is not handled)", real.display())
+            format!("{} {NOT_HANDLED} (Yarn 2+ or another launcher is not handled)", real.display())
         } else {
             e
         }
@@ -1465,6 +1487,31 @@ mod tests {
         let elsewhere = keg.join("bin/yarnpkg-copy");
         std::fs::write(&elsewhere, format!("#!/bin/bash\nPREFIX=\"{k}\" exec \"{j}\"  \"$@\"\n")).unwrap();
         assert_eq!(homebrew_launcher(&elsewhere), None);
+    }
+
+    /// The Yarn behind each version manager's `yarn` shim (simulated:
+    /// util::tests::fake_version_manager) is found by asking the shim; one
+    /// that sets a variable only for Yarn (as Homebrew's launcher does) is
+    /// declined, and the message still says the launcher was not recognized.
+    #[test]
+    fn yarn_behind_version_manager_shims() {
+        let Some(node) = util::tests::real_node() else { return eprintln!("SKIP: no node") };
+        let d = std::fs::canonicalize(crate::store::tests::scratch("yarn-shims")).unwrap();
+        for flavor in ["volta", "mise", "asdf"] {
+            let t = d.join(flavor);
+            let path = util::tests::path_with(&util::tests::fake_version_manager(&t, flavor, &node));
+            let run = t.join("run");
+            std::fs::create_dir_all(&run).unwrap();
+            let run_dir = || Ok(run.clone());
+            let y = find_yarn_on(&path, &t, &run_dir).unwrap();
+            assert_eq!((y.js, y.version.as_str(), y.corepack, y.env.len()), (t.join("img/yarn/1.22.22/bin/yarn.js"), "1.22.22", false, 0), "{flavor}");
+            let hb = t.join("homebrew-like");
+            std::fs::create_dir_all(&hb).unwrap();
+            std::fs::write(hb.join(".fakeyarnprefix"), "").unwrap();
+            let e = find_yarn_on(&path, &hb, &run_dir).unwrap_err();
+            assert!(e.contains(NOT_HANDLED) && e.contains("sets PREFIX"), "{flavor}: {e}");
+            assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0, "{flavor}: the probe's files are gone");
+        }
     }
 
     #[test]

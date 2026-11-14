@@ -70,7 +70,7 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy, String)> {
     if std::fs::symlink_metadata(root.join("node_modules")).is_ok_and(|m| m.file_type().is_symlink()) {
         bail!("the project directory's node_modules is a symlink; npm ci replaces it, matchapack does not");
     }
-    let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
+    let npm_dir = util::npm_lookup().map_err(|e| anyhow!(e))?;
     for m in ["lib/cli.js", "bin/npm-cli.js", "node_modules/pacote/package.json"] {
         if !npm_dir.join(m).exists() {
             bail!("npm installation {} has no {m}", npm_dir.display());
