@@ -32,6 +32,9 @@ unset MATCHAPACK_ENGINE
 # ~/.config/matchapack (the run's helper files go to <store>/tmp).
 export MATCHAPACK_STORE=${MATCHAPACK_STORE:-$(cd "$work" && pwd -P)/store}
 export MATCHAPACK_VERIFY_CLONES=some
+# npm 12 refuses tarballs from a non-registry URL unless told otherwise; the
+# local fixtures install from 127.0.0.1 (as in test-inject.sh).
+[ "${npm_version%%.*}" -ge 12 ] && export npm_config_allow_remote=all
 echo "npm $npm_version, node $(node -v), $("$bin" --version)"
 
 # The optional-upward fixture installs from a local tarball server.
