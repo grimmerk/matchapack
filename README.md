@@ -73,9 +73,15 @@ projects (see "Yarn 1 (classic) projects").
   same node binary, with the shim's whole environment (its PATH, its own
   variables), so install scripts see what they see with plain npm or Yarn.
   It runs plain npm or Yarn instead, and says why, when it cannot do that
-  exactly: the shim gives node command-line options, starts it in another
-  directory, changes NODE_OPTIONS, or does not start node within 10 s;
-  also for corepack's `npm` launcher, which is not handled.
+  exactly: the shim gives node command-line options, adds arguments of
+  its own to npm's or Yarn's, starts node in another directory, changes
+  NODE_OPTIONS, or does not start node within 10 s; also for corepack's
+  `npm` launcher, which is not handled.
+- With npm's or Yarn's own files on PATH (nvm and the others above), on
+  macOS matchapack starts node without `DYLD_*` variables when npm or
+  Yarn would reach node through `#!/usr/bin/env node` (or another script
+  run by a system binary), because macOS removes them there; so install
+  scripts see the same environment as with plain npm or Yarn.
 
 ## How it installs (the inject engine)
 
@@ -135,7 +141,8 @@ matchapack runs plain npm instead, and prints why, before anything starts,
 when:
 - the `npm` on PATH cannot be traced to npm's own package, or not started
   exactly as it starts it (a launcher it cannot ask, corepack's `npm`
-  launcher, a shim that gives node options; see "Node version managers");
+  launcher, a shim that gives node options or arguments of its own; see
+  "Node version managers");
 - npm is not a major version this engine has been run on: 10, 11 and 12. It
   has no code per npm version, so every 10.x, 11.x and 12.x passes this check
   (`INJECT_NPM_MAJORS` in src/wrapper.rs; `MATCHAPACK_NPM_VERSIONS=any`, or a
