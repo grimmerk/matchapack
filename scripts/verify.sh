@@ -65,8 +65,11 @@ base=${MATCHAPACK_VERIFY_BASELINE:-ci}
 # Harness runs log to the work dir unless the caller chose a log dir.
 export MATCHAPACK_LOG_DIR=${MATCHAPACK_LOG_DIR:-$work/logs}
 # The harness is how a new npm version gets verified, so B installs on any npm
-# unless the caller narrows it (`matchapack install` applies the version gate).
+# unless the caller narrows it (`matchapack install` applies the version gate
+# and the hook the pacote fingerprint gate; verify-npm.sh says whether this
+# npm's fingerprint is listed).
 export MATCHAPACK_NPM_VERSIONS=${MATCHAPACK_NPM_VERSIONS:-any}
+export MATCHAPACK_NPM_FINGERPRINT=${MATCHAPACK_NPM_FINGERPRINT:-any}
 # The copies live under the work dir: keep the user's trial scope file
 # (~/.config/matchapack/paths) from deciding a wrapper run.
 export MATCHAPACK_PATHS=${MATCHAPACK_PATHS:-$(cd "$work" && pwd -P)}

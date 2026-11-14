@@ -5,8 +5,14 @@
 # What the fixture harness cannot show: that the hook really cloned, that a
 # disabled hook and a store miss still give npm ci's tree, the gates before
 # npm starts, that npm's own failures stay npm's, the store lock and the
-# project record, and the hook's eligibility rules (test-inject-hook.js).
+# project record, the hook's eligibility rules and result trap
+# (test-inject-hook.js), the pacote fingerprint gate, and npm 12 patches.
 # Uses its own store and log directory, never the real ones.
+# To run it with another npm, put that npm first on PATH (for example one
+# installed with `npm i --prefix <dir> npm@12.2.2`: PATH=<dir>/node_modules/.bin:$PATH).
+# An npm whose pacote fingerprint is not in src/npm-fingerprints.json fails
+# case 0b and clones nothing; MATCHAPACK_NPM_FINGERPRINT=any runs the cases
+# anyway (to see whether its fingerprint can be added).
 set -uo pipefail
 work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
@@ -57,6 +63,7 @@ wrapped() { # dir command...
   (cd "$d" && PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/matchapack.sh'; $*" > "$work/out" 2>&1)
 }
 last_log() { tail -1 "$work/logs/log.jsonl" | python3 -c "import json,sys;r=json.load(sys.stdin);print($1)"; }
+last_log_in() { tail -1 "$1/log.jsonl" | python3 -c "import json,sys;r=json.load(sys.stdin);print($2)"; }
 # classic_entries <store>: make the store's entries what the classic engine
 # (removed in PR C2) left in stores it filled: no made-by record, and lc-dup's
 # run.sh (listed twice in its tarball) with mode 644 where npm's extraction
@@ -81,6 +88,17 @@ if node "$here/scripts/test-inject-hook.js" "$npm_dir" > "$work/out" 2>&1; then
   ok "hook rules: $(grep -c '^PASS' "$work/out") eligibility cases against pacote $(node -p "require('$npm_dir/node_modules/pacote/package.json').version")"
 else
   bad "hook rules: $(grep '^FAIL' "$work/out" | head -3)"
+fi
+
+# 0b. This npm's pacote code is on the list the binary carries (otherwise
+#     every install below runs as plain npm and clones nothing).
+npm_fp=$(node "$here/src/inject.js" --fingerprint "$npm_dir")
+if grep -q "\"$npm_fp\"" "$here/src/npm-fingerprints.json"; then
+  ok "fingerprint: npm $(npm -v)'s pacote ($npm_fp) is in src/npm-fingerprints.json"
+elif [ "${MATCHAPACK_NPM_FINGERPRINT-}" = any ]; then
+  echo "NOTE fingerprint: npm $(npm -v)'s pacote ($npm_fp) is NOT in src/npm-fingerprints.json; running with MATCHAPACK_NPM_FINGERPRINT=any"
+else
+  bad "fingerprint: npm $(npm -v)'s pacote ($npm_fp) is not in src/npm-fingerprints.json (MATCHAPACK_NPM_FINGERPRINT=any to run the cases anyway)"
 fi
 
 # The pacote and tar npm's arborist loads, as node resolves them: what the
@@ -324,13 +342,14 @@ env -u MATCHAPACK_ENGINE "$bin" install "$p" -- --no-audit --no-fund > "$work/ou
   && ok "MATCHAPACK_ENGINE empty, through the shell function: the inject engine" || bad "default engine wrapper: rc=$rc"
 
 # 10. npm's failures are npm's: same status, said once, nothing retried.
+#     (npm before 10.6 prints `npm ERR!`, later ones `npm error`.)
 p=$(project outofsync small "d['dependencies']['left-pad']='1.3.0'"); mkdir -p "$p/node_modules/sentinel"
 (cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
 install "$p"; rc=$?
-[ $want != 0 ] && [ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ -d "$p/node_modules/sentinel" ] \
+[ $want != 0 ] && [ $rc = $want ] && [ "$(grep -Ec 'npm (error|ERR!) code EUSAGE' "$work/out")" = 1 ] && [ -d "$p/node_modules/sentinel" ] \
   && ok "lockfile out of sync: npm's own error and status ($rc), node_modules untouched" || bad "out of sync: rc=$rc, npm ci gives $want"
 wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
-[ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
+[ $rc = $want ] && [ "$(grep -Ec 'npm (error|ERR!) code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
   && ok "lockfile out of sync through the shell function: status $rc, npm not run again, logged as npm_failed" || bad "out of sync wrapper: rc=$rc ($(last_log "r['outcome']"))"
 
 # 10a. The version gate is by npm major: this npm (11 or 12) is taken with
@@ -370,6 +389,90 @@ p=$(project helper-declined small)
 [ $rc = 0 ] && grep -q 'no FetcherBase.prototype.extract' "$work/out" && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] \
   && [ "$(grep -c 'added [0-9]* packages' "$work/out")" = 1 ] && same "$ref_small" "$p" \
   && ok "the helper stops before npm: declined, plain npm runs once" || bad "helper declined: rc=$rc ($(last_log "r['outcome']"))"
+
+# npm_copy <name>: a full copy of the npm on PATH, as $work/<name>/bin/npm,
+# for the doctored npm of the cases below (a copy, so that npm and the hook
+# load the same changed files).
+npm_copy() {
+  local c=$work/$1; rm -rf "${c:?}"; mkdir -p "$c/bin"
+  cp -R "$real_npm" "$c/npm"; ln -s ../npm/bin/npm-cli.js "$c/bin/npm"; echo "$c"
+}
+
+# 10c. The fingerprint gate: an npm whose pacote class has one statement more
+#      inside a private method (#entryMode: not part of extract's own text)
+#      runs as plain npm before anything changes, with the fingerprint and
+#      the way out in the message, logged, and counted by `matchapack report`.
+#      MATCHAPACK_NPM_FINGERPRINT=any, or that fingerprint, lets it clone;
+#      another fingerprint does not.
+fpc=$(npm_copy fp-npm)
+python3 - "$fpc/npm/node_modules/pacote/lib/fetcher.js" <<'PY' || bad "fingerprint: could not change pacote's #entryMode"
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+s, n = re.subn(r"(\n  (?:#entryMode|\[_entryMode\]) \(path, mode, type\) \{\n)", r"\1    void 'matchapack test: changed pacote code'\n", s)
+assert n == 1, n
+open(p, "w").write(s)
+PY
+fp_new=$(node "$here/src/inject.js" --fingerprint "$fpc/npm")
+fp_log=$work/logs-fp; rm -rf "${fp_log:?}"
+p=$(project fp-unknown small); mkdir -p "$p/node_modules/sentinel"
+(unset MATCHAPACK_NPM_FINGERPRINT; PATH=$fpc/bin:$PATH; MATCHAPACK_LOG_DIR=$fp_log wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && [ "$fp_new" != "$npm_fp" ] \
+  && grep -qF "matchapack: running plain npm instead (npm $(npm -v) has pacote code this matchapack was not tested with; update matchapack, or set MATCHAPACK_NPM_FINGERPRINT=any to try it; fingerprint $fp_new)" "$work/out" \
+  && ! grep -q 'matchapack inject helper' "$work/out" && [ "$(grep -c 'added [0-9]* packages' "$work/out")" = 1 ] && [ ! -e "$p/node_modules/sentinel" ] \
+  && [ "$(MATCHAPACK_LOG_DIR=$fp_log last_log_in "$fp_log" "r['outcome'], r['engine']")" = "declined inject" ] && same "$ref_small" "$p" \
+  && ok "fingerprint gate: pacote code not on the list ($fp_new) runs as plain npm, once, with the message, tree identical" \
+  || bad "fingerprint gate, unknown: rc=$rc, fingerprint $fp_new ($(grep '^matchapack' "$work/out" | head -2))"
+MATCHAPACK_LOG_DIR=$fp_log "$bin" report > "$work/report" 2>&1 \
+  && grep -qF "npm fingerprint gate: 1 runs went to plain npm, pacote code not tested with this build (npm $(npm -v) ${fp_new:0:16}…: 1)" "$work/report" \
+  && ok "fingerprint gate: matchapack report counts the run" || bad "fingerprint gate: report ($(grep fingerprint "$work/report"))"
+for fpv in any "$fp_new" "$npm_fp,$fp_new"; do
+  p=$(project fp-accepted small)
+  (PATH=$fpc/bin:$PATH; export MATCHAPACK_NPM_FINGERPRINT=$fpv; MATCHAPACK_LOG_DIR=$fp_log wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+  [ $rc = 0 ] && grep -q 'matchapack: added' "$work/out" && [ "$(last_log_in "$fp_log" "r['outcome'], r['inject']['cloned'], r['inject']['fingerprint']")" = "installed $n_small $fp_new" ] \
+    && same "$ref_small" "$p" \
+    && ok "fingerprint gate: MATCHAPACK_NPM_FINGERPRINT=${fpv:0:20}… takes it: $n_small cloned, tree identical" || bad "fingerprint gate, override ${fpv:0:20}: rc=$rc"
+done
+p=$(project fp-other small)
+(PATH=$fpc/bin:$PATH; export MATCHAPACK_NPM_FINGERPRINT=$npm_fp; MATCHAPACK_LOG_DIR=$fp_log wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q "running plain npm instead (npm .* has pacote code this matchapack was not tested with" "$work/out" \
+  && ok "fingerprint gate: a MATCHAPACK_NPM_FINGERPRINT naming another fingerprint does not take it" || bad "fingerprint gate, other override: rc=$rc"
+p=$(project fp-bad small)
+MATCHAPACK_NPM_FINGERPRINT=${fp_new:0:16} "$bin" install "$p" -- --no-audit --no-fund > "$work/out" 2>&1; rc=$?
+[ $rc != 0 ] && grep -q "MATCHAPACK_NPM_FINGERPRINT: ${fp_new:0:16} is not a fingerprint" "$work/out" && [ ! -e "$p/node_modules" ] \
+  && ok "fingerprint gate: a malformed MATCHAPACK_NPM_FINGERPRINT is refused before npm starts" || bad "fingerprint gate, malformed: rc=$rc"
+
+# 10d. The trap on the hook's result: an npm whose caller reads a key of
+#      extract's result other than resolved / integrity / from (here pacote's
+#      exported extract, which arborist calls, reads `files`): matchapack
+#      treats the install as broken, logs the key, and through the shell
+#      function npm ci rebuilds node_modules (npm's "added" line twice: the
+#      hooked run, then the plain one); `matchapack install` stops with an
+#      error.
+trc=$(npm_copy trap-npm)
+python3 - "$trc/npm/node_modules/pacote/lib/index.js" <<'PY' || bad "trap: could not change pacote's extract"
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "extract: (spec, dest, opts) => get(spec, opts).extract(dest),"
+assert s.count(old) == 1
+s = s.replace(old, "extract: (spec, dest, opts) => get(spec, opts).extract(dest).then(r => { void r.files; return r }),")
+open(p, "w").write(s)
+PY
+tr_log=$work/logs-trap; rm -rf "${tr_log:?}"
+p=$(project trap small)
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$tr_log wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q "matchapack: failed while npm was running (npm read \`files\` ([0-9]*×) of what matchapack's hook returned" "$work/out" \
+  && grep -q 'running npm ci to rebuild node_modules' "$work/out" && [ "$(grep -c 'added [0-9]* packages' "$work/out")" = 2 ] \
+  && [ "$(last_log_in "$tr_log" "r['outcome'], '\`files\`' in r['reason']")" = "broke True" ] && same "$ref_small" "$p" \
+  && ok "trap: npm reading another key of the hook's result is a broken install; npm ci rebuilt it, logged with the key, tree identical" \
+  || bad "trap, shell function: rc=$rc ($(grep '^matchapack' "$work/out" | head -3))"
+MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
+  && grep -q "inject engine: in 1 runs npm read an unexpected key of the hook's result, and npm ci rebuilt node_modules" "$work/report" \
+  && ok "trap: matchapack report counts the run" || bad "trap: report ($(grep 'unexpected key' "$work/report"))"
+p=$(project trap-direct small)
+(PATH=$trc/bin:$PATH; install "$p"); rc=$?
+[ $rc != 0 ] && grep -q "npm read \`files\` ([0-9]*×) of what matchapack's hook returned" "$work/out" \
+  && ok "trap: matchapack install stops with the error (status $rc)" || bad "trap, matchapack install: rc=$rc"
+
 p=$(project failscript bundled "d['scripts']={'postinstall':'exit 7'}")
 (cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
 install "$p"; rc=$?
@@ -496,6 +599,42 @@ if [ "$npm_major" -ge 12 ]; then
 else
   echo "SKIP allow-remote: npm $npm_major has no default refusal of remote tarballs (npm 12 does)"
 fi
+
+# 15. npm 12: a package patched by `patchedDependencies` (npm patch). npm
+#     changes the package's files right after extract returns; the store
+#     entry must stay pacote's (unpatched), the project the same as npm ci's
+#     (patched), with an empty store and with the filled one.
+if [ "$npm_major" -ge 12 ]; then
+  pcopy() { local d=$work/$1; rm -rf "${d:?}"; cp -R "$here/fixtures/npm12-patch" "$d"; echo "$d"; }
+  ref_patch=$(pcopy patch-ref); (cd "$ref_patch" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci on fixtures/npm12-patch"
+  n_patch=$(python3 -c "import json;print(sum(1 for k,v in json.load(open('$ref_patch/node_modules/.package-lock.json'))['packages'].items() if k))")
+  ps=$work/store-patch; rm -rf "${ps:?}"
+  for round in empty filled; do
+    p=$(pcopy "patch-$round")
+    MATCHAPACK_STORE=$ps install "$p" && [ "$(cloned)" = "$n_patch" ] && [ "$(by_npm)" = 0 ] && same "$ref_patch" "$p" \
+      && grep -q 'patched by gl-patch-fixture' "$p/node_modules/is-number/index.js" \
+      && ! grep -rqs 'patched by gl-patch-fixture' "$ps/v2" \
+      && ok "npm $npm_major patchedDependencies, $round store: $n_patch cloned, the patch applied in the project, not in the store, tree identical" \
+      || bad "patchedDependencies, $round store: cloned $(cloned) of $n_patch, by npm $(by_npm)"
+  done
+else
+  echo "SKIP patchedDependencies: npm $npm_major has no npm patch (npm 12 does)"
+fi
+
+# Every run of the shell function above that read an unexpected key of the
+# hook's result was rebuilt by plain npm and so looks fine: it must still
+# fail the suite (the deliberate one, 10d, logs elsewhere). `matchapack
+# install` stops on it, so those cases fail by themselves.
+python3 - "$work/logs/log.jsonl" <<'PY' && ok "no install read an unexpected key of the hook's result" || bad "an install read an unexpected key of the hook's result"
+import json, sys
+bad = []
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    if "of what matchapack's hook returned" in str(r.get("reason", "")) or (r.get("inject") or {}).get("result_unexpected"):
+        bad.append(r.get("reason") or r["inject"]["result_unexpected"])
+print("\n".join(map(str, bad[:3])))
+sys.exit(1 if bad else 0)
+PY
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

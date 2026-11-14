@@ -180,8 +180,9 @@ pub fn process_umask() -> u32 {
 /// with pacote's extraction; npm placing packages the hook never saw is
 /// reported). A major is listed once the inject harness has run on it
 /// (`scripts/verify-npm.sh`, `scripts/test-inject.sh`):
-/// 10 (10.8.2 and 10.9.2, also a 3-workspace project; NOTES), 11 (11.17–11.20
-/// in use), 12 (12.2.2).
+/// 10 (10.8.2 and 10.9.2, also a 3-workspace project; 10.5.2, 10.7.0 and
+/// 10.9.10; NOTES), 11 (11.17–11.20 in use), 12 (12.2.2). Inside a major,
+/// the pacote fingerprint gate (`npm_fingerprints`) decides.
 pub const INJECT_NPM_MAJORS: &[u32] = &[10, 11, 12];
 
 /// The inject engine's version gate: MATCHAPACK_NPM_VERSIONS when set (`any`,
@@ -212,9 +213,79 @@ fn inject_version_allowed(version: &str, allowed: Option<&str>) -> Result<(), St
 fn version_matches(version: &str, pattern: &str) -> bool {
     version == pattern || version.starts_with(&format!("{pattern}."))
 }
+
+/// The pacote code the hook may be installed on: fingerprints (SHA-256 of
+/// the text of pacote's FetcherBase class, `node src/inject.js --fingerprint
+/// <npm dir>`) of the npm releases the harness has run on, with the versions
+/// and the date (src/npm-fingerprints.json; NOTES "G-lite: npm release
+/// safety"). Inside a listed major, this is what decides whether an npm
+/// release the binary has never seen gets the hook: it does when its pacote
+/// code is byte for byte code that was tested.
+const NPM_FINGERPRINTS: &str = include_str!("npm-fingerprints.json");
+
+pub fn npm_fingerprints() -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(NPM_FINGERPRINTS).expect("src/npm-fingerprints.json is JSON");
+    v["fingerprints"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default()
+}
+
+fn is_fingerprint(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// What the hook is given as MATCHAPACK_INJECT_FINGERPRINTS: `any`, or the
+/// fingerprints above plus the user's MATCHAPACK_NPM_FINGERPRINT (`any`, or
+/// a comma list of fingerprints as matchapack prints them). The hook checks
+/// its npm's pacote against it before npm starts, and declines (plain npm,
+/// with the fingerprint in the message) when it is not on it.
+pub fn inject_fingerprints() -> Result<String, String> {
+    fingerprints_allowed(std::env::var("MATCHAPACK_NPM_FINGERPRINT").ok().as_deref())
+}
+
+fn fingerprints_allowed(user: Option<&str>) -> Result<String, String> {
+    let mut list = npm_fingerprints();
+    match user.map(str::trim) {
+        None | Some("") => {}
+        Some("any") => return Ok("any".into()),
+        Some(extra) => {
+            for f in extra.split(',').map(|f| f.trim().to_ascii_lowercase()).filter(|f| !f.is_empty()) {
+                if !is_fingerprint(&f) {
+                    return Err(format!("MATCHAPACK_NPM_FINGERPRINT: {f} is not a fingerprint (64 hexadecimal digits, as matchapack prints it) or `any`"));
+                }
+                list.push(f);
+            }
+        }
+    }
+    Ok(list.join(","))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::inject_version_allowed;
+    use super::{fingerprints_allowed, inject_version_allowed, is_fingerprint, npm_fingerprints};
+
+    #[test]
+    fn npm_fingerprint_list() {
+        let list = npm_fingerprints();
+        // The six class texts of npm 10.0.0 to 12.2.2 (NOTES "G-lite"): the
+        // two before 10.8.0 added after test-inject.sh passed on 10.5.2 and
+        // 10.7.0.
+        for p in ["eaaea911e04032d0", "2b01fc92939cb2c9", "e89576a31b8145ab", "2e43f4c0648d9b8d", "b1ead56a5de97d9b", "d384f9b730728433"] {
+            assert!(list.iter().any(|f| f.starts_with(p)), "{p}");
+        }
+        assert!(list.iter().all(|f| is_fingerprint(f) && *f == f.to_ascii_lowercase()), "{list:?}");
+        let v: serde_json::Value = serde_json::from_str(super::NPM_FINGERPRINTS).unwrap();
+        for (f, e) in v["fingerprints"].as_object().unwrap() {
+            assert!(e["verified_on"].as_array().is_some_and(|a| !a.is_empty()) && e["added"].is_string(), "{f}: verified_on and added");
+        }
+        let joined = list.join(",");
+        assert_eq!(fingerprints_allowed(None).unwrap(), joined);
+        assert_eq!(fingerprints_allowed(Some(" ")).unwrap(), joined);
+        assert_eq!(fingerprints_allowed(Some("any")).unwrap(), "any");
+        // The user's fingerprints are added to the list, not put in its place.
+        let mine = "AB".repeat(32);
+        assert_eq!(fingerprints_allowed(Some(&format!(" {mine} ,"))).unwrap(), format!("{joined},{}", mine.to_ascii_lowercase()));
+        let e = fingerprints_allowed(Some("e89576a3")).unwrap_err();
+        assert!(e.contains("e89576a3 is not a fingerprint"), "{e}");
+    }
 
     #[test]
     fn inject_engine_npm_majors() {
