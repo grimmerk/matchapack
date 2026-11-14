@@ -109,8 +109,9 @@ fn walk(dir: &Path, store_root: &Path) -> Walked {
                     Err(_) => w.no_hidden_lock += 1,
                 }
             }
-            continue;
         }
+        // pruned() is the one place that keeps node_modules from being
+        // entered, for the roots and here.
         if ft.is_dir() {
             let p = ent.path();
             if !pruned(&p, store_root) {
