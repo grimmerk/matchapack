@@ -63,7 +63,16 @@ def main(argv):
             # Exited, and nothing more to read for a while.
             break
     os.close(master)
-    rc = p.wait()
+    # A command that closed the terminal but runs on is held to the same
+    # deadline.
+    try:
+        rc = p.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait()
+        out.write(b"\nyarn1-tty.py: timed out\n")
+        out.flush()
+        return 124
     return 128 - rc if rc < 0 else rc
 
 

@@ -118,13 +118,15 @@ MATCHAPACK-YARN [upgrade-interactive] [--latest]
 MATCHAPACK-YARN [upgradeInteractive]
 MATCHAPACK-YARN [workspace] [w] [add] [x]
 MATCHAPACK-YARN [workspace] [w] [remove] [x]
-MATCHAPACK-YARN [workspace] [w] [upgrade]" "yarn upgrade; yarn upgrade x --latest; yarn remove x; yarn upgrade-interactive --latest; yarn upgradeInteractive; yarn workspace w add x; yarn workspace w remove x; yarn workspace w upgrade"
+MATCHAPACK-YARN [workspace] [w] [upgrade]
+MATCHAPACK-YARN [workspace] [w] [upgrade-interactive] [--latest]
+MATCHAPACK-YARN [workspace] [w] [upgradeInteractive]" "yarn upgrade; yarn upgrade x --latest; yarn remove x; yarn upgrade-interactive --latest; yarn upgradeInteractive; yarn workspace w add x; yarn workspace w remove x; yarn workspace w upgrade; yarn workspace w upgrade-interactive --latest; yarn workspace w upgradeInteractive"
   check yarn-not-routed "YARN [global] [add] [x]
 YARN [workspace] [w] [run] [add]
-YARN [workspace] [w] [upgrade-interactive]
+YARN [workspace] [w] [install]
 YARN [workspace] [w]
 YARN [workspaces] [run] [add]
-YARN [why] [add]" "yarn global add x; yarn workspace w run add; yarn workspace w upgrade-interactive; yarn workspace w; yarn workspaces run add; yarn why add"
+YARN [why] [add]" "yarn global add x; yarn workspace w run add; yarn workspace w install; yarn workspace w; yarn workspaces run add; yarn why add"
   check yarn-run    "YARN [run] [install]"               "yarn run install"
   check yarn-version "YARN [--version]
 YARN [-v]

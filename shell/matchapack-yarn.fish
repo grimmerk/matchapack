@@ -9,7 +9,7 @@ function yarn --wraps yarn --description 'yarn; installs and yarn add/upgrade/re
             or string match -q -- '-*' "$argv[1]"
             or begin
                 test "$argv[1]" = workspace
-                and contains -- "$argv[3]" add remove upgrade
+                and contains -- "$argv[3]" add remove upgrade upgrade-interactive upgradeInteractive
             end
         end
         and test "$MATCHAPACK" != 0

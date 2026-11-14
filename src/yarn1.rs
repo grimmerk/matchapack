@@ -134,8 +134,10 @@ const ENGINE_COMMANDS: &[&str] = &["", "install", "add", "upgrade", "remove", "u
 
 /// `yarn workspace <name> <command> …`: Yarn starts a second Yarn, `node
 /// <Yarn's bundle> <command> …` in the workspace's directory; the hook
-/// starts that one with itself too (src/yarn1-hook.js, `wrapChild`).
-const WORKSPACE_COMMANDS: &[&str] = &["add", "remove", "upgrade"];
+/// starts that one with itself too (src/yarn1-hook.js, `wrapChild`). Not
+/// `install`: from a workspace Yarn installs at the root, as `yarn install`
+/// there does (routed).
+const WORKSPACE_COMMANDS: &[&str] = &["add", "remove", "upgrade", "upgrade-interactive", "upgradeInteractive"];
 
 /// The command the engine runs for `matchapack yarn <args>`, as logged
 /// (`install`, `add`, `upgrade`, `remove`, `upgrade-interactive`,
@@ -157,7 +159,8 @@ pub fn engine_command(args: &[String]) -> Option<String> {
         });
     }
     let sub = workspace_args(args)?;
-    WORKSPACE_COMMANDS.contains(&sub[1].as_str()).then(|| format!("workspace {}", sub[1]))
+    let c = if sub[1] == "upgradeInteractive" { "upgrade-interactive" } else { sub[1].as_str() };
+    WORKSPACE_COMMANDS.contains(&c).then(|| format!("workspace {c}"))
 }
 
 /// For `yarn [flags] workspace <name> <words…>`: `[<name>, <words…>]`, the
@@ -487,6 +490,8 @@ fn copy(reason: impl Into<String>) -> Outcome {
 #[derive(Debug, Default)]
 pub struct Stats {
     pub hello: Option<Value>,
+    /// The hello of the Yarn a workspace command started (its hook's).
+    pub child_hello: Option<Value>,
     pub declined: Option<String>,
     pub cloned: u64,
     pub cloned_bytes: u64,
@@ -616,6 +621,28 @@ impl Server {
     /// names it (checked to be Yarn 1's npm package), once it has arrived;
     /// an error when the install ends first (corepack failed, or the hook
     /// declined).
+    /// `yarn workspace <name> <command> …`: the directory the Yarn the
+    /// workspace command started runs in, from its hook's hello; waits for it
+    /// as `chosen_yarn` does. A directory of the project only (its
+    /// destinations would be refused anywhere else).
+    fn child_dir(&self, install_ended: &AtomicBool) -> std::result::Result<PathBuf, String> {
+        loop {
+            let named = self.stats.lock().unwrap().child_hello.as_ref().map(|h| h["cwd"].as_str().map(PathBuf::from));
+            match named {
+                Some(Some(d)) => {
+                    let real = std::fs::canonicalize(&d).map_err(|e| format!("the workspace's Yarn runs in {}: {e}", d.display()))?;
+                    if !plain_absolute(&d) || !real.starts_with(&self.root) {
+                        return Err(format!("the workspace's Yarn runs in {}, outside the project", d.display()));
+                    }
+                    return Ok(d);
+                }
+                Some(None) => return Err("the workspace's hook names no directory".into()),
+                None if install_ended.load(Ordering::Relaxed) => return Err("the install ended first".into()),
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+
     fn chosen_yarn(&self, install_ended: &AtomicBool) -> std::result::Result<PathBuf, String> {
         loop {
             let named = self.stats.lock().unwrap().hello.as_ref().map(|h| h["yarn_js"].as_str().map(PathBuf::from));
@@ -798,7 +825,12 @@ impl Server {
             if let Some(f) = v.get("facts").and_then(Facts::from_json) {
                 let _ = self.facts.set(f);
             }
-            self.stats.lock().unwrap().hello = Some(v.clone());
+            let mut s = self.stats.lock().unwrap();
+            if v.get("child") == Some(&Value::Bool(true)) {
+                s.child_hello = Some(v.clone());
+            } else {
+                s.hello = Some(v.clone());
+            }
             return true;
         }
         if let Some(why) = v.get("declined").and_then(|d| d.as_str()) {
@@ -1227,15 +1259,24 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // "Yarn 1 shell route", decision 4.
     //
     // For `yarn workspace <name> <command> …` the Yarn that links is the one
-    // the workspace command starts, with the arguments after the name only
-    // (Yarn passes it nothing of its own): its cache options are those.
+    // the workspace command starts, in the workspace's directory, with the
+    // arguments after the name only (Yarn passes it nothing of its own): its
+    // cache options are those, resolved in that directory (a relative
+    // `--cache-folder`, a workspace's `.yarnrc`). That directory is known
+    // from that Yarn's hello, so `yarn cache dir` is started after it, as
+    // under corepack and for the same reason it is then the only spawn here.
+    let workspace = workspace_args(args).is_some();
     let cache_from = workspace_args(args).map_or(args, |w| &w[1..]);
-    let ask = if yarn.corepack { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, cache_from)) };
+    let ask = if yarn.corepack || workspace { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, cache_from)) };
     let status = std::thread::scope(|s| {
         s.spawn(|| {
             let ask = match ask {
                 Some(a) => a,
-                None => server.chosen_yarn(&install_ended).and_then(|js| start_yarn_cache_dir(&node, &js, &yarn.env, cwd, cache_from)),
+                None => {
+                    let js = if yarn.corepack { server.chosen_yarn(&install_ended) } else { Ok(yarn.js.clone()) };
+                    let dir = if workspace { server.child_dir(&install_ended) } else { Ok(cwd.to_path_buf()) };
+                    js.and_then(|js| dir.and_then(|d| start_yarn_cache_dir(&node, &js, &yarn.env, &d, cache_from)))
+                }
             };
             server.set_cache(ask.and_then(|a| a.answer(deadline, &install_ended)))
         });
@@ -1450,6 +1491,8 @@ mod tests {
             (vec!["workspace", "w2", "add", "x"], "workspace add"),
             (vec!["--cache-folder", "/c", "workspace", "w2", "remove", "x"], "workspace remove"),
             (vec!["workspace", "w2", "upgrade", "--latest"], "workspace upgrade"),
+            (vec!["workspace", "w2", "upgrade-interactive", "--latest"], "workspace upgrade-interactive"),
+            (vec!["workspace", "w2", "upgradeInteractive"], "workspace upgrade-interactive"),
         ] {
             assert_eq!(handled(&a).as_deref(), Some(want), "{a:?}");
         }
@@ -1464,7 +1507,6 @@ mod tests {
             vec!["run", "add"],
             vec!["why", "x"],
             vec!["workspace", "w2", "run", "add"],
-            vec!["workspace", "w2", "upgrade-interactive"],
             vec!["workspace", "w2", "install"],
             vec!["workspace", "w2"],
             vec!["workspace", "-x", "add", "y"],

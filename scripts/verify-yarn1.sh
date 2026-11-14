@@ -54,9 +54,12 @@
 #                      `matchapack yarn WORDS` in the engine tree (NOTES
 #                      "Yarn 1 commands"). The install before it is plain
 #                      Yarn in every tree, so a difference is the command's.
-#                      WORDS are split at spaces; --non-interactive
-#                      --cache-folder <the run's cache> are added after them
-#                      (no --frozen-lockfile). The command's exit status must
+#                      WORDS are split at spaces; --non-interactive is added
+#                      after them (no --frozen-lockfile), and the run's cache
+#                      is given as YARN_CACHE_FOLDER, not --cache-folder: a
+#                      workspace command passes its child only the words
+#                      after the name, and a case may give cache options of
+#                      its own in WORDS. The command's exit status must
 #                      be the same in every run (it may fail: then the
 #                      engine's log line must say yarn_failed with that
 #                      status); the comparison covers the install and the
@@ -226,25 +229,24 @@ install() {
 # run_command <name> <cache> <node> <how> <tty 0|1> <words...>: `yarn
 # WORDS` (--command, --command-before) in $work/<name>, after its install;
 # plain or engine as for install. Every Yarn of it, a workspace command's
-# child included, gets the run's cache (YARN_CACHE_FOLDER as well as
-# --cache-folder: a workspace command passes its child only the words after
-# the name). Exit status: the command's.
+# child included, gets the run's cache as YARN_CACHE_FOLDER (an option in
+# WORDS overrides it, as it would for a user). Exit status: the command's.
 run_command() {
-  local name=$1 cache=$2 n=$3 how=$4 tty=$5 run=() extra=(--non-interactive --cache-folder "$cache")
+  local name=$1 cache=$2 n=$3 how=$4 tty=$5 run=() extra=(--non-interactive)
   shift 5
   local cmd_words=("$@")
-  [ "$tty" = 1 ] && extra=(--cache-folder "$cache")
+  [ "$tty" = 1 ] && extra=()
   if [ "$how" = plain ]; then run=("$n" "$yarnjs"); else run=("$bin" yarn); fi
   [ "$tty" = 1 ] && run=(python3 "$here/scripts/yarn1-tty.py" -- "${run[@]}")
   echo "--- yarn ${cmd_words[*]} ($how)" >> "$work/$name.log"
   if [ "$how" = plain ]; then
     (cd "$work/$name/$subdir" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true YARN_CACHE_FOLDER="$cache" \
-      "${run[@]}" "${cmd_words[@]}" "${extra[@]}") >> "$work/$name.log" 2>&1 < /dev/null
+      "${run[@]}" "${cmd_words[@]}" ${extra[@]+"${extra[@]}"}) >> "$work/$name.log" 2>&1 < /dev/null
   else
     (cd "$work/$name/$subdir" && env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK \
       YARN_DISABLE_SELF_UPDATE_CHECK=true YARN_CACHE_FOLDER="$cache" PATH="$(dirname "$n"):$PATH" MATCHAPACK_YARN_JS="$yarnjs" \
       MATCHAPACK_STORE="$work/mp/store" MATCHAPACK_LOG_DIR="$work/mp/log" MATCHAPACK_CONFIG_DIR="$work/mp/config" MATCHAPACK_NO_FALLBACK=1 \
-      "${run[@]}" "${cmd_words[@]}" "${extra[@]}") >> "$work/$name.log" 2>&1 < /dev/null
+      "${run[@]}" "${cmd_words[@]}" ${extra[@]+"${extra[@]}"}) >> "$work/$name.log" 2>&1 < /dev/null
   fi
 }
 # yarn_run <name> <cache> <node> <how> [args]: copy the project to

@@ -54,9 +54,10 @@ enum Cmd {
     },
     /// Stand in for `yarn <args>` (Yarn 1, macOS): a bare `yarn`, `yarn
     /// install`, `add`, `upgrade`, `remove`, `upgrade-interactive` and `yarn
-    /// workspace <name> add|remove|upgrade` run the user's Yarn with each file
-    /// of its link step cloned from Yarn's cache; anything else, and every
-    /// command matchapack declines, runs plain Yarn with the same arguments.
+    /// workspace <name> add|remove|upgrade|upgrade-interactive` run the user's
+    /// Yarn with each file of its link step cloned from Yarn's cache; anything
+    /// else, and every command matchapack declines, runs plain Yarn with the
+    /// same arguments.
     Yarn {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

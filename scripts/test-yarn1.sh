@@ -877,6 +877,36 @@ if [ $rc = 0 ] && same && both_changed package.json && [ "$(ejson c-ui "y['link_
   ok "yarn upgrade-interactive --latest, every update taken (pseudo-terminal): $(ejson c-ui "y['link_steps']") link steps in one process; engine identical; $n files cloned"
 else bad "yarn upgrade-interactive (exit $rc, cloned ${n:-?}, link steps $(ejson c-ui "y['link_steps']"), first-copies $(copied c-ui first-copies))"; tail -5 "$work/c-ui/engine.log" | sed 's/^/    /'; fi
 
+# The same in one workspace (yarn1-upgrade-ws: workspace u1 has
+# yarn1-upgrade's dependencies): `yarn workspace u1 upgrade-interactive`,
+# whose prompt is the workspace command's own Yarn's.
+cverify c-ws-ui "workspace u1 upgrade-interactive --latest" --command-tty "$here/fixtures/yarn1-upgrade-ws"
+n=$(ejson c-ws-ui "y['cloned']")
+if [ $rc = 0 ] && same && both_changed packages/u1/package.json && [ "$(ejson c-ws-ui "y['link_steps']")" -ge 2 ] && first128 c-ws-ui && [ "${n:-0}" -ge 150 ] \
+  && [ "$(ejson c-ws-ui "r['command']")" = "workspace upgrade-interactive" ]; then
+  ok "yarn workspace u1 upgrade-interactive --latest (pseudo-terminal): the workspace's Yarn prompts and links with the hook; engine identical; $n files cloned"
+else bad "yarn workspace upgrade-interactive (exit $rc, cloned ${n:-?}, link steps $(ejson c-ws-ui "y['link_steps']"))"; tail -5 "$work/c-ws-ui/engine.log" | sed 's/^/    /'; fi
+
+# The cache of a workspace command is its own Yarn's: the words after the
+# name, resolved in the workspace's directory. (1) The command's own
+# --cache-folder before `workspace` (a decoy folder; Yarn gives it to the
+# workspace command, not to its child, which takes the run's cache from
+# YARN_CACHE_FOLDER). (2) A relative --cache-folder after the name, which
+# names the run's cache from packages/w2 (work/<tree>/packages/w2/../../..
+# is the work directory) and another folder from the root. Asking
+# `yarn cache dir` with the wrong options or in the wrong directory clones
+# nothing.
+cverify c-ws-cache "--cache-folder $work/c-ws-cache-decoy workspace w2 add $T/y1-many-2.0.0.tgz" "$here/fixtures/yarn1-workspaces"
+n=$(ejson c-ws-cache "y['cloned']")
+if [ $rc = 0 ] && same && [ "${n:-0}" -gt 285 ] && [ "$(ejson c-ws-cache "y['cache']")" = "$work/c-ws-cache/cache/v6" ]; then
+  ok "yarn --cache-folder <other> workspace w2 add: the cache asked is the workspace's Yarn's, not the command's; engine identical; $n files cloned"
+else bad "workspace command with its own --cache-folder (exit $rc, cloned ${n:-?}, cache $(ejson c-ws-cache "y['cache']"))"; fi
+cverify c-ws-relcache "workspace w2 add $T/y1-many-2.0.0.tgz --cache-folder ../../../cache" "$here/fixtures/yarn1-workspaces"
+n=$(ejson c-ws-relcache "y['cloned']")
+if [ $rc = 0 ] && same && [ "${n:-0}" -gt 285 ] && [ "$(ejson c-ws-relcache "y['cache']")" = "$work/c-ws-relcache/cache/v6" ]; then
+  ok "yarn workspace w2 add --cache-folder <relative>: resolved in the workspace's directory, as Yarn does; engine identical; $n files cloned"
+else bad "workspace command with a relative --cache-folder (exit $rc, cloned ${n:-?}, cache $(ejson c-ws-relcache "y['cache']"))"; fi
+
 # The harness itself: a command that changes nothing reads "none" / "no",
 # so a case cannot pass because the command did nothing.
 cverify c-noop "install --force" --engine-min-clones 0 "$here/fixtures/yarn1-small"
@@ -1182,11 +1212,11 @@ else
   # Not routed: Yarn's other commands, a workspace's other commands. A stub
   # yarn: never a real `yarn global` in a test (it writes the user's global
   # folder).
-  rrun "$work" zsh "$rt/stub:/usr/bin:/bin" 'yarn global add x; yarn workspace w2 run add; yarn workspace w2 upgrade-interactive; yarn why add'
+  rrun "$work" zsh "$rt/stub:/usr/bin:/bin" 'yarn global add x; yarn workspace w2 run add; yarn workspace w2 install; yarn why add'
   if [ "$(starts)" = 0 ] && [ "$(cat "$work/out")" = "STUB-YARN [global] [add] [x]
 STUB-YARN [workspace] [w2] [run] [add]
-STUB-YARN [workspace] [w2] [upgrade-interactive]
-STUB-YARN [why] [add]" ]; then ok "route: yarn global add, yarn workspace w2 run / upgrade-interactive, yarn why → plain yarn, matchapack never started"
+STUB-YARN [workspace] [w2] [install]
+STUB-YARN [why] [add]" ]; then ok "route: yarn global add, yarn workspace w2 run / install, yarn why → plain yarn, matchapack never started"
   else bad "route: commands not routed (starts $(starts); $(tr '\n' '|' < "$work/out"))"; fi
   rrun "$work" zsh "$rt/bin:/usr/bin:/bin" 'yarn --version'
   if [ $rc = 0 ] && [ "$(starts)" = 0 ] && [ "$(cat "$work/out")" = "$yv" ]; then ok "route: yarn --version → plain yarn, matchapack never started"

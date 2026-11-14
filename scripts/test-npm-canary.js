@@ -243,6 +243,13 @@ check('watch: a red line, matchapack changed: tested again', pl.node && pl.node.
 pl = plan(wpoll(watchState({ lines: { ...red26.lines, 26: { ...red26.lines[26], head: 'h' } } }), nodeIndex('ordinary', lines)))
 check('watch: a red line, matchapack unchanged: not again; recorded lines never', pl.node && pl.node.todo.length === 0, JSON.stringify(pl.node || pl))
 
+// 17b. A line to be retested gets a new release with the same libuv: the
+//      new release is tested (not only recorded, which would wait a poll).
+uvh('26.13.3', '1.52.1')
+const inc26 = { lines: { ...steady.lines, 26: { ...steady.lines[26], suites: 'incomplete' } } }
+pl = plan(wpoll(watchState(inc26), nodeIndex('inc-new', [...lines, ['26.13.3', '2026-11-14']])))
+check('watch: an incomplete line and a new same-libuv release: the new release is tested', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '26.13.3' && pl.node.record.length === 0 && /incomplete/.test(pl.node.todo[0].reason), JSON.stringify(pl.node || pl))
+
 // 18. Yarn: a new stable 1.x is an item; 2.x and prereleases are not.
 yarnVersions(['1.22.23', '1.23.0-rc.1', '2.4.4'])
 pl = plan(wpoll(watchState(steady), nodeIndex('ordinary', lines)))
@@ -300,6 +307,15 @@ const n27 = { node: '27.0.0', line: 27, uv: '1.53.0', reason: 'Node 27 is new', 
 const n27jobs = { nodeLinux: ['10.9.10'].map((v) => ({ key: `node27.0.0-npm${v}`, node: '27.0.0', npm: v })), nodeMacos: [{ key: 'node27.0.0', node: '27.0.0', yarn: '1.22.22' }] }
 w = wreport(watchState(steady), { ...wplan([n27]), ...n27jobs }, { 'nodelinux-node27.0.0-npm10.9.10': { suites: suitesOk }, 'nodemacos-node27.0.0': ysuites(true, factsOk, 'v27.0.0') })
 check('watch report: new major, all green: a comment, the run notifies, the line added and verified', w.flags.notify === true && /Node 27\.0\.0 \(Node 27 is new\): action needed/.test(w.comment) && w.state.node.lines[27].verified === '27.0.0', JSON.stringify({ f: w.flags, l: w.state.node.lines[27] }))
+
+// 22b. An older release requested by hand, green, while the line's newer
+//      release is red: the line keeps the red result (and is retried); the
+//      older one gets its history row.
+const redNewer = { lines: { ...steady.lines, 26: { ...steady.lines[26], newest: '26.14.0', tested: '26.14.0', uv: '1.54.0', suites: 'fail', action: 'action needed', verified: '26.13.1' } } }
+const reqOld = { node: '26.13.1', line: 26, uv: '1.52.1', reason: 'requested', npm: true, yarn: true, newMajor: false }
+const reqJobs = { nodeLinux: [{ key: 'node26.13.1-npm10.9.10', node: '26.13.1', npm: '10.9.10' }], nodeMacos: [{ key: 'node26.13.1', node: '26.13.1', yarn: '1.22.22' }] }
+w = wreport(watchState(redNewer), { ...wplan([reqOld]), ...reqJobs }, { 'nodelinux-node26.13.1-npm10.9.10': { suites: suitesOk }, 'nodemacos-node26.13.1': ysuites(true, factsOk, 'v26.13.1') })
+check('watch report: an older release requested and green does not hide the newer red one', w.state.node.lines[26].tested === '26.14.0' && w.state.node.lines[26].suites === 'fail' && w.state.node.lines[26].verified === '26.13.1' && w.state.history[0].version === 'Node 26.13.1', JSON.stringify({ l: w.state.node.lines[26], h: w.state.history[0] }))
 
 // 23. Recorded releases only (the "nothing to test" path): state updated,
 //     green.

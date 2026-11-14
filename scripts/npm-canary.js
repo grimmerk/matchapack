@@ -400,8 +400,13 @@ async function watchPoll (state, opts, npmAll, supported, date) {
       const r = newestOf(m)
       if (!line.newest || cmp(r.version, line.newest) > 0) {
         const uv = await uvOf(r.version, opts.nodeUvDir)
+        // A line whose last test is to be repeated (incomplete, or red with
+        // matchapack changed) tests the new release instead.
+        const again = watchRetry(line, opts.head)
         if (uv !== line.uv) {
           add({ node: r.version, line: m, uv, uvBefore: line.uv || null, reason: `libuv ${line.uv || '?'} → ${uv} in Node ${m}` })
+        } else if (again) {
+          add({ node: r.version, line: m, uv, reason: `${line.tested} ${again}: the newest release instead`, newMajor: !!line.newMajor })
         } else {
           record.push({ line: m, newest: r.version, uv })
         }
@@ -914,24 +919,30 @@ function watchReport (state, plan, res, run) {
     // is a person's change); a libuv change only when something differs.
     const action = t.newMajor || suites !== 'pass' || factsChanged || (t.yarn && !facts) ? 'action needed' : 'none'
     const newer = !prev.newest || cmp(t.node, prev.newest) >= 0
-    state.node.lines[t.line] = {
-      ...prev,
-      newest: newer ? t.node : prev.newest,
-      uv: newer ? (m && m.uv) || t.uv : prev.uv,
-      tested: t.node,
-      uvTested: (m && m.uv) || t.uv,
-      checked: plan.date,
-      suites,
-      npm: jobCell(lin),
-      yarn: jobCell(mac),
-      facts: facts || prev.facts || null,
-      action,
-      head: plan.head,
-      run,
-      newMajor: !!t.newMajor,
-    }
-    if (suites === 'pass') {
-      state.node.lines[t.line].verified = t.node
+    // An older release than the one the line last tested (one requested by
+    // hand): its row and comment only; the line keeps the newer release's
+    // results (a red one stays red, and is retried).
+    const older = !!prev.tested && cmp(t.node, prev.tested) < 0
+    if (!older) {
+      state.node.lines[t.line] = {
+        ...prev,
+        newest: newer ? t.node : prev.newest,
+        uv: newer ? (m && m.uv) || t.uv : prev.uv,
+        tested: t.node,
+        uvTested: (m && m.uv) || t.uv,
+        checked: plan.date,
+        suites,
+        npm: jobCell(lin),
+        yarn: jobCell(mac),
+        facts: facts || prev.facts || null,
+        action,
+        head: plan.head,
+        run,
+        newMajor: !!t.newMajor,
+      }
+      if (suites === 'pass' && (!prev.verified || cmp(t.node, prev.verified) >= 0)) {
+        state.node.lines[t.line].verified = t.node
+      }
     }
     const row = { date: plan.date, version: `Node ${t.node}`, reason: t.reason, linux: jobCell(lin), macos: jobCell(mac), classText: '-', caller: '-', action, head: plan.head, run }
     out.rows.push(row)
