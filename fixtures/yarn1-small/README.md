@@ -43,6 +43,16 @@ The tarballs are made by `make-tarballs.py` (deterministic).
   #48; `matchapack diff --normalize-roots`). The npm fixture `rootpath` uses
   the same tarball.
 
+- `yarn1-upgrade` (Yarn 1 commands): dependencies by name and range
+  (`y1-many >=1.0.0`, `y1-b ^1.0.0`, `y1-script ^1.0.0`, dev `@y1/scoped
+  ^1.0.0`), locked to the 1.0.0 versions, and a `.yarnrc` naming the
+  tarball server as the registry: `make-tarballs.py` also writes a registry
+  document per package next to the tarballs (Yarn 1 reads a plain file
+  server as a registry). So `yarn upgrade` moves `y1-many` to 2.0.0, `yarn
+  upgrade y1-b --latest` rewrites its range, and `yarn add y1-c` resolves by
+  name, all offline. Its `yarn.lock` was made by installing exact versions,
+  then writing the ranges into the patterns.
+
 To change a tarball: edit `make-tarballs.py`, run it, then regenerate each
 affected `yarn.lock` with the tarball server running:
 

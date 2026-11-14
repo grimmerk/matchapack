@@ -198,10 +198,25 @@ source `shell/matchapack-yarn.sh` (fish: `shell/matchapack-yarn.fish`) after
 it.
 
 **What goes through matchapack.**
-- A bare `yarn`, `yarn install …`, and `yarn` with a flag first (`yarn
-  --frozen-lockfile`) go to `matchapack yarn`.
-- Every other command (`yarn add`, `yarn run`, `yarn build`, `yarn
-  --version`, `yarn --help`) runs Yarn directly; matchapack does not start.
+- The commands that copy packages into `node_modules` go to `matchapack
+  yarn`: a bare `yarn`, `yarn install …`, `yarn` with a flag first (`yarn
+  --frozen-lockfile`), `yarn add`, `yarn upgrade`, `yarn remove`, `yarn
+  upgrade-interactive`, and `yarn workspace <name> add|remove|upgrade …`
+  (the Yarn that `yarn workspace` starts for the command runs with the hook
+  too). Each prints matchapack's two lines and costs about 0.25 s of CPU
+  more than plain Yarn (measured on `yarn add` of a 3-file package).
+- Every other command (`yarn run`, `yarn build`, `yarn global …`, `yarn
+  workspace <name> run …`, `yarn --version`, `yarn --help`) runs Yarn
+  directly; matchapack does not start.
+- Yarn leaves its first 128 file copies of each command to Node (the engine
+  has to, so that Yarn's own time check sees a real copy), so a `yarn add`
+  of a package with 128 files or fewer clones nothing, however large the
+  files are (`typescript`: 117 files, 30.9 MiB, none cloned; `date-fns`:
+  4,783 files, 94 % of its bytes cloned). On a full install the 128 are
+  noise.
+- The first `yarn add` in a new project, before it has a `yarn.lock`, is
+  plain Yarn (the gate below), so its packages are real copies until the
+  next install over an empty `node_modules`.
 - In a Yarn 2+ project (a `.yarnrc.yml`, `packageManager: yarn@2` or later,
   or a Yarn 2+ lockfile) `matchapack yarn` runs plain Yarn at once. It
   decides from those files only, without starting node, and prints and

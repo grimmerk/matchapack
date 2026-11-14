@@ -26,12 +26,23 @@ network.
 No package has an empty file except y1-empty. Deterministic: fixed times,
 owner, order, gzip header without a name or time. Re-run after a change, then
 regenerate each fixture's yarn.lock (see its README.md).
+
+Next to the tarballs, one registry document per package, named as the
+package (`y1-many`; `@y1/scoped` in a folder `@y1`): what a registry answers
+for it (each version's manifest, `dist.tarball`, `dist.shasum`; `latest` the
+highest version). Yarn 1 takes a plain file server as a registry, so a
+fixture whose .yarnrc names http://127.0.0.1:48321 as its registry can `yarn
+add y1-c` and `yarn upgrade` by name (fixtures/yarn1-upgrade; NOTES "Yarn 1
+commands"). The npm fixtures name no package of these.
 """
-import gzip, io, json, os, tarfile
+import gzip, hashlib, io, json, os, tarfile
 
 here = os.path.dirname(os.path.abspath(__file__))
 out = os.path.join(here, "..", "optional-upward", "tarballs")
 URL = "http://127.0.0.1:48321/"
+
+
+registry = {}
 
 
 def tarball(file, entries):
@@ -48,6 +59,9 @@ def tarball(file, entries):
         g.write(raw.getvalue())
     with open(os.path.join(out, file), "wb") as f:
         f.write(gz.getvalue())
+    m = json.loads(dict((p, d) for p, _, d in entries)["package.json"])
+    m["dist"] = {"tarball": URL + file, "shasum": hashlib.sha1(gz.getvalue()).hexdigest()}
+    registry.setdefault(m["name"], {})[m["version"]] = m
     print(file)
 
 
@@ -145,3 +159,20 @@ def many(v):
 
 for v in ("1.0.0", "2.0.0"):
     tarball(f"y1-many-{v}.tgz", many(v))
+
+
+def semver(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+for name, versions in sorted(registry.items()):
+    doc = {
+        "name": name,
+        "dist-tags": {"latest": max(versions, key=semver)},
+        "versions": {v: versions[v] for v in sorted(versions, key=semver)},
+    }
+    path = os.path.join(out, *name.split("/"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(json.dumps(doc, indent=2) + "\n")
+    print(name)

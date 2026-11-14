@@ -35,15 +35,27 @@
 //                                  (default 30000)
 //       MATCHAPACK_YARN_SIMULATE   tests: `copy-keeps-times` makes the probe's
 //                                  copies keep the source's times, as a libuv
-//                                  that sets times after writing would
+//                                  that sets times after writing would;
+//                                  `child-copy-keeps-times` the same in a
+//                                  workspace command's child only
+//       MATCHAPACK_YARN_WRAP_CHILD `workspace`: the command is `yarn workspace
+//                                  <name> <command> …`, whose own Yarn is a
+//                                  child process (`wrapChild`)
+//       MATCHAPACK_YARN_CHILD      `1`: this hook was started by another one
+//                                  for that child (set by `wrapChild` only)
 // Exit status: Yarn's. 90 before Yarn starts: the hook declined (the reason
-// is sent to matchapack and printed); matchapack then runs plain Yarn.
+// is sent to matchapack and printed); matchapack then runs plain Yarn. In a
+// child (MATCHAPACK_YARN_CHILD) the hook runs plain Yarn itself instead: the
+// workspace command that started it is already running and would fail.
 'use strict'
 const fs = require('fs')
 const path = require('path')
 
 let sock = null
 let yarnStarted = false
+// In a child (MATCHAPACK_YARN_CHILD): runs Yarn without the hook, in this
+// process, when the hook declines before Yarn has started.
+let plainFallback = null
 
 function send (obj) {
   if (sock && !sock.destroyed && sock.writable) {
@@ -53,6 +65,13 @@ function send (obj) {
 
 function decline (message) {
   process.stderr.write(`matchapack yarn hook: ${message}\n`)
+  if (plainFallback) {
+    const run = plainFallback
+    plainFallback = null
+    send({ declined: `in the workspace's Yarn: ${message}` })
+    run()
+    return new Promise(() => {})
+  }
   if (sock && !sock.destroyed && sock.writable) {
     // Exit once the reason is written: matchapack logs it.
     sock.write(JSON.stringify({ declined: message }) + '\n', () => process.exit(90))
@@ -127,9 +146,23 @@ async function main () {
   const hookMode = process.env.MATCHAPACK_YARN_HOOK || 'on'
   const simulate = process.env.MATCHAPACK_YARN_SIMULATE || ''
   const timeoutMs = Number(process.env.MATCHAPACK_YARN_TIMEOUT_MS) || 30000
+  const wrapChild = process.env.MATCHAPACK_YARN_WRAP_CHILD === 'workspace'
+  const isChild = process.env.MATCHAPACK_YARN_CHILD === '1'
   // Not for the scripts Yarn runs.
-  for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE', 'MATCHAPACK_YARN_TIMEOUT_MS', 'MATCHAPACK_YARN_LAUNCHER']) {
+  for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE', 'MATCHAPACK_YARN_TIMEOUT_MS',
+    'MATCHAPACK_YARN_LAUNCHER', 'MATCHAPACK_YARN_WRAP_CHILD', 'MATCHAPACK_YARN_CHILD']) {
     delete process.env[k]
+  }
+  if (isChild && target) {
+    // As the workspace command would have started it: `node <target> <args>`.
+    plainFallback = () => {
+      if (sock) {
+        // (end, not destroy: the reason sent just before is still written)
+        sock.end()
+      }
+      process.argv = [process.argv[0], target, ...yarnArgs]
+      require('module').runMain(target)
+    }
   }
   if (!target || !Number.isInteger(fd) || fd < 3 || !probeDir) {
     return decline('usage: MATCHAPACK_YARN_FD=<fd> MATCHAPACK_YARN_PROBE_DIR=<dir> node yarn1-hook.js <yarn.js> <args...>')
@@ -208,7 +241,83 @@ async function main () {
     send({ id, ...req })
   })
 
-  // Starts Yarn 1 from its bin/yarn.js, with the hook installed.
+  // A child's socket (fd 3 of the Yarn a workspace command starts): each
+  // request is passed on to matchapack as one of this process's own, and
+  // the answer back under the child's id; a message without an id (hello,
+  // link step, decline) is passed on as it is.
+  const relayFrom = (s) => {
+    s.setEncoding('utf8')
+    s.on('error', () => {})
+    let b = ''
+    s.on('data', (chunk) => {
+      b += chunk
+      let i
+      while ((i = b.indexOf('\n')) >= 0) {
+        const line = b.slice(0, i)
+        b = b.slice(i + 1)
+        let msg
+        try {
+          msg = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (msg === null || typeof msg !== 'object') {
+          continue
+        }
+        if (msg.id === undefined) {
+          send(msg)
+          continue
+        }
+        const { id, ...req } = msg
+        request(req).then((answer) => {
+          if (!s.destroyed && s.writable) {
+            s.write(JSON.stringify(Object.assign({}, answer, { id })) + '\n')
+          }
+        })
+      }
+    })
+  }
+
+  // `yarn workspace <name> <command> …` (MATCHAPACK_YARN_WRAP_CHILD): Yarn's
+  // workspace command starts `node <its bundle> <command> …` in the
+  // workspace's directory (src/cli/commands/workspace.js: NODE_BIN_PATH,
+  // YARN_BIN_PATH, stdio 'inherit') and waits for it; that Yarn links. That
+  // one spawn is made `node <this hook> <its bundle> <command> …` with one
+  // more descriptor, fd 3: a socket pair to this process (libuv makes stdio
+  // 'pipe' a socket pair). The child's hook runs that Yarn as this one runs
+  // Yarn (probe, first copies, clones; in a child a decline runs plain
+  // Yarn), and this process relays its requests (relayFrom). The rest of the
+  // spawn is Yarn's: the program, the bundle as the main module, the
+  // directory, the environment (plus the hook's variables, which the child's
+  // hook removes before Yarn starts), stdin, stdout, stderr.
+  const wrapWorkspaceChild = (bundle) => {
+    const cp = require('child_process')
+    const spawn = cp.spawn
+    let wrapped = false
+    cp.spawn = function (file, args, options) {
+      if (wrapped || file !== process.execPath || !Array.isArray(args) || args[0] !== bundle ||
+          !options || typeof options.cwd !== 'string' || options.stdio !== 'inherit') {
+        return spawn.apply(this, arguments)
+      }
+      wrapped = true
+      const env = Object.assign({}, options.env || process.env, {
+        MATCHAPACK_YARN_FD: '3',
+        MATCHAPACK_YARN_PROBE_DIR: probeDir,
+        MATCHAPACK_YARN_CHILD: '1',
+        MATCHAPACK_YARN_HOOK: hookMode,
+        MATCHAPACK_YARN_TIMEOUT_MS: String(timeoutMs),
+      }, simulate ? { MATCHAPACK_YARN_SIMULATE: simulate } : {})
+      const child = spawn.call(this, file, [__filename, ...args], Object.assign({}, options, { env, stdio: ['inherit', 'inherit', 'inherit', 'pipe'] }))
+      if (child.stdio && child.stdio[3]) {
+        relayFrom(child.stdio[3])
+      }
+      return child
+    }
+  }
+
+  // Starts Yarn 1 from its bin/yarn.js (in a workspace command's child: from
+  // its bundle, lib/cli.js, as that command starts it), with the hook
+  // installed.
   const start = async (yarnJs) => {
     // The bundle bin/yarn.js loads (`require(__dirname + '/../lib/cli')`).
     let bundle
@@ -239,7 +348,7 @@ async function main () {
 
     let p
     try {
-      p = probe(probeDir, simulate)
+      p = probe(probeDir, isChild && simulate === 'child-copy-keeps-times' ? 'copy-keeps-times' : simulate)
     } catch (e) {
       return decline(`the start-up probe of Node's copy failed: ${e.message}`)
     }
@@ -309,16 +418,25 @@ async function main () {
         const run = prev && typeof prev.linkStep === 'function' ? prev.linkStep(fn, context) : fn()
         return Promise.resolve(run).finally(() => {
           active = false
+          // This link step's counts: matchapack adds them up (`yarn
+          // upgrade-interactive` runs several link steps in one process).
           send({ link_step: 'end', counts })
+          for (const k of Object.keys(counts)) {
+            delete counts[k]
+          }
         })
       },
     })
     if (hookMode !== 'none') {
       fs.copyFile = hooked
       global.experimentalYarnHooks = hooks
+      if (wrapChild) {
+        wrapWorkspaceChild(bundle)
+      }
     }
 
     yarnStarted = true
+    plainFallback = null
     send({ hello: true, yarn: yarnVersion, yarn_js: yarnJs, node: process.version, first: firstN, facts: p.facts, hook: hookMode })
     // Run Yarn's bin/yarn.js as the main module, as `node yarn.js` (or the
     // `yarn` symlink, which Node resolves to it) would, and as corepack starts
@@ -354,6 +472,11 @@ function beforeYarn (e) {
     throw e
   }
   process.stderr.write(`matchapack yarn hook: before Yarn started: ${e && e.stack ? e.stack : e}\n`)
+  if (plainFallback) {
+    const run = plainFallback
+    plainFallback = null
+    return run()
+  }
   process.exit(90)
 }
 

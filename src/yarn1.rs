@@ -105,24 +105,69 @@ const CACHE_WAIT: Duration = Duration::from_secs(10);
 /// The name of the command Yarn will run (empty: Yarn's default, install),
 /// found the way Yarn finds it.
 pub fn command(args: &[String]) -> &str {
+    command_at(args).map_or("", |i| args[i].as_str())
+}
+
+/// Where in `args` the command name is (`command`): the first word that is
+/// neither an option nor the value of the option before it.
+fn command_at(args: &[String]) -> Option<usize> {
     let mut prev_binds = false;
-    for a in args {
+    for (i, a) in args.iter().enumerate() {
         let is_option = a.starts_with('-');
         if !is_option && !prev_binds {
-            return a;
+            return Some(i);
         }
         prev_binds = is_option && VALUE_OPTIONS.contains(&a.as_str());
     }
-    ""
+    None
 }
 
-/// Whether `matchapack yarn <args>` is an install the engine handles: `yarn`
-/// or `yarn install`, not `yarn --version` / `--help`.
-pub fn is_install(args: &[String]) -> bool {
+/// The Yarn commands the engine runs (NOTES "Yarn 1 commands"), as Yarn
+/// names them (`src/cli/aliases.js`: `upgrade-interactive` is
+/// `upgradeInteractive`). Each runs Yarn's link step (`Install.init`) in
+/// the process the hook is in: `add` and `upgrade` (an `Add`), `remove` (an
+/// `Install` after it edits package.json; removing a package can move
+/// others, which Yarn copies), `upgrade-interactive` (one `Add` per
+/// dependency type and workspace, after its prompt). `yarn global …` installs
+/// outside the project and stays plain Yarn.
+const ENGINE_COMMANDS: &[&str] = &["", "install", "add", "upgrade", "remove", "upgrade-interactive", "upgradeInteractive"];
+
+/// `yarn workspace <name> <command> …`: Yarn starts a second Yarn, `node
+/// <Yarn's bundle> <command> …` in the workspace's directory; the hook
+/// starts that one with itself too (src/yarn1-hook.js, `wrapChild`).
+const WORKSPACE_COMMANDS: &[&str] = &["add", "remove", "upgrade"];
+
+/// The command the engine runs for `matchapack yarn <args>`, as logged
+/// (`install`, `add`, `upgrade`, `remove`, `upgrade-interactive`,
+/// `workspace add`, …), or None: plain Yarn (`--version`, `--help`, every
+/// other command). Found as Yarn finds it (`command`); for `workspace`, the
+/// two words after it must be the workspace's name and one of
+/// WORKSPACE_COMMANDS, as Yarn splits them (`src/cli/index.js`,
+/// PROXY_COMMANDS: the first two words after `workspace` are its own).
+pub fn engine_command(args: &[String]) -> Option<String> {
     if args.first().is_some_and(|a| a == "-v") || args.iter().any(|a| a == "--version" || a == "--help" || a == "-h") {
-        return false;
+        return None;
     }
-    matches!(command(args), "" | "install")
+    let c = command(args);
+    if ENGINE_COMMANDS.contains(&c) {
+        return Some(match c {
+            "" => "install".into(),
+            "upgradeInteractive" => "upgrade-interactive".into(),
+            c => c.into(),
+        });
+    }
+    let sub = workspace_args(args)?;
+    WORKSPACE_COMMANDS.contains(&sub[1].as_str()).then(|| format!("workspace {}", sub[1]))
+}
+
+/// For `yarn [flags] workspace <name> <words…>`: `[<name>, <words…>]`, the
+/// name and the arguments of the Yarn the workspace command starts. None
+/// when the command is not `workspace`, or the name or the command is
+/// missing or an option.
+fn workspace_args(args: &[String]) -> Option<&[String]> {
+    let at = command_at(args).filter(|&i| args[i] == "workspace")?;
+    let rest = &args[at + 1..];
+    (rest.len() >= 2 && !rest[0].starts_with('-') && !rest[1].starts_with('-')).then_some(rest)
 }
 
 fn option_name(a: &str) -> &str {
@@ -462,6 +507,9 @@ impl Stats {
             "facts": self.hello.as_ref().and_then(|h| h.get("facts")).cloned().unwrap_or(Value::Null),
             "cache": self.cache,
             "cache_secs": self.cache_secs,
+            // Set when Yarn ran: the hook in the Yarn a workspace command
+            // started declined, and that Yarn ran without clones.
+            "declined": self.declined,
             "serve_wall_secs": (wall * 100.0).round() / 100.0,
             "errors": self.errors,
         })
@@ -1134,6 +1182,14 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     } else {
         cmd.env_remove("MATCHAPACK_YARN_LAUNCHER");
     }
+    // `yarn workspace <name> add …`: the hook starts the Yarn the workspace
+    // command starts with itself, and passes its requests on (src/yarn1-hook.js).
+    if workspace_args(args).is_some() {
+        cmd.env("MATCHAPACK_YARN_WRAP_CHILD", "workspace");
+    } else {
+        cmd.env_remove("MATCHAPACK_YARN_WRAP_CHILD");
+    }
+    cmd.env_remove("MATCHAPACK_YARN_CHILD");
     let deadline = std::env::var("MATCHAPACK_YARN_CACHE_DIR_SECS").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs_f64).unwrap_or(CACHE_DIR_DEADLINE);
     let install_ended = AtomicBool::new(false);
     // Yarn's cache folder, asked of the same Yarn: started here, before the
@@ -1152,12 +1208,17 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // workers clone, open with O_CLOEXEC, set times, groups and xattrs; the
     // socket and its clone were made before the install's node). NOTES
     // "Yarn 1 shell route", decision 4.
-    let ask = if yarn.corepack { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, args)) };
+    //
+    // For `yarn workspace <name> <command> …` the Yarn that links is the one
+    // the workspace command starts, with the arguments after the name only
+    // (Yarn passes it nothing of its own): its cache options are those.
+    let cache_from = workspace_args(args).map_or(args, |w| &w[1..]);
+    let ask = if yarn.corepack { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, cache_from)) };
     let status = std::thread::scope(|s| {
         s.spawn(|| {
             let ask = match ask {
                 Some(a) => a,
-                None => server.chosen_yarn(&install_ended).and_then(|js| start_yarn_cache_dir(&node, &js, &yarn.env, cwd, args)),
+                None => server.chosen_yarn(&install_ended).and_then(|js| start_yarn_cache_dir(&node, &js, &yarn.env, cwd, cache_from)),
             };
             server.set_cache(ask.and_then(|a| a.answer(deadline, &install_ended)))
         });
@@ -1185,7 +1246,8 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // Yarn wrote .yarn-integrity in this run (it linked), but the hook saw
     // no link step: the hook no longer fits this Yarn, or another Yarn ran.
     let linked = now_mtime(&integrity).is_some_and(|t| Some(t) != integrity_before);
-    let unseen = linked && stats.link_steps == 0;
+    // (A workspace command's Yarn whose hook declined ran plain, and said so.)
+    let unseen = linked && stats.link_steps == 0 && stats.declined.is_none();
     out["linked"] = json!(linked);
     out["unseen"] = json!(unseen);
     if !status.success() {
@@ -1233,14 +1295,14 @@ fn mib(b: u64) -> String {
     format!("{:.1} MiB", b as f64 / 1048576.0)
 }
 
-/// `matchapack yarn <args>`: a bare `yarn` or `yarn install` with clones of
-/// Yarn's cache; anything else, and every install a gate refuses, is plain
-/// Yarn with the same arguments.
+/// `matchapack yarn <args>`: a bare `yarn`, `yarn install` and the other
+/// commands of `engine_command` with clones of Yarn's cache; anything else,
+/// and every command a gate refuses, is plain Yarn with the same arguments.
 pub fn cli(args: Vec<String>) -> i32 {
     // On Linux plain Yarn already clones (its libuv uses FICLONE).
-    if !cfg!(target_os = "macos") || std::env::var("MATCHAPACK").as_deref() == Ok("0") || !is_install(&args) {
+    let Some(cmd_name) = engine_command(&args).filter(|_| cfg!(target_os = "macos") && std::env::var("MATCHAPACK").as_deref() != Ok("0")) else {
         return exec_yarn(&args, None);
-    }
+    };
     // Before anything of the install runs (`load_end`: trial::append).
     let load_start = trial::loadavg();
     let cwd = match std::env::current_dir() {
@@ -1262,7 +1324,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     let yarn_version = found.as_ref().map(|y| y.version.clone()).unwrap_or_default();
     let corepack = found.as_ref().is_ok_and(|y| y.corepack);
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args, "load_start": load_start });
+        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "command": cmd_name, "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args, "load_start": load_start });
         if corepack {
             rec["launcher"] = json!("corepack");
         }
@@ -1353,12 +1415,50 @@ mod tests {
         // An optional value binds the next word too (`--production [prod]`).
         assert_eq!(command(&s(&["--production", "install"])), "");
         assert_eq!(command(&s(&["run", "build"])), "run");
-        for a in [vec![], vec!["install"], vec!["--frozen-lockfile", "--cache-folder", "/c"], vec!["install", "--production"]] {
-            assert!(is_install(&s(&a)), "{a:?}");
+        let handled = |a: &[&str]| engine_command(&s(a));
+        for (a, want) in [
+            (vec![], "install"),
+            (vec!["install"], "install"),
+            (vec!["--frozen-lockfile", "--cache-folder", "/c"], "install"),
+            (vec!["install", "--production"], "install"),
+            (vec!["add", "x"], "add"),
+            (vec!["--cache-folder", "/c", "add", "x"], "add"),
+            (vec!["-D", "add", "x"], "add"),
+            (vec!["add", "x", "--dev", "--exact"], "add"),
+            (vec!["upgrade"], "upgrade"),
+            (vec!["upgrade", "--scope", "@y1", "--latest"], "upgrade"),
+            (vec!["remove", "x"], "remove"),
+            (vec!["upgrade-interactive", "--latest"], "upgrade-interactive"),
+            (vec!["upgradeInteractive"], "upgrade-interactive"),
+            (vec!["workspace", "w2", "add", "x"], "workspace add"),
+            (vec!["--cache-folder", "/c", "workspace", "w2", "remove", "x"], "workspace remove"),
+            (vec!["workspace", "w2", "upgrade", "--latest"], "workspace upgrade"),
+        ] {
+            assert_eq!(handled(&a).as_deref(), Some(want), "{a:?}");
         }
-        for a in [vec!["add", "x"], vec!["-v"], vec!["--version"], vec!["install", "--help"], vec!["global", "add", "x"], vec!["run", "install"]] {
-            assert!(!is_install(&s(&a)), "{a:?}");
+        for a in [
+            vec!["-v"],
+            vec!["--version"],
+            vec!["install", "--help"],
+            vec!["add", "--help"],
+            vec!["add", "-h", "x"],
+            vec!["global", "add", "x"],
+            vec!["run", "install"],
+            vec!["run", "add"],
+            vec!["why", "x"],
+            vec!["workspace", "w2", "run", "add"],
+            vec!["workspace", "w2", "upgrade-interactive"],
+            vec!["workspace", "w2", "install"],
+            vec!["workspace", "w2"],
+            vec!["workspace", "-x", "add", "y"],
+            vec!["workspace", "w2", "--dev", "add"],
+            vec!["workspaces", "run", "add"],
+        ] {
+            assert_eq!(handled(&a), None, "{a:?}");
         }
+        // The Yarn a workspace command starts gets the words after the name.
+        assert_eq!(workspace_args(&s(&["--cache-folder", "/c", "workspace", "w2", "add", "x", "--cache-folder", "/d"])), Some(&s(&["w2", "add", "x", "--cache-folder", "/d"])[..]));
+        assert_eq!(workspace_args(&s(&["add", "workspace"])), None);
     }
 
     #[test]

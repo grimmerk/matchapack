@@ -1,0 +1,17 @@
+{
+  "name": "y1-empty",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "y1-empty",
+      "version": "1.0.0",
+      "main": "index.js",
+      "dist": {
+        "tarball": "http://127.0.0.1:48321/y1-empty-1.0.0.tgz",
+        "shasum": "b8a904ae18b29046831127db8ec6f8968382bf57"
+      }
+    }
+  }
+}

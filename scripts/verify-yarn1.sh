@@ -49,6 +49,30 @@
 #                      not as the engine's
 #   --engine-min-clones N  the engine run must have cloned at least N files
 #                      (default 1; 0 for a case that must clone nothing)
+#   --command 'WORDS'  after the install, run `yarn WORDS` in every tree:
+#                      plain Yarn in the prime run, in plain1 and plain2;
+#                      `matchapack yarn WORDS` in the engine tree (NOTES
+#                      "Yarn 1 commands"). The install before it is plain
+#                      Yarn in every tree, so a difference is the command's.
+#                      WORDS are split at spaces; --non-interactive
+#                      --cache-folder <the run's cache> are added after them
+#                      (no --frozen-lockfile). The command's exit status must
+#                      be the same in every run (it may fail: then the
+#                      engine's log line must say yarn_failed with that
+#                      status); the comparison covers the install and the
+#                      command. Prints whether each package.json and
+#                      yarn.lock is byte-identical between plain1 and the
+#                      engine, and which of them the command changed. Not
+#                      with --then.
+#   --command-setup engine  with --command: the engine tree's install is
+#                      the engine's too
+#   --command-before 'WORDS'  with --command: plain `yarn WORDS` in every tree
+#                      after the install and before the command (a tree an
+#                      earlier command left, which a fresh install from its
+#                      lockfile would lay out otherwise)
+#   --command-tty      with --command: run it in a pseudo-terminal that
+#                      takes every update `yarn upgrade-interactive` offers
+#                      (scripts/yarn1-tty.py), without --non-interactive
 # Environment: MATCHAPACK_YARN_NODE (node binary, default the node on PATH),
 # MATCHAPACK_YARN_JS (yarn.js, default the yarn on PATH, resolved); the
 # engine's test switches (MATCHAPACK_YARN_FAIL_EVERY, …) reach the engine run.
@@ -70,6 +94,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin=$here/target/release/matchapack
 work= cache_mode=warm cache_group= cache_xattr=0 engine= prime_node= then= min_clones=1 cache_dir= before_then= subdir=.
+command= command_setup=plain command_tty=0 command_before=
 while [ $# -gt 0 ]; do
   case $1 in
     --work) work=${2:?--work needs a directory}; shift 2 ;;
@@ -82,6 +107,11 @@ while [ $# -gt 0 ]; do
     --before-then) before_then=${2:?--before-then needs a command}; shift 2 ;;
     --subdir) subdir=${2:?--subdir needs a directory}; shift 2 ;;
     --engine) engine=${2:?--engine needs a name}; shift 2 ;;
+    --command) command=${2:?--command needs the words of a yarn command}; shift 2 ;;
+    --command-setup) command_setup=${2:?--command-setup needs plain or engine}; shift 2
+      case $command_setup in plain|engine) ;; *) echo "--command-setup $command_setup: plain or engine" >&2; exit 2 ;; esac ;;
+    --command-tty) command_tty=1; shift ;;
+    --command-before) command_before=${2:?--command-before needs the words of a yarn command}; shift 2 ;;
     --engine-min-clones) min_clones=${2:?--engine-min-clones needs a number}; shift 2
       case $min_clones in ''|*[!0-9]*) echo "--engine-min-clones $min_clones: a number" >&2; exit 2 ;; esac ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
@@ -103,6 +133,12 @@ case $engine in
 esac
 [ -z "$then" ] || { [ -f "$then/package.json" ] && [ -f "$then/yarn.lock" ]; } || { echo "--then $then: needs package.json and yarn.lock" >&2; exit 2; }
 [ -z "$before_then" ] || [ -n "$then" ] || { echo "--before-then needs --then" >&2; exit 2; }
+[ -z "$command" ] || [ -z "$then" ] || { echo "--command is not with --then" >&2; exit 2; }
+{ [ "$command_setup" = plain ] && [ $command_tty = 0 ] && [ -z "$command_before" ]; } || [ -n "$command" ] \
+  || { echo "--command-setup / --command-tty / --command-before need --command" >&2; exit 2; }
+read -ra cmd_words <<< "$command"
+read -ra before_words <<< "$command_before"
+[ -z "$command" ] || [ ${#cmd_words[@]} -gt 0 ] || { echo "--command: no words" >&2; exit 2; }
 case $subdir in /*|..|../*|*/..|*/../*) echo "--subdir $subdir: a relative path inside the project" >&2; exit 2 ;; esac
 [ -d "$src/$subdir" ] || { echo "--subdir $subdir: no such directory in $src" >&2; exit 2; }
 # A symlink in the path could lead out of the project: Yarn would then
@@ -143,7 +179,7 @@ if [ -n "$cache_dir" ]; then
   case "$work/" in "$cache_dir/"*) echo "--work $work is inside --cache-dir $cache_dir" >&2; exit 2 ;; esac
 fi
 rm -rf "${work:?}/prime" "${work:?}/plain1" "${work:?}/plain2" "${work:?}/engine" "${work:?}/cache" "${work:?}/cache-1" "${work:?}/cache-2" \
-  "${work:?}/cache-e" "${work:?}/runs" "${work:?}/mp" "${work:?}/engine.json" "${work:?}/diff-engine.txt"
+  "${work:?}/cache-e" "${work:?}/runs" "${work:?}/mp" "${work:?}/engine.json" "${work:?}/diff-engine.txt" "${work:?}/command-status"
 echo "yarn $yver, node $("$node" -v), $("$bin" --version), $cache_mode cache, work $work"
 
 # Fixtures install from the local tarball server (as in verify-npm.sh).
@@ -152,6 +188,12 @@ if grep -q '127.0.0.1:48321' "$src/yarn.lock" && ! curl -sf -o /dev/null http://
   python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
   server=$!
   for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz && break; sleep 0.1; done
+fi
+# A server another checkout left running answers the tarballs, and may not
+# have the registry documents (make-tarballs.py) the Yarn command cases name
+# packages by.
+if curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz && ! curl -sf -o /dev/null http://127.0.0.1:48321/y1-c; then
+  echo "the server on 127.0.0.1:48321 has no registry documents: it serves another checkout's fixtures/optional-upward/tarballs; stop it" >&2; exit 2
 fi
 trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
 
@@ -181,8 +223,33 @@ install() {
       "$bin" yarn install --frozen-lockfile --non-interactive --cache-folder "$cache" "$@") >> "$work/$name.log" 2>&1
   fi
 }
+# run_command <name> <cache> <node> <how> <tty 0|1> <words...>: `yarn
+# WORDS` (--command, --command-before) in $work/<name>, after its install;
+# plain or engine as for install. Every Yarn of it, a workspace command's
+# child included, gets the run's cache (YARN_CACHE_FOLDER as well as
+# --cache-folder: a workspace command passes its child only the words after
+# the name). Exit status: the command's.
+run_command() {
+  local name=$1 cache=$2 n=$3 how=$4 tty=$5 run=() extra=(--non-interactive --cache-folder "$cache")
+  shift 5
+  local cmd_words=("$@")
+  [ "$tty" = 1 ] && extra=(--cache-folder "$cache")
+  if [ "$how" = plain ]; then run=("$n" "$yarnjs"); else run=("$bin" yarn); fi
+  [ "$tty" = 1 ] && run=(python3 "$here/scripts/yarn1-tty.py" -- "${run[@]}")
+  echo "--- yarn ${cmd_words[*]} ($how)" >> "$work/$name.log"
+  if [ "$how" = plain ]; then
+    (cd "$work/$name/$subdir" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true YARN_CACHE_FOLDER="$cache" \
+      "${run[@]}" "${cmd_words[@]}" "${extra[@]}") >> "$work/$name.log" 2>&1 < /dev/null
+  else
+    (cd "$work/$name/$subdir" && env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK \
+      YARN_DISABLE_SELF_UPDATE_CHECK=true YARN_CACHE_FOLDER="$cache" PATH="$(dirname "$n"):$PATH" MATCHAPACK_YARN_JS="$yarnjs" \
+      MATCHAPACK_STORE="$work/mp/store" MATCHAPACK_LOG_DIR="$work/mp/log" MATCHAPACK_CONFIG_DIR="$work/mp/config" MATCHAPACK_NO_FALLBACK=1 \
+      "${run[@]}" "${cmd_words[@]}" "${extra[@]}") >> "$work/$name.log" 2>&1 < /dev/null
+  fi
+}
 # yarn_run <name> <cache> <node> <how> [args]: copy the project to
-# $work/<name>, install (twice with --then); sets run_<name>=START:END.
+# $work/<name>, install (twice with --then; then the command with
+# --command); sets run_<name>=START:END.
 yarn_run() {
   local name=$1 cache=$2 n=$3 how=$4 s e rc
   shift 4
@@ -190,7 +257,16 @@ yarn_run() {
   cpp "$src" "$work/$name" || { echo "copying $src to $work/$name failed"; exit 1; }
   : > "$work/$name.log"
   s=$(now_ns)
-  install "$name" "$cache" "$n" "$how" "$@"; rc=$?
+  local ihow=$how
+  [ -n "$command" ] && [ "$command_setup" = plain ] && ihow=plain
+  install "$name" "$cache" "$n" "$ihow" "$@"; rc=$?
+  if [ $rc = 0 ] && [ -n "$command_before" ]; then
+    run_command "$name" "$cache" "$n" plain 0 "${before_words[@]}"; rc=$?
+  fi
+  if [ $rc = 0 ] && [ -n "$command" ]; then
+    run_command "$name" "$cache" "$n" "$how" "$command_tty" "${cmd_words[@]}"
+    echo "$name $?" >> "$work/command-status"
+  fi
   if [ $rc = 0 ] && [ -n "$then" ]; then
     cp -p "$then/package.json" "$then/yarn.lock" "$work/$name/" \
       && { [ -z "$before_then" ] || (cd "$work/$name" && sh -c "$before_then") >> "$work/$name.log" 2>&1; } \
@@ -234,6 +310,41 @@ yarn_run plain1 "$c1" "$node" plain "$@"
 yarn_run plain2 "$c2" "$node" plain "$@"
 [ -n "$engine" ] && yarn_run engine "$ce" "$node" engine "$@"
 
+# --- The command (--command) -------------------------------------------------
+# The same exit status in every run (the prime run's included).
+cmd_rc=
+if [ -n "$command" ]; then
+  statuses=$(awk '{ print $2 }' "$work/command-status" | sort -u)
+  if [ "$(printf '%s\n' "$statuses" | wc -l | tr -d ' ')" != 1 ]; then
+    echo "command: yarn ${cmd_words[*]}: the exit status differs between runs: $(tr '\n' ' ' < "$work/command-status")"
+    for n in prime plain1 plain2 engine; do [ -f "$work/$n.log" ] && { echo "  $n:"; tail -6 "$work/$n.log" | sed 's/^/    /'; }; done
+    exit 1
+  fi
+  cmd_rc=$statuses
+  echo "command: yarn ${cmd_words[*]}: exit $cmd_rc in every run"
+  # Each package.json and yarn.lock of the project (outside node_modules):
+  # did the command change it (plain1 against the source), and is it the
+  # same bytes in plain1 and the engine (also compared below, as files of
+  # the trees; these lines are for the tests).
+  manifests=$(cd "$work/plain1" && find . -name node_modules -prune -o \( -name package.json -o -name yarn.lock \) -type f -print | sed 's|^\./||' | LC_ALL=C sort)
+  changed_pj= changed_lock=no same_pj=true same_lock=true
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    if ! cmp -s "$src/$m" "$work/plain1/$m"; then
+      case $m in */yarn.lock|yarn.lock) changed_lock=yes ;; *) changed_pj="$changed_pj $m" ;; esac
+    fi
+    if [ -n "$engine" ] && ! cmp -s "$work/plain1/$m" "$work/engine/$m"; then
+      case $m in */yarn.lock|yarn.lock) same_lock=false ;; *) same_pj=false ;; esac
+    fi
+  done <<< "$manifests"
+  echo "command: changed package.json:${changed_pj:- none}"
+  echo "command: changed yarn.lock: $changed_lock"
+  if [ -n "$engine" ]; then
+    echo "command: package.json byte-identical (plain1, engine): $same_pj"
+    echo "command: yarn.lock byte-identical (plain1, engine): $same_lock"
+  fi
+fi
+
 "$bin" diff --meta --normalize-roots "$work/plain1" "$work/plain2" --a-run "$run_plain1" --b-run "$run_plain2" \
   --a-cache "$c1" --b-cache "$c2" > "$work/diff-plain.txt"
 rc=$?
@@ -257,12 +368,31 @@ r = json.load(open(sys.argv[1]))
 y = r.get("yarn1") or {}
 copied = ", ".join(f"{k} {v}" for k, v in sorted((y.get("copied") or {}).items())) or "-"
 cache = "%s after %s s, install %.1f s" % (y.get("cache"), y.get("cache_secs"), r.get("secs", 0))
-print(r.get("outcome"), y.get("cloned", 0), y.get("cloned_bytes", 0), y.get("copied_total", 0), y.get("link_steps", 0), y.get("unseen"), copied, cache, sep="\t")
-' "$work/engine.json" 2>/dev/null) || { echo "engine: no log line ($work/mp/log/log.jsonl)"; exit 1; }
-IFS=$'\t' read -r outcome cloned cbytes copied steps unseen why cache <<< "$stats"
+words = sys.argv[2:]
+args = "yes" if (r.get("args") or [])[:len(words)] == words else "no: %s" % r.get("args")
+print(r.get("outcome"), y.get("cloned", 0), y.get("cloned_bytes", 0), y.get("copied_total", 0), y.get("link_steps", 0), y.get("unseen"), copied, cache,
+      r.get("code"), r.get("command"), args, (y.get("declined") or "-").replace("\t", " "), sep="\t")
+' "$work/engine.json" ${command:+"${cmd_words[@]}"} 2>/dev/null) || { echo "engine: no log line ($work/mp/log/log.jsonl)"; exit 1; }
+IFS=$'\t' read -r outcome cloned cbytes copied steps unseen why cache code logged_cmd args_ok child_declined <<< "$stats"
 echo "engine: $outcome, cloned $cloned files ($(( cbytes / 1048576 )) MiB), copied by Node $copied ($why), link steps $steps, unseen $unseen"
 echo "engine: Yarn's cache folder: $cache"
-[ "$outcome" = installed ] || { echo "engine: did not install ($outcome)"; exit 1; }
+if [ -n "$command" ]; then
+  # The log line is the command's (not the install's before it).
+  echo "engine: logged command $logged_cmd, its arguments as given: $args_ok"
+  [ "$args_ok" = yes ] || { echo "engine: the last log line is not the command's"; exit 1; }
+  if [ "$cmd_rc" != 0 ]; then
+    { [ "$outcome" = yarn_failed ] && [ "$code" = "$cmd_rc" ]; } || { echo "engine: the command failed with $cmd_rc, logged $outcome (code $code)"; exit 1; }
+    min_clones=0
+  elif [ "$child_declined" != - ]; then
+    # The hook in the Yarn a workspace command started declined: that Yarn
+    # ran plain, unseen by the hook. Only a case that clones nothing.
+    echo "engine: $child_declined"
+    [ "$min_clones" = 0 ] || { echo "engine: the workspace's Yarn ran without the hook"; exit 1; }
+  else
+    [ "$steps" -ge 1 ] 2>/dev/null || { echo "engine: the hook saw no link step"; exit 1; }
+  fi
+fi
+[ "$outcome" = installed ] || [ "${cmd_rc:-0}" != 0 ] || { echo "engine: did not install ($outcome)"; exit 1; }
 if [ "$min_clones" = 0 ]; then
   [ "$cloned" = 0 ] || { echo "engine: cloned $cloned files, expected none"; exit 1; }
 else

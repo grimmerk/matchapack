@@ -1,0 +1,16 @@
+{
+  "name": "@y1/scoped",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "@y1/scoped",
+      "version": "1.0.0",
+      "dist": {
+        "tarball": "http://127.0.0.1:48321/y1-scoped-1.0.0.tgz",
+        "shasum": "02e5c4fc6aafa6a3a0c46eff5dd93bf6651e038a"
+      }
+    }
+  }
+}
