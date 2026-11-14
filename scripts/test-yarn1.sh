@@ -456,21 +456,26 @@ if [ $rc = 2 ] && [ -f "$work/e-in/cache/keep" ]; then ok "a --cache-dir inside 
 # yarn1-emptyfirst at the default thread pool: plain Yarn's own race (NOTES
 # "The probe race"; issue grimmerk/matchapack-private#57) can hit the engine's run as well as a plain
 # one, so the engine may differ from plain1 the way two plain runs can.
-# emptyfirst_engine_verdict <case> <exit> [<engine tree>]: the verdict on
-# such a case, whose harness output is in $work/out. Passes on exit 0; under
-# Node >= 22 on exit 3 with the engine identical to plain1 or differing only
-# where plain varies; and on exit 1 when the harness reached the comparison
+# emptyfirst_engine_verdict <case> <exit> [<engine tree>] [<plain2 tree>]:
+# the verdict on such a case, whose harness output is in $work/out. Passes
+# on exit 0; under Node >= 22 on exit 3 with the engine identical to plain1
+# or differing only where plain varies, when plain's own variation is the
+# race's (probe_only on plain2, as in the plain cases above: plain varying
+# on an empty file is not the race either); and on exit 1 when the harness reached the comparison
 # (ENGINE DIFFERS) and the engine tree differs from plain1 only the way the
 # race does (probe_only: mtimes of non-empty package files). The evidence is
 # kept as emptyfirst-engine-race-<case>.txt. Sets $verdict. The strict
 # one-thread cases below have no tolerance: with one pool thread the race
 # cannot happen.
 emptyfirst_engine_verdict() {
-  local c=$1 r=$2 tree=${3:-$work/$1/engine}
+  local c=$1 r=$2 tree=${3:-$work/$1/engine} p2=${4:-$work/$1/plain2}
   verdict="exit $r"
   if [ "$r" = 0 ] && grep -q 'plain vs engine: IDENTICAL' "$work/out"; then verdict="plain vs engine: IDENTICAL"; return 0; fi
   [ "$node_major" -ge 22 ] || return 1
   if [ "$r" = 3 ] && grep -Eq 'plain vs engine: (IDENTICAL|differs only where plain varies)' "$work/out"; then
+    if ! probe_only "$c" "$p2" "$(window "$c" plain2)" "$(cachedir "$c" plain2)"; then
+      verdict="plain varies beyond the probe race ($why)"; return 1
+    fi
     verdict=$(grep -o 'plain vs engine: [a-zA-Z ]*' "$work/out" | head -1); return 0
   fi
   [ "$r" = 1 ] && grep -q 'plain vs engine: ENGINE DIFFERS' "$work/out" || return 1
@@ -514,6 +519,12 @@ if [ -d "$work/e-empty/engine" ] && [ "$node_major" -ge 22 ]; then
   else bad "engine-side verdict accepted a content change"; fi
   if ! forced race-e "$nudge"'; set_ns node_modules/.yarn-integrity 1700000000123456789'; then ok "engine-side verdict: .yarn-integrity's mtime is not the race ($verdict)"
   else bad "engine-side verdict accepted .yarn-integrity's mtime"; fi
+  # Exit 3 ("differs only where plain varies") with plain varying on an empty
+  # file: not the race on either side.
+  d=$(copy2 e-empty race-f plain2); (cd "$d" && set_ns node_modules/y1-empty/e011.empty $(( $(mtime_of node_modules/y1-empty/e011.empty) + 1000 )))
+  printf 'plain vs plain: PLAIN VARIES (forced)\nplain vs engine: differs only where plain varies (forced)\n' > "$work/out"
+  if ! emptyfirst_engine_verdict e-empty 3 "" "$d" && [ "${verdict#plain varies beyond}" != "$verdict" ]; then ok "engine-side verdict: exit 3 with plain varying on an empty file is not the race ($verdict)"
+  else bad "engine-side verdict accepted exit 3 with plain varying on an empty file ($verdict)"; fi
   # Exit 1 for another reason than the comparison (here: no clones) is never the race.
   printf 'engine: cloned 0 files, expected at least 1\n' > "$work/out"
   if ! emptyfirst_engine_verdict e-empty 1 "$work/e-empty-race-a"; then ok "engine-side verdict: an exit 1 that is not ENGINE DIFFERS is not the race"
