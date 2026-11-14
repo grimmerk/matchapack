@@ -568,18 +568,6 @@ impl Store {
 
 }
 
-/// The first difference between two extracted trees, `want` the reference
-/// (what the tarball extracts to) and `got` the one checked: the same files
-/// (contents, modes), the same directories and nothing else. Directory modes
-/// are compared only with `dir_modes`; the inject engine's checks and
-/// `store verify` compare them (the umask is 022 for both, and a clone
-/// carries them into the project).
-/// None when they are the same.
-pub fn compare_trees(want: &Path, got: &Path, dir_modes: bool) -> Result<Option<String>> {
-    let (want, got) = (tree(want, dir_modes, None)?.0, tree(got, dir_modes, None)?.0);
-    Ok(first_difference(&want, &got))
-}
-
 /// What comparing a store entry with pacote's extraction found
 /// (`compare_extraction`).
 #[derive(Debug, PartialEq, Eq)]
@@ -600,12 +588,16 @@ pub enum Compared {
 /// npm's 1985 dates.
 pub const EXTRACTION_TIME_SLACK: std::time::Duration = std::time::Duration::from_secs(3600);
 
-/// `compare_trees(extracted, entry, true)`, where `extracted` is pacote's
-/// extraction made by this install, which began at `started`. In the same
-/// walk (the metadata is read there anyway), every path of `extracted` must
-/// be a file or a directory, and every file at most EXTRACTION_TIME_SLACK
-/// older than `started`: pacote extracts with `noMtime` and no links, which
-/// is what the placement of a clone (then touched to now) reproduces.
+/// Compare a store entry with pacote's extraction of its tarball,
+/// `extracted`, made by this install (or `store verify`), which began at
+/// `started`: the same files (contents, modes), the same directories (and
+/// their modes: the umask is 022 for both, and a clone carries them into
+/// the project) and nothing else; the first difference, from the
+/// extraction's side (until 2026-11 `compare_trees`). In the same walk (the
+/// metadata is read there anyway), every path of `extracted` must be a file
+/// or a directory, and every file at most EXTRACTION_TIME_SLACK older than
+/// `started`: pacote extracts with `noMtime` and no links, which is what
+/// the placement of a clone (then touched to now) reproduces.
 pub fn compare_extraction(extracted: &Path, entry: &Path, started: std::time::SystemTime) -> Result<Compared> {
     let (want, odd) = tree(extracted, true, Some(started.checked_sub(EXTRACTION_TIME_SLACK).unwrap_or(std::time::UNIX_EPOCH)))?;
     if let Some(odd) = odd {

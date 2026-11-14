@@ -10,8 +10,11 @@
 //!   fetcher with npm's default options, umask 022, the tarball read from
 //!   npm's cache by its integrity; the hook's own eligibility rule is
 //!   asserted on the fetcher);
-//! - the comparison is `store::compare_trees` with directory modes, as the
-//!   inject check's;
+//! - the comparison is `store::compare_extraction`, as the inject check's:
+//!   directory modes compared, and pacote's extraction must hold only files
+//!   and directories written by this command (otherwise the entry is not
+//!   recorded and counts as one pacote could not extract, so that an install
+//!   compares it and declines that code; serve.rs);
 //! - an entry that matches gets this extraction code's key added to its made-by
 //!   record (the next inject install then samples it instead of comparing it
 //!   first), as a check that matched does;
@@ -27,7 +30,7 @@
 //! pacote like any other (it has an empty record, so it shows as `extractor`
 //! when it differs).
 
-use crate::store::{compare_trees, process_tag, rename_noreplace, Integrity, Store, TmpDir};
+use crate::store::{compare_extraction, process_tag, Compared, rename_noreplace, Integrity, Store, TmpDir};
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -79,6 +82,7 @@ pub fn verify_entry(store: &Store, key: &str, i: &Integrity, extract: &dyn Fn(&I
     let discard = || {
         let _ = std::fs::remove_dir_all(&fresh.path);
     };
+    let started = std::time::SystemTime::now();
     if let Err(e) = extract(i, &fresh.path) {
         discard();
         return Ok(Found::Failed(format!("{e:#}")));
@@ -89,11 +93,16 @@ pub fn verify_entry(store: &Store, key: &str, i: &Integrity, extract: &dyn Fn(&I
         let _shared = store.entry_lock(i, false)?;
         let made_by = store.made_by(i);
         let ino_before = ino(&dir);
-        let differs = compare_trees(&fresh.path, &dir, true);
+        let differs = compare_extraction(&fresh.path, &dir, started);
         (made_by, ino_before, differs)
     };
     let differs = match differs {
-        Ok(d) => d,
+        Ok(Compared::Same) => None,
+        Ok(Compared::Differs(d)) => Some(d),
+        Ok(Compared::Unexpected(odd)) => {
+            discard();
+            return Ok(Found::Failed(format!("pacote's extraction is not what matchapack's clones reproduce ({odd})")));
+        }
         Err(e) => {
             discard();
             return Err(e.context(format!("comparing {}", dir.display())));
@@ -354,6 +363,19 @@ mod tests {
         store.forget_made_by(&i);
         assert_eq!(verify_entry(&store, crate::serve::UNKNOWN_KEY, &i, &ex, false).unwrap(), Found::Match { recorded: false });
         assert!(store.made_by(&i).is_empty());
+        // An extraction with a file older than the command (more than the
+        // slack), or something other than files and directories: not
+        // recorded, reported as not extracted as a clone gives it.
+        let aged = |i: &Integrity, to: &Path| -> Result<()> {
+            ex(i, to)?;
+            crate::store::tests::age(&to.join("index.js"), 3660);
+            Ok(())
+        };
+        match verify_entry(&store, KEY, &i, &aged, true).unwrap() {
+            Found::Failed(e) => assert!(e.contains("index.js: modified at") && e.contains("not what matchapack's clones reproduce"), "{e}"),
+            f => panic!("{f:?}"),
+        }
+        assert!(store.made_by(&i).is_empty(), "not recorded");
         // An extraction that fails is reported as such, not as a difference.
         let failing = |_: &Integrity, _: &Path| -> Result<()> { bail!("no") };
         assert!(matches!(verify_entry(&store, KEY, &i, &failing, true).unwrap(), Found::Failed(_)));

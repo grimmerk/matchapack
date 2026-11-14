@@ -55,7 +55,7 @@
 //! again with `extracted`. The directory then becomes the store entry
 //! (renamed in only if no other install got there first) and is cloned.
 //! The same round trip checks the store against pacote (`why: "check"`): the
-//! entry is compared with pacote's extraction (`store::compare_trees`) before
+//! entry is compared with pacote's extraction (`store::compare_extraction`) before
 //! anything is placed. Each entry records the extraction code under which it
 //! is known to be what pacote extracts (`store.made_by`; keys such as
 //! `fetcher:<32 hex> tar:<32 hex> uv:1.52.1`, `code_key`: pacote's
