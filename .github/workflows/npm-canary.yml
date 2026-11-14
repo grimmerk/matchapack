@@ -1,0 +1,287 @@
+# The npm release canary (G-lite, #32): tests each new npm release of the
+# supported majors once, soon after it is published, and asks for a person
+# only when something changed.
+#
+#   poll    (daily, Linux, ~1 billed minute) reads npm's VERSION LIST from the
+#           registry (not the dist-tags) and the state from the tracking
+#           issue; picks the releases of the majors in INJECT_NPM_MAJORS
+#           (src/wrapper.rs) the state has not seen, the newest release of a
+#           newer major, and once a month the current release of every line.
+#           Nothing to test: it writes the poll date and stops.
+#   linux   per release, on a loop-mounted btrfs: test-inject.sh and
+#           verify-npm.sh (scripts/npm-suites.sh) with MATCHAPACK_NPM_VERSIONS
+#           and MATCHAPACK_NPM_FINGERPRINT set to `any`; the pacote class
+#           fingerprint (from the hook's own code); the diff of the tracked
+#           functions (pacote's FetcherBase class, arborist's caller chain,
+#           rebuild.js, ci.js exec) against the last verified release.
+#   decide  macOS only when the class text is not on the list (or could not
+#           be told) or for a new major; the LLM summary only when a tracked
+#           text changed.
+#   macos   the same suites, for those releases only (macOS bills 10x).
+#   advise  the advisory LLM summary (scripts/npm-canary-advise.sh); never a
+#           gate, never fails the run.
+#   report  rewrites the tracking issue's body (a table per line, a history,
+#           the state) and comments when a person should look: the suites,
+#           the fingerprint, each changed function's diff, the changelog lines
+#           and the compare link; then the advisory summary below it. The run
+#           is red when a release is red.
+#
+# State: one JSON block in the tracking issue's body, rewritten by the
+# workflow (review 2026-11-14, section 9.3). Why there: it needs only
+# `issues: write` (a file in the repository would need `contents: write` and
+# a push to master from a workflow, or a pull request, which needs a
+# repository setting); the owner reads the result where the state is, and
+# the poll date in it makes a dead poll visible; the issue's edit history
+# keeps every earlier state. A version is tested once; a red one again only
+# when matchapack's HEAD changes (or by hand: run the workflow with
+# `versions`).
+#
+# Setup the owner does once (nothing here creates it):
+#   1. Open the tracking issue (any title; an empty body is a fresh state)
+#      and set the repository VARIABLE NPM_CANARY_ISSUE to its number
+#      (Settings > Secrets and variables > Actions > Variables).
+#   2. Optional, for the advisory summary, ONE repository SECRET (same page,
+#      Secrets): ANTHROPIC_API_KEY (an API key) or CLAUDE_CODE_OAUTH_TOKEN
+#      (a subscription token from `claude setup-token`). Neither: skipped
+#      with a note in the comment.
+#   3. Scheduled runs use the workflow file on the default branch; GitHub
+#      disables schedules after 60 days without repository activity (public
+#      repositories) and may delay or drop scheduled runs: the poll date in
+#      the issue shows it.
+name: npm canary
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: npm versions to test, comma-separated (empty = what the poll finds)
+        required: false
+        default: ''
+      current:
+        description: also test the current release of every supported line (the monthly run)
+        type: boolean
+        default: false
+concurrency:
+  group: npm-canary
+  cancel-in-progress: false
+permissions: {}
+env:
+  NODE_VERSION: 24.22.1   # pinned: inspect reads Node's own acorn (node --expose-internals)
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write   # the poll date, on a day with nothing to test
+    outputs:
+      any: ${{ steps.poll.outputs.any }}
+      matrix: ${{ steps.poll.outputs.matrix }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE: ${{ vars.NPM_CANARY_ISSUE }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: read the state from the tracking issue
+        run: |
+          [ -n "$ISSUE" ] || { echo "::error::set the repository variable NPM_CANARY_ISSUE to the tracking issue's number"; exit 1; }
+          gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/body.md"
+          mkdir -p canary
+          node scripts/npm-canary.js state "$RUNNER_TEMP/body.md" > canary/state.json
+      - name: poll the registry
+        id: poll
+        env:
+          VERSIONS: ${{ inputs.versions }}
+          CURRENT: ${{ inputs.current }}
+        run: |
+          args=(--head "$GITHUB_SHA")
+          [ -n "${VERSIONS:-}" ] && args+=(--versions "$VERSIONS")
+          [ "${CURRENT:-}" = true ] && args+=(--current)
+          node scripts/npm-canary.js poll canary/state.json "${args[@]}" > canary/plan.json
+          jq -r '"to test: \([.todo[] | "\(.version) (\(.reason), against \(.baseline))"] | join(", ") | if . == "" then "nothing" else . end)"' canary/plan.json
+          echo "matrix=$(jq -c .todo canary/plan.json)" >> "$GITHUB_OUTPUT"
+          echo "any=$(jq -r '.todo | length > 0' canary/plan.json)" >> "$GITHUB_OUTPUT"
+      - name: nothing to test, record the poll date
+        if: steps.poll.outputs.any == 'false'
+        run: |
+          node scripts/npm-canary.js report canary/state.json canary/plan.json "$RUNNER_TEMP/none" canary/out --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file canary/out/body.md
+          if [ -f canary/out/comment.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file canary/out/comment.md; fi
+      - uses: actions/upload-artifact@v4
+        if: steps.poll.outputs.any == 'true'
+        with:
+          name: canary-plan
+          path: canary/*.json
+
+  linux:
+    needs: poll
+    if: needs.poll.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.poll.outputs.matrix) }}
+    name: linux (npm ${{ matrix.version }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: build
+        run: cargo build --release
+      - name: btrfs on a loop device, zsh
+        run: |
+          sudo apt-get install -y -qq zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zsh >/dev/null; }
+          scripts/btrfs-scratch.sh "$RUNNER_TEMP/btrfs"
+      - name: suites, fingerprint and diffs
+        env:
+          ITEM: ${{ toJSON(matrix) }}
+        run: |
+          printf '%s\n' "$ITEM" > "$RUNNER_TEMP/item.json"
+          scripts/npm-canary-version.sh "$RUNNER_TEMP/item.json" "$RUNNER_TEMP/btrfs/w" "out/canary-linux-${{ matrix.version }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-linux-${{ matrix.version }}
+          path: out/canary-linux-${{ matrix.version }}
+
+  decide:
+    needs: [poll, linux]
+    if: always() && needs.poll.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      macos: ${{ steps.decide.outputs.macos }}
+      advise: ${{ steps.decide.outputs.advise }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canary-linux-*
+          path: results
+      - id: decide
+        run: |
+          node scripts/npm-canary.js decide results decided > decided.json
+          cat decided.json
+          echo "macos=$(jq -c .macos decided.json)" >> "$GITHUB_OUTPUT"
+          echo "advise=$(jq -r .advise decided.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.decide.outputs.advise == 'true'
+        with:
+          name: canary-llm-input
+          path: decided/llm-input.txt
+          if-no-files-found: ignore
+
+  macos:
+    needs: [poll, decide]
+    if: always() && needs.decide.result == 'success' && needs.decide.outputs.macos != '[]'
+    runs-on: macos-15
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.decide.outputs.macos) }}
+    name: macos (npm ${{ matrix.version }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: build
+        run: cargo build --release
+      - name: suites
+        env:
+          MATCHAPACK_NPM_VERSIONS: any
+          MATCHAPACK_NPM_FINGERPRINT: any
+          VERSION: ${{ matrix.version }}
+        run: |
+          rc=0; scripts/npm-suites.sh "$VERSION" "$RUNNER_TEMP/w" || rc=$?
+          mkdir -p "out/canary-macos-$VERSION"
+          cp "$RUNNER_TEMP"/w/*.json "$RUNNER_TEMP"/w/*.log "out/canary-macos-$VERSION/" || true
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-macos-${{ matrix.version }}
+          path: out/canary-macos-${{ matrix.version }}
+
+  advise:
+    # Advisory only: its input is other people's text, so it can do nothing
+    # but produce a file (no write permission at all); report posts it.
+    needs: [poll, decide]
+    if: always() && needs.decide.outputs.advise == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+    outputs:
+      status: ${{ steps.advise.outputs.status }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: canary-llm-input
+          path: llm
+      - name: Claude Code CLI, pinned
+        if: env.ANTHROPIC_API_KEY != '' || env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          npm install --prefix "$RUNNER_TEMP/cc" --no-audit --no-fund --no-package-lock @anthropic-ai/claude-code@2.1.310
+          echo "$RUNNER_TEMP/cc/node_modules/.bin" >> "$GITHUB_PATH"
+      - id: advise
+        run: |
+          mkdir -p out/canary-advice
+          scripts/npm-canary-advise.sh llm/llm-input.txt out/canary-advice/advice.md
+          echo "status=$(cat out/canary-advice/advice.md.status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canary-advice
+          path: out/canary-advice
+          if-no-files-found: ignore
+
+  report:
+    needs: [poll, linux, decide, macos, advise]
+    if: always() && needs.poll.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write   # the body and the comments of the tracking issue
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE: ${{ vars.NPM_CANARY_ISSUE }}
+      ADVISE: ${{ needs.decide.outputs.advise }}
+      ADVISE_STATUS: ${{ needs.advise.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canary-*
+          path: results
+      - name: write the tracking issue
+        run: |
+          if [ "$ADVISE" != true ]; then note="not asked for (no tracked function changed)"
+          else note=${ADVISE_STATUS:-"failed (the advise job left no status)"}; fi
+          node scripts/npm-canary.js report results/canary-plan/state.json results/canary-plan/plan.json results out \
+            --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --advise "$note"
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file out/body.md
+          if [ -f out/comment.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file out/comment.md; fi
+          if [ -s results/canary-advice/advice.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file results/canary-advice/advice.md; fi
+      - name: red when a release is red
+        run: jq -e '.red == false' out/flags.json
