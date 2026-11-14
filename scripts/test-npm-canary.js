@@ -437,8 +437,9 @@ check('watch report: an item with no job: incomplete, not verified, red', w.stat
 
 // 23. Recorded releases only (the "nothing to test" path): state updated,
 //     green.
-w = wreport(watchState(steady), { node: { todo: [], record: [{ line: 26, newest: '26.13.2', uv: '1.52.1' }], watched: [22, 24, 26] }, yarn: { todo: [], record: null }, nodeLinux: [], nodeMacos: [] }, {})
+w = wreport(watchState(steady), { node: { todo: [], record: [{ line: 26, newest: '26.13.2', uv: '1.52.1' }, { line: 24, newest: '24.22.3', uv: '1.52.1', uvSrc: sha('seeded') }], watched: [22, 24, 26] }, yarn: { todo: [], record: null }, nodeLinux: [], nodeMacos: [] }, {})
 check('watch report: a release only recorded: newest updated, tested and verified kept, green', w.state.node.lines[26].newest === '26.13.2' && w.state.node.lines[26].tested === '26.13.1' && w.state.node.lines[26].verified === '26.13.1' && w.flags.notify === false, JSON.stringify(w.state.node.lines[26]))
+check('watch report: a recorded release keeps its fs.c hash (a seed too); one without keeps the line\'s', w.state.node.lines[24].uvSrc === sha('seeded') && w.state.node.lines[26].uvSrc === sha(fsc('1.52.1')), JSON.stringify(w.state.node.lines))
 
 // 24. A new Yarn 1 release: always a person, even when green.
 w = wreport(watchState(steady), { node: { todo: [], record: [], watched: [22, 24, 26] }, yarn: { todo: [{ yarn: '1.22.23', reason: 'Yarn 1.22.23 is new' }], record: null }, nodeLinux: [], nodeMacos: [{ key: 'yarn1.22.23', node: null, yarn: '1.22.23' }] }, { 'nodemacos-yarn1.22.23': ysuites(true, factsOk, 'v24.22.1', '1.22.23', '1.52.1') })
