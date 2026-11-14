@@ -264,8 +264,9 @@ fn find_yarn_on(path: &std::ffi::OsStr, cwd: &Path, run_dir: &dyn Fn() -> std::r
     let p = std::env::split_paths(path).map(|d| d.join("yarn")).find(|p| p.is_file()).ok_or("no yarn on PATH")?;
     match yarn_bin(&p) {
         Err(e) if e.contains(NOT_HANDLED) => {
+            util::known_launcher(&p, "yarn").map_err(|why| format!("{e}; {why}"))?;
             let (target, launch) = util::probe_launcher(&p, "yarn", path, cwd, &run_dir()?).map_err(|why| format!("{e}; {why}"))?;
-            let y = yarn_bin(&target).map_err(|why| format!("the yarn on PATH ({}) starts {}: {why}", p.display(), target.display()))?;
+            let y = yarn_entry(&target).map_err(|why| format!("the yarn on PATH ({}) starts {}: {why}", p.display(), target.display()))?;
             Ok(YarnBin { node: util::NodeStart::Launch(launch), ..y })
         }
         // The `yarn` on PATH itself: node as plain Yarn would get it
@@ -275,6 +276,21 @@ fn find_yarn_on(path: &std::ffi::OsStr, cwd: &Path, run_dir: &dyn Fn() -> std::r
 }
 
 const NOT_HANDLED: &str = "is neither Yarn 1's npm package, Homebrew's launcher for it, nor corepack's launcher";
+
+/// The Yarn a launcher's node was started on (`js`, symlinks resolved):
+/// only the script itself, Yarn 1's `bin/yarn.js` or corepack's launcher,
+/// never a file beside it (`yarn_bin` would take a `bin/yarn.js` beside a
+/// `bin/policy.js` the launcher starts, and bypass it).
+fn yarn_entry(js: &Path) -> std::result::Result<YarnBin, String> {
+    if is_corepack_launcher(js) {
+        return Ok(YarnBin { js: js.to_path_buf(), version: String::new(), corepack: true, env: Vec::new(), node: util::NodeStart::default() });
+    }
+    if !(js.file_name().is_some_and(|n| n == "yarn.js") && js.parent().and_then(Path::file_name).is_some_and(|n| n == "bin")) {
+        return Err("not Yarn 1's bin/yarn.js or corepack's launcher".into());
+    }
+    let version = yarn1_package(js)?;
+    Ok(YarnBin { js: js.to_path_buf(), version, corepack: false, env: Vec::new(), node: util::NodeStart::default() })
+}
 
 /// `find_yarn_js` for the file `p`.
 fn yarn_bin(p: &Path) -> std::result::Result<YarnBin, String> {
@@ -1501,7 +1517,9 @@ mod tests {
     /// util::tests::fake_version_manager) is found by asking the shim, and
     /// node is started with the environment the shim gives Yarn: also when
     /// it sets a variable only for Yarn (PREFIX, as Homebrew's launcher
-    /// does). One that adds arguments of its own to Yarn's is declined.
+    /// does). One that adds arguments of its own to Yarn's, or starts a
+    /// script beside Yarn's bin/yarn.js, is declined; so is a `yarn`
+    /// launcher matchapack does not know, without being run.
     #[test]
     fn yarn_behind_version_manager_shims() {
         let Some(node) = util::tests::real_node() else { return eprintln!("SKIP: no node") };
@@ -1521,6 +1539,13 @@ mod tests {
             let util::NodeStart::Launch(l) = &y.node else { panic!("{flavor}: not a Launch") };
             assert!(l.env.contains(&("PREFIX".into(), "/opt/fake-prefix".into())), "{flavor}: {:?}", l.env);
             assert_eq!(y.js, t.join("img/yarn/1.22.22/bin/yarn.js"), "{flavor}");
+            // A known shim that starts another script beside Yarn's
+            // bin/yarn.js: declined, not replaced by the yarn.js.
+            let policy = t.join("policy");
+            std::fs::create_dir_all(&policy).unwrap();
+            std::fs::write(policy.join(".fakepolicy"), "").unwrap();
+            let e = find_yarn_on(&path, &policy, &run_dir).unwrap_err();
+            assert!(e.contains("/bin/policy.js: not Yarn 1's bin/yarn.js or corepack's launcher"), "{flavor}: {e}");
             let args = t.join("args");
             std::fs::create_dir_all(&args).unwrap();
             std::fs::write(args.join(".fakeargs"), "").unwrap();
@@ -1537,8 +1562,22 @@ mod tests {
         std::fs::create_dir_all(g.join("bin")).unwrap();
         std::os::unix::fs::symlink("../lib/node_modules/yarn/bin/yarn.js", g.join("bin/yarn")).unwrap();
         let no_probe = || -> std::result::Result<PathBuf, String> { panic!("probed Yarn's own package") };
+        // A wrapper of Yarn that is no known launcher: declined, not run.
+        let w = d.join("wrapper");
+        let ran = d.join("wrapper-ran");
+        write_exec_sh(&w.join("yarn"), &format!("#!/bin/sh\ntouch \"{}\"\ncase \"$1\" in install|\"\") set -- \"$@\" --ignore-scripts ;; esac\nexec node \"{}\" \"$@\"\n", ran.display(), g.join("lib/node_modules/yarn/bin/yarn.js").display()));
+        let e = find_yarn_on(&util::tests::path_with(&w), &d, &no_probe).unwrap_err();
+        assert!(e.contains(NOT_HANDLED) && e.contains("is a launcher matchapack does not follow"), "{e}");
+        assert!(!ran.exists(), "the wrapper was run");
         let y = find_yarn_on(&util::tests::path_with(&g.join("bin")), &d, &no_probe).unwrap();
         assert!(matches!(&y.node, util::NodeStart::Path { node, drop_dyld } if node == Path::new("node") && *drop_dyld == cfg!(target_os = "macos")), "{:?}", y.node);
+    }
+
+    fn write_exec_sh(p: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]

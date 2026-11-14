@@ -864,19 +864,20 @@ open(f, "w").write(s.replace(a, "\"installationMethod\": \"homebrew\""))' "$keg"
     ok "Homebrew's yarn: plain vs matchapack yarn identical (diff --meta); $n files cloned; scripts see the launcher's PREFIX and npm_execpath = its libexec/bin/yarn.js"
   else bad "Homebrew's yarn (prime $r0, plain $rp, engine $re, diff $rd, cloned ${n:-?}; env $(tr '\n' ' ' < "$hb/engine/node_modules/.hb-env" 2>/dev/null))"; sed 's/^/    /' "$hb/engine.log" | tail -4; grep -v '^      ' "$hb/diff.txt" | tail -15; fi
   # A launcher of another shape (it works, and runs the same Yarn) is not
-  # recognized as Homebrew's: matchapack asks it what it starts (the probe,
-  # util::probe_launcher) and starts that node with the environment the
-  # launcher gave it, PREFIX included. Same tree as plain Homebrew Yarn.
+  # recognized, and it is no version manager's shim matchapack follows
+  # (util::known_launcher): declined without being run, and without
+  # MATCHAPACK_NO_FALLBACK plain yarn runs it.
   hbo=$hb/other; mkdir -p "$hbo/Cellar/yarn/$yv/bin" "$hbo/bin"; ln -s "$keg/libexec" "$hbo/Cellar/yarn/$yv/libexec"
   printf '#!/bin/bash\nexport PREFIX="%s"\nexec "%s" "$@"\n' "$hbp" "$hbjs" > "$hbo/Cellar/yarn/$yv/bin/yarn"; chmod 0555 "$hbo/Cellar/yarn/$yv/bin/yarn"
   ln -s "../Cellar/yarn/$yv/bin/yarn" "$hbo/bin/yarn"
-  HB_VARS=MATCHAPACK_NO_FALLBACK=1 hbrun other-run engine "$hbo/bin"; wo=$win
-  n=$(hrec 'y["cloned"]')
-  "$bin" diff --meta --normalize-roots "$hb/plain" "$hb/other-run" --a-run "$wp" --b-run "$wo" --a-cache "$hb/cache" --b-cache "$hb/cache" > "$hb/other-diff.txt" 2>&1; rd=$?
-  if [ $rc = 0 ] && [ $rd = 0 ] && [ "$(hrec 'r["outcome"]')" = installed ] && [ "${n:-0}" -gt 0 ] \
-    && [ "$(cat "$hb/other-run/node_modules/.hb-env" 2>/dev/null)" = "$want" ]; then
-    ok "a Homebrew-like launcher of another shape: followed through the probe, $n files cloned, scripts see its PREFIX, identical to plain Homebrew Yarn"
-  else bad "other launcher shape (exit $rc, diff $rd, cloned ${n:-?})"; sed 's/^/    /' "$hb/other-run.log" | tail -4; grep -v '^      ' "$hb/other-diff.txt" | tail -10; fi
+  HB_VARS=MATCHAPACK_NO_FALLBACK=1 hbrun other-declined engine "$hbo/bin"
+  if [ $rc = 3 ] && grep -q "neither Yarn 1's npm package, Homebrew's launcher for it, nor corepack's launcher" "$hb/other-declined.log" \
+    && [ ! -e "$hb/other-declined/node_modules" ] && [ "$(hrec 'r["outcome"]')" = declined ]; then
+    hbrun other-plain engine "$hbo/bin"
+    if [ $rc = 0 ] && grep -q 'running plain yarn instead' "$hb/other-plain.log" && [ "$(cat "$hb/other-plain/node_modules/.hb-env" 2>/dev/null)" = "$want" ]; then
+      ok "a Homebrew-like launcher of another shape: declined, then plain yarn runs it (PREFIX $hbp)"
+    else bad "other launcher shape, plain run (exit $rc)"; fi
+  else bad "other launcher shape declined (exit $rc)"; sed 's/^/    /' "$hb/other-declined.log" | tail -4; fi
 fi
 
 # --- The shell route: the `yarn` function `matchapack init` prints ------------
