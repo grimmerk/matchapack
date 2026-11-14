@@ -225,6 +225,9 @@ check('watch: a new 26.x with another libuv: one item, npm and Yarn suites', pl.
 // 16. Fail closed: version.h unreadable, a short release list.
 let r16 = wpoll(watchState(steady), nodeIndex('no-uv', [...lines, ['26.15.0', '2026-11-14']]))
 check('watch: version.h of a new release cannot be read: the poll fails', r16.status !== 0 && /libuv of Node 26\.15\.0/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+fs.writeFileSync(path.join(W, 'uv', 'v26.15.1.h'), '/* no version here */\n')
+r16 = wpoll(watchState(steady), nodeIndex('bad-uv', [...lines, ['26.15.1', '2026-11-14']]))
+check('watch: a version.h without the version: the poll fails', r16.status !== 0 && /version\.h has no UV_VERSION_MAJOR/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
 const short = path.join(W, 'short.json')
 write(short, lines.map(([v, date]) => ({ version: `v${v}`, date })))
 r16 = wpoll(watchState(steady), short)
