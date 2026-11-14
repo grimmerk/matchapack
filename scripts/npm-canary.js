@@ -402,9 +402,18 @@ async function watchPoll (state, opts, npmAll, supported, date) {
       const r = newestOf(m)
       add({ node: r.version, line: m, uv: await uvOf(r.version, opts.nodeUvDir), reason: m > maxKnown ? `Node ${m} is new` : `Node ${m} is not in the state`, newMajor: m > maxKnown })
     }
-    for (const m of known.filter((k) => watched.includes(k))) {
+    for (const m of known) {
       const line = lines[m]
       const r = newestOf(m)
+      if (!watched.includes(m)) {
+        // No longer watched: no new release is looked for, but a test still
+        // to be repeated (one requested by hand) is repeated.
+        const again = watchRetry(line, opts.head)
+        if (again) {
+          add({ node: line.newest || line.tested, line: m, uv: line.uv, reason: `${line.tested} ${again}`, newMajor: !!line.newMajor })
+        }
+        continue
+      }
       if (!line.newest || cmp(r.version, line.newest) > 0) {
         const uv = await uvOf(r.version, opts.nodeUvDir)
         // A line whose last test is to be repeated (incomplete, or red with

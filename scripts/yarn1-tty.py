@@ -51,8 +51,12 @@ def main(argv):
                 break
             out.write(chunk)
             out.flush()
-            seen = (seen + chunk)[-4096:]
-            if not answered and PROMPT in seen:
+            # Looked for before the tail is cut: a read may hold the hint and
+            # more than the tail after it.
+            buf = seen + chunk
+            hit = not answered and PROMPT in buf
+            seen = buf[-4096:]
+            if hit:
                 answered = True
                 # Inquirer reads keypresses; a short pause lets it draw first.
                 time.sleep(0.3)

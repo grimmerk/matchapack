@@ -270,6 +270,12 @@ const redOld = { lines: { ...steady.lines, 26: { ...steady.lines[26], newest: '2
 pl = plan(wpoll(watchState(redOld), nodeIndex('same-uv', [...lines, ['26.13.2', '2026-11-14']])))
 check('watch: a red line retried tests its newest release', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '26.13.2', JSON.stringify(pl.node || pl))
 
+// 17e. A line no longer watched (Node 20) whose test, requested by hand,
+//      left no result: tested again on the next poll all the same.
+const inc20 = { lines: { ...steady.lines, 20: nl('20.20.2', '1.46.0', { tested: '20.20.2', uvTested: '1.46.0', suites: 'incomplete', head: 'h' }) } }
+pl = plan(wpoll(watchState(inc20), nodeIndex('ordinary', lines)))
+check('watch: an incomplete test of a line no longer watched is repeated', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '20.20.2' && /incomplete/.test(pl.node.todo[0].reason), JSON.stringify(pl.node || pl))
+
 // 18. Yarn: a new stable 1.x is an item; 2.x and prereleases are not.
 yarnVersions(['1.22.23', '1.23.0-rc.1', '2.4.4'])
 pl = plan(wpoll(watchState(steady), nodeIndex('ordinary', lines)))
