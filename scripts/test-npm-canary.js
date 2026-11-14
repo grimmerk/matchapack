@@ -144,6 +144,8 @@ r = report({ items: [{ item: item('11.21.1', { reason: 'monthly run', baseline: 
 check('monthly retest of a verified release, function changed: nobody asked, green', r.state.lines[11].suites === 'pass' && r.state.lines[11].action === 'none' && r.flags.notify === false && r.comments.length === 0, JSON.stringify({ line: r.state.lines[11], flags: r.flags }))
 r = report({ items: [{ item: item('11.21.2'), linux: { known: true, compare: changedFn('11.21.1') }, files: { 'diffs/f.diff': '+x\n' } }] })
 check('new release, function changed: read the diff, a comment, the run notifies', r.state.lines[11].action === 'read the diff' && r.flags.notify === true && r.comments.length === 1, JSON.stringify({ line: r.state.lines[11], flags: r.flags }))
+r = report({ items: [{ item: item('11.20.0', { reason: 'requested', baseline: '11.19.1' }), linux: { known: true, compare: changedFn('11.19.1') }, files: { 'diffs/f.diff': '+x\n' } }] })
+check('older release requested by hand (below the verified one), function changed: still asks', r.state.history[0].action === 'read the diff' && r.flags.notify === true && r.comments.length === 1, JSON.stringify({ history: r.state.history[0], flags: r.flags }))
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`${pass} passed, ${fail} failed`)

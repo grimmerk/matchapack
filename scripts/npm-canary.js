@@ -583,12 +583,13 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     const classText = !r ? '?' : r.known === true ? 'known' : r.known === false ? 'new' : 'unknown'
     const caller = !r ? '?' : !r.compare ? (compareMissing ? 'missing' : '?') : r.compare.callerChanged ? 'changed' : 'same'
     const classChanged = !!(r && r.compare && r.compare.classChanged)
-    // A release this line has already verified (the monthly run, a retest by
-    // hand): its diff against the release before was reported when it was
-    // first tested, so a changed function asks for nobody again; a failure
-    // or a new class text still does.
+    // The release this line verified last, tested again (the monthly run, a
+    // retest by hand): its diff against the release before was reported when
+    // it was first tested, so a changed function asks for nobody again; a
+    // failure or a new class text still does. Only that release: an older
+    // one (a skipped release requested by hand) may never have been tested.
     const prior = state.lines[t.major] || {}
-    const reviewed = !!(prior.verified && cmp(prior.verified, t.version) >= 0)
+    const reviewed = prior.verified === t.version
     let action = 'none'
     if (suites !== 'pass' || classText !== 'known' || t.newMajor) {
       action = 'action needed'
