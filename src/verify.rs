@@ -32,7 +32,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -159,7 +159,8 @@ impl Pacote {
             f.write_all(text.as_bytes())?;
         }
         let helper = run_dir.join("store-verify.js");
-        let spawned = Command::new("node")
+        let spawned = crate::util::npm_node()
+            .command()
             .arg(&helper)
             .arg(npm_dir)
             .arg(cacache)

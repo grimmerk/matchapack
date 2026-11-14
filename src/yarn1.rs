@@ -165,6 +165,10 @@ pub struct YarnBin {
     /// every Yarn started here (the install, `yarn cache dir`, plain Yarn on
     /// a decline), so Yarn and its scripts see what plain Homebrew Yarn sees.
     pub env: Vec<(String, String)>,
+    /// How node is started for `js`: the `node` on PATH, or, behind a
+    /// version manager's shim, exactly the node and environment the shim
+    /// gives Yarn (`util::probe_launcher`).
+    pub node: util::NodeStart,
 }
 
 /// The version of Yarn 1's npm package whose `bin/yarn.js` is `js`, or why
@@ -260,8 +264,9 @@ fn find_yarn_on(path: &std::ffi::OsStr, cwd: &Path, run_dir: &dyn Fn() -> std::r
     let p = std::env::split_paths(path).map(|d| d.join("yarn")).find(|p| p.is_file()).ok_or("no yarn on PATH")?;
     match yarn_bin(&p) {
         Err(e) if e.contains(NOT_HANDLED) => {
-            let target = util::probe_launcher(&p, "yarn", path, cwd, &run_dir()?).map_err(|why| format!("{e}; {why}"))?;
-            yarn_bin(&target).map_err(|why| format!("the yarn on PATH ({}) starts {}: {why}", p.display(), target.display()))
+            let (target, launch) = util::probe_launcher(&p, "yarn", path, cwd, &run_dir()?).map_err(|why| format!("{e}; {why}"))?;
+            let y = yarn_bin(&target).map_err(|why| format!("the yarn on PATH ({}) starts {}: {why}", p.display(), target.display()))?;
+            Ok(YarnBin { node: util::NodeStart::Launch(launch), ..y })
         }
         r => r,
     }
@@ -273,7 +278,7 @@ const NOT_HANDLED: &str = "is neither Yarn 1's npm package, Homebrew's launcher 
 fn yarn_bin(p: &Path) -> std::result::Result<YarnBin, String> {
     let real = std::fs::canonicalize(p).map_err(|e| format!("resolving {}: {e}", p.display()))?;
     if is_corepack_launcher(&real) {
-        return Ok(YarnBin { js: real, version: String::new(), corepack: true, env: Vec::new() });
+        return Ok(YarnBin { js: real, version: String::new(), corepack: true, env: Vec::new(), node: util::NodeStart::default() });
     }
     let mut env = Vec::new();
     let js = if real.file_name().is_some_and(|n| n == "yarn.js") {
@@ -291,7 +296,7 @@ fn yarn_bin(p: &Path) -> std::result::Result<YarnBin, String> {
             e
         }
     })?;
-    Ok(YarnBin { js, version, corepack: false, env })
+    Ok(YarnBin { js, version, corepack: false, env, node: util::NodeStart::default() })
 }
 
 /// Whether the project at `cwd` is a Yarn 2+ one, decided from files only:
@@ -1002,10 +1007,11 @@ struct CacheDirAsk {
 /// install (CI run 43306715867; NOTES "The cause"). The other way round,
 /// `yarn cache dir` could hold the pipe on which the install's node reports
 /// its exec, and the install started only when `yarn cache dir` ended.
-fn start_yarn_cache_dir(node: &Path, yarn_js: &Path, env: &[(String, String)], cwd: &Path, args: &[String]) -> std::result::Result<CacheDirAsk, String> {
+fn start_yarn_cache_dir(node: &util::NodeStart, yarn_js: &Path, env: &[(String, String)], cwd: &Path, args: &[String]) -> std::result::Result<CacheDirAsk, String> {
     use std::io::Read;
     let started = Instant::now();
-    let mut child = std::process::Command::new(node)
+    let mut child = node
+        .command()
         .arg(yarn_js)
         .arg("cache")
         .arg("dir")
@@ -1113,7 +1119,7 @@ impl CacheDirAsk {
 
 fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result::Result<Summary, RunError> {
     let t0 = Instant::now();
-    let node = PathBuf::from("node");
+    let node = yarn.node.clone();
     let prepared = (|| -> Result<_> {
         let run_dir = util::private_run_dir()?;
         let helper = run_dir.join("yarn1-hook.js");
@@ -1139,7 +1145,7 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
 
     // Not util::node_cmd: Yarn runs here as the user's `yarn`, and the
     // scripts it starts see the user's environment.
-    let mut cmd = std::process::Command::new(&node);
+    let mut cmd = node.command();
     cmd.arg(&helper)
         .arg(&yarn.js)
         .args(args)
@@ -1240,7 +1246,7 @@ fn exec_yarn(args: &[String], yarn: Option<&YarnBin>) -> i32 {
     let chosen = yarn.map(|y| y.js.clone()).or_else(|| std::env::var_os("MATCHAPACK_YARN_JS").map(PathBuf::from));
     let mut cmd = match chosen.as_deref() {
         Some(js) => {
-            let mut c = std::process::Command::new("node");
+            let mut c = yarn.map(|y| y.node.command()).unwrap_or_else(|| std::process::Command::new("node"));
             c.arg(js).envs(yarn.iter().flat_map(|y| y.env.iter().map(|(k, v)| (k, v))));
             c
         }
@@ -1490,9 +1496,10 @@ mod tests {
     }
 
     /// The Yarn behind each version manager's `yarn` shim (simulated:
-    /// util::tests::fake_version_manager) is found by asking the shim; one
-    /// that sets a variable only for Yarn (as Homebrew's launcher does) is
-    /// declined, and the message still says the launcher was not recognized.
+    /// util::tests::fake_version_manager) is found by asking the shim, and
+    /// node is started with the environment the shim gives Yarn: also when
+    /// it sets a variable only for Yarn (PREFIX, as Homebrew's launcher
+    /// does).
     #[test]
     fn yarn_behind_version_manager_shims() {
         let Some(node) = util::tests::real_node() else { return eprintln!("SKIP: no node") };
@@ -1508,8 +1515,10 @@ mod tests {
             let hb = t.join("homebrew-like");
             std::fs::create_dir_all(&hb).unwrap();
             std::fs::write(hb.join(".fakeyarnprefix"), "").unwrap();
-            let e = find_yarn_on(&path, &hb, &run_dir).unwrap_err();
-            assert!(e.contains(NOT_HANDLED) && e.contains("sets PREFIX"), "{flavor}: {e}");
+            let y = find_yarn_on(&path, &hb, &run_dir).unwrap();
+            let util::NodeStart::Launch(l) = &y.node else { panic!("{flavor}: not a Launch") };
+            assert!(l.env.contains(&("PREFIX".into(), "/opt/fake-prefix".into())), "{flavor}: {:?}", l.env);
+            assert_eq!(y.js, t.join("img/yarn/1.22.22/bin/yarn.js"), "{flavor}");
             assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0, "{flavor}: the probe's files are gone");
         }
     }
@@ -1776,7 +1785,7 @@ mod tests {
         assert!(s3.stats.lock().unwrap().cache.as_deref().is_some_and(|c| c.contains("another volume")));
     }
 
-    fn yarn_cache_dir(node: &Path, yarn_js: &Path, cwd: &Path, args: &[String], deadline: Duration, cancel: &AtomicBool) -> std::result::Result<PathBuf, String> {
+    fn yarn_cache_dir(node: &util::NodeStart, yarn_js: &Path, cwd: &Path, args: &[String], deadline: Duration, cancel: &AtomicBool) -> std::result::Result<PathBuf, String> {
         start_yarn_cache_dir(node, yarn_js, &[], cwd, args)?.answer(deadline, cancel)
     }
 
@@ -1794,7 +1803,7 @@ mod tests {
         let pid = || std::fs::read_to_string(d.join("slow.js.pid")).ok().and_then(|p| p.trim().parse::<i32>().ok());
         let gone = |p: i32| unsafe { libc::kill(p, 0) } != 0;
         let t = Instant::now();
-        let e = yarn_cache_dir(Path::new("node"), &slow, &d, &[], Duration::from_millis(1500), &AtomicBool::new(false)).unwrap_err();
+        let e = yarn_cache_dir(&util::NodeStart::path("node"), &slow, &d, &[], Duration::from_millis(1500), &AtomicBool::new(false)).unwrap_err();
         assert!(e.contains("did not answer"), "{e}");
         assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
         assert!(pid().is_some_and(gone), "killed and reaped");
@@ -1802,7 +1811,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let t = Instant::now();
         let e = std::thread::scope(|s| {
-            let h = s.spawn(|| yarn_cache_dir(Path::new("node"), &slow, &d, &[], Duration::from_secs(60), &cancel));
+            let h = s.spawn(|| yarn_cache_dir(&util::NodeStart::path("node"), &slow, &d, &[], Duration::from_secs(60), &cancel));
             std::thread::sleep(Duration::from_millis(1500));
             cancel.store(true, Ordering::Relaxed);
             h.join().unwrap().unwrap_err()
@@ -1815,12 +1824,12 @@ mod tests {
         let held = d.join("held.js");
         std::fs::write(&held, "require('child_process').spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }).unref(); console.log('/held/cache/v6')\n").unwrap();
         let t = Instant::now();
-        assert_eq!(yarn_cache_dir(Path::new("node"), &held, &d, &[], Duration::from_secs(30), &AtomicBool::new(false)).unwrap(), PathBuf::from("/held/cache/v6"));
+        assert_eq!(yarn_cache_dir(&util::NodeStart::path("node"), &held, &d, &[], Duration::from_secs(30), &AtomicBool::new(false)).unwrap(), PathBuf::from("/held/cache/v6"));
         assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
         // A real answer is read.
         let ok = d.join("ok.js");
         std::fs::write(&ok, "console.log('warning line'); console.log('/some/cache/v6')\n").unwrap();
-        assert_eq!(yarn_cache_dir(Path::new("node"), &ok, &d, &[], Duration::from_secs(30), &AtomicBool::new(false)).unwrap(), PathBuf::from("/some/cache/v6"));
+        assert_eq!(yarn_cache_dir(&util::NodeStart::path("node"), &ok, &d, &[], Duration::from_secs(30), &AtomicBool::new(false)).unwrap(), PathBuf::from("/some/cache/v6"));
     }
 
     /// The end of an install does not wait for the pipes of a `yarn cache
@@ -1838,7 +1847,7 @@ mod tests {
             require('fs').writeFileSync(process.argv[1] + '.pid', String(c.pid)); setTimeout(() => {}, 60000)\n";
         std::fs::write(&held, script).unwrap();
         let pid_file = d.join("held-slow.js.pid");
-        let ask = start_yarn_cache_dir(Path::new("node"), &held, &[], &d, &[]).unwrap();
+        let ask = start_yarn_cache_dir(&util::NodeStart::path("node"), &held, &[], &d, &[]).unwrap();
         let t = Instant::now();
         while !pid_file.exists() && t.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(20));
@@ -1858,7 +1867,7 @@ mod tests {
         let script = "const c = require('child_process').spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }); c.unref(); \
             require('fs').writeFileSync(process.argv[1] + '.pid', String(c.pid)); console.log('/held/cache/v6')\n";
         std::fs::write(&done, script).unwrap();
-        let mut ask = start_yarn_cache_dir(Path::new("node"), &done, &[], &d, &[]).unwrap();
+        let mut ask = start_yarn_cache_dir(&util::NodeStart::path("node"), &done, &[], &d, &[]).unwrap();
         let t = Instant::now();
         while matches!(ask.child.try_wait(), Ok(None)) && t.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(20));
