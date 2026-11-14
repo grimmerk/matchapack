@@ -7,7 +7,10 @@
 //
 //   state   <issue body file>                       the state JSON, from the issue body
 //   poll    <state.json> [--head SHA] [--versions a,b] [--current] [--registry-json file]
-//                                                   the plan JSON: which versions to test
+//           [--node X.Y.Z] [--node-index-json file] [--node-uv-dir dir] [--yarn-registry-json file]
+//                                                   the plan JSON: which npm versions to test, and
+//                                                   the Node and Yarn 1 releases to test (the
+//                                                   release watch; the three files are for tests)
 //   inspect <npm package dir> <out.json>            versions, fingerprint, tracked function texts
 //   compare <base.json> <new.json> <out dir>        compare.json, one .diff per changed function,
 //                                                   changelog.md
@@ -21,6 +24,10 @@
 // workflow's header for why there): the last successful poll, the month of
 // the last monthly run, and per npm major the newest release tested, its
 // results, and the last release that passed (the baseline of the next diff).
+// `node`: per watched Node line its newest release seen, that release's
+// libuv, the release last tested, its results and the hook's facts; `yarn`:
+// the newest Yarn 1 release seen and the one last tested (NOTES "The Node and
+// Yarn 1 release watch").
 'use strict'
 const fs = require('node:fs')
 const path = require('node:path')
@@ -81,6 +88,14 @@ const cmp = (a, b) => {
 }
 const major = (v) => parts(v)[0]
 const today = () => new Date().toISOString().slice(0, 10)
+// Every fetch of the poll. CANARY_NO_NETWORK (the offline tests) makes one a
+// failure, so a test that forgot to give a file cannot pass on the network.
+const netFetch = (url, init) => {
+  if (process.env.CANARY_NO_NETWORK) {
+    die(`network disabled (CANARY_NO_NETWORK): ${url}`)
+  }
+  return fetch(url, init)
+}
 
 // The npm majors the inject engine runs on: INJECT_NPM_MAJORS in
 // src/wrapper.rs, the one list.
@@ -96,7 +111,7 @@ function supportedMajors () {
 // --- state -----------------------------------------------------------------
 
 function emptyState () {
-  return { version: 1, polled: null, monthly: null, lines: {}, history: [] }
+  return { version: 1, polled: null, monthly: null, lines: {}, history: [], node: null, yarn: null }
 }
 function stateFromBody (body) {
   const i = body.indexOf(STATE_OPEN)
@@ -121,7 +136,7 @@ async function registryVersions (file) {
   }
   // The version list, not the dist-tags: `latest` can trail, and a release
   // can be published without a tag moving. Any failure fails the job.
-  const res = await fetch('https://registry.npmjs.org/npm', { headers: { accept: 'application/vnd.npm.install-v1+json' } })
+  const res = await netFetch('https://registry.npmjs.org/npm', { headers: { accept: 'application/vnd.npm.install-v1+json' } })
   if (!res.ok) {
     die(`registry: HTTP ${res.status}`)
   }
@@ -239,7 +254,200 @@ async function poll (stateFile, opts) {
       }
     }
   }
-  return { date, month: monthly ? month : null, head: opts.head || null, supported, newMajor: all.length && major(all[all.length - 1]) > Math.max(...supported) ? major(all[all.length - 1]) : null, todo, skipped }
+  const watch = await watchPoll(state, opts, all, supported, date)
+  return { date, month: monthly ? month : null, head: opts.head || null, supported, newMajor: all.length && major(all[all.length - 1]) > Math.max(...supported) ? major(all[all.length - 1]) : null, todo, skipped, ...watch }
+}
+
+// --- the Node and Yarn 1 release watch -----------------------------------------
+// The behaviour the Yarn 1 engine depends on is Node's fs.copyFile, which is
+// libuv's uv_fs_copyfile, and libuv changes inside a Node line, not only at a
+// major (22.11.0 -> 22.12.0: libuv 1.48.0 -> 1.49.1 made copies keep times).
+// So a Node line is tested again when a new major appears or when the libuv
+// version of its newest release changes; either runs the Yarn suites (macOS)
+// and the npm suites (Linux, btrfs, one job per supported npm line at its
+// last verified release) on that Node. A new stable Yarn 1 release runs the
+// Yarn suites with it (none expected: the line is frozen at 1.22.22).
+
+// A line is watched while it has had a release in this many days: on
+// 2026-11-15 that is 22, 24 and 26 (Node 20's last release was 2026-03-24 and
+// 25's 2026-03-31: both lines have ended). A line the state knows that stops
+// releasing keeps its row, untested.
+const NODE_WATCH_DAYS = 183
+// The Yarn 1 the Node items run with, until the watch has verified a newer
+// one (.github/workflows/ci.yml pins the same).
+const YARN_PINNED = '1.22.22'
+const isNodeVersion = (v) => /^v\d+\.\d+\.\d+$/.test(v)
+const days = (from, to) => (Date.parse(to) - Date.parse(from)) / 86400000
+
+// Node's releases (nodejs.org/dist/index.json): version and date, oldest
+// first. Releases only: the list also has alphas (v27.0.0-alpha.0.1.0 on
+// 2026-11-12), which a "newest major" taken from its first entry would read
+// as Node 27. Its `uv` field is missing on the newest release of each line
+// (2026-11-14), so the libuv version is read from Node's own source (uvOf).
+async function nodeReleases (file) {
+  let doc
+  if (file) {
+    doc = readJson(file)
+  } else {
+    const res = await netFetch('https://nodejs.org/dist/index.json')
+    if (!res.ok) {
+      die(`nodejs.org: HTTP ${res.status}`)
+    }
+    doc = await res.json()
+  }
+  if (!Array.isArray(doc)) {
+    die('nodejs.org/dist/index.json is not a list')
+  }
+  const out = doc.filter((e) => e && typeof e.version === 'string' && isNodeVersion(e.version)).map((e) => ({ version: e.version.slice(1), date: String(e.date || '') }))
+  if (out.length < 500) {
+    die(`nodejs.org/dist/index.json: only ${out.length} releases, refusing to decide on that`)
+  }
+  return out.sort((a, b) => cmp(a.version, b.version))
+}
+
+// The libuv version of a Node release: deps/uv/include/uv/version.h at its
+// tag (in tests: <dir>/v<version>.h). Any failure fails the poll: a libuv
+// change must never be missed because a file could not be read.
+async function uvOf (version, dir) {
+  let text
+  if (dir) {
+    const f = path.join(dir, `v${version}.h`)
+    if (!fs.existsSync(f)) {
+      die(`libuv of Node ${version}: ${f} not found`)
+    }
+    text = fs.readFileSync(f, 'utf8')
+  } else {
+    const url = `https://raw.githubusercontent.com/nodejs/node/v${version}/deps/uv/include/uv/version.h`
+    const res = await netFetch(url)
+    if (!res.ok) {
+      die(`libuv of Node ${version}: ${url}: HTTP ${res.status}`)
+    }
+    text = await res.text()
+  }
+  const n = (k) => (text.match(new RegExp(`#define UV_VERSION_${k}\\s+(\\d+)`)) || [])[1]
+  const v = [n('MAJOR'), n('MINOR'), n('PATCH')]
+  if (v.some((x) => x === undefined)) {
+    die(`libuv of Node ${version}: version.h has no UV_VERSION_MAJOR, _MINOR and _PATCH`)
+  }
+  return v.join('.')
+}
+
+// The stable Yarn 1 releases (1.x.y), oldest first.
+async function yarn1Versions (file) {
+  let vs
+  if (file) {
+    vs = Object.keys(readJson(file).versions || {})
+  } else {
+    const res = await netFetch('https://registry.npmjs.org/yarn', { headers: { accept: 'application/vnd.npm.install-v1+json' } })
+    if (!res.ok) {
+      die(`registry (yarn): HTTP ${res.status}`)
+    }
+    vs = Object.keys((await res.json()).versions || {})
+  }
+  if (vs.length < 50) {
+    die(`registry: only ${vs.length} versions of yarn, refusing to decide on that`)
+  }
+  return vs.filter((v) => /^1\.\d+\.\d+$/.test(v)).sort(cmp)
+}
+
+// A watched release tested before is tested again as an npm release is
+// (retryReason): incomplete, or red with matchapack changed since. Never a
+// line only recorded (no test yet).
+const watchRetry = (line, head) => (line && line.tested ? retryReason(line, head) : null)
+
+async function watchPoll (state, opts, npmAll, supported, date) {
+  const releases = await nodeReleases(opts.nodeIndexJson)
+  const lines = (state.node && state.node.lines) || {}
+  const majors = [...new Set(releases.map((r) => major(r.version)))].sort((a, b) => a - b)
+  const newestOf = (m) => releases.filter((r) => major(r.version) === m).pop()
+  const watched = majors.filter((m) => days(newestOf(m).date, date) <= NODE_WATCH_DAYS)
+  const top = majors[majors.length - 1]
+  const todo = []
+  const record = []
+  const add = (t) => {
+    if (!todo.some((x) => x.node === t.node)) {
+      todo.push({ npm: true, yarn: true, newMajor: false, uvBefore: null, ...t })
+    }
+  }
+  if (opts.node) {
+    if (!isNodeVersion(`v${opts.node}`) || !releases.some((r) => r.version === opts.node)) {
+      die(`not a Node release: ${opts.node}`)
+    }
+    const m = major(opts.node)
+    add({ node: opts.node, line: m, uv: await uvOf(opts.node, opts.nodeUvDir), reason: 'requested', newMajor: !lines[m] })
+  }
+  if (!state.node) {
+    // First run: record the watched lines; test only the newest once (Node
+    // 22 and 24 run in pull-request CI already; 26 in no workflow).
+    for (const m of watched) {
+      const r = newestOf(m)
+      const uv = await uvOf(r.version, opts.nodeUvDir)
+      if (m === top) {
+        add({ node: r.version, line: m, uv, reason: `first run: Node ${m}, the newest line` })
+      } else {
+        record.push({ line: m, newest: r.version, uv })
+      }
+    }
+  } else {
+    const known = Object.keys(lines).map(Number)
+    if (top > Math.max(0, ...known)) {
+      const r = newestOf(top)
+      add({ node: r.version, line: top, uv: await uvOf(r.version, opts.nodeUvDir), reason: `Node ${top} is new`, newMajor: true })
+    }
+    for (const m of known.filter((k) => watched.includes(k))) {
+      const line = lines[m]
+      const r = newestOf(m)
+      if (!line.newest || cmp(r.version, line.newest) > 0) {
+        const uv = await uvOf(r.version, opts.nodeUvDir)
+        if (uv !== line.uv) {
+          add({ node: r.version, line: m, uv, uvBefore: line.uv || null, reason: `libuv ${line.uv || '?'} → ${uv} in Node ${m}` })
+        } else {
+          record.push({ line: m, newest: r.version, uv })
+        }
+      } else {
+        const again = watchRetry(line, opts.head)
+        if (again) {
+          add({ node: line.tested, line: m, uv: line.uvTested || line.uv, reason: again, newMajor: !!line.newMajor })
+        }
+      }
+    }
+  }
+
+  const yv = await yarn1Versions(opts.yarnRegistryJson)
+  const ynew = yv[yv.length - 1]
+  const y = state.yarn
+  const yarn = { todo: [], record: null }
+  if (!y) {
+    // First run: the current release, not tested (pull-request CI runs it).
+    yarn.record = { newest: ynew }
+  } else if (cmp(ynew, y.newest) > 0) {
+    yarn.todo.push({ yarn: ynew, reason: `Yarn ${ynew} is new` })
+  } else {
+    const again = watchRetry(y, opts.head)
+    if (again) {
+      yarn.todo.push({ yarn: y.tested, reason: again })
+    }
+  }
+
+  // The jobs. node-linux: per Node item, each supported npm line at the
+  // release the npm canary verified last (else its newest). node-macos: per
+  // Node item with the Yarn 1 the watch verified last, per Yarn item on the
+  // workflow's pinned Node (node null).
+  const yarnBase = (y && y.verified) || YARN_PINNED
+  const nodeLinux = []
+  for (const t of todo.filter((x) => x.npm)) {
+    for (const m of supported) {
+      const v = (state.lines[m] && state.lines[m].verified) || npmAll.filter((x) => major(x) === m).pop()
+      if (v) {
+        nodeLinux.push({ key: `node${t.node}-npm${v}`, node: t.node, npm: v })
+      }
+    }
+  }
+  const nodeMacos = [
+    ...todo.filter((x) => x.yarn).map((t) => ({ key: `node${t.node}`, node: t.node, yarn: yarnBase })),
+    ...yarn.todo.map((t) => ({ key: `yarn${t.yarn}`, node: null, yarn: t.yarn })),
+  ]
+  return { node: { todo, record, watched }, yarn, nodeLinux, nodeMacos }
 }
 
 // --- inspect ---------------------------------------------------------------
@@ -505,11 +713,19 @@ function result (dir) {
 }
 
 function loadResults (dir) {
-  const out = { linux: {}, macos: {} }
+  const out = { linux: {}, macos: {}, nodelinux: {}, nodemacos: {} }
   if (!dir || !fs.existsSync(dir)) {
     return out
   }
   for (const d of fs.readdirSync(dir)) {
+    // The release watch's jobs (canary-nodelinux-<key>, canary-nodemacos-<key>):
+    // their suites.json, or null when the job left none.
+    const w = d.match(/^canary-(nodelinux|nodemacos)-(.+)$/)
+    if (w) {
+      const f = path.join(dir, d, 'suites.json')
+      out[w[1]][w[2]] = fs.existsSync(f) ? readJson(f) : null
+      continue
+    }
     const m = d.match(/^canary-(linux|macos)-(\d+\.\d+\.\d+)$/)
     if (!m) {
       continue
@@ -615,6 +831,11 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
       sections.push(versionSection(t, r, macMissing ? null : mac, row).join('\n'))
     }
   }
+  const w = watchReport(state, plan, res, run)
+  rows.push(...w.rows)
+  sections.push(...w.sections)
+  red = red || w.red
+  attention = attention || w.attention
   state.polled = plan.date
   if (plan.month) {
     state.monthly = plan.month
@@ -640,6 +861,138 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
   writeJson(path.join(outDir, 'flags.json'), { red, attention, skipped: plan.skipped.length, notify })
   console.log(`${rows.length} versions reported; ${attention ? 'a comment asks for a person' : 'nothing for a person'}${red ? '; at least one red' : ''}`)
   return { red, attention }
+}
+
+// --- report: the Node and Yarn 1 release watch -----------------------------------
+
+const suitesPass = (s) => !!(s && s.suites && Object.keys(s.suites).length && Object.values(s.suites).every((x) => x.status === 0))
+const FACT_KEYS = ['empty_atime', 'empty_mtime', 'atime', 'mtime', 'group']
+const sameFacts = (a, b) => FACT_KEYS.every((k) => (a ? a[k] : undefined) === (b ? b[k] : undefined))
+function factsText (f) {
+  if (!f) {
+    return '-'
+  }
+  const kept = FACT_KEYS.filter((k) => f[k] === true)
+  return kept.length ? `keeps ${kept.join(', ')}` : 'keeps nothing'
+}
+
+// Each job a watch item needed: its result, or a failure when it left none
+// (the job failed before its upload: never a pass).
+function jobResults (entries, results) {
+  return entries.map((e) => ({ e, s: Object.prototype.hasOwnProperty.call(results, e.key) ? results[e.key] : null }))
+}
+function verdict (jobs) {
+  if (jobs.some((j) => j.s && !suitesPass(j.s))) {
+    return 'fail'
+  }
+  return jobs.some((j) => !j.s) ? 'incomplete' : 'pass'
+}
+const jobCell = (jobs) => (!jobs.length ? '-' : jobs.map((j) => (j.s ? (suitesPass(j.s) ? 'pass' : 'FAIL') : 'missing')).join(', '))
+
+function watchReport (state, plan, res, run) {
+  const out = { rows: [], sections: [], red: false, attention: false }
+  const N = plan.node || { todo: [], record: [] }
+  const Y = plan.yarn || { todo: [], record: null }
+  if (plan.node) {
+    state.node = state.node || { lines: {} }
+  }
+  // Releases seen with the libuv of the line's last: only recorded.
+  for (const r of N.record) {
+    const l = state.node.lines[r.line] || {}
+    state.node.lines[r.line] = { ...l, newest: r.newest, uv: r.uv, checked: plan.date }
+  }
+  for (const t of N.todo) {
+    const lin = jobResults((plan.nodeLinux || []).filter((e) => e.node === t.node), res.nodelinux)
+    const mac = jobResults((plan.nodeMacos || []).filter((e) => e.node === t.node), res.nodemacos)
+    const suites = verdict([...lin, ...mac])
+    const m = mac[0] && mac[0].s
+    const facts = (m && m.facts) || null
+    const prev = state.node.lines[t.line] || {}
+    const factsChanged = !!(prev.facts && facts && !sameFacts(prev.facts, facts))
+    // A new major always asks for a person (enabling it in pull-request CI
+    // is a person's change); a libuv change only when something differs.
+    const action = t.newMajor || suites !== 'pass' || factsChanged || (t.yarn && !facts) ? 'action needed' : 'none'
+    const newer = !prev.newest || cmp(t.node, prev.newest) >= 0
+    state.node.lines[t.line] = {
+      ...prev,
+      newest: newer ? t.node : prev.newest,
+      uv: newer ? (m && m.uv) || t.uv : prev.uv,
+      tested: t.node,
+      uvTested: (m && m.uv) || t.uv,
+      checked: plan.date,
+      suites,
+      npm: jobCell(lin),
+      yarn: jobCell(mac),
+      facts: facts || prev.facts || null,
+      action,
+      head: plan.head,
+      run,
+      newMajor: !!t.newMajor,
+    }
+    if (suites === 'pass') {
+      state.node.lines[t.line].verified = t.node
+    }
+    const row = { date: plan.date, version: `Node ${t.node}`, reason: t.reason, linux: jobCell(lin), macos: jobCell(mac), classText: '-', caller: '-', action, head: plan.head, run }
+    out.rows.push(row)
+    out.red = out.red || suites !== 'pass'
+    if (action !== 'none') {
+      out.attention = true
+      out.sections.push(nodeSection(t, lin, mac, prev, facts, factsChanged, suites, action).join('\n'))
+    }
+  }
+  if (Y.record) {
+    state.yarn = { ...(state.yarn || {}), newest: Y.record.newest, checked: plan.date }
+  }
+  for (const t of Y.todo) {
+    const mac = jobResults((plan.nodeMacos || []).filter((e) => e.yarn === t.yarn && e.node === null), res.nodemacos)
+    const suites = verdict(mac)
+    const m = mac[0] && mac[0].s
+    const prev = state.yarn || {}
+    // A new Yarn 1 release always asks for a person: none is expected (the
+    // line is frozen), and the engine has never seen its code.
+    const isNew = !prev.newest || cmp(t.yarn, prev.newest) > 0
+    const action = isNew || suites !== 'pass' ? 'action needed' : 'none'
+    state.yarn = { ...prev, newest: isNew ? t.yarn : prev.newest, tested: t.yarn, checked: plan.date, suites, node: m ? m.node : null, facts: m ? m.facts || null : null, action, head: plan.head, run }
+    if (suites === 'pass') {
+      state.yarn.verified = t.yarn
+    }
+    out.rows.push({ date: plan.date, version: `Yarn ${t.yarn}`, reason: t.reason, linux: '-', macos: jobCell(mac), classText: '-', caller: '-', action, head: plan.head, run })
+    out.red = out.red || suites !== 'pass'
+    if (action !== 'none') {
+      out.attention = true
+      const L = [`### Yarn ${t.yarn} (${t.reason}): ${action}`, '']
+      L.push(`- Yarn suites (test-yarn1.sh, macOS${m && m.node ? `, Node ${m.node}` : ''}): ${jobCell(mac)}`)
+      for (const j of mac) {
+        for (const f of (j.s && j.s.suites ? Object.values(j.s.suites).flatMap((x) => x.failed || []) : [])) {
+          L.push(`  - \`${f.replace(/`/g, "'")}\``)
+        }
+      }
+      L.push(`- A new Yarn 1 release: nothing in the engine knows its code (NOTES "Yarn 1 commands", "Part 4"). Read its changelog; when the suites pass, move the pin in .github/workflows/ci.yml.`, '')
+      out.sections.push(L.join('\n'))
+    }
+  }
+  return out
+}
+
+function nodeSection (t, lin, mac, prev, facts, factsChanged, suites, action) {
+  const out = [`### Node ${t.node} (${t.reason}): ${action}`, '']
+  out.push(`- libuv: ${t.uvBefore ? `${t.uvBefore} → ` : ''}${(mac[0] && mac[0].s && mac[0].s.uv) || t.uv}`)
+  out.push(`- Yarn suites (test-yarn1.sh, macOS): ${jobCell(mac)}`)
+  out.push(`- npm suites (test-inject.sh and verify-npm.sh, Linux on btrfs): ${lin.map((j) => `npm ${j.e.npm} ${j.s ? (suitesPass(j.s) ? 'pass' : 'FAIL') : 'missing'}`).join(', ') || '-'}`)
+  for (const j of [...mac, ...lin]) {
+    for (const f of (j.s && j.s.suites ? Object.values(j.s.suites).flatMap((x) => x.failed || []) : [])) {
+      out.push(`  - \`${f.replace(/`/g, "'")}\``)
+    }
+  }
+  out.push(`- What Node's fs.copyFile keeps (the Yarn hook's probe): ${factsText(facts)}${factsChanged ? ` — **changed** (was: ${factsText(prev.facts)})` : ''}`)
+  if (t.newMajor) {
+    out.push(`- Node ${t.line} is a new major: adding it to pull-request CI is a person's change.`)
+  }
+  if (suites !== 'pass') {
+    out.push(`- Not verified (${suites}); the next poll tests it again when matchapack changes${suites === 'incomplete' ? ' (incomplete: on the next poll)' : ''}.`)
+  }
+  out.push('')
+  return out
 }
 
 // GitHub refuses a comment over 65,536 characters; keep well under it.
@@ -731,12 +1084,25 @@ function versionSection (t, r, mac, row) {
 
 function body (state, plan) {
   const L = []
-  L.push('Tracking issue of the **npm release canary** (`.github/workflows/npm-canary.yml`). The workflow rewrites this body; edit only to reset the state (delete the state block to start over).', '')
+  L.push('Tracking issue of the **npm release canary** (`.github/workflows/npm-canary.yml`), with its Node and Yarn 1 release watch. The workflow rewrites this body; edit only to reset the state (delete the state block to start over).', '')
   L.push(`Last successful poll: **${state.polled || 'never'}**. Last monthly run: ${state.monthly || 'never'}. Supported majors (INJECT_NPM_MAJORS): ${plan.supported.join(', ')}.${plan.newMajor ? ` **npm ${plan.newMajor} exists and is not enabled.**` : ''}`, '')
   L.push('| line | newest release tested | checked | suites | pacote class text | caller (vs last verified) | last verified | action |', '|---|---|---|---|---|---|---|---|')
   for (const m of Object.keys(state.lines).map(Number).sort((a, b) => a - b)) {
     const l = state.lines[m]
     L.push(`| ${m}${l.newMajor ? ' (not enabled)' : ''} | ${l.newest} | ${l.checked}${l.run ? ` ([run](${l.run}))` : ''} | ${l.suites} | ${l.classText} | ${l.caller} | ${l.verified || '-'} | ${l.action} |`)
+  }
+  if (state.node) {
+    L.push('', '**Node release watch** (a new major, or a libuv change inside a watched line: the Yarn suites on macOS and the npm suites on Linux on that Node).', '')
+    L.push('| Node line | newest release seen | libuv | last tested | Yarn suites | npm suites | what fs.copyFile keeps | last verified | action |', '|---|---|---|---|---|---|---|---|---|')
+    for (const m of Object.keys(state.node.lines).map(Number).sort((a, b) => a - b)) {
+      const l = state.node.lines[m]
+      const watched = !plan.node || !plan.node.watched || plan.node.watched.includes(m)
+      L.push(`| ${m}${watched ? '' : ' (no longer watched)'} | ${l.newest || '-'} | ${l.uv || '-'} | ${l.tested ? `${l.tested}, ${l.checked}${l.run ? ` ([run](${l.run}))` : ''}` : '-'} | ${l.tested ? l.yarn || '-' : '-'} | ${l.tested ? l.npm || '-' : '-'} | ${factsText(l.facts)} | ${l.verified || '-'} | ${l.action || '-'} |`)
+    }
+  }
+  if (state.yarn) {
+    const y = state.yarn
+    L.push('', `**Yarn 1 release watch**: newest release seen ${y.newest || '-'} (${y.checked || '-'}); last tested ${y.tested ? `${y.tested}: ${y.suites}` : '-'}; last verified ${y.verified || '-'}; action ${y.action || '-'}.`)
   }
   L.push('', '<details><summary>History (newest first)</summary>', '', '| date | version | reason | Linux | macOS | class | caller | action |', '|---|---|---|---|---|---|---|---|')
   for (const h of state.history || []) {
@@ -777,7 +1143,11 @@ async function main () {
       const registryJson = flag('--registry-json')
       const date = flag('--date')
       const current = bool('--current')
-      const plan = await poll(args[0], { head, versions: versions ? versions.split(',').map((s) => s.trim()).filter(Boolean) : null, registryJson, date, current })
+      const node = flag('--node')
+      const nodeIndexJson = flag('--node-index-json')
+      const nodeUvDir = flag('--node-uv-dir')
+      const yarnRegistryJson = flag('--yarn-registry-json')
+      const plan = await poll(args[0], { head, versions: versions ? versions.split(',').map((s) => s.trim()).filter(Boolean) : null, registryJson, date, current, node: node || null, nodeIndexJson, nodeUvDir, yarnRegistryJson })
       process.stdout.write(JSON.stringify(plan, null, 2) + '\n')
       break
     }
