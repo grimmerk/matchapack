@@ -15,16 +15,12 @@
 #           functions (pacote's FetcherBase class, arborist's caller chain,
 #           rebuild.js, ci.js exec) against the last verified release.
 #   decide  macOS only when the class text is not on the list (or could not
-#           be told) or for a new major; the LLM summary only when a tracked
-#           text changed.
+#           be told) or for a new major.
 #   macos   the same suites, for those releases only (macOS bills 10x).
-#   advise  the advisory LLM summary (scripts/npm-canary-advise.sh); never a
-#           gate, never fails the run.
 #   report  rewrites the tracking issue's body (a table per line, a history,
 #           the state) and comments when a person should look: the suites,
 #           the fingerprint, each changed function's diff, the changelog lines
-#           and the compare link; then the advisory summary below it. The run
-#           is red when a release is red.
+#           and the compare link. The run is red when a release is red.
 #
 # State: one JSON block in the tracking issue's body, rewritten by the
 # workflow (review 2026-11-14, section 9.3). Why there: it needs only
@@ -40,11 +36,7 @@
 #   1. Open the tracking issue (any title; an empty body is a fresh state)
 #      and set the repository VARIABLE NPM_CANARY_ISSUE to its number
 #      (Settings > Secrets and variables > Actions > Variables).
-#   2. Optional, for the advisory summary, ONE repository SECRET (same page,
-#      Secrets): ANTHROPIC_API_KEY (an API key) or CLAUDE_CODE_OAUTH_TOKEN
-#      (a subscription token from `claude setup-token`). Neither: skipped
-#      with a note in the comment.
-#   3. Scheduled runs use the workflow file on the default branch; GitHub
+#   2. Scheduled runs use the workflow file on the default branch; GitHub
 #      disables schedules after 60 days without repository activity (public
 #      repositories) and may delay or drop scheduled runs: the poll date in
 #      the issue shows it.
@@ -163,7 +155,6 @@ jobs:
       contents: read
     outputs:
       macos: ${{ steps.decide.outputs.macos }}
-      advise: ${{ steps.decide.outputs.advise }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -175,13 +166,6 @@ jobs:
           node scripts/npm-canary.js decide results decided > decided.json
           cat decided.json
           echo "macos=$(jq -c .macos decided.json)" >> "$GITHUB_OUTPUT"
-          echo "advise=$(jq -r .advise decided.json)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        if: steps.decide.outputs.advise == 'true'
-        with:
-          name: canary-llm-input
-          path: decided/llm-input.txt
-          if-no-files-found: ignore
 
   macos:
     needs: [poll, decide]
@@ -220,45 +204,8 @@ jobs:
           name: canary-macos-${{ matrix.version }}
           path: out/canary-macos-${{ matrix.version }}
 
-  advise:
-    # Advisory only: its input is other people's text, so it can do nothing
-    # but produce a file (no write permission at all); report posts it.
-    needs: [poll, decide]
-    if: always() && needs.decide.outputs.advise == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
-    permissions:
-      contents: read
-    outputs:
-      status: ${{ steps.advise.outputs.status }}
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: canary-llm-input
-          path: llm
-      - name: Claude Code CLI, pinned
-        if: env.ANTHROPIC_API_KEY != '' || env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: |
-          npm install --prefix "$RUNNER_TEMP/cc" --no-audit --no-fund --no-package-lock @anthropic-ai/claude-code@2.1.310
-          echo "$RUNNER_TEMP/cc/node_modules/.bin" >> "$GITHUB_PATH"
-      - id: advise
-        run: |
-          mkdir -p out/canary-advice
-          scripts/npm-canary-advise.sh llm/llm-input.txt out/canary-advice/advice.md
-          echo "status=$(cat out/canary-advice/advice.md.status)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: canary-advice
-          path: out/canary-advice
-          if-no-files-found: ignore
-
   report:
-    needs: [poll, linux, decide, macos, advise]
+    needs: [poll, linux, decide, macos]
     if: always() && needs.poll.outputs.any == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -268,8 +215,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       ISSUE: ${{ vars.NPM_CANARY_ISSUE }}
-      ADVISE: ${{ needs.decide.outputs.advise }}
-      ADVISE_STATUS: ${{ needs.advise.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -278,15 +223,12 @@ jobs:
           path: results
       - name: write the tracking issue
         run: |
-          if [ "$ADVISE" != true ]; then note="not asked for (no tracked function changed)"
-          else note=${ADVISE_STATUS:-"failed (the advise job left no status)"}; fi
           node scripts/npm-canary.js report results/canary-plan/state.json results/canary-plan/plan.json results out \
-            --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --advise "$note"
+            --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           # Comments first, the state last: a failed post leaves the releases
           # unseen, so the next poll tests and reports them again (bash -e
-          # stops at the failed post). The advisory summary may fail.
+          # stops at the failed post).
           for f in out/comments/*.md; do [ -f "$f" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$f"; done
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file out/body.md
-          if [ -s results/canary-advice/advice.md ]; then gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file results/canary-advice/advice.md || echo "::warning::advisory summary not posted"; fi
       - name: red when a release is red
         run: jq -e '.red == false' out/flags.json

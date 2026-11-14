@@ -12,8 +12,8 @@
 //   compare <base.json> <new.json> <out dir>        compare.json, one .diff per changed function,
 //                                                   changelog.md
 //   result  <version dir>                           result.json from the files above + suites.json
-//   decide  <results dir> <out dir>                 {"macos": [...], "advise": bool}; llm-input.txt
-//   report  <state.json> <plan.json> <results dir> <out dir> [--run URL] [--advise STATUS]
+//   decide  <results dir> <out dir>                 {"macos": [...]}
+//   report  <state.json> <plan.json> <results dir> <out dir> [--run URL]
 //                                                   new state.json, body.md, comments/NN.md (when a
 //                                                   person should look)
 //
@@ -531,34 +531,16 @@ function loadResults (dir) {
 // (whether a missing macOS result is a failure).
 const needsMacos = (r, item) => !!r && (r.known !== true || !!r.newMajor || !!(item && item.newMajor))
 
-// The advisory summary only when a tracked text changed.
 function decide (resultsDir, outDir) {
   const { linux } = loadResults(resultsDir)
   const macos = []
-  let advise = false
-  const parts_ = []
   for (const [v, r] of Object.entries(linux)) {
-    if (!r) {
-      continue
-    }
-    if (needsMacos(r)) {
+    if (r && needsMacos(r)) {
       macos.push(v)
-    }
-    if (r.compare && (r.compare.classChanged || r.compare.callerChanged)) {
-      advise = true
-      for (const i of r.compare.changed) {
-        const f = path.join(r.dir, i.file)
-        if (fs.existsSync(f)) {
-          parts_.push(`### npm ${r.compare.base} -> ${v}: ${i.name} (${i.status})\n${fs.readFileSync(f, 'utf8')}`)
-        }
-      }
     }
   }
   fs.mkdirSync(outDir, { recursive: true })
-  if (parts_.length) {
-    fs.writeFileSync(path.join(outDir, 'llm-input.txt'), parts_.join('\n'))
-  }
-  const d = { macos: macos.sort(cmp), advise }
+  const d = { macos: macos.sort(cmp) }
   writeJson(path.join(outDir, 'decide.json'), d)
   return d
 }
@@ -638,9 +620,6 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     const intro = []
     if (plan.skipped.length) {
       intro.push(`Not tested (more than three new releases of a line since the last run): ${plan.skipped.join(', ')}. Run the workflow with \`versions\` to test them.`, '')
-    }
-    if (opts.advise) {
-      intro.push(`Advisory LLM summary: ${opts.advise}.`, '')
     }
     // comments/NN.md, each under GitHub's comment limit; the workflow posts
     // them in order, before it writes the state.
@@ -805,9 +784,7 @@ async function main () {
       process.stdout.write(JSON.stringify(decide(args[0], args[1])) + '\n')
       break
     case 'report': {
-      const run = flag('--run')
-      const advise = flag('--advise')
-      report(args[0], args[1], args[2], args[3], { run, advise })
+      report(args[0], args[1], args[2], args[3], { run: flag('--run') })
       break
     }
     default:
