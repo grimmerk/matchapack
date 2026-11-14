@@ -1,10 +1,11 @@
 # matchapack
 
-Makes `npm ci` and Yarn 1 installs place `node_modules` as copy-on-write
-clones, so each extra checkout or git worktree of a repo costs almost no disk.
-`npm ci` clones every package from one machine-wide store; Yarn 1 (macOS) clones
+Makes `npm ci`, `npm install` (also `npm update` and `npm uninstall`) and
+Yarn 1 installs place `node_modules` as copy-on-write clones, so each extra
+checkout or git worktree of a repo costs almost no disk. npm clones every
+package it installs from one machine-wide store; Yarn 1 (macOS) clones
 every file from Yarn's own cache (see "Yarn 1 (classic) projects"). The tree it
-builds is the tree plain `npm ci` or `yarn` builds: same paths, contents,
+builds is the tree plain npm or `yarn` builds: same paths, contents,
 permissions, symlinks, `.bin` links, mtimes, and npm's hidden lockfile or
 Yarn's `.yarn-integrity` (see `NOTES.md`
 for how that was verified). Nothing is added to the project: no config file, no
@@ -44,12 +45,47 @@ matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm
 matchapack: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
 ```
 
-`npm ci` (or `npm clean-install`, `npm ic`, `npm install-clean`), with any
-of npm's flags, is taken over. Every other npm command runs npm directly and
-never starts matchapack. A Claude Code session picks the function up from its
-shell snapshot, so sessions started after the line was added use it.
+`npm install`, `npm update` and `npm uninstall` go the same way, quietly:
+they print one line of matchapack's only when a package was placed (most
+runs on an installed project place nothing), and npm writes `package.json`
+and `package-lock.json` itself, as always:
 
-Bypass for one command: `MATCHAPACK=0 npm ci`, or `command npm ci`.
+```
+$ npm install left-pad@1.3.0
+…npm's own output: "added 1 package, and audited 349 packages in 1s"…
+matchapack: 1 package cloned from the store, npm extracted 0 (inject engine; MATCHAPACK=0 npm install for plain npm)
+```
+
+Taken over, with any of npm's flags: `npm ci` (and `clean-install`, `ic`,
+`install-clean`, `isntall-clean`), `npm install` (and `i`, `add`, `in`,
+`ins`, `inst`, `insta`, `instal`, `isnt`, `isnta`, `isntal`, `isntall`),
+`npm update` (and `up`, `upgrade`, `udpate`, and `u` from npm 11) and
+`npm uninstall` (and `un`, `unlink`, `remove`, `rm`, `r`): the first words
+npm itself has for these commands (`ROUTED` in src/wrapper.rs). Every other
+npm command runs npm directly and never starts matchapack. A Claude Code
+session picks the function up from its shell snapshot, so sessions started
+after the line was added use it.
+
+Not taken over: these go straight to plain npm (never through matchapack,
+or declined with the reason before npm's command runs):
+- `npm install-test` / `it`, `npm install-ci-test` / `cit`: an install
+  followed by `npm test`; the same engine path, not routed yet (no harness
+  cases; the owner's decision, 2026-11-15).
+- `npm dedupe`, `npm prune`, `npm audit fix`: they rewrite the tree too; not
+  routed yet, for the same reason.
+- `npm link`, `npm exec` / `npx`: they install into npm's global directory
+  or npx's cache, not into the project.
+- Abbreviations npm also accepts (`npm upd`, `npm uninst`): not on the list
+  of first words; plain npm. So is a command line that starts with a flag
+  (`npm --prefix x install`).
+- Global installs: `-g`, `--global`, `--location=global` on the command
+  line, and `global=true` / `location=global` in the environment or any
+  npmrc (the project's included): they install outside any project.
+- `--dry-run`, `--package-lock-only`, `--help` / `--usage`: they install
+  nothing.
+- `npm u` on npm 10, where it is no command: npm prints its own error.
+
+Bypass for one command: `MATCHAPACK=0 npm install`, or `command npm install`.
 Remove: delete the line. Installed node_modules keep working without the store
 (clones are independent files); the store is `~/.cache/matchapack/store`.
 
@@ -122,6 +158,38 @@ In detail:
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
   Docker, `scripts/linux-test.sh`).
 
+`npm install`, `npm update` and `npm uninstall` run through the same engine
+(NOTES, "The install family"): npm decides what to add, change or remove,
+writes `package.json`, `package-lock.json` and the hidden lockfile, and
+leaves alone what it does not change; only its extraction of the packages it
+adds or changes is replaced by clones. So:
+- a fresh `npm install` (no `node_modules` yet, as in a new worktree) saves
+  as much as `npm ci`; `npm install <pkg>` and `npm update` save the
+  packages they add or change; `npm uninstall` and an `npm install` with
+  nothing to do place nothing (and print nothing of matchapack's);
+- packages that were in `node_modules` before stay as they are: a
+  `node_modules` built by plain npm keeps its full copies (convert it with
+  one `npm ci`, or `scripts/convert-existing.sh`);
+- every routed command starts matchapack, takes the store's shared lock and
+  writes one log line (it waits while `matchapack store gc` or `store verify
+  --fix` holds the store); the cost is about one more process, within the
+  noise of npm's own run (NOTES);
+- what the project's record for `store gc` holds is kept across commands:
+  entries of packages that are still installed stay, entries of removed or
+  replaced packages drop out;
+- the "npm placed packages the hook never saw" check compares what the run
+  added or changed in the hidden lockfile with what the hook saw, so it
+  stays silent on an incremental install that is fine;
+- if matchapack breaks during one of these commands (npm read something of
+  the hook's result that pacote's own result does not have, or matchapack
+  itself failed), it does not repair anything by itself: running the
+  command again would not rebuild what is in place, and `npm ci` is a
+  rebuild from the lockfile, not what plain `npm install` would have left
+  (NOTES). It stops with a non-zero status and says what to do: check
+  `git diff` of `package.json` and `package-lock.json`, then
+  `MATCHAPACK=0 npm ci <the same arguments>`. (`npm ci` itself is rebuilt
+  with plain `npm ci` automatically, as before.)
+
 matchapack runs plain npm instead, and prints why, when (before npm starts,
 unless marked "npm's root": those are decided on the root npm reports, after
 npm loaded its config and before its command ran, so the project is
@@ -145,6 +213,8 @@ unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
   root);
 - the command installs nothing (`--dry-run`, `--package-lock-only`,
   `--help`; npm's root also catches them set in an npmrc);
+- npm maps the routed word to another command (npm's root: `npm u` on npm
+  10, where it is no command);
 - `MATCHAPACK_ENGINE` names another engine (`classic` was removed in PR C2).
 When the filesystem cannot clone, npm extracts every package itself, and
 matchapack says so: the first clone the filesystem refuses stops cloning for
@@ -300,21 +370,25 @@ own and complete).
 
 - `matchapack report [--days N]`: what happened (installed / handed to npm and
   why / failed), install times, space not written, store size, free space.
-  Every `npm ci` that reaches matchapack appends one line to
-  `~/.cache/matchapack/log.jsonl` (`MATCHAPACK_LOG=0` turns it off). Each
+  Every routed npm command that reaches matchapack appends one line to
+  `~/.cache/matchapack/log.jsonl` (`MATCHAPACK_LOG=0` turns it off), with
+  npm's command (`command`: ci, install, update, uninstall) and npm's install
+  root (`root`); the report counts runs per command. Each
   line carries the 1- and 5-minute load average at the start and the end of
   the run (`load_start`, `load_end`); the report's recent runs show the
   1-minute pair (`load 3.1→5.4`), so a slow install can be read against what
   else the machine was doing. Lines that are not readable JSON are skipped
   and counted.
 - `scripts/verify-sample.sh [N]`: re-checks the N most recent matchapack
-  installs against a real `npm ci` on copies (npm ci runs twice so build noise
-  is told apart); results show up in `matchapack report`.
+  `npm ci` installs against a real `npm ci` on copies (npm ci runs twice so
+  build noise is told apart); results show up in `matchapack report`. The
+  install family is verified by `scripts/verify-steps.sh` (below).
 - Limit the trial to some projects: list path prefixes, one per line, in
   `~/.config/matchapack/paths` (e.g. `~/git/app` also covers `~/git/app-<topic>`
-  worktrees). Elsewhere npm ci runs as usual.
+  worktrees). Elsewhere npm runs as usual.
 
-Known differences from `npm ci`: none in the tree (see "How it installs").
+Known differences from plain npm: none in the tree, `package.json` or the
+lockfiles (see "How it installs").
 
 ## Existing node_modules
 
@@ -353,7 +427,13 @@ scripts/verify-npm.sh /tmp/verify-npm ~/git/app    # plus a real project (copied
 
 It runs `npm ci` and matchapack side by side on copies and compares the trees
 and the hidden lockfile byte for byte (the workspaces fixture also file
-times, owner, group and extended attribute names), and says whether this npm's
+times, owner, group and extended attribute names), then the install family:
+about 40 cases of `scripts/verify-steps.sh`, each a sequence of npm commands
+(`npm install`, `npm install <pkg>`, `update`, `uninstall`, workspaces,
+`--prefix`, the flags `--force`, `--legacy-peer-deps`, `--save-peer`,
+`--save-optional`, …) run with plain npm and through matchapack from the same
+start and compared after every step, `package.json` and `package-lock.json`
+byte for byte included. It says whether this npm's
 pacote fingerprint is on the list. A new npm major goes into
 `INJECT_NPM_MAJORS` in src/wrapper.rs once it passes, and a new fingerprint
 into `src/npm-fingerprints.json` (after `scripts/test-inject.sh` passes too;
@@ -450,6 +530,15 @@ packages again.
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
   `test-shells.sh` on Linux; on macOS the safety, routing, store and inject
   tests, the fixture harness and the Yarn 1 harness tests.
+- `scripts/verify-steps.sh <project> <work> [--start bare|ci|nolock] [--pre
+  cmd] -- <step> [-- <step> …]`: the install family's harness. The same npm
+  commands (each `[@subdirectory] [NAME=value …] <npm arguments>`) with plain
+  npm and through `matchapack npm`, from the same start, compared after every
+  step: exit status, the whole tree with the hidden lockfile byte for byte,
+  `package.json` and `package-lock.json` (each by name), whether npm trusts
+  the hidden lockfile, `npm ls`, stale times, and matchapack's log record
+  (command, root, unseen count, the `store gc` record). `CLONES=…` and
+  `UNSEEN=…` in a step are expectations. verify-npm.sh runs its cases.
 - `scripts/test-inject.sh <work>`: the inject engine end to end (the hook
   cloned, a disabled hook and a store miss give the same tree, the gates,
   npm's own failures, the store lock, the project record, the file group

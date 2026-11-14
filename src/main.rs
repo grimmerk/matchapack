@@ -45,9 +45,10 @@ enum Cmd {
         #[arg(last = true)]
         npm_args: Vec<String>,
     },
-    /// Stand in for `npm <args>`: handle a bare `npm ci` from the store when it
-    /// is safe to, otherwise run the real npm with the same arguments. Meant to
-    /// be called by the shell wrapper (shell/matchapack.sh).
+    /// Stand in for `npm <args>`: run `npm ci`, `npm install`, `npm update` or
+    /// `npm uninstall` (or an alias) with clones from the store when it is
+    /// safe to, otherwise the real npm with the same arguments. Meant to be
+    /// called by the shell wrapper (shell/matchapack.sh).
     Npm {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -60,7 +61,7 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Print the shell integration for an rc file (routes a bare `npm ci`, and on macOS a bare `yarn` / `yarn install`, through matchapack)
+    /// Print the shell integration for an rc file (routes `npm ci`, `npm install`, `npm update` and `npm uninstall`, and on macOS a bare `yarn` / `yarn install`, through matchapack)
     ///
     /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts matchapack on
     /// PATH (otherwise the guard skips it silently):
