@@ -606,7 +606,18 @@ echo "fake $flavor: no $name" >&2; exit 127
 
     /// The variables, argv[0] and binary a `NodeStart` gives node.
     fn started_as(n: &NodeStart, cwd: &Path) -> (std::collections::BTreeMap<String, String>, String, PathBuf) {
-        let o = n.command().current_dir(cwd).args(["-e", "process.stdout.write(JSON.stringify([process.env, process.argv0, process.execPath]))"]).output().unwrap();
+        started_as_on(n, cwd, None)
+    }
+
+    /// `started_as` with PATH set to `path` (a fixture's), so that a
+    /// `NodeStart::Path` resolves the fixture's `node`, not the developer's
+    /// (which may be a version manager's shim that changes the environment).
+    fn started_as_on(n: &NodeStart, cwd: &Path, path: Option<&OsStr>) -> (std::collections::BTreeMap<String, String>, String, PathBuf) {
+        let mut c = n.command();
+        if let Some(p) = path {
+            c.env("PATH", p);
+        }
+        let o = c.current_dir(cwd).args(["-e", "process.stdout.write(JSON.stringify([process.env, process.argv0, process.execPath]))"]).output().unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let (env, argv0, node): (std::collections::BTreeMap<String, String>, String, String) = serde_json::from_slice(&o.stdout).unwrap();
         (env, argv0, PathBuf::from(node))
@@ -791,10 +802,13 @@ echo "fake $flavor: no $name" >&2; exit 127
             std::fs::create_dir_all(nvm.join("bin")).unwrap();
             symlink("../lib/node_modules/npm/bin/npm-cli.js", nvm.join("bin/npm")).unwrap();
             symlink(&node, nvm.join("bin/node")).unwrap();
-            let (_, start) = find_npm(&path_with(&nvm.join("bin")), &d, &no_probe).unwrap();
+            let path = path_with(&nvm.join("bin"));
+            let (_, start) = find_npm(&path, &d, &no_probe).unwrap();
             assert!(matches!(&start, NodeStart::Path { drop_dyld, .. } if *drop_dyld == drops), "{name}: {start:?}");
             if let Some(v) = &ours {
-                let (env, _, _) = started_as(&start, &d);
+                // The fixture's node, not the developer's `node` on PATH (an
+                // asdf shim there would itself drop the variable).
+                let (env, _, _) = started_as_on(&start, &d, Some(&path));
                 assert_eq!(env.get("DYLD_FALLBACK_LIBRARY_PATH"), if drops { None } else { Some(v) }, "{name}");
             }
         }
