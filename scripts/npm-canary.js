@@ -196,7 +196,10 @@ async function poll (stateFile, opts) {
         add(v, 'new release')
       }
       // A red release is tested once; again only when matchapack changed.
-      if (!unseen.length && line.suites !== 'pass' && opts.head && line.head !== opts.head) {
+      // An incomplete one (a planned comparison missing) on the next poll.
+      if (!unseen.length && line.suites === 'incomplete') {
+        add(line.newest, 'was incomplete (no comparison); again')
+      } else if (!unseen.length && line.suites !== 'pass' && opts.head && line.head !== opts.head) {
         add(line.newest, `was ${line.suites}; matchapack changed since`)
       }
     }
@@ -510,7 +513,11 @@ function loadResults (dir) {
 }
 
 // macOS (10x) only when the pacote class text is new (or cannot be told) and
-// for a new major. The advisory summary only when a tracked text changed.
+// for a new major: the one rule, for decide (which jobs run) and report
+// (whether a missing macOS result is a failure).
+const needsMacos = (r, item) => !!r && (r.known !== true || !!r.newMajor || !!(item && item.newMajor))
+
+// The advisory summary only when a tracked text changed.
 function decide (resultsDir, outDir) {
   const { linux } = loadResults(resultsDir)
   const macos = []
@@ -520,7 +527,7 @@ function decide (resultsDir, outDir) {
     if (!r) {
       continue
     }
-    if (r.known !== true || r.newMajor) {
+    if (needsMacos(r)) {
       macos.push(v)
     }
     if (r.compare && (r.compare.classChanged || r.compare.callerChanged)) {
@@ -565,10 +572,20 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     const r = res.linux[t.version]
     const mac = Object.prototype.hasOwnProperty.call(res.macos, t.version) ? res.macos[t.version] : undefined
     const linuxOk = !!(r && r.suitesPass)
-    const macOk = mac === undefined ? null : !!(mac && Object.values(mac.suites).every((s) => s.status === 0))
-    const suites = !r ? 'error' : linuxOk && macOk !== false ? 'pass' : 'fail'
+    // macOS required (needsMacos) but no result: the job failed before its
+    // upload. A failure, never a skip.
+    const macRequired = needsMacos(r, t)
+    const macMissing = macRequired && !mac
+    const macOk = macMissing ? false : mac === undefined ? null : !!(mac && Object.values(mac.suites).every((s) => s.status === 0))
+    // A planned comparison (a baseline was named) that left no result: the
+    // check is incomplete; the next poll runs the release again.
+    const compareMissing = !!(r && t.baseline && !r.compare)
+    let suites = !r ? 'error' : linuxOk && macOk !== false ? 'pass' : 'fail'
+    if (suites === 'pass' && compareMissing) {
+      suites = 'incomplete'
+    }
     const classText = !r ? '?' : r.known === true ? 'known' : r.known === false ? 'new' : 'unknown'
-    const caller = !r || !r.compare ? '?' : r.compare.callerChanged ? 'changed' : 'same'
+    const caller = !r ? '?' : !r.compare ? (compareMissing ? 'missing' : '?') : r.compare.callerChanged ? 'changed' : 'same'
     const classChanged = !!(r && r.compare && r.compare.classChanged)
     let action = 'none'
     if (suites !== 'pass' || classText !== 'known' || t.newMajor) {
@@ -576,7 +593,7 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     } else if (caller === 'changed' || classChanged) {
       action = 'read the diff'
     }
-    const row = { date: plan.date, version: t.version, reason: t.reason, baseline: (r && r.compare && r.compare.base) || t.baseline, suites, linux: r ? (linuxOk ? 'pass' : 'fail') : 'error', macos: macOk === null ? '-' : macOk ? 'pass' : 'fail', classText, fingerprint: r ? r.fingerprint : null, caller, action, head: plan.head, run }
+    const row = { date: plan.date, version: t.version, reason: t.reason, baseline: (r && r.compare && r.compare.base) || t.baseline, suites, linux: r ? (linuxOk ? 'pass' : 'fail') : 'error', macos: macMissing ? 'missing' : macOk === null ? '-' : macOk ? 'pass' : 'fail', classText, fingerprint: r ? r.fingerprint : null, caller, action, head: plan.head, run }
     rows.push(row)
     // The line's row: the newest release tested, unless this was an older
     // one (several releases in one day, or a requested version).
@@ -592,7 +609,7 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     }
     if (action !== 'none') {
       attention = true
-      comment.push(...versionSection(t, r, mac, row))
+      comment.push(...versionSection(t, r, macMissing ? null : mac, row))
     }
   }
   state.polled = plan.date
@@ -635,7 +652,7 @@ function versionSection (t, r, mac, row) {
   const c = r.compare
   out.push(`- Suites, Linux on btrfs: ${suiteCell(r.suites)}`)
   if (mac !== undefined) {
-    out.push(`- Suites, macOS: ${mac ? suiteCell(mac.suites) : 'no result'}`)
+    out.push(`- Suites, macOS: ${mac ? suiteCell(mac.suites) : 'required (class text not listed, or a new major), but the job left no result: counted as a failure'}`)
   }
   for (const s of [...(r.suites ? Object.values(r.suites) : []), ...(mac && mac.suites ? Object.values(mac.suites) : [])]) {
     for (const f of s.failed || []) {
@@ -645,6 +662,9 @@ function versionSection (t, r, mac, row) {
   out.push(`- pacote class text: ${row.classText}${r.fingerprint ? ` (\`${r.fingerprint.slice(0, 16)}…\`)` : ''}${r.fingerprintError ? `; fingerprint: ${r.fingerprintError}` : ''}`)
   if (t.newMajor) {
     out.push(`- npm ${t.major} is a new major: tested with MATCHAPACK_NPM_VERSIONS=any and MATCHAPACK_NPM_FINGERPRINT=any. Enabling it is a pull request by a person.`)
+  }
+  if (!c && t.baseline) {
+    out.push(`- Comparison with ${t.baseline}: missing (the baseline install or the inspection failed; see the run). Not verified; the next poll runs this release again.`)
   }
   if (c) {
     out.push(`- Compared with ${c.base}: ${c.changed.length ? c.changed.map((i) => `\`${i.name}\` ${i.status}${i.lines ? ` (${i.lines} lines)` : ''}`).join(', ') : 'no tracked function changed'}`)
