@@ -40,7 +40,10 @@ export MATCHAPACK_VERIFY_CLONES=some
 echo "npm $npm_version, node $(node -v), $("$bin" --version)"
 # The cases run whatever this npm's pacote fingerprint is (verify.sh); say
 # whether the binary would take it without an override.
-npm_dir=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd)
+# npm's package directory as npm itself reports it (npm_execpath, its
+# bin/npm-cli.js): also right behind a version manager's shim, where the
+# `npm` on PATH is not a symlink into the package.
+npm_dir=$(cd "$(dirname "$(npm exec -c 'printf %s "$npm_execpath"')")/.." && pwd)
 fp=$(node "$here/src/inject.js" --fingerprint "$npm_dir")
 if grep -q "\"$fp\"" "$here/src/npm-fingerprints.json"; then
   echo "pacote fingerprint $fp: listed in src/npm-fingerprints.json"

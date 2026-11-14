@@ -209,7 +209,7 @@ pub const INJECT_NPM_MAJORS: &[u32] = &[10, 11, 12];
 /// or a comma list of versions: `11.19` matches 11.19.x, `11` matches 11.x),
 /// otherwise the majors above.
 pub fn inject_npm_version_gate() -> Result<(), String> {
-    let version = util::npm_version().ok_or("could not determine the npm version")?;
+    let version = util::npm_version()?;
     inject_version_allowed(&version, std::env::var("MATCHAPACK_NPM_VERSIONS").ok().as_deref())
 }
 
