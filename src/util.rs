@@ -215,10 +215,11 @@ fn find_npm(path: &OsStr, cwd: &Path, run_dir: &dyn Fn() -> Result<PathBuf, Stri
 
 /// Preloaded into node through NODE_OPTIONS by `probe_launcher`: reports how
 /// node was started (binary, argv[0], options, working directory,
-/// environment, script) and exits before that script runs.
+/// environment, script and its arguments) and exits before that script
+/// runs.
 const PROBE_JS: &str = "'use strict';\n\
 // matchapack: what a launcher on PATH starts (src/util.rs, probe_launcher).\n\
-require('fs').writeSync(1, '\\nMATCHAPACK-PROBE ' + JSON.stringify({ main: process.argv[1] ?? null, node: process.execPath, argv0: process.argv0, exec_argv: process.execArgv, cwd: process.cwd(), env: process.env }) + '\\n');\n\
+require('fs').writeSync(1, '\\nMATCHAPACK-PROBE ' + JSON.stringify({ main: process.argv[1] ?? null, args: process.argv.slice(2), node: process.execPath, argv0: process.argv0, exec_argv: process.execArgv, cwd: process.cwd(), env: process.env }) + '\\n');\n\
 process.exit(0);\n";
 
 /// How long a launcher may take to start node (`probe_launcher`). The first
@@ -241,7 +242,8 @@ pub(crate) const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from
 /// own variables, and none of the `DYLD_*` variables macOS removes on the
 /// way (`#!/usr/bin/env node`, a bash shim). What matchapack cannot pass on
 /// is declined: node options on the command line (`execArgv`: the install's
-/// node gets none), another working directory, a launcher that changes
+/// node gets none), arguments the launcher adds to the script's, another
+/// working directory, a launcher that changes
 /// NODE_OPTIONS, and an environment JSON cannot carry exactly.
 ///
 /// `--version`, never the user's arguments: a launcher that does not start
@@ -322,6 +324,7 @@ fn probe_launcher_within(launcher: &Path, name: &str, path: &OsStr, cwd: &Path, 
 #[derive(serde::Deserialize)]
 struct Probe {
     main: Option<String>,
+    args: Vec<String>,
     node: String,
     argv0: String,
     exec_argv: Vec<String>,
@@ -333,6 +336,11 @@ struct Probe {
 /// or why matchapack cannot.
 fn exact_launch(prefix: &str, p: Probe, cwd: &Path, node_options: &str, user_options: Option<&str>) -> Result<(PathBuf, Launch), String> {
     let main = p.main.as_deref().ok_or_else(|| format!("{prefix} starts node without a script"))?;
+    // The launcher's own arguments to the script (`exec node yarn.js "$@"
+    // --ignore-scripts`): matchapack passes the user's alone.
+    if p.args != ["--version"] {
+        return Err(format!("{prefix} passes the script arguments of its own ({}), matchapack would pass the user's alone", p.args.join(" ")));
+    }
     if !p.exec_argv.is_empty() {
         return Err(format!("{prefix} starts node with options ({}), matchapack would start it without", p.exec_argv.join(" ")));
     }
@@ -436,7 +444,8 @@ pub(crate) mod tests {
     /// Yarn 1.22.22 is a standalone package. A `.fakeyarnprefix` makes the
     /// `yarn` shim set PREFIX, as Homebrew's launcher does (only for Yarn);
     /// `.fakeflags` makes the `npm` shim start node with an option, `.fakecd`
-    /// makes it change directory first. Returns the shims directory.
+    /// makes it change directory first, `.fakeargs` makes the `npm` and
+    /// `yarn` shims add `--ignore-scripts` after the user's arguments. Returns the shims directory.
     pub(crate) fn fake_version_manager(d: &Path, flavor: &str, node: &Path) -> PathBuf {
         let img = d.join("img");
         for (v, npm) in [("24.0.0", "11.0.0"), ("22.0.0", "10.0.0")] {
@@ -464,12 +473,14 @@ case $name in
   npm)
     [ -f .fakeflags ] && exec "$d/img/node/$v/bin/node" --max-old-space-size=4096 "$d/img/node/$v/lib/node_modules/npm/bin/npm-cli.js" "$@"
     [ -f .fakecd ] && cd "$(cat .fakecd)"
+    [ -f .fakeargs ] && exec "$d/img/node/$v/bin/node" "$d/img/node/$v/lib/node_modules/npm/bin/npm-cli.js" "$@" --ignore-scripts
     [ -f .fakenpm ] && exec "$d/img/node/$v/bin/node" "$d/img/npm/$(cat .fakenpm)/bin/npm-cli.js" "$@"
     [ $flavor = mise ] && exec "$d/img/node/$v/bin/node" "$d/img/node/$v/lib/node_modules/npm/bin/npm-cli.js" "$@"
     [ $flavor = asdf ] && export PATH="$front:$d/no-such-dir:$PATH"
     exec "$d/img/node/$v/bin/npm" "$@" ;;
   yarn)
     [ -f .fakeyarnprefix ] && export PREFIX=/opt/fake-prefix
+    [ -f .fakeargs ] && exec "$d/img/node/$v/bin/node" "$d/img/yarn/1.22.22/bin/yarn.js" "$@" --ignore-scripts
     exec "$d/img/yarn/1.22.22/bin/yarn.js" "$@" ;;
 esac
 echo "fake $flavor: no $name" >&2; exit 127
@@ -609,10 +620,13 @@ echo "fake $flavor: no $name" >&2; exit 127
         // A shim that starts node with an option, or in another directory.
         let t = d.join("volta");
         let path = path_with(&fake_version_manager(&t, "volta", &node));
-        let (flags, cd) = (t.join("flags"), t.join("cd"));
-        for p in [&flags, &cd] {
+        let (flags, cd, args) = (t.join("flags"), t.join("cd"), t.join("args"));
+        for p in [&flags, &cd, &args] {
             std::fs::create_dir_all(p).unwrap();
         }
+        std::fs::write(args.join(".fakeargs"), "").unwrap();
+        let e = find_npm(&path, &args, &probe_dir(&t)).unwrap_err();
+        assert!(e.contains("passes the script arguments of its own (--version --ignore-scripts)"), "{e}");
         std::fs::write(flags.join(".fakeflags"), "").unwrap();
         std::fs::write(cd.join(".fakecd"), t.display().to_string()).unwrap();
         let e = find_npm(&path, &flags, &probe_dir(&t)).unwrap_err();
@@ -659,6 +673,7 @@ echo "fake $flavor: no $name" >&2; exit 127
             ("#!/Users/u/.nvm/versions/node/v24.22.1/bin/node\n", false),
             ("#!/opt/homebrew/bin/bash\n", false),
             ("'use strict';\n", false),
+            ("/usr/bin/env node\n", false),
             ("\u{cf}\u{fa}\u{ed}\u{fe}", false),
         ] {
             assert_eq!(protected_interpreter(head.as_bytes()), protected, "{head:?}");
@@ -729,6 +744,7 @@ echo "fake $flavor: no $name" >&2; exit 127
     fn probe(main: Option<&str>, exec_argv: &[&str], cwd: &Path, env: &[(&str, &str)]) -> Probe {
         Probe {
             main: main.map(String::from),
+            args: vec!["--version".into()],
             node: "/n/node".into(),
             argv0: "node".into(),
             exec_argv: exec_argv.iter().map(|s| s.to_string()).collect(),
@@ -761,5 +777,10 @@ echo "fake $flavor: no $name" >&2; exit 127
         assert!(refused(probe(Some(m), &[], &d, &[])).contains("changes NODE_OPTIONS"));
         assert!(refused(probe(Some(m), &[], &d, &[("NODE_OPTIONS", ours), ("X", "a\u{fffd}b")])).contains("the variable X cannot be passed on exactly"));
         assert!(refused(probe(None, &[], &d, &[("NODE_OPTIONS", ours)])).contains("without a script"));
+        for args in [vec!["--version", "--ignore-scripts"], vec!["--ignore-scripts", "--version"], vec![]] {
+            let mut p = probe(Some(m), &[], &d, &[("NODE_OPTIONS", ours)]);
+            p.args = args.iter().map(|a| a.to_string()).collect();
+            assert!(refused(p).contains("passes the script arguments of its own"), "{args:?}");
+        }
     }
 }

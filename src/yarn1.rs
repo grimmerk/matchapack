@@ -1501,7 +1501,7 @@ mod tests {
     /// util::tests::fake_version_manager) is found by asking the shim, and
     /// node is started with the environment the shim gives Yarn: also when
     /// it sets a variable only for Yarn (PREFIX, as Homebrew's launcher
-    /// does).
+    /// does). One that adds arguments of its own to Yarn's is declined.
     #[test]
     fn yarn_behind_version_manager_shims() {
         let Some(node) = util::tests::real_node() else { return eprintln!("SKIP: no node") };
@@ -1521,6 +1521,11 @@ mod tests {
             let util::NodeStart::Launch(l) = &y.node else { panic!("{flavor}: not a Launch") };
             assert!(l.env.contains(&("PREFIX".into(), "/opt/fake-prefix".into())), "{flavor}: {:?}", l.env);
             assert_eq!(y.js, t.join("img/yarn/1.22.22/bin/yarn.js"), "{flavor}");
+            let args = t.join("args");
+            std::fs::create_dir_all(&args).unwrap();
+            std::fs::write(args.join(".fakeargs"), "").unwrap();
+            let e = find_yarn_on(&path, &args, &run_dir).unwrap_err();
+            assert!(e.contains("passes the script arguments of its own (--version --ignore-scripts)"), "{flavor}: {e}");
             assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0, "{flavor}: the probe's files are gone");
         }
         // Yarn 1's npm package on PATH (an npm-global install): no probe;
