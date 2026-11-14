@@ -198,5 +198,63 @@ copies=$(grep -l "\"$vw/" "$store"/projects/*.json 2>/dev/null | wc -l | tr -d '
 [ $rc = 0 ] && grep -q 'RESULT: IDENTICAL' "$work/out" && [ "$copies" = 0 ] && [ "$(ls "$store/projects" | sort)" = "$before" ] \
   && ok "verify.sh: no project record left for its copies; the other records kept" || bad "verify.sh records: rc=$rc, $copies left for its copies, records $(ls "$store/projects" | wc -l | tr -d ' ') (before $(echo "$before" | wc -l | tr -d ' '))"
 
+# 14. `store adopt` (#30), on a store of its own: projects installed before
+#     records existed. A (odd-tarballs, 2 entries) is under the scanned
+#     directory; B (fixtures/small) is outside it, reached only through
+#     symlinks, a symlinked node_modules and a copy of its hidden lockfile
+#     inside a package. Adopting records A only; gc then keeps A's entries,
+#     removes B's, and B's files still read the same (clones are
+#     independent of the store entries they were cloned from).
+if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
+  store=$work/store-adopt; export MATCHAPACK_STORE=$store MATCHAPACK_LOG_DIR=$work/logs-adopt
+  ar=$work/adopt-root; ao=$work/adopt-other
+  [ -d "$ar/locked" ] && chmod 755 "$ar/locked"
+  rm -rf "${store:?}" "${work:?}/logs-adopt" "${ar:?}" "${ao:?}"
+  mkdir -p "$ar/a" "$ao/b"
+  cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$ar/a/"
+  cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$ao/b/"
+  install "$ar/a" && na=$(entries) && MATCHAPACK_VERBOSE=1 install "$ao/b" && grep -q 'inject: cloned [1-9]' "$work/out" && nb=$(( $(entries) - na )) \
+    || bad "adopt: setup installs"
+  rm -f "$store"/projects/*.json; age_entries
+  ln -s "$ao" "$ar/out"; ln -s "$ar" "$ar/a/loop"
+  mkdir -p "$ar/c" "$ar/d/node_modules/pkg/node_modules"; ln -s "$ao/b/node_modules" "$ar/c/node_modules"
+  cp "$ao/b/node_modules/.package-lock.json" "$ar/d/node_modules/pkg/node_modules/"
+  mkdir -p "$ar/locked"; chmod 000 "$ar/locked"
+  adopt() { "$bin" store adopt "$@" > "$work/out" 2>&1; }
+  # 14a. Dry run: lists A, writes nothing.
+  adopt --dry-run "$ar" && grep -q ': 1 npm projects' "$work/out" && grep -q 'records to write: 1 new' "$work/out" \
+    && grep -q "^  $ar/a: would record, $na store entries" "$work/out" && [ "$(records)" = 0 ] \
+    && ok "adopt --dry-run: lists the one project, writes no record" || bad "adopt --dry-run (records $(records))"
+  # 14b. The real run: one record, A's entries; nothing behind a symlink or
+  #      inside a node_modules; the unreadable directory is skipped.
+  adopt "$ar" && [ "$(records)" = 1 ] && grep -q "$ar/a\"" "$store"/projects/*.json \
+    && grep -q "now kept by these projects: $na of $((na + nb))" "$work/out" \
+    && grep -q 'skipped: 1 node_modules is a symlink, 1 unreadable' "$work/out" \
+    && ok "adopt: records the project, follows no symlink, skips node_modules contents and what it cannot read" || bad "adopt: records $(records)"
+  # 14c. B's files share blocks with the store before gc (they are clones);
+  #      gc removes B's entries; B's files read the same afterwards.
+  sum() { python3 -c '
+import hashlib, os, sys
+h = hashlib.sha256()
+for d, ds, fs in sorted(os.walk(sys.argv[1])):
+    ds.sort()
+    for f in sorted(fs):
+        p = os.path.join(d, f)
+        h.update(p.encode())
+        if not os.path.islink(p):
+            h.update(open(p, "rb").read())
+print(h.hexdigest())' "$1"; }
+  before=$(sum "$ao/b/node_modules")
+  shared=$(python3 "$here/scripts/shared-blocks.py" "$ao/b" "$store/v2" 2>/dev/null)
+  gc && grep -q "removed $nb of $((na + nb))" "$work/out" && [ "$(entries)" = "$na" ] \
+    && ok "gc after adopt: keeps the adopted project's $na entries, removes the $nb only an unadopted project uses" || bad "gc after adopt ($(entries) left)"
+  case $shared in shared\ 0\ *|'') shared_ok=no ;; *) shared_ok=yes ;; esac
+  [ "$shared_ok" = yes ] && [ "$(sum "$ao/b/node_modules")" = "$before" ] && (cd "$ao/b" && node -e 'require("lodash")') \
+    && ok "gc: an unadopted project's files read the same after its entries are removed (before: $shared)" || bad "gc: B's files after removal (before: $shared)"
+  chmod 755 "$ar/locked"
+else
+  echo "SKIP adopt: the fixtures' tarball server is not running (127.0.0.1:48321)"
+fi
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]
