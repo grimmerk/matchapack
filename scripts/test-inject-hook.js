@@ -1,5 +1,7 @@
 // Unit checks of the inject hook's eligibility rules (src/inject.js
-// `ineligible`), its result trap (`resultTrap`) and its fingerprint, against
+// `ineligible`), its result trap (`resultTrap`), its fingerprint, and the
+// helper's start-up (nothing of npm loaded before npm, the install root npm
+// reports, the lazy hook; #59, #36), against
 // the fetcher objects of the npm given: the real
 // pacote classes are constructed, so a renamed field or a changed default in
 // a new pacote fails here instead of silently turning every package into a
@@ -8,14 +10,16 @@
 // Prints one PASS/FAIL line per case; exit 1 when any failed.
 'use strict'
 const path = require('path')
-const npmDir = process.argv[2]
+const fs = require('fs')
+const os = require('os')
+const crypto = require('crypto')
+const npmDir = fs.realpathSync(process.argv[2])
 const util = require('util')
-const { execFileSync } = require('child_process')
+const { execFileSync, spawn } = require('child_process')
 const injectJs = path.join(__dirname, '..', 'src', 'inject.js')
 const { ineligible, resultTrap, fingerprint, fetcherBase } = require(injectJs)
-const pacote = require(require.resolve('pacote', {
-  paths: [path.join(npmDir, 'node_modules', '@npmcli', 'arborist')],
-}))
+const pacoteMain = require.resolve('pacote', { paths: [path.join(npmDir, 'node_modules', '@npmcli', 'arborist')] })
+const pacote = require(pacoteMain)
 
 const sri = 'sha512-' + Buffer.alloc(64, 7).toString('base64')
 const url = 'https://registry.npmjs.org/x/-/x-1.0.0.tgz'
@@ -84,6 +88,191 @@ const quiet = async (name, use) => {
   check(`trap: ${name} gives what the plain object gives, and reads nothing unexpected`,
     JSON.stringify([got, t.reads.filter(r => r.endsWith(':false'))]), JSON.stringify([want, []]))
 }
+// The helper's start-up (#59) and the install root it reports (#36), on this
+// npm: src/inject.js started with a socket as fd 3, as inject.rs starts it,
+// and a stand-in for matchapack on the other end that answers the root
+// message as `rootAnswer` says. A probe loaded before the helper
+// (`--require`) wraps Module.prototype.require first and reports:
+//   - how many files under the npm directory are in require.cache when npm's
+//     lib/cli.js is first required (#59: the helper loads none of npm);
+//   - at exit, whether Module.prototype.require is the probe's own again
+//     (the helper's watcher removed itself), and which loaded pacote copies
+//     have their FetcherBase.prototype.extract replaced by the hook.
+// The project is empty (no dependencies), so `npm ci` loads arborist and
+// pacote, extracts nothing and needs no registry.
+function helperRun ({ args, rootAnswer, cwd, env = {} }) {
+  const tmp = helperRun.tmp
+  const probe = path.join(tmp, 'probe.js')
+  fs.writeFileSync(probe, `
+const Module = require('module')
+const npmDir = ${JSON.stringify(npmDir + path.sep)}
+const cli = ${JSON.stringify(path.join(npmDir, 'lib', 'cli.js'))}
+const orig = Module.prototype.require
+let report = null
+const probe = function (id) {
+  if (!report) {
+    let file = null
+    try { file = Module._resolveFilename(id, this) } catch {}
+    if (file === cli) {
+      report = Object.keys(require.cache).filter(k => k.startsWith(npmDir)).map(k => k.slice(npmDir.length))
+    }
+  }
+  return orig.apply(this, arguments)
+}
+Module.prototype.require = probe
+process.on('exit', () => {
+  const hooked = []
+  for (const k of Object.keys(require.cache)) {
+    if (!k.endsWith('/pacote/lib/index.js')) continue
+    const R = require.cache[k].exports && require.cache[k].exports.RemoteFetcher
+    const F = R && Object.getPrototypeOf(R)
+    hooked.push([k.slice(npmDir.length), !!(F && F.prototype.extract && F.prototype.extract.name === 'matchapackExtract')])
+  }
+  process.stderr.write('PROBE ' + JSON.stringify({ beforeCli: report, requireRestored: Module.prototype.require === probe, hooked }) + '\\n')
+})
+`)
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--require', probe, injectJs, npmDir, ...args], {
+      cwd,
+      env: {
+        ...process.env,
+        ...env,
+        MATCHAPACK_INJECT_FD: '3',
+        MATCHAPACK_INJECT_FINGERPRINTS: 'any',
+        npm_config_cache: path.join(tmp, 'cache'),
+        npm_config_userconfig: path.join(tmp, 'npmrc'),
+        npm_config_update_notifier: 'false',
+        npm_config_audit: 'false',
+        npm_config_fund: 'false',
+      },
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    const messages = []
+    let buf = ''
+    child.stdout.on('data', d => { out += d })
+    child.stderr.on('data', d => { err += d })
+    child.stdio[3].on('error', () => {})
+    child.stdio[3].on('data', (d) => {
+      buf += d
+      let i
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i)
+        buf = buf.slice(i + 1)
+        let m
+        try {
+          m = JSON.parse(line)
+        } catch {
+          continue
+        }
+        messages.push(m)
+        const answer = (a) => child.stdio[3].write(JSON.stringify({ id: m.id, ...a }) + '\n')
+        if (m.id === 'declined') {
+          answer({ ok: true })
+        } else if (m.root !== undefined && m.integrity === undefined) {
+          answer(rootAnswer(m))
+        } else if (m.integrity !== undefined) {
+          answer({ ok: false, reason: 'test', message: 'test', fatal: false })
+        }
+      }
+    })
+    // 'close', not 'exit': 'exit' may come before the last stderr or fd 3
+    // data has been read (Node's child_process docs), so a run could look
+    // as if it had no probe line or fewer messages.
+    child.on('close', (code) => {
+      const line = err.split('\n').find(l => l.startsWith('PROBE '))
+      resolve({ code, out, err, messages, probe: line ? JSON.parse(line.slice(6)) : null })
+    })
+  })
+}
+
+async function helperCases () {
+  const tmp = helperRun.tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'matchapack-hook-test-'))
+  fs.writeFileSync(path.join(tmp, 'npmrc'), '')
+  const project = (name) => {
+    const d = path.join(tmp, name)
+    fs.mkdirSync(d)
+    fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: 'tiny', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } }))
+    fs.writeFileSync(path.join(d, 'package-lock.json'), JSON.stringify({ name: 'tiny', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'tiny', version: '1.0.0' } } }))
+    return d
+  }
+  const roots = (r) => r.messages.filter(m => m.root !== undefined && m.integrity === undefined)
+  try {
+    // #59: npm prints its version; nothing of npm was loaded before its
+    // lib/cli.js, and the hello names the file fingerprint.
+    {
+      const r = await helperRun({ args: ['--version'], rootAnswer: () => ({ ok: true }), cwd: tmp })
+      const hello = r.messages.find(m => m.hello)
+      check('helper: no file of npm is loaded before npm\'s lib/cli.js (#59)',
+        JSON.stringify([r.code, r.out.trim(), r.probe && r.probe.beforeCli]),
+        JSON.stringify([0, require(path.join(npmDir, 'package.json')).version, []]))
+      check('helper: the hello carries the file fingerprint and the pending hook',
+        JSON.stringify(hello && [hello.fingerprint, hello.hook]), JSON.stringify([fingerprint(npmDir), 'pending']))
+    }
+    // npm ci: the root npm reports once, when it starts the command; the
+    // hook on arborist's pacote once npm loaded it; the watcher gone.
+    {
+      const d = project('ci')
+      const r = await helperRun({ args: ['ci'], rootAnswer: (m) => ({ ok: true, root: m.root }), cwd: d })
+      const rs = roots(r)
+      check('helper: npm ci reports its install root once, with the command',
+        JSON.stringify([r.code, rs.length, rs[0] && rs[0].root, rs[0] && rs[0].command, rs[0] && rs[0].global]),
+        JSON.stringify([0, 1, d, 'ci', false]))
+      const hooks = r.messages.filter(m => m.hook !== undefined && !m.hello)
+      check('helper: the hook is installed when npm has loaded pacote, and said once', JSON.stringify(hooks), JSON.stringify([{ hook: 'on' }]))
+      check('helper: only arborist\'s pacote, the one hashed, carries the hook',
+        JSON.stringify(r.probe && r.probe.hooked.filter(([, on]) => on).map(([k]) => k)),
+        JSON.stringify([path.relative(npmDir, pacoteMain)]))
+      check('helper: the watcher on Module.prototype.require removed itself', r.probe && r.probe.requireRestored, true)
+      check('helper: no pacote file was loaded before npm\'s lib/cli.js in npm ci either',
+        JSON.stringify(r.probe && r.probe.beforeCli), JSON.stringify([]))
+    }
+    // An alias, deref'd by npm's own table.
+    {
+      const d = project('alias')
+      const r = await helperRun({ args: ['clean-install'], rootAnswer: (m) => ({ ok: true, root: m.root }), cwd: d })
+      check('helper: an alias is reported as npm\'s command name', JSON.stringify([r.code, roots(r).map(m => [m.command, m.typed])]), JSON.stringify([0, [['ci', 'clean-install']]]))
+    }
+    // A command that runs another (install-ci-test runs test through
+    // npm.exec): the second exec passes through, the root is reported once.
+    {
+      const d = project('cit')
+      const r = await helperRun({ args: ['install-ci-test'], rootAnswer: (m) => ({ ok: true, root: m.root }), cwd: d })
+      check('helper: a nested npm.exec passes through (one root report)', JSON.stringify([r.code, roots(r).map(m => m.command)]), JSON.stringify([0, ['install-ci-test']]))
+    }
+    // The root refused: exit 90 before the command ran, node_modules as it
+    // was, npm silent about its exit handler.
+    {
+      const d = project('refused')
+      fs.mkdirSync(path.join(d, 'node_modules', 'sentinel'), { recursive: true })
+      const r = await helperRun({ args: ['ci'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
+      check('helper: a refused root exits 90 before the command, node_modules untouched, no "Exit handler never called"',
+        JSON.stringify([r.code, fs.existsSync(path.join(d, 'node_modules', 'sentinel')), /Exit handler never called/.test(r.err), roots(r).length]),
+        JSON.stringify([90, true, false, 1]))
+    }
+    // npm's own values: global from the environment, --prefix, a workspace
+    // member (its root is the workspace root).
+    {
+      const d = project('global')
+      const r = await helperRun({ args: ['ci'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d, env: { npm_config_global: 'true' } })
+      check('helper: npm_config_global=true is reported as global', JSON.stringify(roots(r).map(m => m.global)), JSON.stringify([true]))
+      const other = project('prefixed')
+      const r2 = await helperRun({ args: ['ci', '--prefix', other], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
+      check('helper: --prefix <dir> is reported as the root', JSON.stringify(roots(r2).map(m => m.root)), JSON.stringify([other]))
+      const ws = path.join(tmp, 'ws')
+      fs.mkdirSync(path.join(ws, 'packages', 'a'), { recursive: true })
+      fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify({ name: 'ws', version: '1.0.0', workspaces: ['packages/*'] }))
+      fs.writeFileSync(path.join(ws, 'packages', 'a', 'package.json'), JSON.stringify({ name: 'a', version: '1.0.0' }))
+      const r3 = await helperRun({ args: ['ci', '--dry-run'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: path.join(ws, 'packages', 'a') })
+      check('helper: in a workspace member, npm\'s root is the workspace root; --dry-run is reported',
+        JSON.stringify(roots(r3).map(m => [m.root, m.dry_run])), JSON.stringify([[ws, true]]))
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 ;(async () => {
   await quiet('await of an async function\'s result', async (v) => JSON.stringify(await (async () => v)()))
   await quiet('Promise.resolve', async (v) => JSON.stringify(await Promise.resolve(v)))
@@ -124,12 +313,20 @@ const quiet = async (name, use) => {
   }
 
   // The fingerprint: the hook's own function and `--fingerprint` agree (CI
-  // and run time hash the same thing), and it is the class text's SHA-256.
-  const fp = fingerprint(fetcherBase(pacote))
+  // and run time hash the same thing), and it is the SHA-256 of the bytes of
+  // pacote's lib/fetcher.js, the file next to the one npm's arborist loads,
+  // which holds the FetcherBase class whose work the hook replaces.
+  const fp = fingerprint(npmDir)
   const printed = execFileSync(process.execPath, [injectJs, '--fingerprint', npmDir], { encoding: 'utf8' }).trim()
   check('fingerprint: --fingerprint prints what the hook computes', printed, fp)
-  check('fingerprint: SHA-256 of FetcherBase\'s class text', fp,
-    require('crypto').createHash('sha256').update(Function.prototype.toString.call(Object.getPrototypeOf(pacote.RemoteFetcher))).digest('hex'))
+  const fetcherText = fs.readFileSync(path.join(path.dirname(pacoteMain), 'fetcher.js'))
+  check('fingerprint: SHA-256 of pacote\'s lib/fetcher.js', fp, crypto.createHash('sha256').update(fetcherText).digest('hex'))
+  check('fingerprint: that file holds the FetcherBase class the hook is installed on',
+    fetcherText.toString('utf8').includes(Function.prototype.toString.call(fetcherBase(pacote))), true)
+
+  // The helper itself, started as matchapack starts it (a socket as fd 3),
+  // with a stand-in for matchapack that answers its messages.
+  await helperCases()
 
   process.exit(failed ? 1 : 0)
 })()

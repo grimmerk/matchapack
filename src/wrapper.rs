@@ -5,9 +5,12 @@
 //! arguments, so the worst case is plain npm.
 //!
 //! The inject engine (`run_inject`) takes `npm ci` with any arguments and
-//! declines only what it must know before npm starts (`decide_inject`,
-//! `inject::gates`: npm major 10–12, umask 022, the project's node_modules
-//! not a symlink, the trial scope, the install staying in this directory).
+//! declines before npm starts only what needs no node (`decide_inject`,
+//! `inject::gates`: npm major 10–12, umask 022, the exact flags that make it
+//! global or install nothing, a start directory outside the trial scope).
+//! The gates that depend on where npm installs (the trial scope, a symlinked
+//! node_modules, a global install set in an npmrc) run on npm's own install
+//! root when npm reports it (serve.rs `accept_root`; #36).
 
 use crate::{trial, util, InstallError};
 use serde_json::{json, Value};
@@ -66,6 +69,11 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
     match outcome {
         Ok(s) => {
             let by_npm = s.inject.as_ref().and_then(|i| i["fallbacks"].as_object()).map(|m| m.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);
+            // Without the hook npm extracted every package it installed.
+            let by_npm = match s.inject.as_ref() {
+                Some(i) if i["hook"] == "not-installed" => i["installed"].as_u64().unwrap_or(by_npm),
+                _ => by_npm,
+            };
             eprintln!(
                 "matchapack: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})",
                 s.placed, s.secs
@@ -94,42 +102,54 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
     }
 }
 
-/// What matchapack must know before npm starts, for the inject engine. npm's
-/// flags and settings are npm's to read: whatever they make it install, the
-/// hook replaces only extractions it can reproduce exactly.
+/// What matchapack declines before npm starts, for the inject engine: only
+/// what needs no node, as a shortcut. The authority is npm's own install
+/// root and settings, checked when npm reports them (serve.rs
+/// `accept_root`): abbreviations (`--glob`), the environment and npmrc files
+/// (`global=true`), the workspace walk and `--prefix` are npm's to read.
+/// Whatever npm's flags make it install, the hook replaces only extractions
+/// it can reproduce exactly.
 fn decide_inject(args: &[String]) -> Result<crate::inject::InjectOpts, String> {
-    // The clone server accepts destinations inside this directory only; with
-    // these npm installs somewhere else.
-    for a in &args[1..] {
-        let name = a.split('=').next().unwrap_or(a);
-        if ["--prefix", "-C", "--global", "-g", "--location"].contains(&name) {
-            return Err(format!("option {a} moves the install out of this directory"));
-        }
-        // Not installs: nothing to clone, and a run that places nothing
-        // would read in the log as a hook that no longer fires.
-        if ["--help", "-h", "-?", "--usage", "--dry-run"].contains(&name) {
-            return Err(format!("option {a} installs nothing"));
-        }
-    }
+    let prefix_typed = early_flags(&args[1..])?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    // Without a package.json here npm looks for the project in a parent
-    // directory. Without a lockfile here either `npm ci` refuses, or this is
-    // a workspace of a monorepo and npm installs into the root's
-    // node_modules, outside this directory: nothing could be cloned
-    // (grimmerk/matchapack-private#36 for doing better).
-    if !cwd.join("package.json").is_file() {
-        return Err("no package.json in this directory".into());
+    // Without --prefix npm installs into this directory or an ancestor of it,
+    // and the trial scope is a string prefix: a directory outside it has no
+    // ancestor inside it. With --prefix the root decides (serve.rs).
+    if !prefix_typed {
+        trial::in_scope(&cwd)?;
     }
-    if !cwd.join("package-lock.json").is_file() && !cwd.join("npm-shrinkwrap.json").is_file() {
-        return Err("no package-lock.json or npm-shrinkwrap.json in this directory (npm would install elsewhere, or refuse)".into());
-    }
-    trial::in_scope(&cwd)?;
     Ok(crate::inject::InjectOpts {
         dir: cwd,
+        trial_scope: true,
         store: crate::default_store(None),
         clone_mode: crate::default_clone_mode(),
         npm_args: args.to_vec(),
     })
+}
+
+/// The exact spellings of npm's flags that decline before node starts
+/// (npm's other spellings are caught on its own values, serve.rs), and
+/// whether `--prefix` / `-C` was typed.
+fn early_flags(rest: &[String]) -> Result<bool, String> {
+    let mut prefix_typed = false;
+    for (i, a) in rest.iter().enumerate() {
+        let name = a.split('=').next().unwrap_or(a);
+        let global = ["-g", "--global"].contains(&a.as_str())
+            || a == "--location=global"
+            || (a == "--location" && rest.get(i + 1).map(String::as_str) == Some("global"));
+        if global {
+            return Err(format!("option {a} makes npm install globally"));
+        }
+        // Not installs: nothing to clone, and a run that places nothing
+        // would read in the log as a hook that no longer fires.
+        if ["--help", "-h", "-?", "--usage", "--dry-run", "--package-lock-only"].contains(&a.as_str()) {
+            return Err(format!("option {a} installs nothing"));
+        }
+        if ["--prefix", "-C"].contains(&name) {
+            prefix_typed = true;
+        }
+    }
+    Ok(prefix_typed)
 }
 
 /// matchapack will not handle this install and nothing has been changed. Run
@@ -215,8 +235,8 @@ fn version_matches(version: &str, pattern: &str) -> bool {
 }
 
 /// The pacote code the hook may be installed on: fingerprints (SHA-256 of
-/// the text of pacote's FetcherBase class, `node src/inject.js --fingerprint
-/// <npm dir>`) of the npm releases the harness has run on, with the versions
+/// pacote's lib/fetcher.js, the file of its FetcherBase class, `node
+/// src/inject.js --fingerprint <npm dir>`) of the npm releases the harness has run on, with the versions
 /// and the date (src/npm-fingerprints.json; NOTES "G-lite: npm release
 /// safety"). Inside a listed major, this is what decides whether an npm
 /// release the binary has never seen gets the hook: it does when its pacote
@@ -260,17 +280,39 @@ fn fingerprints_allowed(user: Option<&str>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprints_allowed, inject_version_allowed, is_fingerprint, npm_fingerprints};
+    use super::{early_flags, fingerprints_allowed, inject_version_allowed, is_fingerprint, npm_fingerprints};
+
+    #[test]
+    fn flags_that_decline_before_node_starts() {
+        let f = |a: &[&str]| early_flags(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        for a in [&["-g"][..], &["--global"], &["--location=global"], &["--no-audit", "--location", "global"]] {
+            assert!(f(a).unwrap_err().contains("makes npm install globally"), "{a:?}");
+        }
+        for a in [&["--dry-run"][..], &["--help"], &["-h"], &["-?"], &["--usage"], &["--package-lock-only"]] {
+            assert!(f(a).unwrap_err().contains("installs nothing"), "{a:?}");
+        }
+        // npm's to decide on its own values: a local location, abbreviations,
+        // a value that only looks like a flag.
+        for a in [&["--location=project"][..], &["--location", "project"], &["--glob"], &["--omit=dev"], &[]] {
+            assert_eq!(f(a), Ok(false), "{a:?}");
+        }
+        // --prefix and -C are supported: the start directory's scope check is
+        // then skipped (the root npm reports is checked).
+        for a in [&["--prefix", "x"][..], &["--prefix=x"], &["-C", "x"], &["--no-audit", "-C=x"]] {
+            assert_eq!(f(a), Ok(true), "{a:?}");
+        }
+    }
 
     #[test]
     fn npm_fingerprint_list() {
         let list = npm_fingerprints();
-        // The six class texts of npm 10.0.0 to 12.2.2 (NOTES "G-lite"): the
-        // two before 10.8.0 added after test-inject.sh passed on 10.5.2 and
-        // 10.7.0.
-        for p in ["eaaea911e04032d0", "2b01fc92939cb2c9", "e89576a31b8145ab", "2e43f4c0648d9b8d", "b1ead56a5de97d9b", "d384f9b730728433"] {
+        // The eight texts of pacote's lib/fetcher.js in npm 10.0.0 to 12.2.2
+        // (NOTES "The lazy hook and npm's install root"), each listed after
+        // test-inject.sh and verify-npm.sh passed on a release with it.
+        for p in ["07f98090ee5bc371", "8d7208cf1a9e98ee", "cef1bd59a34dfe60", "1a385341f75d6c77", "45eabb392a0c7c33", "6972084f1fa0d668", "97dbf9a402ad3329", "b7d5a64232232301"] {
             assert!(list.iter().any(|f| f.starts_with(p)), "{p}");
         }
+        assert_eq!(list.len(), 8, "{list:?}");
         assert!(list.iter().all(|f| is_fingerprint(f) && *f == f.to_ascii_lowercase()), "{list:?}");
         let v: serde_json::Value = serde_json::from_str(super::NPM_FINGERPRINTS).unwrap();
         for (f, e) in v["fingerprints"].as_object().unwrap() {

@@ -10,8 +10,9 @@
 #           Nothing to test: it writes the poll date and stops.
 #   linux   per release, on a loop-mounted btrfs: test-inject.sh and
 #           verify-npm.sh (scripts/npm-suites.sh) with MATCHAPACK_NPM_VERSIONS
-#           and MATCHAPACK_NPM_FINGERPRINT set to `any`; the pacote class
-#           fingerprint (from the hook's own code); the diff of the tracked
+#           and MATCHAPACK_NPM_FINGERPRINT set to `any`; the pacote
+#           fingerprint (pacote's lib/fetcher.js, from the hook's own code;
+#           called "class text" in the reports); the diff of the tracked
 #           functions (pacote's FetcherBase class, arborist's caller chain,
 #           rebuild.js, ci.js exec) against the last verified release.
 #   decide  macOS only when the class text is not on the list (or could not

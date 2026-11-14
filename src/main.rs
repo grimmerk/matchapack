@@ -293,7 +293,7 @@ fn main() -> Result<()> {
                 npm_args.push("--ignore-scripts".into());
             }
             npm_args.extend(extra);
-            let o = inject::InjectOpts { dir, store: default_store(store), clone_mode: clone_mode.unwrap_or_else(default_clone_mode), npm_args };
+            let o = inject::InjectOpts { dir, trial_scope: false, store: default_store(store), clone_mode: clone_mode.unwrap_or_else(default_clone_mode), npm_args };
             let r = inject::run(&o);
             util::remove_run_dir();
             match r {

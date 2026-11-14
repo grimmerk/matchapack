@@ -4,9 +4,26 @@
 //! package's store entry instead. Node cannot clone (see NOTES), so the clone
 //! and the mtime touch happen here.
 //!
+//! The project root is npm's own (grimmerk/matchapack-private#36): when npm
+//! starts its command, the helper reports `npm.prefix` (the `root` message),
+//! and this server runs the gates on it (`accept_root`) and pins it. Until
+//! then every request is refused (`no-root`); a refused root makes the helper
+//! exit before the command runs, and matchapack runs plain npm.
+//!
 //! Protocol: one JSON object per line, both ways, over one socket.
 //!   node → matchapack
-//!     {"hello":true,"pacote":"21.5.1","hook":"on"}   once, before npm starts
+//!     {"hello":true,"pacote":"21.5.1","fingerprint":"…","hook":"pending"}
+//!                                                    once, before npm starts
+//!     {"id":0,"root":"/abs/dir","global":false,"command":"ci","typed":"ic",
+//!      "dry_run":false,"package_lock_only":false,"usage":false}
+//!                                                    npm's install root and command,
+//!                                                    once, before the command runs
+//!     {"no_root":"…"}                                npm's root could not be read: no
+//!                                                    root, every request refused
+//!     {"hook":"on"}                                  npm loaded pacote: the hook is on
+//!                                                    (`off`, `none`; `not-installed`
+//!                                                    with a `reason`: npm extracts
+//!                                                    every package itself)
 //!     {"id":7,"integrity":"sha512-…","dest":"/abs/dir"}
 //!     {"id":8,"integrity":"sha512-…","dest":"/abs/dir","extracted":"/…/tmp/…/x3"}
 //!     {"note":"type-FileFetcher"}                    a package the hook left to npm, and why
@@ -15,6 +32,9 @@
 //!                                                    resolved, integrity or from)
 //!     {"id":"declined","declined":"…"}               the hook stops before npm starts, and why
 //!   matchapack → node
+//!     {"id":0,"ok":true,"root":"/abs/dir"}           the root, canonical, pinned
+//!     {"id":0,"ok":false,"reason":"…"}               refused (recorded as the decline
+//!                                                    reason; the helper then exits 90)
 //!     {"id":7,"ok":true,"kind":"fast","filled":false,"checked":false}
 //!     {"id":7,"ok":false,"extract_to":"/…/tmp/…/x3","why":"fill"}
 //!     {"id":7,"ok":false,"reason":"rejected-dest","message":"…","fatal":false}
@@ -56,7 +76,7 @@
 //!     from the parsed digest, so it is always inside the store's layout; it
 //!     must be a directory, not a symlink;
 //!   - the destination must be an absolute path whose parent really is (after
-//!     resolving symlinks) a directory inside the project root and below a
+//!     resolving symlinks) a directory inside the pinned root and below a
 //!     `node_modules`, and must itself be absent or a real directory that
 //!     holds nothing but `node_modules`;
 //!   - `extracted` must be a directory this server handed out for the same
@@ -126,6 +146,17 @@ fn refused(reason: &'static str, message: impl Into<String>) -> Outcome {
 pub struct Stats {
     /// The hook's first message: npm was about to start.
     pub hello: Option<Value>,
+    /// The install root npm reported and this server accepted, canonical.
+    pub root: Option<PathBuf>,
+    /// npm's name of the command (`ci`), with the root.
+    pub command: Option<String>,
+    /// Why npm's root could not be read (the helper's `no_root`).
+    pub no_root: Option<String>,
+    /// The hook's state once npm loaded pacote: `on`, `off`, `none`, or
+    /// `not-installed` (then `hook_reason`). None: npm never loaded the
+    /// pacote the helper hashed.
+    pub hook: Option<String>,
+    pub hook_reason: Option<String>,
     pub cloned: usize,
     /// kind name → (packages, summed place seconds, summed touch seconds).
     pub kinds: BTreeMap<String, (usize, f64, f64)>,
@@ -144,7 +175,8 @@ pub struct Stats {
     pub paths_regrouped: usize,
     /// The first few refusal messages, for the log.
     pub errors: Vec<String>,
-    /// Why the hook stopped before npm started (the helper's `declined`).
+    /// Why the helper stopped before npm's command ran: its own `declined`
+    /// (before npm started), or this server's refusal of npm's root.
     pub declined: Option<String>,
     /// Reads of `resolved`, `integrity` or `from` of what the hook's extract
     /// resolved to, by key: npm does not read them today; noted.
@@ -190,6 +222,11 @@ impl Stats {
             "errors": self.errors,
             "pacote": self.hello.as_ref().and_then(|h| h.get("pacote")).cloned().unwrap_or(Value::Null),
             "fingerprint": self.hello.as_ref().and_then(|h| h.get("fingerprint")).cloned().unwrap_or(Value::Null),
+            "root": self.root.as_ref().map(|r| r.display().to_string()),
+            "command": self.command,
+            "hook": self.hook,
+            "hook_reason": self.hook_reason,
+            "no_root": self.no_root,
             "result_reads": self.result_reads,
             "result_unexpected": self.result_unexpected,
         })
@@ -241,10 +278,18 @@ fn known_key(key: &str) -> bool {
     !key.contains('?')
 }
 
+/// The commands whose install root the server accepts (npm's names, after
+/// its alias resolution): what the shell function routes.
+const ROOT_COMMANDS: &[&str] = &["ci"];
+
 pub struct Server<'a> {
     store: &'a Store,
-    /// The project root, canonical.
-    root: PathBuf,
+    /// The install root npm reported (canonical), set once by the `root`
+    /// message (or given to `new`, tests); requests are refused until then.
+    root: std::sync::OnceLock<PathBuf>,
+    /// Whether the root must be inside the trial scope (trial::in_scope):
+    /// the shell function's runs, not `matchapack install`.
+    trial_scope: AtomicBool,
     mode: Mode,
     /// Where merge placements clone to first: under the store's tmp/, so on
     /// the store's volume, which is the project's volume whenever a clone
@@ -344,20 +389,26 @@ fn already_exists(e: &anyhow::Error) -> bool {
 }
 
 impl<'a> Server<'a> {
-    /// `root` must be the canonical project directory.
+    /// `root`, when given, must be the canonical project directory (tests);
+    /// None: npm reports it (the `root` message).
     /// `key` names the pacote and tar versions npm extracts with (None: from
     /// the hook's hello); an entry not yet known to it is compared before use.
-    pub fn new(store: &'a Store, root: PathBuf, mode: Mode, key: Option<String>, policy: CheckPolicy) -> Result<Server<'a>> {
+    pub fn new(store: &'a Store, root: Option<PathBuf>, mode: Mode, key: Option<String>, policy: CheckPolicy) -> Result<Server<'a>> {
         let tmp = TmpDir::create(store.root.join("tmp").join(format!("{}-inject", crate::store::process_tag())), 0o700)?;
         let key_cell = std::sync::OnceLock::new();
         if let Some(k) = key {
             let _ = key_cell.set(k);
         }
+        let root_cell = std::sync::OnceLock::new();
+        if let Some(r) = root {
+            let _ = root_cell.set(r);
+        }
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1)
             ^ ((std::process::id() as u64) << 32);
         Ok(Server {
             store,
-            root,
+            root: root_cell,
+            trial_scope: AtomicBool::new(false),
             mode,
             tmp,
             seq: AtomicU64::new(0),
@@ -383,9 +434,57 @@ impl<'a> Server<'a> {
         self.k().to_string()
     }
 
-    /// Whether `p` (absolute) is this project's root, symlinks resolved.
+    /// Check the root npm reports against the trial scope (the shell
+    /// function's runs).
+    pub fn set_trial_scope(&self, on: bool) {
+        self.trial_scope.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether `p` (absolute) is the pinned root, symlinks resolved.
     fn is_root(&self, p: &Path) -> bool {
-        p == self.root || (p.is_absolute() && std::fs::canonicalize(p).is_ok_and(|c| c == self.root))
+        let Some(root) = self.root.get() else { return false };
+        p == root || (p.is_absolute() && std::fs::canonicalize(p).is_ok_and(|c| &c == root))
+    }
+
+    /// The gates on the install root npm reported (the `root` message), and
+    /// the root, canonical, when they pass. Everything that depends on where
+    /// npm installs is decided here, on npm's own values (its abbreviations,
+    /// its environment and npmrc files, the workspace walk included); the
+    /// command has not run yet, so a refusal changes nothing.
+    fn accept_root(&self, v: &Value) -> std::result::Result<PathBuf, String> {
+        let flag = |k: &str| v.get(k).and_then(|x| x.as_bool()) == Some(true);
+        if flag("global") {
+            return Err("npm installs globally".into());
+        }
+        let command = v.get("command").and_then(|c| c.as_str());
+        if !command.is_some_and(|c| ROOT_COMMANDS.contains(&c)) {
+            let typed = v.get("typed").and_then(|c| c.as_str()).unwrap_or("?");
+            return Err(match command {
+                Some(c) => format!("npm runs `{c}` for `{typed}`, not one of {}", ROOT_COMMANDS.join(", ")),
+                None => format!("npm has no command `{typed}`"),
+            });
+        }
+        for (k, name) in [("dry_run", "--dry-run"), ("package_lock_only", "--package-lock-only"), ("usage", "--usage")] {
+            if flag(k) {
+                return Err(format!("this run installs nothing ({name})"));
+            }
+        }
+        let Some(reported) = v.get("root").and_then(|r| r.as_str()).map(Path::new).filter(|p| p.is_absolute()) else {
+            return Err("npm reported no absolute install root".into());
+        };
+        let root = match std::fs::canonicalize(reported) {
+            Ok(r) if r.is_dir() => r,
+            _ => return Err(format!("the install root {} does not exist yet", reported.display())),
+        };
+        if self.trial_scope.load(Ordering::Relaxed) {
+            crate::trial::in_scope(&root)?;
+        }
+        // npm ci replaces a node_modules that is a symlink; every clone into
+        // it would be refused one by one (its real path is outside the root).
+        if std::fs::symlink_metadata(root.join("node_modules")).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("the install root's node_modules is a symlink ({}); npm ci replaces it, matchapack does not", root.display()));
+        }
+        Ok(root)
     }
 
     /// Whether to compare an entry, known to `made_by`, with pacote's
@@ -420,6 +519,9 @@ impl<'a> Server<'a> {
     /// The directory the request may be placed at: `dest` with its parent
     /// resolved. See the module comment for the rules.
     fn check_dest(&self, dest: &Path) -> std::result::Result<PathBuf, String> {
+        let Some(root) = self.root.get() else {
+            return Err("npm has reported no install root".into());
+        };
         if !dest.is_absolute() || !dest.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_))) {
             return Err("the destination is not a plain absolute path".into());
         }
@@ -430,7 +532,7 @@ impl<'a> Server<'a> {
             return Err("the destination is a node_modules directory".into());
         }
         let real = std::fs::canonicalize(parent).map_err(|e| format!("resolving {}: {e}", parent.display()))?;
-        let Ok(rel) = real.strip_prefix(&self.root) else {
+        let Ok(rel) = real.strip_prefix(root) else {
             return Err(format!("{} resolves outside the project ({})", parent.display(), real.display()));
         };
         if !rel.components().any(|c| c.as_os_str() == "node_modules") {
@@ -1012,13 +1114,26 @@ impl<'a> Server<'a> {
         }
     }
 
-    /// Record a message that needs no answer (`hello`, `note`). Returns
-    /// false when `v` is something else.
+    /// Record a message that needs no answer (`hello`, `note`, `hook`,
+    /// `no_root`). Returns false when `v` is something else.
     fn record_message(&self, v: &Value) -> bool {
+        // Short words and messages chosen by the helper; keep the log sane
+        // whatever arrives.
+        let text = |x: &Value| x.as_str().map(|s| s.chars().take(300).collect::<String>());
         if v.get("hello").is_some() {
             let ver = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("?").to_string();
             let _ = self.key.set(format!("pacote@{} tar@{}", ver("pacote"), ver("tar")));
             self.stats.lock().unwrap().hello = Some(v.clone());
+            return true;
+        }
+        if let Some(state) = v.get("hook").and_then(text) {
+            let mut s = self.stats.lock().unwrap();
+            s.hook = Some(state.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(20).collect());
+            s.hook_reason = v.get("reason").and_then(text);
+            return true;
+        }
+        if let Some(why) = v.get("no_root").and_then(text) {
+            self.stats.lock().unwrap().no_root = Some(why);
             return true;
         }
         if let Some(note) = v.get("note").and_then(|n| n.as_str()) {
@@ -1055,20 +1170,48 @@ impl<'a> Server<'a> {
             self.stats.lock().unwrap().declined = Some(why.chars().take(300).collect());
             return vec![json!({ "id": id, "ok": true }).to_string()];
         }
+        // npm's install root, once, before its command runs.
+        if v.get("root").is_some() && v.get("integrity").is_none() {
+            let command = v.get("command").and_then(|c| c.as_str()).map(|c| c.chars().take(40).collect::<String>());
+            let verdict = match self.root.get() {
+                Some(_) => Err("npm reported its install root twice".to_string()),
+                None => self.accept_root(&v),
+            };
+            let mut s = self.stats.lock().unwrap();
+            s.command = command;
+            return vec![match verdict {
+                Ok(root) => {
+                    let _ = self.root.set(root.clone());
+                    s.root = Some(root.clone());
+                    json!({ "id": id, "ok": true, "root": root })
+                }
+                Err(why) => {
+                    s.declined = Some(why.chars().take(300).collect());
+                    json!({ "id": id, "ok": false, "reason": why })
+                }
+            }
+            .to_string()];
+        }
         {
             let mut s = self.stats.lock().unwrap();
             s.first.get_or_insert_with(Instant::now);
         }
         let str_of = |k: &str| v.get(k).and_then(|x| x.as_str());
         let answers: Vec<(Value, Outcome)> = match (str_of("integrity"), str_of("dest")) {
-            // npm installs into another project root than this one (npm ci
-            // run inside a workspace of a monorepo, or a --prefix the wrapper
-            // did not recognise): every destination would be refused anyway;
-            // said as what it is, so the log does not read like a dead hook.
-            // Diagnosis only: the destination check never uses this value.
+            // No root reported yet (npm's could not be read): nothing is placed.
+            (Some(_), Some(_)) if self.root.get().is_none() => {
+                vec![(id.clone(), refused("no-root", "npm has reported no install root"))]
+            }
+            // The root arborist passed to pacote is not the one npm reported
+            // when it started the command: two values inside npm disagree, so
+            // nothing is placed. The destination check itself uses the pinned
+            // root only.
             (Some(_), Some(_)) if str_of("npm_root").is_some_and(|r| !self.is_root(Path::new(r))) => vec![(
                 id.clone(),
-                refused("npm-root-elsewhere", format!("npm installs into {}, not {}", str_of("npm_root").unwrap_or(""), self.root.display())),
+                refused(
+                    "npm-root-elsewhere",
+                    format!("npm installs into {}, not {}", str_of("npm_root").unwrap_or(""), self.root.get().map(|r| r.display().to_string()).unwrap_or_default()),
+                ),
             )],
             (Some(sri), Some(dest)) => {
                 // A panic in one placement must not take the answer with it:
@@ -1217,7 +1360,7 @@ mod tests {
         }
 
         fn server_with(&self, mode: Mode, policy: CheckPolicy) -> Server<'_> {
-            Server::new(&self.store, self.root.clone(), mode, Some("pacote@1.0.0 tar@2.0.0".into()), policy).unwrap()
+            Server::new(&self.store, Some(self.root.clone()), mode, Some("pacote@1.0.0 tar@2.0.0".into()), policy).unwrap()
         }
 
         /// What the hook does with an `extract_to` answer, with matchapack's own
@@ -1938,7 +2081,7 @@ mod tests {
     #[test]
     fn the_key_comes_from_the_hooks_hello() {
         let fx = Fx::new("serve-key");
-        let s = Server::new(&fx.store, fx.root.clone(), clone::Mode::File, None, CheckPolicy::OneIn(50)).unwrap();
+        let s = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, None, CheckPolicy::OneIn(50)).unwrap();
         assert!(s.record_message(&json!({ "hello": true, "pacote": "21.5.1", "tar": "7.5.22", "hook": "on" })));
         assert_eq!(s.key(), "pacote@21.5.1 tar@7.5.22");
     }
@@ -1990,7 +2133,7 @@ mod tests {
         // A key the hook could not name vouches for nothing.
         let fresh = Fx::new("serve-policy-unknown");
         let (j, sri_j) = fresh.entry(PKG);
-        let unknown = Server::new(&fresh.store, fresh.root.clone(), clone::Mode::File, Some("pacote@? tar@?".into()), CheckPolicy::OneIn(1_000_000)).unwrap();
+        let unknown = Server::new(&fresh.store, Some(fresh.root.clone()), clone::Mode::File, Some("pacote@? tar@?".into()), CheckPolicy::OneIn(1_000_000)).unwrap();
         fresh.store.set_made_by(&j, "pacote@? tar@?").unwrap();
         assert!(matches!(unknown.place_entry(&sri_j, &fresh.root.join("node_modules/r")), Outcome::Extract { why: "check", .. }));
     }
@@ -2011,6 +2154,81 @@ mod tests {
         let link = fx.dir.join("root-link");
         std::os::unix::fs::symlink(&fx.root, &link).unwrap();
         assert_eq!(req(&link)["reason"], "rejected-source");
+    }
+
+    #[test]
+    fn the_root_npm_reports_is_gated_and_pinned_once() {
+        let fx = Fx::new("serve-root-handshake");
+        let new = || Server::new(&fx.store, None, clone::Mode::File, Some("pacote@1.0.0 tar@2.0.0".into()), CheckPolicy::OneIn(50)).unwrap();
+        let line = |s: &Server, v: Value| serde_json::from_str::<Value>(&s.handle_line(&v.to_string())[0]).unwrap();
+        let root_msg = |root: &Path, extra: Value| {
+            let mut m = json!({ "id": 0, "root": root, "global": false, "command": "ci", "typed": "ci", "dry_run": false, "package_lock_only": false, "usage": false });
+            if let (Value::Object(m), Value::Object(x)) = (&mut m, extra) {
+                m.extend(x);
+            }
+            m
+        };
+        let req = json!({ "id": 1, "integrity": "sha512-x", "dest": fx.root.join("node_modules/p") });
+
+        // Before npm reported its root: nothing is placed.
+        // (One server at a time: each has its own directory under the
+        // store's tmp/, named per process.)
+        let s = new();
+        assert_eq!(line(&s, req.clone())["reason"], "no-root");
+        assert!(s.check_dest(&fx.root.join("node_modules/p")).is_err());
+        drop(s);
+
+        // Refusals: recorded as the decline reason, the root stays unset.
+        let other = fx.dir.join("not-there");
+        let nm_link = fx.dir.join("nm-link");
+        fs::create_dir_all(&nm_link).unwrap();
+        std::os::unix::fs::symlink(fx.dir.join("elsewhere"), nm_link.join("node_modules")).unwrap();
+        for (msg, want) in [
+            (root_msg(&fx.root, json!({ "global": true })), "npm installs globally"),
+            (root_msg(&fx.root, json!({ "command": "install", "typed": "i" })), "npm runs `install` for `i`"),
+            (root_msg(&fx.root, json!({ "command": null, "typed": "u" })), "npm has no command `u`"),
+            (root_msg(&fx.root, json!({ "dry_run": true })), "this run installs nothing (--dry-run)"),
+            (root_msg(&fx.root, json!({ "package_lock_only": true })), "this run installs nothing (--package-lock-only)"),
+            (root_msg(&fx.root, json!({ "usage": true })), "this run installs nothing (--usage)"),
+            (root_msg(&other, json!({})), "does not exist yet"),
+            (root_msg(Path::new("relative"), json!({})), "no absolute install root"),
+            (root_msg(&nm_link, json!({})), "node_modules is a symlink"),
+        ] {
+            let s = new();
+            let a = line(&s, msg.clone());
+            assert_eq!(a["ok"], false, "{msg}");
+            assert!(a["reason"].as_str().unwrap().contains(want), "{a} {want}");
+            let st = s.stats.lock().unwrap();
+            assert!(st.declined.as_deref().is_some_and(|d| d.contains(want)) && st.root.is_none(), "{msg}");
+            drop(st);
+            assert_eq!(line(&s, req.clone())["reason"], "no-root");
+            drop(s);
+        }
+
+        // Accepted: canonical (here through a symlink), pinned, and the
+        // requests are judged against it; a second report is refused.
+        let s = new();
+        let link = fx.dir.join("root-link");
+        std::os::unix::fs::symlink(&fx.root, &link).unwrap();
+        let a = line(&s, root_msg(&link, json!({ "typed": "ic" })));
+        assert_eq!((a["ok"].as_bool(), a["root"].as_str()), (Some(true), fx.root.to_str()), "{a}");
+        {
+            let st = s.stats.lock().unwrap();
+            assert_eq!((st.root.as_deref(), st.command.as_deref(), st.declined.as_deref()), (Some(fx.root.as_path()), Some("ci"), None));
+        }
+        assert_eq!(line(&s, req.clone())["reason"], "rejected-source", "judged on its own once the root is pinned");
+        let again = line(&s, root_msg(&fx.dir, json!({})));
+        assert_eq!(again["ok"], false, "{again}");
+        assert!(s.check_dest(&fx.root.join("node_modules/p")).is_ok());
+        assert_eq!(s.stats.lock().unwrap().root.as_deref(), Some(fx.root.as_path()));
+
+        // The helper's other messages are recorded.
+        assert!(s.record_message(&json!({ "hook": "not-installed", "reason": "no FetcherBase" })));
+        assert!(s.record_message(&json!({ "no_root": "npm's lib/npm.js has no Npm.prototype.exec" })));
+        let j = s.stats.lock().unwrap().to_json();
+        assert_eq!((j["hook"].as_str(), j["hook_reason"].as_str(), j["command"].as_str()), (Some("not-installed"), Some("no FetcherBase"), Some("ci")));
+        assert_eq!(j["root"].as_str(), fx.root.to_str());
+        assert!(j["no_root"].as_str().unwrap().contains("no Npm.prototype.exec"));
     }
 
     /// Answer lines from `handle_line`, by id.
