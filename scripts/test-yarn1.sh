@@ -903,6 +903,17 @@ if [ $rc = 0 ] && same && both_changed packages/u1/package.json && [ "$(ejson c-
   ok "yarn workspace u1 upgrade-interactive --latest (pseudo-terminal): the workspace's Yarn prompts and links with the hook; engine identical; $n files cloned"
 else bad "yarn workspace upgrade-interactive (exit $rc, cloned ${n:-?}, link steps $(ejson c-ws-ui "y['link_steps']"))"; tail -5 "$work/c-ws-ui/engine.log" | sed 's/^/    /'; fi
 
+# `yarn workspace u1 upgrade` (yarn1-upgrade-ws): the workspace command's
+# own Yarn upgrades within u1's ranges (y1-many 1.0.0 -> 2.0.0, hoisted to
+# the root); yarn.lock rewritten, no package.json.
+cverify c-ws-upgrade "workspace u1 upgrade" "$here/fixtures/yarn1-upgrade-ws"
+n=$(ejson c-ws-upgrade "y['cloned']")
+if [ $rc = 0 ] && same && said ": exit 0 in every run" && said "command: changed package.json: none" && said "command: changed yarn.lock: yes" && said "command: yarn.lock byte-identical (plain1, engine): true" \
+  && [ "${n:-0}" -ge 150 ] && first128 c-ws-upgrade && [ "$(ejson c-ws-upgrade "r['command']")" = "workspace upgrade" ] \
+  && grep -q '"2.0.0"' "$work/c-ws-upgrade/engine/node_modules/y1-many/package.json"; then
+  ok "yarn workspace u1 upgrade: the workspace's Yarn upgrades y1-many to 2.0.0 within its range; yarn.lock rewritten, package.json not; engine identical; $n files cloned; logged as workspace upgrade"
+else bad "yarn workspace upgrade (exit $rc, cloned ${n:-?}, command $(ejson c-ws-upgrade "r['command']"))"; fi
+
 # The cache of a workspace command is its own Yarn's: the words after the
 # name, resolved in the workspace's directory. (1) The command's own
 # --cache-folder before `workspace` (a decoy folder; Yarn gives it to the
