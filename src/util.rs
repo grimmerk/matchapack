@@ -83,26 +83,44 @@ fn npm_found() -> Result<(PathBuf, NodeStart), String> {
 /// argv[0] and its whole environment (`Launch`, from `probe_launcher`).
 #[derive(Debug, Clone)]
 pub enum NodeStart {
-    Path(PathBuf),
+    /// `node` (or the given node), with this process's environment, less
+    /// every `DYLD_*` variable when `drop_dyld` (`entry_drops_dyld`).
+    Path { node: PathBuf, drop_dyld: bool },
     Launch(Launch),
 }
 
 impl Default for NodeStart {
     fn default() -> Self {
-        NodeStart::Path(PathBuf::from("node"))
+        NodeStart::Path { node: PathBuf::from("node"), drop_dyld: false }
     }
 }
 
 impl NodeStart {
+    /// The `node` on PATH for the user's entry `entry` (the `npm` or `yarn`
+    /// on PATH): as plain npm or Yarn sees it (`entry_drops_dyld`).
+    pub fn for_entry(entry: &Path) -> Self {
+        NodeStart::Path { node: PathBuf::from("node"), drop_dyld: entry_drops_dyld(entry) }
+    }
+
     #[cfg(test)]
     pub fn path(p: impl Into<PathBuf>) -> Self {
-        NodeStart::Path(p.into())
+        NodeStart::Path { node: p.into(), drop_dyld: false }
     }
 
     /// A Command for this node; the caller's `env` calls apply on top.
     pub fn command(&self) -> Command {
         match self {
-            NodeStart::Path(p) => Command::new(p),
+            NodeStart::Path { node, drop_dyld } => {
+                let mut c = Command::new(node);
+                if *drop_dyld {
+                    for (k, _) in std::env::vars_os() {
+                        if k.as_encoded_bytes().starts_with(b"DYLD_") {
+                            c.env_remove(k);
+                        }
+                    }
+                }
+                c
+            }
             NodeStart::Launch(l) => {
                 use std::os::unix::process::CommandExt;
                 let mut c = Command::new(&l.node);
@@ -111,6 +129,38 @@ impl NodeStart {
             }
         }
     }
+}
+
+/// Whether plain npm or Yarn, started through `entry` (the file on PATH,
+/// symlinks followed, as exec follows them), reaches node without `DYLD_*`:
+/// on macOS, when `entry` is a script whose interpreter is a protected
+/// system binary (`#!/usr/bin/env node`, `#!/bin/sh`, `#!/bin/bash`: under
+/// /bin, /sbin, /usr/bin or /usr/sbin), because macOS removes every
+/// `DYLD_*` variable when it starts one. npm's `bin/npm-cli.js`, Yarn 1's
+/// `bin/yarn.js` and `bin/yarn`, Homebrew's and corepack's launchers all
+/// are. matchapack starts node itself, so without this its npm or Yarn
+/// would see variables plain npm or Yarn does not (measured: cargo's
+/// `DYLD_FALLBACK_LIBRARY_PATH` reaches `node -e` and not npm through its
+/// shebang). An entry that names node directly (`#!/path/to/node`) or is
+/// not a script keeps them, as plain npm does.
+pub fn entry_drops_dyld(entry: &Path) -> bool {
+    use std::io::Read;
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(entry).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+    protected_interpreter(&head[..n])
+}
+
+/// `head` starts with a `#!` line whose interpreter is under /bin, /sbin,
+/// /usr/bin or /usr/sbin (the system directories macOS protects).
+fn protected_interpreter(head: &[u8]) -> bool {
+    let Some(rest) = head.strip_prefix(b"#!") else { return false };
+    let line = rest.split(|b| *b == b'\n').next().unwrap_or(&[]);
+    let line = String::from_utf8_lossy(line);
+    let interp = line.split_whitespace().next().unwrap_or("");
+    ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"].iter().any(|d| interp.starts_with(d))
 }
 
 /// The node a launcher started, as it started it: the binary
@@ -153,7 +203,7 @@ pub fn on_path(path: &OsStr, name: &str) -> Option<PathBuf> {
 fn find_npm(path: &OsStr, cwd: &Path, run_dir: &dyn Fn() -> Result<PathBuf, String>) -> Result<(PathBuf, NodeStart), String> {
     let bin = on_path(path, "npm").ok_or("no npm on PATH")?;
     if let Some(dir) = npm_package_of(&bin) {
-        return Ok((dir, NodeStart::default()));
+        return Ok((dir, NodeStart::for_entry(&bin)));
     }
     let (main, launch) = probe_launcher(&bin, "npm", path, cwd, &run_dir()?)?;
     let dir = npm_package_of(&main).ok_or_else(|| {
@@ -199,20 +249,24 @@ pub(crate) const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from
 /// then only prints a version. A bare `yarn` would install. The launcher
 /// runs in its own process group, killed at PROBE_DEADLINE.
 pub(crate) fn probe_launcher(launcher: &Path, name: &str, path: &OsStr, cwd: &Path, run_dir: &Path) -> Result<(PathBuf, Launch), String> {
-    probe_launcher_within(launcher, name, path, cwd, run_dir, PROBE_DEADLINE)
+    probe_launcher_within(launcher, name, path, cwd, run_dir, std::env::var_os("NODE_OPTIONS"), PROBE_DEADLINE)
 }
 
-fn probe_launcher_within(launcher: &Path, name: &str, path: &OsStr, cwd: &Path, run_dir: &Path, within: std::time::Duration) -> Result<(PathBuf, Launch), String> {
+/// `probe_launcher` with the user's NODE_OPTIONS and the deadline given.
+fn probe_launcher_within(launcher: &Path, name: &str, path: &OsStr, cwd: &Path, run_dir: &Path, user_options: Option<std::ffi::OsString>, within: std::time::Duration) -> Result<(PathBuf, Launch), String> {
     use std::os::unix::process::CommandExt;
     let prefix = format!("the {name} on PATH ({})", launcher.display());
-    let user_options = match std::env::var_os("NODE_OPTIONS") {
+    let user_options = match user_options {
         None => None,
         Some(o) => Some(o.into_string().map_err(|_| format!("{prefix}: NODE_OPTIONS is not UTF-8"))?),
     };
     let js = run_dir.join("launcher-probe.js");
     let js_str = js.to_str().filter(|s| !s.contains(['"', '\\', '\n'])).ok_or_else(|| format!("{prefix}: cannot name {} in NODE_OPTIONS", js.display()))?;
+    // The probe first: node runs `--require` preloads in order, so the
+    // probe records the environment before any preload of the user's runs,
+    // and exits; the user's preloads then run once, in the install's node.
     let node_options = match user_options.as_deref() {
-        Some(o) if !o.trim().is_empty() => format!("{o} --require \"{js_str}\""),
+        Some(o) if !o.trim().is_empty() => format!("--require \"{js_str}\" {o}"),
         _ => format!("--require \"{js_str}\""),
     };
     // Output to files, not pipes: no pipe for another thread's spawn to
@@ -526,7 +580,7 @@ echo "fake $flavor: no $name" >&2; exit 127
         symlink("../lib/node_modules/npm/bin/npm-cli.js", nvm.join("bin/npm")).unwrap();
         let (dir, start) = find_npm(&path_with(&nvm.join("bin")), &d, &no_probe).unwrap();
         assert_eq!(dir, nvm.join("lib/node_modules/npm"));
-        assert!(matches!(&start, NodeStart::Path(p) if p == Path::new("node")), "{start:?}");
+        assert!(matches!(&start, NodeStart::Path { node, drop_dyld } if node == Path::new("node") && *drop_dyld == cfg!(target_os = "macos")), "{start:?}");
 
         // Not a node launcher at all: it is run with --version only (a
         // bare `yarn` would install), and declined.
@@ -567,6 +621,68 @@ echo "fake $flavor: no $name" >&2; exit 127
         assert!(e.contains(&format!("starts node in {}, not in {}", t.display(), cd.display())), "{e}");
     }
 
+    /// A user's `--require` preload that changes the environment runs once:
+    /// the probe, first in NODE_OPTIONS, records the environment before it,
+    /// and the install's node runs it (PATH prepended once, as under the
+    /// launcher alone).
+    #[test]
+    fn user_preloads_run_once() {
+        let Some(node) = real_node() else { return eprintln!("SKIP: no node") };
+        let d = std::fs::canonicalize(crate::store::tests::scratch("preload-once")).unwrap();
+        let path = path_with(&fake_version_manager(&d, "volta", &node));
+        let pre = d.join("preload.js");
+        std::fs::write(&pre, "process.env.PATH = '/preloaded:' + process.env.PATH;\n").unwrap();
+        let opts = format!("--require \"{}\"", pre.display());
+        let run = d.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let (_, l) = probe_launcher_within(&on_path(&path, "npm").unwrap(), "npm", &path, &d, &run, Some(opts.clone().into()), PROBE_DEADLINE).unwrap();
+        let env: std::collections::BTreeMap<String, String> = l.env.iter().cloned().collect();
+        assert_eq!(env.get("NODE_OPTIONS"), Some(&opts));
+        assert!(!env["PATH"].contains("/preloaded"), "the probe ran before the preload: {}", env["PATH"]);
+        let (seen, _, _) = started_as(&NodeStart::Launch(l), &d);
+        assert_eq!(seen["PATH"], format!("/preloaded:{}", env["PATH"]), "the preload ran once, in the install's node");
+    }
+
+    /// On the nvm-style path (npm's files on PATH, no probe), node gets
+    /// what plain npm's node gets: on macOS no DYLD_* when npm-cli.js runs
+    /// through `#!/usr/bin/env node`; all of them when the entry names node
+    /// directly.
+    #[test]
+    fn nvm_style_entry_and_dyld() {
+        for (head, protected) in [
+            ("#!/usr/bin/env node\n", true),
+            ("#! /usr/bin/env node\n", true),
+            ("#!/bin/sh\nexec node x", true),
+            ("#!/bin/bash\n", true),
+            ("#!/usr/sbin/x\n", true),
+            ("#!/usr/local/bin/node\n", false),
+            ("#!/Users/u/.nvm/versions/node/v24.22.1/bin/node\n", false),
+            ("#!/opt/homebrew/bin/bash\n", false),
+            ("'use strict';\n", false),
+            ("\u{cf}\u{fa}\u{ed}\u{fe}", false),
+        ] {
+            assert_eq!(protected_interpreter(head.as_bytes()), protected, "{head:?}");
+        }
+        let Some(node) = real_node() else { return eprintln!("SKIP: no node") };
+        let d = std::fs::canonicalize(crate::store::tests::scratch("nvm-dyld")).unwrap();
+        let no_probe = || -> Result<PathBuf, String> { panic!("probed npm's own package") };
+        let ours = std::env::var("DYLD_FALLBACK_LIBRARY_PATH").ok();
+        for (name, shebang, drops) in [("env", "#!/usr/bin/env node".to_string(), cfg!(target_os = "macos")), ("direct", format!("#!{}", node.display()), false)] {
+            let nvm = d.join(name);
+            package(&nvm.join("lib/node_modules/npm"), "npm", "11.0.0", "npm-cli.js");
+            std::fs::write(nvm.join("lib/node_modules/npm/bin/npm-cli.js"), format!("{shebang}\n")).unwrap();
+            std::fs::create_dir_all(nvm.join("bin")).unwrap();
+            symlink("../lib/node_modules/npm/bin/npm-cli.js", nvm.join("bin/npm")).unwrap();
+            symlink(&node, nvm.join("bin/node")).unwrap();
+            let (_, start) = find_npm(&path_with(&nvm.join("bin")), &d, &no_probe).unwrap();
+            assert!(matches!(&start, NodeStart::Path { drop_dyld, .. } if *drop_dyld == drops), "{name}: {start:?}");
+            if let Some(v) = &ours {
+                let (env, _, _) = started_as(&start, &d);
+                assert_eq!(env.get("DYLD_FALLBACK_LIBRARY_PATH"), if drops { None } else { Some(v) }, "{name}");
+            }
+        }
+    }
+
     /// A launcher that does not start node in time is stopped, with the
     /// processes it started, and declined; its files are removed.
     #[test]
@@ -577,7 +693,7 @@ echo "fake $flavor: no $name" >&2; exit 127
         let run = d.join("run");
         std::fs::create_dir_all(&run).unwrap();
         let t0 = std::time::Instant::now();
-        let e = probe_launcher_within(&d.join("bin/npm"), "npm", &path_with(&d.join("bin")), &d, &run, std::time::Duration::from_millis(500)).unwrap_err();
+        let e = probe_launcher_within(&d.join("bin/npm"), "npm", &path_with(&d.join("bin")), &d, &run, None, std::time::Duration::from_millis(500)).unwrap_err();
         assert!(e.contains("did not start node within 0 s") || e.contains("did not start node within 1 s"), "{e}");
         assert!(t0.elapsed() < std::time::Duration::from_secs(5), "{:?}", t0.elapsed());
         assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0, "the probe's files are gone");

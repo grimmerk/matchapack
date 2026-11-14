@@ -268,7 +268,9 @@ fn find_yarn_on(path: &std::ffi::OsStr, cwd: &Path, run_dir: &dyn Fn() -> std::r
             let y = yarn_bin(&target).map_err(|why| format!("the yarn on PATH ({}) starts {}: {why}", p.display(), target.display()))?;
             Ok(YarnBin { node: util::NodeStart::Launch(launch), ..y })
         }
-        r => r,
+        // The `yarn` on PATH itself: node as plain Yarn would get it
+        // (`util::entry_drops_dyld`).
+        r => r.map(|y| YarnBin { node: util::NodeStart::for_entry(&p), ..y }),
     }
 }
 
@@ -1521,6 +1523,17 @@ mod tests {
             assert_eq!(y.js, t.join("img/yarn/1.22.22/bin/yarn.js"), "{flavor}");
             assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0, "{flavor}: the probe's files are gone");
         }
+        // Yarn 1's npm package on PATH (an npm-global install): no probe;
+        // node without DYLD_* on macOS, as `#!/usr/bin/env node` gives it.
+        let g = d.join("global");
+        std::fs::create_dir_all(g.join("lib/node_modules/yarn/bin")).unwrap();
+        std::fs::write(g.join("lib/node_modules/yarn/package.json"), r#"{"name":"yarn","version":"1.22.22"}"#).unwrap();
+        std::fs::write(g.join("lib/node_modules/yarn/bin/yarn.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::create_dir_all(g.join("bin")).unwrap();
+        std::os::unix::fs::symlink("../lib/node_modules/yarn/bin/yarn.js", g.join("bin/yarn")).unwrap();
+        let no_probe = || -> std::result::Result<PathBuf, String> { panic!("probed Yarn's own package") };
+        let y = find_yarn_on(&util::tests::path_with(&g.join("bin")), &d, &no_probe).unwrap();
+        assert!(matches!(&y.node, util::NodeStart::Path { node, drop_dyld } if node == Path::new("node") && *drop_dyld == cfg!(target_os = "macos")), "{:?}", y.node);
     }
 
     #[test]
