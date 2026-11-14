@@ -134,7 +134,7 @@ const ENGINE_COMMANDS: &[&str] = &["", "install", "add", "upgrade", "remove", "u
 
 /// `yarn workspace <name> <command> …`: Yarn starts a second Yarn, `node
 /// <Yarn's bundle> <command> …` in the workspace's directory; the hook
-/// starts that one with itself too (src/yarn1-hook.js, `wrapChild`). Not
+/// starts that one with itself too (src/yarn1-hook.js, `wrapWorkspaceChild`). Not
 /// `install`: from a workspace Yarn installs at the root, as `yarn install`
 /// there does (routed).
 const WORKSPACE_COMMANDS: &[&str] = &["add", "remove", "upgrade", "upgrade-interactive", "upgradeInteractive"];
@@ -662,10 +662,6 @@ impl Server {
         })
     }
 
-    /// Under corepack: the `bin/yarn.js` corepack chose, as the hook's hello
-    /// names it (checked to be Yarn 1's npm package), once it has arrived;
-    /// an error when the install ends first (corepack failed, or the hook
-    /// declined).
     /// `yarn workspace <name> <command> …`: the directory the Yarn the
     /// workspace command started runs in, from its hook's hello; waits for it
     /// as `chosen_yarn` does. A directory of the project only (its
@@ -688,6 +684,10 @@ impl Server {
         }
     }
 
+    /// Under corepack: the `bin/yarn.js` corepack chose, as the hook's hello
+    /// names it (checked to be Yarn 1's npm package), once it has arrived;
+    /// an error when the install ends first (corepack failed, or the hook
+    /// declined).
     fn chosen_yarn(&self, install_ended: &AtomicBool) -> std::result::Result<PathBuf, String> {
         loop {
             let named = self.stats.lock().unwrap().hello.as_ref().map(|h| h["yarn_js"].as_str().map(PathBuf::from));
@@ -1460,6 +1460,14 @@ pub fn cli(args: Vec<String>) -> i32 {
     match outcome {
         Ok(Ok(s)) => {
             let n = |k: &str| s.stats[k].as_u64().unwrap_or(0);
+            // The Yarn a workspace command started declined: it ran as plain
+            // Yarn and copied every file; say that, not "0 files cloned" and
+            // a cache note that follows from it.
+            if let Some(why) = s.stats["declined"].as_str() {
+                eprintln!("matchapack: the workspace's Yarn ran as plain Yarn, without clones ({why})");
+                log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats }), chosen(&s.stats)));
+                return 0;
+            }
             if s.stats["linked"] == true || n("cloned") > 0 {
                 eprintln!(
                     "matchapack: {} files cloned from Yarn's cache ({}), {} copied by Node, in {:.1}s",
@@ -1631,8 +1639,6 @@ mod tests {
         assert!(yarn1_package(&bin).unwrap_err().contains("not Yarn 1"));
     }
 
-    /// Homebrew's `bin/yarn` is recognized only as `write_env_script` writes
-    /// it, naming its own keg's `libexec/bin/yarn.js`.
     /// The version floor (1.10.0): by number, not text; checked on the
     /// package matchapack finds itself.
     #[test]
@@ -1656,6 +1662,8 @@ mod tests {
         }
     }
 
+    /// Homebrew's `bin/yarn` is recognized only as `write_env_script` writes
+    /// it, naming its own keg's `libexec/bin/yarn.js`.
     #[test]
     fn homebrew_launcher_shape() {
         let d = std::fs::canonicalize(crate::store::tests::scratch("y1-homebrew")).unwrap();

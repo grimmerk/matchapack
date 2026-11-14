@@ -40,9 +40,9 @@
 //                                  workspace command's child only
 //       MATCHAPACK_YARN_WRAP_CHILD `workspace`: the command is `yarn workspace
 //                                  <name> <command> …`, whose own Yarn is a
-//                                  child process (`wrapChild`)
+//                                  child process (`wrapWorkspaceChild`)
 //       MATCHAPACK_YARN_CHILD      `1`: this hook was started by another one
-//                                  for that child (set by `wrapChild` only)
+//                                  for that child (set by `wrapWorkspaceChild` only)
 // Exit status: Yarn's. 90 before Yarn starts: the hook declined (the reason
 // is sent to matchapack and printed); matchapack then runs plain Yarn. In a
 // child (MATCHAPACK_YARN_CHILD) the hook runs plain Yarn itself instead: the

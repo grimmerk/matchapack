@@ -375,7 +375,10 @@ async function watchPoll (state, opts, npmAll, supported, date) {
       die(`not a Node release: ${opts.node}`)
     }
     const m = major(opts.node)
-    add({ node: opts.node, line: m, uv: await uvOf(opts.node, opts.nodeUvDir), reason: 'requested', newMajor: !lines[m] })
+    // A new major only above every line the state knows (a first run, with
+    // no state, tests the newest line as an ordinary one).
+    const knownLines = Object.keys(lines).map(Number)
+    add({ node: opts.node, line: m, uv: await uvOf(opts.node, opts.nodeUvDir), reason: 'requested', newMajor: !!state.node && !lines[m] && m > Math.max(0, ...knownLines) })
   }
   if (!state.node) {
     // First run: record the watched lines; test only the newest once (Node
@@ -415,9 +418,11 @@ async function watchPoll (state, opts, npmAll, supported, date) {
           record.push({ line: m, newest: r.version, uv })
         }
       } else {
+        // Again: the line's newest release (recorded releases share the
+        // line's libuv), not an older one tested before.
         const again = watchRetry(line, opts.head)
         if (again) {
-          add({ node: line.tested, line: m, uv: line.uvTested || line.uv, reason: again, newMajor: !!line.newMajor })
+          add({ node: line.newest, line: m, uv: line.uv, reason: `${line.tested} ${again}`, newMajor: !!line.newMajor })
         }
       }
     }
@@ -887,17 +892,35 @@ function factsText (f) {
 }
 
 // Each job a watch item needed: its result, or a failure when it left none
-// (the job failed before its upload: never a pass).
+// (the job failed before its upload: never a pass). A result is checked
+// against the job it is for: the Node, npm and Yarn its suites.json names
+// must be the ones the job was to test (`wrong` otherwise: a failure, never a
+// pass for a release that was not tested).
 function jobResults (entries, results) {
-  return entries.map((e) => ({ e, s: Object.prototype.hasOwnProperty.call(results, e.key) ? results[e.key] : null }))
+  return entries.map((e) => {
+    const s = Object.prototype.hasOwnProperty.call(results, e.key) ? results[e.key] : null
+    const wrong = []
+    if (s) {
+      if (e.node && s.node !== `v${e.node}`) {
+        wrong.push(`ran on Node ${s.node || '?'}, not ${e.node}`)
+      }
+      if (e.npm && s.npm !== e.npm) {
+        wrong.push(`ran npm ${s.npm || '?'}, not ${e.npm}`)
+      }
+      if (e.yarn && s.yarn !== e.yarn) {
+        wrong.push(`ran Yarn ${s.yarn || '?'}, not ${e.yarn}`)
+      }
+    }
+    return { e, s, wrong: wrong.join('; ') || null }
+  })
 }
 function verdict (jobs) {
-  if (jobs.some((j) => j.s && !suitesPass(j.s))) {
+  if (jobs.some((j) => j.s && (j.wrong || !suitesPass(j.s)))) {
     return 'fail'
   }
   return jobs.some((j) => !j.s) ? 'incomplete' : 'pass'
 }
-const jobCell = (jobs) => (!jobs.length ? '-' : jobs.map((j) => (j.s ? (suitesPass(j.s) ? 'pass' : 'FAIL') : 'missing')).join(', '))
+const jobCell = (jobs) => (!jobs.length ? '-' : jobs.map((j) => (!j.s ? 'missing' : j.wrong ? `WRONG (${j.wrong})` : suitesPass(j.s) ? 'pass' : 'FAIL')).join(', '))
 
 function watchReport (state, plan, res, run) {
   const out = { rows: [], sections: [], red: false, attention: false }
@@ -924,9 +947,14 @@ function watchReport (state, plan, res, run) {
     }
     const prev = state.node.lines[t.line] || {}
     const factsChanged = !!(prev.facts && facts && !sameFacts(prev.facts, facts))
+    // The libuv version the next poll compares with is the one read from
+    // version.h (t.uv); the one the job's Node reports is shown, and asks for
+    // a person when the two differ.
+    const uvRuntime = (m && m.uv) || null
+    const uvDiffers = !!(uvRuntime && t.uv && uvRuntime !== t.uv)
     // A new major always asks for a person (enabling it in pull-request CI
     // is a person's change); a libuv change only when something differs.
-    const action = t.newMajor || suites !== 'pass' || factsChanged || (t.yarn && !facts) ? 'action needed' : 'none'
+    const action = t.newMajor || suites !== 'pass' || factsChanged || uvDiffers || (t.yarn && !facts) ? 'action needed' : 'none'
     const newer = !prev.newest || cmp(t.node, prev.newest) >= 0
     // An older release than the one the line last tested (one requested by
     // hand): its row and comment only; the line keeps the newer release's
@@ -936,10 +964,12 @@ function watchReport (state, plan, res, run) {
       state.node.lines[t.line] = {
         ...prev,
         newest: newer ? t.node : prev.newest,
-        uv: newer ? (m && m.uv) || t.uv : prev.uv,
+        uv: newer ? t.uv : prev.uv,
         tested: t.node,
-        uvTested: (m && m.uv) || t.uv,
+        uvTested: t.uv,
+        uvRuntime,
         checked: plan.date,
+        testedOn: plan.date,
         suites,
         npm: jobCell(lin),
         yarn: jobCell(mac),
@@ -958,7 +988,7 @@ function watchReport (state, plan, res, run) {
     out.red = out.red || suites !== 'pass'
     if (action !== 'none') {
       out.attention = true
-      out.sections.push(nodeSection(t, lin, mac, prev, facts, factsChanged, suites, action).join('\n'))
+      out.sections.push(nodeSection(t, lin, mac, prev, facts, factsChanged, suites, action, uvRuntime).join('\n'))
     }
   }
   if (Y.record) {
@@ -973,7 +1003,7 @@ function watchReport (state, plan, res, run) {
     // line is frozen), and the engine has never seen its code.
     const isNew = !prev.newest || cmp(t.yarn, prev.newest) > 0
     const action = isNew || suites !== 'pass' ? 'action needed' : 'none'
-    state.yarn = { ...prev, newest: isNew ? t.yarn : prev.newest, tested: t.yarn, checked: plan.date, suites, node: m ? m.node : null, facts: m ? m.facts || null : null, action, head: plan.head, run }
+    state.yarn = { ...prev, newest: isNew ? t.yarn : prev.newest, tested: t.yarn, checked: plan.date, testedOn: plan.date, suites, node: m ? m.node : null, facts: m ? m.facts || null : null, action, head: plan.head, run }
     if (suites === 'pass') {
       state.yarn.verified = t.yarn
     }
@@ -995,9 +1025,12 @@ function watchReport (state, plan, res, run) {
   return out
 }
 
-function nodeSection (t, lin, mac, prev, facts, factsChanged, suites, action) {
+function nodeSection (t, lin, mac, prev, facts, factsChanged, suites, action, uvRuntime) {
   const out = [`### Node ${t.node} (${t.reason}): ${action}`, '']
-  out.push(`- libuv: ${t.uvBefore ? `${t.uvBefore} → ` : ''}${(mac[0] && mac[0].s && mac[0].s.uv) || t.uv}`)
+  out.push(`- libuv: ${t.uvBefore ? `${t.uvBefore} → ` : ''}${t.uv} (version.h at the tag)${uvRuntime && uvRuntime !== t.uv ? `; **the job's Node reports ${uvRuntime}**` : ''}`)
+  for (const j of [...mac, ...lin].filter((x) => x.wrong)) {
+    out.push(`- **${j.e.key}: the result is not of the release asked for** (${j.wrong}): counted as a failure`)
+  }
   out.push(`- Yarn suites (test-yarn1.sh, macOS): ${jobCell(mac)}`)
   out.push(`- npm suites (test-inject.sh and verify-npm.sh, Linux on btrfs): ${lin.map((j) => `npm ${j.e.npm} ${j.s ? (suitesPass(j.s) ? 'pass' : 'FAIL') : 'missing'}`).join(', ') || '-'}`)
   for (const j of [...mac, ...lin]) {
@@ -1118,12 +1151,12 @@ function body (state, plan) {
     for (const m of Object.keys(state.node.lines).map(Number).sort((a, b) => a - b)) {
       const l = state.node.lines[m]
       const watched = !plan.node || !plan.node.watched || plan.node.watched.includes(m)
-      L.push(`| ${m}${watched ? '' : ' (no longer watched)'} | ${l.newest || '-'} | ${l.uv || '-'} | ${l.tested ? `${l.tested}, ${l.checked}${l.run ? ` ([run](${l.run}))` : ''}` : '-'} | ${l.tested ? l.yarn || '-' : '-'} | ${l.tested ? l.npm || '-' : '-'} | ${factsText(l.facts)} | ${l.verified || '-'} | ${l.action || '-'} |`)
+      L.push(`| ${m}${watched ? '' : ' (no longer watched)'} | ${l.newest || '-'} | ${l.uv || '-'} | ${l.tested ? `${l.tested}, ${l.testedOn || l.checked}${l.run ? ` ([run](${l.run}))` : ''}` : '-'} | ${l.tested ? l.yarn || '-' : '-'} | ${l.tested ? l.npm || '-' : '-'} | ${factsText(l.facts)} | ${l.verified || '-'} | ${l.action || '-'} |`)
     }
   }
   if (state.yarn) {
     const y = state.yarn
-    L.push('', `**Yarn 1 release watch**: newest release seen ${y.newest || '-'} (${y.checked || '-'}); last tested ${y.tested ? `${y.tested}: ${y.suites}` : '-'}; last verified ${y.verified || '-'}; action ${y.action || '-'}.`)
+    L.push('', `**Yarn 1 release watch**: newest release seen ${y.newest || '-'} (${y.checked || '-'}); last tested ${y.tested ? `${y.tested} on ${y.testedOn || y.checked}: ${y.suites}` : '-'}; last verified ${y.verified || '-'}; action ${y.action || '-'}.`)
   }
   L.push('', '<details><summary>History (newest first)</summary>', '', '| date | version | reason | Linux | macOS | class | caller | action |', '|---|---|---|---|---|---|---|---|')
   for (const h of state.history || []) {

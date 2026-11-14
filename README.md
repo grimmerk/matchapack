@@ -269,9 +269,9 @@ it.
   more than plain Yarn (measured on `yarn add` of a 3-file package).
 - Every other command runs Yarn directly; matchapack does not start. Which
   ones and why: "What stays plain Yarn" below.
-- Yarn leaves its first 128 file copies of each command to Node (the engine
-  has to, so that Yarn's own time check sees a real copy), so a `yarn add`
-  of a package with 128 files or fewer clones nothing, however large the
+- matchapack leaves Yarn's first 128 file copies of each command to Node
+  (so that Yarn's own time check sees real copies). A `yarn add` that
+  copies 128 files or fewer therefore clones nothing, however large the
   files are (`typescript`: 117 files, 30.9 MiB, none cloned; `date-fns`:
   4,783 files, 94 % of its bytes cloned). On a full install the 128 are
   noise.

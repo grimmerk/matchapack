@@ -257,6 +257,19 @@ const inc26 = { lines: { ...steady.lines, 26: { ...steady.lines[26], suites: 'in
 pl = plan(wpoll(watchState(inc26), nodeIndex('inc-new', [...lines, ['26.13.3', '2026-11-14']])))
 check('watch: an incomplete line and a new same-libuv release: the new release is tested', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '26.13.3' && pl.node.record.length === 0 && /incomplete/.test(pl.node.todo[0].reason), JSON.stringify(pl.node || pl))
 
+// 17c. A Node release requested by hand: on a first run (no watch state)
+//      not a new major; above every known line, a new major.
+pl = plan(wpoll(state0, nodeIndex('ordinary', lines), ['--node', '26.13.1']))
+check('watch: --node 26.13.1 on a first run: tested, not a new major', pl.node && pl.node.todo.some((t) => t.node === '26.13.1' && t.reason === 'requested' && t.newMajor === false), JSON.stringify(pl.node || pl))
+pl = plan(wpoll(watchState(upTo24), nodeIndex('ordinary', lines), ['--node', '26.13.1']))
+check('watch: --node 26.13.1 with lines 22 and 24 known: a new major', pl.node && pl.node.todo.some((t) => t.node === '26.13.1' && t.newMajor === true), JSON.stringify(pl.node || pl))
+
+// 17d. A red line retried when matchapack changed tests the line's newest
+//      release (a later one with the same libuv was recorded meanwhile).
+const redOld = { lines: { ...steady.lines, 26: { ...steady.lines[26], newest: '26.13.2', suites: 'fail', head: 'old' } } }
+pl = plan(wpoll(watchState(redOld), nodeIndex('same-uv', [...lines, ['26.13.2', '2026-11-14']])))
+check('watch: a red line retried tests its newest release', pl.node && pl.node.todo.length === 1 && pl.node.todo[0].node === '26.13.2', JSON.stringify(pl.node || pl))
+
 // 18. Yarn: a new stable 1.x is an item; 2.x and prereleases are not.
 yarnVersions(['1.22.23', '1.23.0-rc.1', '2.4.4'])
 pl = plan(wpoll(watchState(steady), nodeIndex('ordinary', lines)))
@@ -265,7 +278,7 @@ yarnVersions()
 
 // report on watch items
 const factsOk = { empty_atime: true, empty_mtime: true, atime: true, mtime: false, group: true }
-const ysuites = (ok = true, facts = factsOk, node = 'v26.14.0') => ({ node, uv: '1.54.0', yarn: '1.22.22', facts, suites: { 'test-yarn1': { status: ok ? 0 : 1, pass: 150, fail: ok ? 0 : 1, skip: 0, failed: ok ? [] : ['FAIL yarn1-many engine (exit 1)'] } } })
+const ysuites = (ok = true, facts = factsOk, node = 'v26.14.0', yarn = '1.22.22', uv = '1.54.0') => ({ node, uv, yarn, facts, suites: { 'test-yarn1': { status: ok ? 0 : 1, pass: 150, fail: ok ? 0 : 1, skip: 0, failed: ok ? [] : ['FAIL yarn1-many engine (exit 1)'] } } })
 function wreport (state, pl, results) {
   const d = path.join(tmp, `w${n++}`)
   write(path.join(d, 'state.json'), state)
@@ -289,7 +302,7 @@ function wreport (state, pl, results) {
 }
 const uvItem = { node: '26.14.0', line: 26, uv: '1.54.0', uvBefore: '1.52.1', reason: 'libuv 1.52.1 → 1.54.0 in Node 26', npm: true, yarn: true, newMajor: false }
 const uvJobs = { nodeLinux: ['10.9.10', '11.21.1', '12.2.1'].map((v) => ({ key: `node26.14.0-npm${v}`, node: '26.14.0', npm: v })), nodeMacos: [{ key: 'node26.14.0', node: '26.14.0', yarn: '1.22.22' }] }
-const linuxOk = Object.fromEntries(uvJobs.nodeLinux.map((e) => [`nodelinux-${e.key}`, { npm: e.npm, suites: suitesOk }]))
+const linuxOk = Object.fromEntries(uvJobs.nodeLinux.map((e) => [`nodelinux-${e.key}`, { npm: e.npm, node: `v${e.node}`, suites: suitesOk }]))
 const wplan = (todo, extra = {}) => ({ node: { todo, record: [], watched: [22, 24, 26] }, yarn: { todo: [], record: null }, ...uvJobs, ...extra })
 
 // 19. libuv change, every suite green, the facts as recorded: nobody asked.
@@ -317,7 +330,7 @@ check('watch report: green but no facts: incomplete, not verified, red', w.state
 // 22. A new major, all green: still a comment and a notice.
 const n27 = { node: '27.0.0', line: 27, uv: '1.53.0', reason: 'Node 27 is new', npm: true, yarn: true, newMajor: true }
 const n27jobs = { nodeLinux: ['10.9.10'].map((v) => ({ key: `node27.0.0-npm${v}`, node: '27.0.0', npm: v })), nodeMacos: [{ key: 'node27.0.0', node: '27.0.0', yarn: '1.22.22' }] }
-w = wreport(watchState(steady), { ...wplan([n27]), ...n27jobs }, { 'nodelinux-node27.0.0-npm10.9.10': { suites: suitesOk }, 'nodemacos-node27.0.0': ysuites(true, factsOk, 'v27.0.0') })
+w = wreport(watchState(steady), { ...wplan([n27]), ...n27jobs }, { 'nodelinux-node27.0.0-npm10.9.10': { npm: '10.9.10', node: 'v27.0.0', suites: suitesOk }, 'nodemacos-node27.0.0': ysuites(true, factsOk, 'v27.0.0', '1.22.22', '1.53.0') })
 check('watch report: new major, all green: a comment, the run notifies, the line added and verified', w.flags.notify === true && /Node 27\.0\.0 \(Node 27 is new\): action needed/.test(w.comment) && w.state.node.lines[27].verified === '27.0.0', JSON.stringify({ f: w.flags, l: w.state.node.lines[27] }))
 
 // 22b. An older release requested by hand, green, while the line's newer
@@ -326,8 +339,20 @@ check('watch report: new major, all green: a comment, the run notifies, the line
 const redNewer = { lines: { ...steady.lines, 26: { ...steady.lines[26], newest: '26.14.0', tested: '26.14.0', uv: '1.54.0', suites: 'fail', action: 'action needed', verified: '26.13.1' } } }
 const reqOld = { node: '26.13.1', line: 26, uv: '1.52.1', reason: 'requested', npm: true, yarn: true, newMajor: false }
 const reqJobs = { nodeLinux: [{ key: 'node26.13.1-npm10.9.10', node: '26.13.1', npm: '10.9.10' }], nodeMacos: [{ key: 'node26.13.1', node: '26.13.1', yarn: '1.22.22' }] }
-w = wreport(watchState(redNewer), { ...wplan([reqOld]), ...reqJobs }, { 'nodelinux-node26.13.1-npm10.9.10': { suites: suitesOk }, 'nodemacos-node26.13.1': ysuites(true, factsOk, 'v26.13.1') })
+w = wreport(watchState(redNewer), { ...wplan([reqOld]), ...reqJobs }, { 'nodelinux-node26.13.1-npm10.9.10': { npm: '10.9.10', node: 'v26.13.1', suites: suitesOk }, 'nodemacos-node26.13.1': ysuites(true, factsOk, 'v26.13.1', '1.22.22', '1.52.1') })
 check('watch report: an older release requested and green does not hide the newer red one', w.state.node.lines[26].tested === '26.14.0' && w.state.node.lines[26].suites === 'fail' && w.state.node.lines[26].verified === '26.13.1' && w.state.history[0].version === 'Node 26.13.1', JSON.stringify({ l: w.state.node.lines[26], h: w.state.history[0] }))
+
+// 22c. A result that is not of the release the job was for (another Node,
+//      npm or Yarn ran): a failure, never a pass, and said so.
+w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(true, factsOk, 'v24.22.1') })
+check('watch report: the macOS result ran on another Node: fail, not verified, WRONG in the comment', w.state.node.lines[26].suites === 'fail' && w.state.node.lines[26].verified === '26.13.1' && w.flags.red && /not of the release asked for\*\* \(ran on Node v24\.22\.1, not 26\.14\.0\)/.test(w.comment), JSON.stringify({ l: w.state.node.lines[26], c: w.comment.slice(0, 400) }))
+w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodelinux-node26.14.0-npm11.21.1': { npm: '11.21.2', node: 'v26.14.0', suites: suitesOk }, 'nodemacos-node26.14.0': ysuites() })
+check('watch report: a Linux result of another npm: fail', w.state.node.lines[26].suites === 'fail' && /ran npm 11\.21\.2, not 11\.21\.1/.test(w.comment), JSON.stringify(w.state.node.lines[26]))
+
+// 22d. The libuv version kept for the next comparison is version.h's; a
+//      job whose Node reports another asks for a person.
+w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(true, factsOk, 'v26.14.0', '1.22.22', '1.54.0-dev') })
+check('watch report: runtime libuv 1.54.0-dev, version.h 1.54.0: the line keeps 1.54.0, a person is asked', w.state.node.lines[26].uv === '1.54.0' && w.state.node.lines[26].uvRuntime === '1.54.0-dev' && w.flags.notify && /the job's Node reports 1\.54\.0-dev/.test(w.comment), JSON.stringify(w.state.node.lines[26]))
 
 // 23. Recorded releases only (the "nothing to test" path): state updated,
 //     green.
@@ -335,7 +360,7 @@ w = wreport(watchState(steady), { node: { todo: [], record: [{ line: 26, newest:
 check('watch report: a release only recorded: newest updated, tested and verified kept, green', w.state.node.lines[26].newest === '26.13.2' && w.state.node.lines[26].tested === '26.13.1' && w.state.node.lines[26].verified === '26.13.1' && w.flags.notify === false, JSON.stringify(w.state.node.lines[26]))
 
 // 24. A new Yarn 1 release: always a person, even when green.
-w = wreport(watchState(steady), { node: { todo: [], record: [], watched: [22, 24, 26] }, yarn: { todo: [{ yarn: '1.22.23', reason: 'Yarn 1.22.23 is new' }], record: null }, nodeLinux: [], nodeMacos: [{ key: 'yarn1.22.23', node: null, yarn: '1.22.23' }] }, { 'nodemacos-yarn1.22.23': ysuites(true, factsOk, 'v24.22.1') })
+w = wreport(watchState(steady), { node: { todo: [], record: [], watched: [22, 24, 26] }, yarn: { todo: [{ yarn: '1.22.23', reason: 'Yarn 1.22.23 is new' }], record: null }, nodeLinux: [], nodeMacos: [{ key: 'yarn1.22.23', node: null, yarn: '1.22.23' }] }, { 'nodemacos-yarn1.22.23': ysuites(true, factsOk, 'v24.22.1', '1.22.23', '1.52.1') })
 check('watch report: Yarn 1.22.23, green: verified, and a comment asks for a person', w.state.yarn.newest === '1.22.23' && w.state.yarn.verified === '1.22.23' && w.flags.notify === true && /Yarn 1\.22\.23 \(Yarn 1\.22\.23 is new\): action needed/.test(w.comment), JSON.stringify({ y: w.state.yarn, f: w.flags }))
 
 // 25. The workflow: the watch's jobs and the report wait for them.

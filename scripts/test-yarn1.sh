@@ -475,7 +475,8 @@ emptyfirst_engine_verdict() {
   fi
   [ "$r" = 1 ] && grep -q 'plain vs engine: ENGINE DIFFERS' "$work/out" || return 1
   if probe_only "$c" "$tree" "$(window "$c" engine)" "$(cachedir "$c" engine)"; then
-    cp "$work/$c/diff-engine.txt" "$work/emptyfirst-engine-race-$c.txt" 2>/dev/null
+    # (evidence of a real run only: not for a self-test's changed copy)
+    [ -z "${3:-}" ] && cp "$work/$c/diff-engine.txt" "$work/emptyfirst-engine-race-$c.txt" 2>/dev/null
     verdict="the probe race on the engine side: mtimes of non-empty package files only ($work/emptyfirst-engine-race-$c.txt)"; return 0
   fi
   verdict="the engine differs beyond the probe race ($why)"; return 1
@@ -774,10 +775,12 @@ T=http://127.0.0.1:48321
 # cverify <case> '<words>' [verify-yarn1 options...] <fixture>
 cverify() { local c=$1 w=$2; shift 2; verify "$c" --engine yarn1 --command "$w" "$@"; }
 said() { grep -qF -- "$1" "$work/out"; }
+# said_line <line>: the harness printed exactly this line.
+said_line() { grep -qxF -- "$1" "$work/out"; }
 # both_changed <manifest list>: the command changed these package.json files
 # and yarn.lock, the same bytes in plain1 and the engine.
 both_changed() {
-  said ": exit 0 in every run" && said "command: changed package.json: $1" && said "command: changed yarn.lock: yes" \
+  said ": exit 0 in every run" && said_line "command: changed package.json: $1" && said_line "command: changed yarn.lock: yes" \
     && said "command: package.json byte-identical (plain1, engine): true" && said "command: yarn.lock byte-identical (plain1, engine): true"
 }
 # pj <case> <tree> <python expression over d, the tree's package.json>
@@ -862,7 +865,9 @@ else bad "yarn workspace remove (exit $rc, cloned ${n:-?})"; fi
 # that process, the command succeeds, nothing is cloned, the reason logged.
 MATCHAPACK_YARN_SIMULATE=child-copy-keeps-times cverify c-ws-decline "workspace w2 add $T/y1-many-2.0.0.tgz" --engine-min-clones 0 "$here/fixtures/yarn1-workspaces"
 if [ $rc = 0 ] && same && both_changed packages/w2/package.json && [ "$(ejson c-ws-decline "r['outcome']")" = installed ] \
-  && ejson c-ws-decline "y.get('declined') or ''" | grep -q "in the workspace's Yarn: .*kept a non-empty file's mtime"; then
+  && ejson c-ws-decline "y.get('declined') or ''" | grep -q "in the workspace's Yarn: .*kept a non-empty file's mtime" \
+  && [ "$(ejson c-ws-decline "y['unseen']")" = False ] && grep -q "matchapack: the workspace's Yarn ran as plain Yarn, without clones" "$work/c-ws-decline/engine.log" \
+  && ! grep -q 'never saw its link step' "$work/c-ws-decline/engine.log"; then
   ok "a workspace command's Yarn whose hook declines runs as plain Yarn: command done, engine identical, nothing cloned, the reason logged"
 else bad "workspace child decline (exit $rc, declined $(ejson c-ws-decline "y.get('declined')"))"; fi
 
@@ -958,6 +963,10 @@ d=$(project yarnpath); printf 'yarn-path "%s"\n' "$yarnjs" > "$d/.yarnrc"; gate 
 oy=$work/yarn-1.9.4; rm -rf "${oy:?}"; mkdir -p "$oy"; cp -R "$(dirname "$(dirname "$yarnjs")")/." "$oy/"
 python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["version"]="1.9.4"; json.dump(d, open(p,"w"))' "$oy/package.json"
 d=$(project floor); gate "Yarn older than 1.10.0" 'yarn 1.9.4 is older than 1.10.0' "$d" MATCHAPACK_YARN_JS="$oy/bin/yarn.js" --
+# (decided by matchapack from the package's version, before any node starts;
+# the hook's own check, for a Yarn corepack chose, is the corepack case)
+if ! grep -q 'matchapack yarn hook:' "$work/out"; then ok "Yarn older than 1.10.0: declined before node started"
+else bad "Yarn older than 1.10.0: declined only by the hook (node was started)"; fi
 # A Yarn 2+ project is told from its files before anything else, and is
 # plain Yarn unlogged (NOTES "Yarn 1 shell route"): exit 3 here, the reason
 # printed, no log line.

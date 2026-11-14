@@ -109,7 +109,8 @@ YARN [install] [--frozen-lockfile]" "yarn; yarn install --frozen-lockfile"
   check yarn-flag   "MATCHAPACK-YARN [--frozen-lockfile] [--cache-folder] [/c d]" "yarn --frozen-lockfile --cache-folder '/c d'"
   check yarn-args   "MATCHAPACK-YARN [install] [a b] [] [*]" "yarn install 'a b' '' '*'"
   # The commands that copy packages into node_modules (NOTES "Yarn 1
-  # commands"); `workspace <name> add|remove|upgrade` only.
+  # commands"); `workspace <name>` with add, remove, upgrade or
+  # upgrade-interactive only.
   check yarn-add    "MATCHAPACK-YARN [add] [x] [--dev]"  "yarn add x --dev"
   check yarn-cmds   "MATCHAPACK-YARN [upgrade]
 MATCHAPACK-YARN [upgrade] [x] [--latest]
