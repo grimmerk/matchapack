@@ -79,7 +79,7 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, CheckPolicy, String)> {
     if umask != 0o022 {
         bail!("umask is {umask:03o}, the store assumes 022");
     }
-    let npm_dir = util::npm_dir().context("cannot locate the npm installation on PATH")?;
+    let npm_dir = util::npm_lookup().map_err(|e| anyhow!(e))?;
     for m in ["lib/cli.js", "bin/npm-cli.js", "node_modules/pacote/package.json"] {
         if !npm_dir.join(m).exists() {
             bail!("npm installation {} has no {m}", npm_dir.display());
@@ -254,8 +254,10 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
 
     // Not util::node_cmd: npm runs here as the user's `npm ci`, and the
     // scripts it starts must see the user's environment, without a
-    // MATCHAPACK=0 of ours. (The helper removes MATCHAPACK_INJECT_FD.)
-    let mut cmd = std::process::Command::new("node");
+    // MATCHAPACK=0 of ours. (The helper removes MATCHAPACK_INJECT_FD.) Behind
+    // a version manager's shim, the node and environment the shim gives npm
+    // (util::NodeStart).
+    let mut cmd = util::npm_node().command();
     cmd.arg(&helper)
         .arg(&npm_dir)
         .args(&o.npm_args)
