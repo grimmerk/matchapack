@@ -7,7 +7,9 @@
 # repository is worth adding: the fixtures are small). Every case must have
 # cloned something (a run in which the hook never fired would pass without
 # testing it). Nothing is recorded: the version gate is by npm major
-# (INJECT_NPM_MAJORS in src/wrapper.rs). --no-record is accepted and ignored
+# (INJECT_NPM_MAJORS in src/wrapper.rs), and inside a major by the pacote
+# fingerprint (src/npm-fingerprints.json; the cases run on any, and the
+# first line says whether this npm's is listed). --no-record is accepted and ignored
 # (it turned off recording into npm-verified, the classic engine's gate,
 # removed in PR C2).
 set -uo pipefail
@@ -33,6 +35,15 @@ unset MATCHAPACK_ENGINE
 export MATCHAPACK_STORE=${MATCHAPACK_STORE:-$(cd "$work" && pwd -P)/store}
 export MATCHAPACK_VERIFY_CLONES=some
 echo "npm $npm_version, node $(node -v), $("$bin" --version)"
+# The cases run whatever this npm's pacote fingerprint is (verify.sh); say
+# whether the binary would take it without an override.
+npm_dir=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd)
+fp=$(node "$here/src/inject.js" --fingerprint "$npm_dir")
+if grep -q "\"$fp\"" "$here/src/npm-fingerprints.json"; then
+  echo "pacote fingerprint $fp: listed in src/npm-fingerprints.json"
+else
+  echo "pacote fingerprint $fp: NOT listed in src/npm-fingerprints.json; add it once this passes (NOTES \"G-lite\")"
+fi
 
 # The optional-upward fixture installs from a local tarball server.
 server=
