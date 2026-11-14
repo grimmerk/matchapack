@@ -53,8 +53,9 @@ Bypass for one command: `MATCHAPACK=0 npm ci`, or `command npm ci`.
 Remove: delete the line. Installed node_modules keep working without the store
 (clones are independent files); the store is `~/.cache/matchapack/store`.
 
-On macOS the same line also routes a bare `yarn` / `yarn install` in Yarn 1
-projects (see "Yarn 1 (classic) projects").
+On macOS the same line also routes a bare `yarn`, `yarn install`, `yarn add`,
+`upgrade`, `remove` and `upgrade-interactive` in Yarn 1 projects (see "Yarn 1
+(classic) projects").
 
 ## How it installs (the inject engine)
 
