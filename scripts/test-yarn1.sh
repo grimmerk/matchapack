@@ -1148,7 +1148,9 @@ open(f, "w").write(s.replace(a, "\"installationMethod\": \"homebrew\""))' "$keg"
     ok "Homebrew's yarn: plain vs matchapack yarn identical (diff --meta); $n files cloned; scripts see the launcher's PREFIX and npm_execpath = its libexec/bin/yarn.js"
   else bad "Homebrew's yarn (prime $r0, plain $rp, engine $re, diff $rd, cloned ${n:-?}; env $(tr '\n' ' ' < "$hb/engine/node_modules/.hb-env" 2>/dev/null))"; sed 's/^/    /' "$hb/engine.log" | tail -4; grep -v '^      ' "$hb/diff.txt" | tail -15; fi
   # A launcher of another shape (it works, and runs the same Yarn) is not
-  # recognized: declined, and without MATCHAPACK_NO_FALLBACK plain yarn runs it.
+  # recognized, and it is no version manager's shim matchapack follows
+  # (util::known_launcher): declined without being run, and without
+  # MATCHAPACK_NO_FALLBACK plain yarn runs it.
   hbo=$hb/other; mkdir -p "$hbo/Cellar/yarn/$yv/bin" "$hbo/bin"; ln -s "$keg/libexec" "$hbo/Cellar/yarn/$yv/libexec"
   printf '#!/bin/bash\nexport PREFIX="%s"\nexec "%s" "$@"\n' "$hbp" "$hbjs" > "$hbo/Cellar/yarn/$yv/bin/yarn"; chmod 0555 "$hbo/Cellar/yarn/$yv/bin/yarn"
   ln -s "../Cellar/yarn/$yv/bin/yarn" "$hbo/bin/yarn"

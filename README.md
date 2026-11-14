@@ -57,6 +57,42 @@ On macOS the same line also routes a bare `yarn`, `yarn install`, `yarn add`,
 `upgrade`, `remove` and `upgrade-interactive` in Yarn 1 projects (see "Yarn 1
 (classic) projects").
 
+**Node version managers.** matchapack uses the npm (and Yarn) that your
+`npm` (and `yarn`) would run in that directory:
+- nvm, fnm, Homebrew's `node`, the official installer, and mise with PATH
+  activation put npm's own files on PATH; matchapack reads them directly
+  (no extra cost).
+- volta, asdf, and mise in shim mode put a small launcher (a "shim") on
+  PATH, which picks a version per directory (`package.json` `volta`,
+  `.tool-versions`, `mise.toml`, ...). matchapack asks the shim which npm or
+  Yarn it starts there: it runs `npm --version` (or `yarn --version`)
+  through the shim with a small probe loaded into node, which reports the
+  file and stops node before npm or Yarn runs. This adds about 40–110 ms to
+  each routed install (measured, medians of two runs on a busy machine:
+  volta 40–60 ms, mise 80–90 ms, asdf 100–110 ms). Tested with volta 2.0.2, mise 2026.10.24, asdf 0.20.2.
+- Only these launchers are asked, each recognised by its install layout:
+  volta's shim, mise's shims, asdf's shims for its nodejs plugin, and
+  corepack's own `yarn` wrapper. They pass your arguments to npm or Yarn
+  unchanged, whatever the command. Any other launcher or wrapper script on
+  PATH is not run by matchapack: it runs plain npm or Yarn and names the
+  launcher. A question with `--version` cannot show what such a wrapper
+  would add to an install (`--ignore-scripts`, say). The shim must also
+  start npm's own `bin/npm-cli.js` or Yarn 1's `bin/yarn.js` (or
+  corepack's launcher) itself, not another script beside it.
+- matchapack then starts npm or Yarn exactly as the shim starts it: the
+  same node binary, with the shim's whole environment (its PATH, its own
+  variables), so install scripts see what they see with plain npm or Yarn.
+  It runs plain npm or Yarn instead, and says why, when it cannot do that
+  exactly: the shim gives node command-line options, adds arguments of
+  its own to npm's or Yarn's, starts node in another directory, changes
+  NODE_OPTIONS, or does not start node within 10 s; also for corepack's
+  `npm` launcher, which is not handled.
+- With npm's or Yarn's own files on PATH (nvm and the others above), on
+  macOS matchapack starts node without `DYLD_*` variables when npm or
+  Yarn would reach node through `#!/usr/bin/env node` (or another script
+  run by a system binary), because macOS removes them there; so install
+  scripts see the same environment as with plain npm or Yarn.
+
 ## How it installs (the inject engine)
 
 matchapack runs npm's own `npm ci`, unchanged, and replaces one thing inside
@@ -127,6 +163,10 @@ matchapack runs plain npm instead, and prints why, when (before npm starts,
 unless marked "npm's root": those are decided on the root npm reports, after
 npm loaded its config and before its command ran, so the project is
 unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
+- the `npm` on PATH cannot be traced to npm's own package, or not started
+  exactly as it starts it (a launcher it cannot ask, corepack's `npm`
+  launcher, a shim that gives node options or arguments of its own; see
+  "Node version managers");
 - npm is not a major version this engine has been run on: 10, 11 and 12. It
   has no code per npm version, so every 10.x, 11.x and 12.x passes this check
   (`INJECT_NPM_MAJORS` in src/wrapper.rs; `MATCHAPACK_NPM_VERSIONS=any`, or a
@@ -269,9 +309,11 @@ it.
 **When it runs plain Yarn instead.** matchapack decides before Yarn starts
 and prints why when:
 - the `yarn` on PATH is neither Yarn 1's npm package, Homebrew's `yarn`
-  (its launcher for that package), nor corepack's launcher (for example Yarn 2+ installed globally, or another launcher;
-  `MATCHAPACK_YARN_JS` can name a `yarn.js`), or corepack chose a Yarn that is
-  not Yarn 1;
+  (its launcher for that package), corepack's launcher, nor a launcher (a
+  version manager's shim) that starts one of these in that directory (for
+  example Yarn 2+ installed globally, or a launcher matchapack cannot
+  follow exactly; see "Node version managers"; `MATCHAPACK_YARN_JS` can
+  name a `yarn.js`), or corepack chose a Yarn that is not Yarn 1;
 - there is no `yarn.lock` in the directory or above it;
 - `packageManager` in `package.json` names another package manager (such as
   `npm@…`; plain Yarn 1.22 refuses to install such a project too);
@@ -297,7 +339,9 @@ starts Yarn 1's package, matchapack takes over at that point. Limits:
 - What corepack does before Yarn starts (a download, a prompt, an update of
   its last known good version) happens once, as with plain corepack, even
   when matchapack then runs plain Yarn.
-- corepack's `shims/yarn` shell wrapper is not recognised: plain Yarn runs.
+- corepack's `shims/yarn` shell wrapper, and corepack's `yarn` behind a
+  version manager's shim (asdf's Node with `corepack enable`), are found
+  by asking them, as for any shim (see "Node version managers").
 
 **Linux.** No `yarn` function is defined, and `matchapack yarn` is plain
 Yarn: Yarn 1's own copy already clones on Btrfs and XFS.
