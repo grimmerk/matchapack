@@ -145,7 +145,8 @@ enum StoreCmd {
     /// An entry is kept while a project installed from it still has its
     /// node_modules: every install records its directory and entries in
     /// <store>/projects/; projects installed before records existed are found
-    /// through the trial log and their node_modules/.package-lock.json.
+    /// through the trial log and their node_modules/.package-lock.json, or
+    /// recorded by `store adopt` (run it first on a store older builds filled).
     /// Removing an entry never breaks an installed node_modules (clones are
     /// independent), but space comes back only for entries no node_modules
     /// still shares, and a later install re-extracts what it needs. Entries
@@ -155,6 +156,29 @@ enum StoreCmd {
         /// Report what would be removed; remove nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Record the npm projects under DIR so that gc keeps their entries (run before the first gc)
+    ///
+    /// For projects installed before installs wrote records: finds every
+    /// directory under each DIR with npm's hidden lockfile
+    /// (node_modules/.package-lock.json) and records it with the store
+    /// entries that lockfile lists, as an install would. A project installed
+    /// by plain npm is recorded too: its entries are kept, which only means
+    /// less space comes back. An existing record is added to, never
+    /// narrowed. Symlinks are not followed; node_modules, .git and the store
+    /// are not entered; a symlinked node_modules is skipped. Yarn projects
+    /// need no record (the Yarn engine clones from Yarn's cache, not the
+    /// store). Refused while an install runs, unless --dry-run.
+    #[command(verbatim_doc_comment)]
+    Adopt {
+        #[arg(required = true)]
+        dirs: Vec<PathBuf>,
+        /// Report what would be recorded; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// List each skipped path and why.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Compare every entry with npm's own extraction of its tarball; exit 1 when one differs
     ///
@@ -269,7 +293,7 @@ fn main() -> Result<()> {
                 npm_args.push("--ignore-scripts".into());
             }
             npm_args.extend(extra);
-            let o = inject::InjectOpts { dir, store: default_store(store), clone_mode: clone_mode.unwrap_or_else(default_clone_mode), npm_args };
+            let o = inject::InjectOpts { dir, trial_scope: false, store: default_store(store), clone_mode: clone_mode.unwrap_or_else(default_clone_mode), npm_args };
             let r = inject::run(&o);
             util::remove_run_dir();
             match r {
@@ -388,6 +412,59 @@ fn main() -> Result<()> {
                             );
                         }
                     }
+                }
+                Some(StoreCmd::Adopt { dirs, dry_run, verbose }) => {
+                    let st = if dry_run { Store::new(s, cacache)? } else { Store::exclusive(s, cacache)? };
+                    let t = std::time::Instant::now();
+                    let r = gc::adopt(&st, &dirs, dry_run)?;
+                    let would = |a: &str, b: &str| if dry_run { a.to_string() } else { b.to_string() };
+                    if dry_run || verbose {
+                        for (p, what, n, absent) in &r.list {
+                            let what = match *what {
+                                "new" => would("would record", "recorded"),
+                                "added" => would("would add to its record", "added to its record"),
+                                "complete" => "already recorded".to_string(),
+                                _ => "nothing to record".to_string(),
+                            };
+                            println!("  {}: {what}, {n} store entries ({absent} listed not in the store)", p.display());
+                        }
+                    }
+                    println!(
+                        "looked at {} directories in {:.1}s: {} npm projects (node_modules/.package-lock.json), {} node_modules without one (not recorded)",
+                        r.dirs,
+                        t.elapsed().as_secs_f64(),
+                        r.projects,
+                        r.no_hidden_lock
+                    );
+                    println!(
+                        "records {}: {} new, {} added to; {} already complete, {} with no package in the store",
+                        would("to write", "written"),
+                        r.written,
+                        r.extended,
+                        r.complete,
+                        r.no_entry
+                    );
+                    println!(
+                        "store entries {} by these projects: {} of {} ({} listed integrities not in the store)",
+                        would("that would be kept", "now kept"),
+                        r.entries,
+                        st.entries().len(),
+                        r.not_in_store
+                    );
+                    if !r.skipped.is_empty() {
+                        let mut why: std::collections::BTreeMap<&str, usize> = Default::default();
+                        for (_, w) in &r.skipped {
+                            *why.entry(w.split(':').next().unwrap_or(w)).or_default() += 1;
+                        }
+                        let parts: Vec<String> = why.iter().map(|(w, n)| format!("{n} {w}")).collect();
+                        println!("skipped: {}{}", parts.join(", "), if verbose { "" } else { " (--verbose lists them)" });
+                        if verbose {
+                            for (p, w) in &r.skipped {
+                                println!("  {}: {w}", p.display());
+                            }
+                        }
+                    }
+                    println!("a record keeps a project's entries through `store gc` while its node_modules exists; a wrong gc decision never breaks a project (its files are clones, independent of the store), it only loses block sharing until its next install");
                 }
                 Some(StoreCmd::Verify { fix, npm_cache }) => {
                     let cacache = npm_cache.unwrap_or(cacache);

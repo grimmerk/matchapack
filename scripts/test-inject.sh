@@ -5,8 +5,9 @@
 # What the fixture harness cannot show: that the hook really cloned, that a
 # disabled hook and a store miss still give npm ci's tree, the gates before
 # npm starts, that npm's own failures stay npm's, the store lock and the
-# project record, the hook's eligibility rules and result trap
-# (test-inject-hook.js), the pacote fingerprint gate, and npm 12 patches.
+# project record, the hook's eligibility rules and result trap, the helper's
+# start-up (test-inject-hook.js), the pacote fingerprint gate, the install
+# root npm reports and the gates on it (#36), and npm 12 patches.
 # Uses its own store and log directory, never the real ones.
 # To run it with another npm, put that npm first on PATH (for example one
 # installed with `npm i --prefix <dir> npm@12.2.2`: PATH=<dir>/node_modules/.bin:$PATH).
@@ -25,7 +26,7 @@ chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs MATCHAPACK_PATHS=$work
 unset MATCHAPACK_ENGINE MATCHAPACK_INJECT_HOOK MATCHAPACK_INJECT_THREADS MATCHAPACK
 store=$work/store
-rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/store-classic" "${work:?}/store-odd" "${work:?}/store-gid" "${work:?}/gid-projects"
+rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/elsewhere-out" "${work:?}/not-there" "${work:?}/not-there-plain" "${work:?}/store-classic" "${work:?}/store-odd" "${work:?}/store-gid" "${work:?}/gid-projects"
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -6; }
@@ -82,10 +83,11 @@ ref_local=$(project ref-local bundled); (cd "$ref_local" && npm ci --no-audit --
 n_small=$(python3 -c "import json;print(sum(1 for k,v in json.load(open('$ref_small/node_modules/.package-lock.json'))['packages'].items() if not v.get('link') and not v.get('inBundle')))")
 d_small=$(python3 -c "import json;print(len({v['integrity'] for k,v in json.load(open('$ref_small/node_modules/.package-lock.json'))['packages'].items() if not v.get('link') and not v.get('inBundle')}))")
 
-# 0. The hook's eligibility rules, against this npm's pacote.
+# 0. The hook's eligibility rules, against this npm's pacote, and the
+#    helper's start-up (test-inject-hook.js).
 npm_dir=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd)
 if node "$here/scripts/test-inject-hook.js" "$npm_dir" > "$work/out" 2>&1; then
-  ok "hook rules: $(grep -c '^PASS' "$work/out") eligibility cases against pacote $(node -p "require('$npm_dir/node_modules/pacote/package.json').version")"
+  ok "hook rules: $(grep -c '^PASS' "$work/out") cases (eligibility, trap, fingerprint, helper start-up) against pacote $(node -p "require('$npm_dir/node_modules/pacote/package.json').version")"
 else
   bad "hook rules: $(grep '^FAIL' "$work/out" | head -3)"
 fi
@@ -297,9 +299,12 @@ p=$(project umask small); mkdir -p "$p/node_modules/sentinel"
 [ $rc = 0 ] && grep -q 'running plain npm instead (umask is 002' "$work/out" && ! grep -q 'matchapack: added' "$work/out" && [ ! -e "$p/node_modules/sentinel" ] && [ -d "$p/node_modules/lodash" ] \
   && ok "umask 002 through the shell function: plain npm ci installs" || bad "umask 002 wrapper: rc=$rc"
 
+# (Decided on the root npm reports, after npm loaded its config: npm's exit
+# handler must stay silent.)
 p=$(project nmlink small); mkdir -p "$work/outside-nm/sentinel"; ln -s "$work/outside-nm" "$p/node_modules"
 install "$p"; rc=$?
 [ $rc != 0 ] && grep -q 'node_modules is a symlink' "$work/out" && [ -d "$work/outside-nm/sentinel" ] && [ -L "$p/node_modules" ] \
+  && ! grep -q 'Exit handler never called' "$work/out" \
   && ok "node_modules symlink: refused, the link's target untouched" || bad "node_modules symlink: rc=$rc"
 
 p=$(project badengine small)
@@ -376,8 +381,9 @@ p=$(project gate-13 small)
   && ok "version gate: npm 13 handed to plain npm, tree identical" || bad "version gate 13: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
 
 # 10b. The helper stops before npm starts (here: an npm whose pacote has no
-# fetchers): status 90, nothing changed, so the wrapper declines and runs
-# plain npm, once. The fake npm is the real one except for a stub pacote.
+# lib/fetcher.js to take the fingerprint from): status 90, nothing changed,
+# so the wrapper declines and runs plain npm, once. The fake npm is the real
+# one except for a stub pacote.
 real_npm=$(cd "$(dirname "$(python3 -c "import os,shutil;print(os.path.realpath(shutil.which('npm')))")")/.." && pwd -P)
 fake=$work/fake-npm; rm -rf "${fake:?}"; mkdir -p "$fake/bin" "$fake/npm/bin" "$fake/npm/node_modules/pacote"
 cp "$real_npm/package.json" "$fake/npm/"; cp "$real_npm/bin/npm-cli.js" "$fake/npm/bin/"; ln -s "$real_npm/lib" "$fake/npm/lib"
@@ -386,7 +392,7 @@ echo '{"name":"pacote","version":"0.0.0"}' > "$fake/npm/node_modules/pacote/pack
 ln -s ../npm/bin/npm-cli.js "$fake/bin/npm"
 p=$(project helper-declined small)
 (PATH=$fake/bin:$PATH; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
-[ $rc = 0 ] && grep -q 'no FetcherBase.prototype.extract' "$work/out" && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] \
+[ $rc = 0 ] && grep -q "running plain npm instead (cannot read npm's pacote (.*fetcher.js): ENOENT)" "$work/out" && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] \
   && [ "$(grep -c 'added [0-9]* packages' "$work/out")" = 1 ] && same "$ref_small" "$p" \
   && ok "the helper stops before npm: declined, plain npm runs once" || bad "helper declined: rc=$rc ($(last_log "r['outcome']"))"
 
@@ -473,6 +479,50 @@ p=$(project trap-direct small)
 [ $rc != 0 ] && grep -q "npm read \`files\` ([0-9]*×) of what matchapack's hook returned" "$work/out" \
   && ok "trap: matchapack install stops with the error (status $rc)" || bad "trap, matchapack install: rc=$rc"
 
+# 10e. npm's pacote has the file on the list but not the shape the hook
+#      needs (here: its exports lack RegistryFetcher, which npm itself does
+#      not use). Found only when npm has loaded pacote, so npm is running: no
+#      hook, npm extracts every package itself, said once and logged; no
+#      "unseen" warning (the line says why).
+shc=$(npm_copy shape-npm)
+python3 - "$shc/npm/node_modules/pacote/lib/index.js" <<'PY' || bad "shape: could not change pacote's exports"
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "  RegistryFetcher,\n"
+assert s.count(old) == 1
+open(p, "w").write(s.replace(old, ""))
+PY
+p=$(project shape small)
+(PATH=$shc/bin:$PATH; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q "matchapack: no clones from the store, npm extracted the packages itself (the hook was not installed: this npm's pacote has no FetcherBase.prototype.extract" "$work/out" \
+  && ! grep -q "went through matchapack's hook" "$work/out" && [ "$(grep -c '^added [0-9]* packages' "$work/out")" = 1 ] \
+  && grep -q "matchapack: added 0 packages from the store in .* (inject engine; npm extracted $n_small)" "$work/out" \
+  && [ "$(last_log "r['outcome'], r['inject']['cloned'], r['inject']['hook'], r['inject']['unseen'] == r['inject']['installed']")" = "installed 0 not-installed True" ] \
+  && same "$ref_small" "$p" \
+  && ok "pacote of another shape, found when npm loads it: no hook, npm extracts every package, said and logged, tree identical" \
+  || bad "shape found late: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+
+# 10f. npm's install root cannot be read (here: an npm whose Npm class has
+#      no exec on its prototype): no root, so the server refuses every
+#      request (`no-root`); npm extracts every package itself, said and
+#      logged, tree identical.
+nxc=$(npm_copy noexec-npm)
+python3 - "$nxc/npm/lib/npm.js" <<'PY' || bad "no exec: could not change npm's lib/npm.js"
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "\nmodule.exports = Npm\n"
+assert s.count(old) == 1
+s = s.replace(old, "\nconst npmExecImpl = Npm.prototype.exec\ndelete Npm.prototype.exec\nmodule.exports = class extends Npm {\n  constructor (...a) {\n    super(...a)\n    this.exec = npmExecImpl\n  }\n}\n")
+open(p, "w").write(s)
+PY
+p=$(project noexec small)
+(PATH=$nxc/bin:$PATH; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q "matchapack: no clones from the store, npm extracted the packages itself (could not learn npm's install root: npm's lib/npm.js has no Npm.prototype.exec)" "$work/out" \
+  && [ "$(last_log "r['outcome'], r['inject']['cloned'], r['inject']['fallbacks'].get('no-root'), r['inject']['root']")" = "installed 0 $n_small None" ] \
+  && same "$ref_small" "$p" \
+  && ok "npm's root cannot be read: every request refused (no-root), npm extracts all $n_small, said and logged, tree identical" \
+  || bad "no exec: rc=$rc ($(grep '^matchapack' "$work/out" | head -2); $(last_log "r['inject'].get('fallbacks')"))"
+
 p=$(project failscript bundled "d['scripts']={'postinstall':'exit 7'}")
 (cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
 install "$p"; rc=$?
@@ -485,10 +535,51 @@ wrapped "$p" "npm ci --omit=dev --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'matchapack: added' "$work/out" && [ ! -d "$p/node_modules/jest" ] && [ -d "$p/node_modules/lodash" ] \
   && [ "$(last_log "r['outcome'], r['engine'], r['inject']['cloned'] > 0, r['inject']['cloned'] < $n_small, '--omit=dev' in r['args'], r['inject']['installed'] == r['inject']['cloned'], r['inject']['unseen']")" = "installed inject True True True True 0" ] \
   && ok "npm ci --omit=dev through the shell function: cloned, dev dependencies absent, logged with the counts" || bad "omit wrapper: rc=$rc"
+
+# 11a. The install root is npm's own (#36): with --prefix npm installs into
+#      that directory, and matchapack clones there.
 mkdir -p "$work/elsewhere"; cp "$here/fixtures/bundled/package.json" "$here/fixtures/bundled/package-lock.json" "$work/elsewhere/"
 wrapped "$p" "npm ci --prefix '$work/elsewhere' --no-audit --no-fund"; rc=$?
-[ $rc = 0 ] && grep -q 'moves the install out of this directory' "$work/out" && ! grep -q 'matchapack: added' "$work/out" && [ -d "$work/elsewhere/node_modules/lc-s" ] \
-  && ok "npm ci --prefix: plain npm (the project is not this directory)" || bad "prefix: rc=$rc"
+[ $rc = 0 ] && grep -q 'matchapack: added' "$work/out" \
+  && [ "$(last_log "r['outcome'], r['inject']['cloned'], r['inject']['root'] == '$work/elsewhere', r['inject']['command']")" = "installed 3 True ci" ] \
+  && same "$ref_local" "$work/elsewhere" \
+  && ok "npm ci --prefix <dir>: the root npm reports is that directory, 3 cloned there, tree identical" || bad "prefix: rc=$rc ($(last_log "r['outcome'], r.get('reason'), (r.get('inject') or {}).get('root')"))"
+
+# 11c. Declines decided on the root npm reports, after npm loaded its config
+#      and before its command ran: the project is unchanged, plain npm runs
+#      once (its status is the answer), npm's exit handler stays silent, and
+#      the run is logged as declined with the reason.
+#      plain_status <dir> <env...> -- <npm args>: plain npm's status there.
+plain_status() { local d=$1; shift; local e=(); while [ "$1" != -- ]; do e+=("$1"); shift; done; shift
+  (cd "$d" && env ${e[@]+"${e[@]}"} npm "$@" > "$work/plain.out" 2>&1); echo $?; }
+decline_case() { # name dir want-reason want-status [env...] -- npm args
+  local name=$1 d=$2 reason=$3 want=$4; shift 4
+  local e=(); while [ "$1" != -- ]; do e+=("$1"); shift; done; shift
+  (cd "$d" && env ${e[@]+"${e[@]}"} PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/matchapack.sh'; npm $*" > "$work/out" 2>&1); local rc=$?
+  if [ $rc = "$want" ] && grep -qF "matchapack: running plain npm instead ($reason" "$work/out" && ! grep -q 'Exit handler never called' "$work/out" \
+    && [ "$(grep -c 'matchapack: running plain npm instead' "$work/out")" = 1 ] && ! grep -q 'matchapack: added' "$work/out" \
+    && [ "$(last_log "r['outcome']")" = declined ] && last_log "r['reason']" | grep -qF "$reason"; then
+    ok "$name: declined on npm's own root ($reason), plain npm once, status $rc"
+  else
+    bad "$name: rc=$rc (plain npm: $want), $(grep '^matchapack' "$work/out" | head -2 | tr '\n' ' ')"
+  fi
+}
+p=$(project global-env small); mkdir -p "$p/node_modules/sentinel"
+want=$(plain_status "$p" npm_config_global=true -- ci --no-audit --no-fund)
+decline_case "global from the environment" "$p" "npm installs globally" "$want" npm_config_global=true -- ci --no-audit --no-fund
+[ -d "$p/node_modules/sentinel" ] && ok "global from the environment: node_modules untouched" || bad "global env: node_modules changed"
+p=$(project global-npmrc small); echo 'global=true' > "$p/.npmrc"; mkdir -p "$p/node_modules/sentinel"
+want=$(plain_status "$p" -- ci --no-audit --no-fund)
+decline_case "global from the project's .npmrc" "$p" "npm installs globally" "$want" -- ci --no-audit --no-fund
+(cd "$p" && PATH="$(dirname "$bin"):$PATH" MATCHAPACK_NO_FALLBACK=1 zsh -c ". '$here/shell/matchapack.sh'; npm ci --no-audit --no-fund" > "$work/out" 2>&1); rc=$?
+[ $rc = 3 ] && grep -q 'not handled, left unchanged (npm installs globally)' "$work/out" && [ -d "$p/node_modules/sentinel" ] && ! grep -q 'Exit handler never called' "$work/out" \
+  && ok "MATCHAPACK_NO_FALLBACK=1 and a decline on npm's root: status 3, node_modules untouched" || bad "no fallback on npm's root: rc=$rc"
+p=$(project prefix-out small); mkdir -p "$work/elsewhere-out"; cp "$here/fixtures/bundled/package.json" "$here/fixtures/bundled/package-lock.json" "$work/elsewhere-out/"
+decline_case "start directory in scope, --prefix root out of scope" "$p" "outside the trial scope" 0 MATCHAPACK_PATHS="$p" -- ci --prefix "'$work/elsewhere-out'" --no-audit --no-fund
+[ -d "$work/elsewhere-out/node_modules/lc-s" ] && same "$ref_local" "$work/elsewhere-out" && ok "root out of scope: plain npm installed there" || bad "root out of scope: plain npm did not install"
+p=$(project prefix-missing small)
+want=$(plain_status "$p" -- ci --prefix "$work/not-there-plain" --no-audit --no-fund)
+decline_case "a --prefix root that does not exist" "$p" "the install root $work/not-there does not exist yet" "$want" -- ci --prefix "'$work/not-there'" --no-audit --no-fund
 
 wrapped "$p" "npm ci --dry-run --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'running plain npm instead (option --dry-run installs nothing' "$work/out" && ! grep -q 'matchapack: added' "$work/out" \
@@ -510,27 +601,21 @@ install "$p"; rc=$?
   && ok "a workspace symlinked out of the project: its dependency is refused by the clone server and extracted by npm" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
 
 # 11b. `npm ci` inside a workspace of a monorepo: npm installs into the
-#      root's node_modules (the workspace's subset), outside the directory
-#      matchapack started in, so nothing could be cloned (#36). Without a
-#      lockfile there the wrapper hands it to npm up front; with a stray one
-#      the run is logged as npm installing elsewhere, not as a dead hook.
+#      root's node_modules (the workspace's subset). npm reports that root,
+#      and matchapack clones there (#36; until 2026-11-15 it declined).
 ws=$work/ws-src; rm -rf "${ws:?}"; mkdir -p "$ws/packages/a"
 printf '{"name":"ws-root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-r":"http://127.0.0.1:48321/lc-r-1.0.0.tgz"}}\n' > "$ws/package.json"
 printf '{"name":"a","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}\n' > "$ws/packages/a/package.json"
 (cd "$ws" && npm install --package-lock-only --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "workspace lockfile"
 wscopy() { local d=$work/$1; rm -rf "${d:?}"; cp -R "$ws" "$d"; echo "$d"; }
 ref_ws=$(wscopy ws-ref); (cd "$ref_ws/packages/a" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci in a workspace"
-p=$(wscopy ws-plain)
+p=$(wscopy ws-member)
 wrapped "$p/packages/a" "npm ci --no-audit --no-fund"; rc=$?
-[ $rc = 0 ] && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && last_log "r['reason']" | grep -q 'no package-lock.json' \
+[ $rc = 0 ] && grep -q 'matchapack: added' "$work/out" \
+  && [ "$(last_log "r['outcome'], r['inject']['cloned'] > 0, r['inject']['root'] == '$p', r['inject']['unseen']")" = "installed True True 0" ] \
   && same "$ref_ws" "$p" \
-  && ok "npm ci in a workspace directory: handed to npm up front (no lockfile there), tree identical" || bad "workspace: rc=$rc ($(last_log "r['outcome'], r.get('reason')"))"
-p=$(wscopy ws-stray); cp "$p/package-lock.json" "$p/packages/a/"
-wrapped "$p/packages/a" "npm ci --no-audit --no-fund"; rc=$?
-rm -f "$p/packages/a/package-lock.json"; rm -f "$ref_ws/packages/a/package-lock.json"
-[ $rc = 0 ] && [ "$(last_log "r['outcome']")" = installed ] && [ "$(last_log "r['inject']['cloned']")" = 0 ] \
-  && [ "$(last_log "r['inject']['fallbacks'].get('npm-root-elsewhere', 0) > 0")" = True ] && same "$ref_ws" "$p" \
-  && ok "with a stray lockfile there: npm installs at the root, logged as npm-root-elsewhere, tree identical" || bad "workspace stray lockfile: rc=$rc ($(last_log "r['inject']['fallbacks']"))"
+  && ok "npm ci in a workspace directory: the root is the workspace root, $(last_log "r['inject']['cloned']") cloned there, tree identical" \
+  || bad "workspace member: rc=$rc ($(last_log "r['outcome'], r.get('reason'), (r.get('inject') or {}).get('root'), (r.get('inject') or {}).get('fallbacks')"))"
 
 # 12. The report counts the inject runs.
 "$bin" report > "$work/out" 2>&1 && grep -Eq 'inject engine: [0-9]+ runs, [0-9]+ packages cloned' "$work/out" && grep -q 'npm failed 1' "$work/out" \

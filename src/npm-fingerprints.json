@@ -1,35 +1,45 @@
 {
-  "about": "The pacote code the inject hook may be installed on: SHA-256 of the text of pacote's FetcherBase class, as `node src/inject.js --fingerprint <npm dir>` prints it. Embedded in the binary; an npm whose fingerprint is not here runs as plain npm (MATCHAPACK_NPM_FINGERPRINT=any, or a comma list, overrides). Add a fingerprint only after scripts/test-inject.sh and scripts/verify-npm.sh pass with an npm that has it. NOTES.md, \"G-lite: npm release safety (run time)\".",
+  "about": "The pacote code the inject hook may be installed on: SHA-256 of the bytes of pacote's lib/fetcher.js (the file that holds the FetcherBase class), as `node src/inject.js --fingerprint <npm dir>` prints it. Read from disk before npm starts, nothing of npm loaded (#59). Until 2026-11-15 it was the text of the loaded FetcherBase class alone (6 texts; the file gives 8). Embedded in the binary; an npm whose fingerprint is not here runs as plain npm (MATCHAPACK_NPM_FINGERPRINT=any, or a comma list, overrides). Add a fingerprint only after scripts/test-inject.sh and scripts/verify-npm.sh pass with an npm that has it. NOTES.md, \"G-lite: npm release safety (run time)\" and \"The lazy hook and npm's install root\".",
   "fingerprints": {
-    "eaaea911e04032d015cac6009ff9ff790cce8aeacd81b0cf6da5e1bd990da864": {
+    "07f98090ee5bc371e74b80c9963540ea437dc813df06e66ff87f9586eda93a13": {
       "releases": "npm 10.0.0 to 10.5.2 (pacote 17.0.4 to 17.0.6)",
       "verified_on": ["10.5.2"],
-      "added": "2026-11-14"
+      "added": "2026-11-15"
     },
-    "2b01fc92939cb2c9da158ed5274b18050225ae5259c09b1efecad3943622b1a6": {
+    "8d7208cf1a9e98ee8f2cec47bd572c0d2d5c5770341712650f0d8841ab8c5709": {
       "releases": "npm 10.6.0 to 10.7.0 (pacote 18.0.2 to 18.0.3)",
       "verified_on": ["10.7.0"],
-      "added": "2026-11-14"
+      "added": "2026-11-15"
     },
-    "e89576a31b8145ab7b8372dd2e7957ef2f0c85264d55423af7ed6c1ccbc914eb": {
+    "cef1bd59a34dfe60eed5569fc3b3dedf280edcdef4febf6ebd9200078b49cb16": {
       "releases": "npm 10.8.0 to 10.9.0 (pacote 18.0.6 to 19.0.0)",
       "verified_on": ["10.8.2"],
-      "added": "2026-11-14"
+      "added": "2026-11-15"
     },
-    "2e43f4c0648d9b8d6453600b4f65b3a9dcfd8b42f8e6e75adb274689e0cbfa9e": {
-      "releases": "npm 10.9.1 to 10.9.10 and 11.0.0 to 11.10.1 (pacote 19.0.1 to 19.0.3, 21.0.0 to 21.3.1)",
-      "verified_on": ["10.9.2", "10.9.10", "11.3.0", "11.6.0", "11.6.1"],
-      "added": "2026-11-14"
+    "1a385341f75d6c77496d30e7751012ad91489bb8c4e4e4db5e4568d2b9432a79": {
+      "releases": "npm 10.9.1 to 10.9.10 and 11.0.0 to 11.8.0 (pacote 19.0.1 to 19.0.3, 21.0.0 to 21.0.4)",
+      "verified_on": ["10.9.10"],
+      "added": "2026-11-15"
     },
-    "b1ead56a5de97d9b8775343bb41b9a86031e92eba074851955b56a676b74278f": {
+    "45eabb392a0c7c332ab342875d513b9932032e7b0b65faec283810488346ad44": {
+      "releases": "npm 11.9.0 (pacote 21.1.0)",
+      "verified_on": ["11.9.0"],
+      "added": "2026-11-15"
+    },
+    "6972084f1fa0d66832aec5067202b3e33f9bfaeb07d8189b9f8d58e4b30e8786": {
+      "releases": "npm 11.10.0 to 11.10.1 (pacote 21.3.1)",
+      "verified_on": ["11.10.1"],
+      "added": "2026-11-15"
+    },
+    "97dbf9a402ad3329c517aa35928da4c115a2e3a77b51f513729a8e253ee1144a": {
       "releases": "npm 11.11.0 to 11.21.2 (pacote 21.4.0 to 21.5.2)",
-      "verified_on": ["11.12.1", "11.14.1", "11.15.0", "11.16.0", "11.17.0", "11.19.1", "11.20.0", "11.21.2"],
-      "added": "2026-11-14"
+      "verified_on": ["11.19.1", "11.21.2"],
+      "added": "2026-11-15"
     },
-    "d384f9b73072843382c2209772903d12c0574f8fac64d90bd3da58220a710984": {
+    "b7d5a642322323017f778d113729a87dd340d4155bab90c44089b8b0ffced486": {
       "releases": "npm 12.0.0 to 12.2.2 (pacote 22.0.0 to 22.0.1)",
       "verified_on": ["12.2.2"],
-      "added": "2026-11-14"
+      "added": "2026-11-15"
     }
   }
 }

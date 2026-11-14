@@ -2,9 +2,12 @@
 //! grimmerk/matchapack-private#33): npm runs its own `npm ci`, in a node child started
 //! here, and only the per-package extraction is replaced by a clone from the
 //! store. This process keeps what must be decided before anything starts
-//! (npm version gate, umask, where the project's node_modules really is),
-//! holds the store's shared lock for the whole run, and serves the clone
-//! requests of the hook (src/inject.js) over a socket (src/serve.rs).
+//! (npm version gate, umask), holds the store's shared lock for the whole
+//! run, and serves the clone requests of the hook (src/inject.js) over a
+//! socket (src/serve.rs). Where npm installs is npm's own answer: the helper
+//! reports it when npm starts the command, and the server runs the gates
+//! that depend on it (trial scope, a symlinked node_modules) and pins it
+//! (grimmerk/matchapack-private#36; NOTES "The lazy hook and npm's install root").
 //! Everything else is npm's: reading its config and arguments, validating the
 //! lockfile, removing the old node_modules, scripts, bin links, the hidden
 //! lockfile, the audit.
@@ -36,7 +39,12 @@ pub fn engine() -> std::result::Result<(), String> {
 }
 
 pub struct InjectOpts {
+    /// The directory npm starts in. npm finds its install root from here
+    /// (an ancestor in a workspace, or its --prefix).
     pub dir: PathBuf,
+    /// The root npm reports must be inside the trial scope (the shell
+    /// function's runs; `matchapack install` names its directory itself).
+    pub trial_scope: bool,
     pub store: PathBuf,
     pub clone_mode: clone::Mode,
     /// npm's arguments, command first (`ci --no-audit`), passed on unchanged.
@@ -46,14 +54,19 @@ pub struct InjectOpts {
 /// The fd number the node child finds the socket at.
 pub(crate) const CHILD_FD: i32 = 3;
 
-/// The helper's exit status when it stops before npm starts (src/inject.js;
-/// the Yarn 1 hook, src/yarn1-hook.js, uses the same).
+/// The helper's exit status when it stops before npm's command runs: before
+/// npm starts, or when the server refuses the install root npm reported
+/// (src/inject.js; the Yarn 1 hook, src/yarn1-hook.js, uses the same).
 pub(crate) const HELPER_DECLINED: i32 = 90;
 
 /// The checks that must hold before npm starts. A refusal changes nothing in
-/// the project, so the caller can run plain npm.
-fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy, String)> {
-    let root = std::fs::canonicalize(&o.dir).with_context(|| format!("resolving {}", o.dir.display()))?;
+/// the project, so the caller can run plain npm. The checks that depend on
+/// where npm installs run on npm's own root, when npm reports it
+/// (serve.rs `accept_root`).
+fn gates(o: &InjectOpts) -> Result<(PathBuf, CheckPolicy, String)> {
+    if !o.dir.is_dir() {
+        bail!("{} is not a directory", o.dir.display());
+    }
     wrapper::inject_npm_version_gate().map_err(|e| anyhow!(e))?;
     // The pacote fingerprints the hook may be installed on; the hook checks
     // its npm's before npm starts (src/inject.js).
@@ -65,11 +78,6 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy, String)> {
     if umask != 0o022 {
         bail!("umask is {umask:03o}, the store assumes 022");
     }
-    // npm ci replaces a node_modules that is a symlink; every clone into it
-    // would be refused one by one (its real path is outside the project).
-    if std::fs::symlink_metadata(root.join("node_modules")).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!("the project directory's node_modules is a symlink; npm ci replaces it, matchapack does not");
-    }
     let npm_dir = util::npm_lookup().map_err(|e| anyhow!(e))?;
     for m in ["lib/cli.js", "bin/npm-cli.js", "node_modules/pacote/package.json"] {
         if !npm_dir.join(m).exists() {
@@ -77,7 +85,7 @@ fn gates(o: &InjectOpts) -> Result<(PathBuf, PathBuf, CheckPolicy, String)> {
         }
     }
     let policy = CheckPolicy::from_env().map_err(|e| anyhow!(e))?;
-    Ok((root, npm_dir, policy, fingerprints))
+    Ok((npm_dir, policy, fingerprints))
 }
 
 /// A hidden-lockfile key that names a package directory inside a
@@ -181,7 +189,7 @@ pub(crate) fn run_serving(
 
 pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     let t0 = Instant::now();
-    let (root, npm_dir, policy, fingerprints) = gates(o).map_err(InstallError::Declined)?;
+    let (npm_dir, policy, fingerprints) = gates(o).map_err(InstallError::Declined)?;
     let prepared = (|| -> Result<_> {
         // The shared lock: no entry is removed while npm may ask for it. The
         // cache path is unused: every request names the cache of the npm
@@ -198,8 +206,11 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         Ok((store, helper, ours, theirs))
     })();
     let (store, helper, ours, theirs) = prepared.map_err(InstallError::Declined)?;
-    let server = match Server::new(&store, root.clone(), o.clone_mode, None, policy) {
-        Ok(s) => s,
+    let server = match Server::new(&store, None, o.clone_mode, None, policy) {
+        Ok(s) => {
+            s.set_trial_scope(o.trial_scope);
+            s
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&helper);
             return Err(InstallError::Declined(e));
@@ -215,7 +226,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     cmd.arg(&helper)
         .arg(&npm_dir)
         .args(&o.npm_args)
-        .current_dir(&root)
+        .current_dir(&o.dir)
         .env("MATCHAPACK_INJECT_FD", CHILD_FD.to_string())
         .env("MATCHAPACK_INJECT_FINGERPRINTS", &fingerprints);
     let t_npm = Instant::now();
@@ -240,20 +251,27 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         Ok(s) => s,
         Err(e) => return Err(InstallError::Broke(anyhow!("waiting for npm: {e}"))),
     };
-    // The helper exits with HELPER_DECLINED when it stops before npm starts
-    // (its pacote has not the shape the hook needs, or a fingerprint not on
-    // the list), having told this process why: nothing in the project has
-    // changed. Both signs are required, so that npm, once started, is never
-    // run twice.
-    if stats.hello.is_none() && status.code() == Some(HELPER_DECLINED) {
+    // The helper exits with HELPER_DECLINED when it stops before npm's
+    // command runs, having told this process why: before npm starts (no
+    // pacote file, a fingerprint not on the list), or because the server
+    // refused the root npm reported. Nothing in the project has changed.
+    // All three signs are required, so that npm, once its command ran, is
+    // never run twice: the status, no accepted root, and a recorded reason
+    // (or no hello: the helper stopped before it could say anything).
+    if status.code() == Some(HELPER_DECLINED) && stats.root.is_none() && (stats.declined.is_some() || stats.hello.is_none()) {
         let why = stats.declined.clone().unwrap_or_else(|| format!("the inject helper could not start npm ({status})"));
         return Err(InstallError::Declined(anyhow!(why)));
     }
+    let root = stats.root.clone();
     // From here on the project holds clones of these entries, whatever npm's
     // exit status. gc cannot run before this record is written: it needs the
-    // store's exclusive lock, which `store` still holds shared.
-    if let Err(e) = store.record_project(&root, &stats.used) {
-        crate::info!("could not record the project for `matchapack store gc`: {e:#}");
+    // store's exclusive lock, which `store` still holds shared. Without a
+    // root (npm stopped before its command, or its root could not be read)
+    // nothing was cloned.
+    if let Some(root) = &root {
+        if let Err(e) = store.record_project(root, &stats.used) {
+            crate::info!("could not record the project for `matchapack store gc`: {e:#}");
+        }
     }
     util::record("npm", npm_secs);
     util::record("clone requests (first to last)", stats.wall_secs());
@@ -280,6 +298,16 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     }
     // Not an error, but not what the user set matchapack up for: say it even
     // when the per-step lines are hidden.
+    // The helper could not read npm's install root, or npm's pacote had not
+    // the shape the hook needs: npm ran without clones. Correct, and said.
+    if let Some(why) = &stats.no_root {
+        eprintln!("matchapack: no clones from the store, npm extracted the packages itself (could not learn npm's install root: {why})");
+    } else if stats.hook.as_deref() == Some("not-installed") {
+        eprintln!(
+            "matchapack: no clones from the store, npm extracted the packages itself (the hook was not installed: {})",
+            stats.hook_reason.as_deref().unwrap_or("?")
+        );
+    }
     if stats.fallbacks.contains_key("clone-unsupported") {
         let why = stats.errors.iter().find(|e| e.starts_with("clone-unsupported")).map(String::as_str).unwrap_or("clone-unsupported");
         eprintln!("matchapack: no clones from the store here, npm extracted the packages itself ({why})");
@@ -327,12 +355,14 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // If a future npm extracts some other way, installs stay correct and
     // nothing here fails: the only sign is npm having placed packages the
     // hook never saw. Said out loud and logged (`matchapack report` counts it).
-    if let Some(installed) = installed_packages(&root) {
+    // When the hook was knowingly not installed, the line above said so.
+    let hook_absent = stats.hook.as_deref() == Some("not-installed");
+    if let Some(installed) = root.as_deref().and_then(installed_packages) {
         let seen = stats.cloned + stats.fallback_total();
         let unseen = installed.saturating_sub(seen);
         inject["installed"] = serde_json::json!(installed);
         inject["unseen"] = serde_json::json!(unseen);
-        if unseen > 0 {
+        if unseen > 0 && !hook_absent {
             eprintln!(
                 "matchapack: npm installed {installed} packages, but only {seen} went through matchapack's hook: \
                  this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)"
