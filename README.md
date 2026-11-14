@@ -69,11 +69,13 @@ projects (see "Yarn 1 (classic) projects").
   file and stops node before npm or Yarn runs. This adds about 40–110 ms to
   each routed install (measured, medians of two runs on a busy machine:
   volta 40–60 ms, mise 80–90 ms, asdf 100–110 ms). Tested with volta 2.0.2, mise 2026.10.24, asdf 0.20.2.
-- matchapack starts that npm or Yarn with the `node` on PATH, so it only
-  takes the shim's answer when the `node` shim starts the same node binary
-  with the same environment variables. Otherwise it runs plain npm or Yarn
-  and says why (for example a launcher that sets a variable only for Yarn,
-  or corepack's `npm` launcher, which is not handled).
+- matchapack then starts npm or Yarn exactly as the shim starts it: the
+  same node binary, with the shim's whole environment (its PATH, its own
+  variables), so install scripts see what they see with plain npm or Yarn.
+  It runs plain npm or Yarn instead, and says why, when it cannot do that
+  exactly: the shim gives node command-line options, starts it in another
+  directory, changes NODE_OPTIONS, or does not start node within 10 s;
+  also for corepack's `npm` launcher, which is not handled.
 
 ## How it installs (the inject engine)
 
@@ -131,9 +133,9 @@ In detail:
 
 matchapack runs plain npm instead, and prints why, before anything starts,
 when:
-- the `npm` on PATH cannot be traced to npm's own package (a launcher it
-  cannot ask, corepack's `npm` launcher, or a shim whose node or
-  environment differs from the `node` shim's; see "Node version managers");
+- the `npm` on PATH cannot be traced to npm's own package, or not started
+  exactly as it starts it (a launcher it cannot ask, corepack's `npm`
+  launcher, a shim that gives node options; see "Node version managers");
 - npm is not a major version this engine has been run on: 10, 11 and 12. It
   has no code per npm version, so every 10.x, 11.x and 12.x passes this check
   (`INJECT_NPM_MAJORS` in src/wrapper.rs; `MATCHAPACK_NPM_VERSIONS=any`, or a
@@ -240,8 +242,8 @@ and prints why when:
 - the `yarn` on PATH is neither Yarn 1's npm package, Homebrew's `yarn`
   (its launcher for that package), corepack's launcher, nor a launcher (a
   version manager's shim) that starts one of these in that directory (for
-  example Yarn 2+ installed globally, or a launcher that sets a variable
-  only for Yarn; see "Node version managers"; `MATCHAPACK_YARN_JS` can
+  example Yarn 2+ installed globally, or a launcher matchapack cannot
+  follow exactly; see "Node version managers"; `MATCHAPACK_YARN_JS` can
   name a `yarn.js`), or corepack chose a Yarn that is not Yarn 1;
 - there is no `yarn.lock` in the directory or above it;
 - `packageManager` in `package.json` names another package manager (such as

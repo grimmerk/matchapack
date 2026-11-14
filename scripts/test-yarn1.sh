@@ -870,13 +870,13 @@ open(f, "w").write(s.replace(a, "\"installationMethod\": \"homebrew\""))' "$keg"
   hbo=$hb/other; mkdir -p "$hbo/Cellar/yarn/$yv/bin" "$hbo/bin"; ln -s "$keg/libexec" "$hbo/Cellar/yarn/$yv/libexec"
   printf '#!/bin/bash\nexport PREFIX="%s"\nexec "%s" "$@"\n' "$hbp" "$hbjs" > "$hbo/Cellar/yarn/$yv/bin/yarn"; chmod 0555 "$hbo/Cellar/yarn/$yv/bin/yarn"
   ln -s "../Cellar/yarn/$yv/bin/yarn" "$hbo/bin/yarn"
-  HB_VARS=MATCHAPACK_NO_FALLBACK=1 hbrun other engine "$hbo/bin"; wo=$win
+  HB_VARS=MATCHAPACK_NO_FALLBACK=1 hbrun other-run engine "$hbo/bin"; wo=$win
   n=$(hrec 'y["cloned"]')
-  "$bin" diff --meta --normalize-roots "$hb/plain" "$hb/other" --a-run "$wp" --b-run "$wo" --a-cache "$hb/cache" --b-cache "$hb/cache" > "$hb/other-diff.txt" 2>&1; rd=$?
+  "$bin" diff --meta --normalize-roots "$hb/plain" "$hb/other-run" --a-run "$wp" --b-run "$wo" --a-cache "$hb/cache" --b-cache "$hb/cache" > "$hb/other-diff.txt" 2>&1; rd=$?
   if [ $rc = 0 ] && [ $rd = 0 ] && [ "$(hrec 'r["outcome"]')" = installed ] && [ "${n:-0}" -gt 0 ] \
-    && [ "$(cat "$hb/other/node_modules/.hb-env" 2>/dev/null)" = "$want" ]; then
+    && [ "$(cat "$hb/other-run/node_modules/.hb-env" 2>/dev/null)" = "$want" ]; then
     ok "a Homebrew-like launcher of another shape: followed through the probe, $n files cloned, scripts see its PREFIX, identical to plain Homebrew Yarn"
-  else bad "other launcher shape (exit $rc, diff $rd, cloned ${n:-?})"; sed 's/^/    /' "$hb/other.log" | tail -4; grep -v '^      ' "$hb/other-diff.txt" | tail -10; fi
+  else bad "other launcher shape (exit $rc, diff $rd, cloned ${n:-?})"; sed 's/^/    /' "$hb/other-run.log" | tail -4; grep -v '^      ' "$hb/other-diff.txt" | tail -10; fi
 fi
 
 # --- The shell route: the `yarn` function `matchapack init` prints ------------
