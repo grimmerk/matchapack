@@ -593,6 +593,23 @@ echo "fake $flavor: no $name" >&2; exit 127
         assert!(gone, "sleep {child} still runs");
     }
 
+    /// `NodeStart::Launch` runs its own node binary with its environment
+    /// only, whatever this process's PATH and variables are; `Path` runs
+    /// the named node with this process's environment.
+    #[test]
+    fn node_start_runs_the_launchers_node() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("node-start")).unwrap();
+        let fake = d.join("bin/fake-node");
+        write_exec(&fake, "#!/bin/sh\nprintf 'fake node %s, X=%s, HOME=%s' \"$1\" \"$X\" \"${HOME-unset}\"\n");
+        std::fs::create_dir_all(d.join("empty")).unwrap();
+        let l = Launch { node: fake.clone(), argv0: "node".into(), env: vec![("PATH".into(), d.join("empty").display().to_string()), ("X".into(), "1".into())] };
+        let o = NodeStart::Launch(l).command().arg("a").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "fake node a, X=1, HOME=unset");
+        let o = NodeStart::path(&fake).command().arg("b").env("X", "2").output().unwrap();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "unset".into());
+        assert_eq!(String::from_utf8_lossy(&o.stdout), format!("fake node b, X=2, HOME={home}"));
+    }
+
     fn probe(main: Option<&str>, exec_argv: &[&str], cwd: &Path, env: &[(&str, &str)]) -> Probe {
         Probe {
             main: main.map(String::from),
