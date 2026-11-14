@@ -861,6 +861,14 @@ echo "fake $flavor: no $name" >&2; exit 127
         std::fs::create_dir_all(d.join("loose/bin")).unwrap();
         symlink(d.join("loose/volta-shim"), d.join("loose/bin/npm")).unwrap();
         assert!(known_launcher(&d.join("loose/bin/npm"), "npm").unwrap_err().contains("does not follow"), "volta without tools/image");
+        // With tools/image, but no `volta` beside the shim binary.
+        std::fs::create_dir_all(d.join("lone/home/tools/image")).unwrap();
+        std::fs::create_dir_all(d.join("lone/home/bin")).unwrap();
+        write_exec(&d.join("lone/release/volta-shim"), "");
+        symlink(d.join("lone/release/volta-shim"), d.join("lone/home/bin/npm")).unwrap();
+        assert!(known_launcher(&d.join("lone/home/bin/npm"), "npm").is_err(), "volta-shim without volta beside it");
+        write_exec(&d.join("lone/release/volta"), "");
+        assert_eq!(known_launcher(&d.join("lone/home/bin/npm"), "npm"), Ok("volta"));
         std::fs::create_dir_all(d.join("loose/shims")).unwrap();
         write_exec(&d.join("loose/mise"), "");
         symlink(d.join("loose/mise"), d.join("loose/shims/npm")).unwrap();
