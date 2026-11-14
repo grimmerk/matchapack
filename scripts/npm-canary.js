@@ -34,31 +34,30 @@ const HISTORY_MAX = 60
 
 // ---------------------------------------------------------------------------
 // The one coupling with the run-time half (the fingerprint gate in
-// src/inject.js and its list). ASSUMED INTERFACE, written before that half
-// landed; adapt here only:
-//   node src/inject.js --print-fingerprint <npm package dir>
+// src/inject.js and its list); adapt here only:
+//   node src/inject.js --fingerprint <npm package dir>
 //     prints the hex sha256 of pacote's FetcherBase class text, as the hook
-//     computes it at run time, and exits 0;
+//     computes it at run time;
 //   src/npm-fingerprints.json
-//     the fingerprints the binary accepts. Any JSON shape: a fingerprint is
-//     known when its hex string appears in the file.
+//     {"fingerprints": {"<hex>": {"releases", "verified_on", "added"}}}, the
+//     fingerprints the binary accepts without MATCHAPACK_NPM_FINGERPRINT.
 // CANARY_INJECT_JS overrides the script (tests).
 // ---------------------------------------------------------------------------
 function fingerprintOf (npmDir) {
   const script = process.env.CANARY_INJECT_JS || path.join(REPO, 'src/inject.js')
-  const r = spawnSync(process.execPath, [script, '--print-fingerprint', npmDir], { encoding: 'utf8', timeout: 60000 })
+  const r = spawnSync(process.execPath, [script, '--fingerprint', npmDir], { encoding: 'utf8', timeout: 60000 })
   const out = (r.stdout || '').trim()
   if (r.status === 0 && /^[0-9a-f]{64}$/.test(out)) {
     return { value: out }
   }
-  return { value: null, error: `inject.js --print-fingerprint: status ${r.status}, ${(r.stderr || out).trim().split('\n').slice(-1)[0] || 'no output'}` }
+  return { value: null, error: `inject.js --fingerprint: status ${r.status}, ${(r.stderr || out).trim().split('\n').slice(-1)[0] || 'no output'}` }
 }
 function knownFingerprint (fp) {
-  const list = path.join(REPO, 'src/npm-fingerprints.json')
-  if (!fp || !fs.existsSync(list)) {
+  if (!fp) {
     return null
   }
-  return fs.readFileSync(list, 'utf8').includes(fp)
+  const list = readJson(path.join(REPO, 'src/npm-fingerprints.json'))
+  return Object.prototype.hasOwnProperty.call(list.fingerprints || {}, fp)
 }
 // ---------------------------------------------------------------------------
 
