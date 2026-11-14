@@ -404,15 +404,38 @@ impl Store {
     /// Record which entries the project at `root` (canonical) was installed
     /// from, for `matchapack store gc`. Replaces the project's earlier record.
     pub fn record_project(&self, root: &Path, used: &[Integrity]) -> Result<()> {
-        let mut keys: Vec<String> = used.iter().map(Integrity::key).collect();
+        self.write_record(root, used.iter().map(Integrity::key).collect(), None)
+    }
+
+    /// The entry keys of the project's record, if it has one.
+    pub fn recorded_entries(&self, root: &Path) -> Option<Vec<String>> {
+        let rec: serde_json::Value = serde_json::from_str(&fs::read_to_string(self.project_file(root)).ok()?).ok()?;
+        if rec.get("path").and_then(|p| p.as_str()).map(Path::new) != Some(root) {
+            return None;
+        }
+        Some(rec.get("entries")?.as_array()?.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+    }
+
+    /// Record a project found by `store adopt` (gc.rs): what its record
+    /// already lists plus `used`, marked as adopted. An install's record
+    /// later replaces it as usual.
+    pub fn adopt_project(&self, root: &Path, mut keys: Vec<String>) -> Result<()> {
+        keys.extend(self.recorded_entries(root).unwrap_or_default());
+        self.write_record(root, keys, Some("adopt"))
+    }
+
+    fn write_record(&self, root: &Path, mut keys: Vec<String>, by: Option<&str>) -> Result<()> {
         keys.sort();
         keys.dedup();
-        let rec = serde_json::json!({
+        let mut rec = serde_json::json!({
             "path": root,
             "ts": crate::trial::now(),
             "build": env!("MATCHAPACK_BUILD"),
             "entries": keys,
         });
+        if let Some(by) = by {
+            rec["by"] = by.into();
+        }
         let f = self.project_file(root);
         fs::create_dir_all(f.parent().unwrap())?;
         let tmp = f.with_extension(format!("json.{}", process_tag()));

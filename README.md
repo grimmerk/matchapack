@@ -346,11 +346,24 @@ NOTES "G-lite").
   uses. A package stays while a project installed from it still has its
   node_modules (every install records its directory and packages in
   `<store>/projects/`; projects installed before records existed are found
-  through the trial log). Removing a package never breaks an installed
-  node_modules, but disk space comes back only for packages no node_modules
-  still shares blocks with, so the real run reports the volume's free space
-  before and after. Packages extracted in the last hour are kept. Refused while
-  an install is running.
+  through the trial log, or recorded with `store adopt`, below). Removing a
+  package never breaks an installed node_modules, but disk space comes back
+  only for packages no node_modules still shares blocks with, so the real run
+  reports the volume's free space before and after. Packages extracted in the
+  last hour are kept. Refused while an install is running.
+- `matchapack store adopt [--dry-run] [--verbose] <dir>...`: record the npm
+  projects under each `<dir>` so that gc keeps their packages. For projects
+  installed before installs wrote records (builds before PR grimmerk/matchapack-private#29): it finds
+  every directory with npm's hidden lockfile (`node_modules/.package-lock.json`)
+  and records it with the store packages that lockfile lists, as an install
+  would. A project installed by plain npm has a hidden lockfile too and is
+  recorded as well: its packages are kept, which only means less space comes
+  back. An existing record is added to, never narrowed; running it twice
+  changes nothing. It follows no symlink, never enters a `node_modules`, a
+  `.git` or the store, skips a symlinked `node_modules` and what it cannot
+  read. `--dry-run` lists each project and what it would record. Yarn
+  projects need no record (the Yarn engine clones from Yarn's cache, not the
+  store). About 8 s for `~/git` here (217,000 directories, 81 projects).
 - `matchapack store verify [--fix]`: compare every package with what npm's
   own pacote (the npm on PATH) extracts from its tarball in the npm cache, the
   way the inject engine has it extracted: files, contents, file and directory
@@ -362,6 +375,21 @@ NOTES "G-lite").
   it instead of comparing it first. About 3 minutes for 8,779 packages on a
   busy machine (the classic engine's Rust extractor took about 1.5): each
   tarball is extracted again, by node.
+
+Before the first real gc on a store filled by older builds:
+
+```sh
+matchapack store adopt --dry-run ~/git   # what would be recorded
+matchapack store adopt ~/git             # every place you keep npm projects
+matchapack store gc --dry-run            # check what would go
+matchapack store gc
+```
+
+A wrong gc decision never breaks a project: its files are clones, independent
+of the store entry they came from (tested: `scripts/test-store.sh` removes the
+entries of a project nobody recorded and its files read the same). It only
+loses the block sharing, and that project's next install extracts those
+packages again.
 
 ## Other commands
 
