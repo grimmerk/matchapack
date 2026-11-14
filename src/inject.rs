@@ -123,7 +123,7 @@ fn extraction_broke(odd: Option<&str>, key: &str) -> Option<anyhow::Error> {
     odd.map(|odd| {
         anyhow!(
             "pacote's extraction is not what matchapack's clones reproduce ({odd}): node_modules may not be npm ci's; \
-             this extraction code ({key}) is left to npm in this store from now on (its declined-keys file)"
+             this extraction code ({key}) is left to npm in this store from now on (a file in its declined/ directory)"
         )
     })
 }

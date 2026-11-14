@@ -73,8 +73,9 @@
 //! under one version can vouch for entries it did not use, so every code
 //! checks every entry it uses, once.
 //! The comparison also checks pacote's extraction itself
-//! (`store::compare_extraction`): only files and directories, every file
-//! written by this install. Otherwise the clones (touched to now) are not
+//! (`store::compare_extraction`), and so does a fill before the extraction
+//! becomes the entry (`store::extraction_odd`, the same rule): only files and
+//! directories, every file written by this install. Otherwise the clones (touched to now) are not
 //! what npm puts on disk: the hook stops for this run (a fatal refusal), the
 //! install counts as broken (npm ci rebuilds node_modules, inject.rs), and
 //! the key goes on the store's decline list (`store.declined`), under which
@@ -1014,6 +1015,22 @@ impl<'a> Server<'a> {
                 discard();
             }
             return o;
+        }
+        // A fill: pacote's extraction becomes the entry with nothing to
+        // compare it with, and is recorded as this key's. The same check as
+        // a comparison's on it first (metadata only): an entry recorded
+        // from an extraction no clone reproduces would be cloned unchecked
+        // by every later install under this key.
+        match crate::store::extraction_odd(extracted, self.started) {
+            Ok(None) => {}
+            Ok(Some(odd)) => {
+                discard();
+                return self.halt_on_extraction(&i, odd);
+            }
+            Err(e) => {
+                discard();
+                return refused("store-error", format!("reading pacote's extraction of {}: {e:#}", i.key()));
+            }
         }
         // pacote's extraction was made just now: placed without a touch.
         let mut o = self.finish(i.clone(), extracted, dst, false, false, None, true);
@@ -2349,6 +2366,56 @@ mod tests {
         fx.pacote_extract(&i, &to);
         assert!(placed_full(fresh.place_extracted(&sri, &fx.root.join("node_modules/f"), &to)).2, "a fresh extraction is compared and placed");
         assert_eq!(fresh.stats.lock().unwrap().new_key_checks, 1);
+    }
+
+    #[test]
+    fn a_fill_no_clone_reproduces_halts_the_run_and_declines_the_key() {
+        let fx = Fx::new("serve-odd-fill");
+        if !fx.can_clone() {
+            return;
+        }
+        let i = cached_tarball(&fx.cacache, PKG);
+        let sri = sri_of(&i);
+        // An empty store: pacote's extraction would become the entry. With a
+        // file older than the install, it does not, and nothing is recorded.
+        let s = fx.server_with(clone::Mode::File, CheckPolicy::OneIn(1_000_000));
+        let dst = fx.root.join("node_modules/fill");
+        let to = extract_to(s.place_entry(&sri, &dst), "fill");
+        fx.pacote_extract(&i, &to);
+        crate::store::tests::age(&to.join("lib/index.js"), 3660);
+        let (reason, message, fatal) = refusal(s.place_extracted(&sri, &dst, &to));
+        assert_eq!((reason, fatal), ("extraction-unexpected", true), "{message}");
+        assert!(message.contains("lib/index.js: modified at"), "{message}");
+        assert!(!to.exists() && !dst.exists() && !fx.store.dir_for(&i).exists(), "nothing placed, no entry");
+        assert!(fx.store.made_by(&i).is_empty(), "nothing recorded");
+        assert!(fx.store.declined(KEY).is_some());
+        assert!(s.stats.lock().unwrap().filled.is_empty());
+        let (reason, _, _) = refusal(s.place_entry(&sri, &fx.root.join("node_modules/later")));
+        assert_eq!(reason, "extraction-unexpected", "every later request of this run");
+        drop(s);
+        // A symlink in a fill, under another key: the same.
+        let other = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, Some(OLD.into()), CheckPolicy::All).unwrap();
+        let to = extract_to(other.place_entry(&sri, &fx.root.join("node_modules/l")), "fill");
+        fx.pacote_extract(&i, &to);
+        std::os::unix::fs::symlink("index.js", to.join("lib/link.js")).unwrap();
+        let (reason, message, _) = refusal(other.place_extracted(&sri, &fx.root.join("node_modules/l"), &to));
+        assert_eq!(reason, "extraction-unexpected", "{message}");
+        assert!(message.contains("lib/link.js: neither a file nor a directory") && !fx.store.dir_for(&i).exists(), "{message}");
+        assert!(fx.store.declined(OLD).is_some() && fx.store.declined(KEY).is_some(), "both keys declined, each in its own file");
+        drop(other);
+        // A fresh extraction is a fill as before.
+        let third = KEY.replace("uv:1.52.1", "uv:9");
+        let ok = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, Some(third.clone()), CheckPolicy::All).unwrap();
+        let to = extract_to(ok.place_entry(&sri, &fx.root.join("node_modules/f")), "fill");
+        fx.pacote_extract(&i, &to);
+        assert!(placed_full(ok.place_extracted(&sri, &fx.root.join("node_modules/f"), &to)).1, "filled");
+        assert_eq!(fx.store.made_by(&i), vec![third]);
+        // The decline list: one file per key; removing it clears that key only.
+        let files: Vec<_> = fs::read_dir(fx.dir.join("store/declined")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(files.len(), 2, "{files:?}");
+        let k = files.iter().find(|f| fs::read_to_string(f).unwrap().starts_with(&format!("{KEY}\n"))).unwrap();
+        fs::remove_file(k).unwrap();
+        assert!(fx.store.declined(KEY).is_none() && fx.store.declined(OLD).is_some());
     }
 
     #[test]

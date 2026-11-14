@@ -397,11 +397,13 @@ nothing; switching back and forth between two npm or Node versions compares
 nothing again; Node's own version is not part of it. The first build with
 this rule compares every entry once, since older records name versions
 (`pacote@… tar@…`), not code. If pacote's extraction ever stops being what a
-clone reproduces (a file older than the install, or something other than
-files and directories), that install is rebuilt by plain `npm ci` and the
-code goes on the store's decline list (`<store>/declined-keys`): later
-installs under it are npm's own until matchapack is updated (delete the line
-to try again). `matchapack report` lists the tar code each run loaded.
+clone reproduces (a file more than an hour older than the install, or
+something other than files and directories), that install is rebuilt by plain `npm ci` and the
+code goes on the store's decline list: later installs under it are npm's
+own. To try that code again, delete its file: `<store>/declined/` holds one
+file per declined code, the key on its first line and the reason on the
+second (`grep -lx '<key>' <store>/declined/*` finds it; deleting the
+directory clears them all). `matchapack report` lists the tar code each run loaded.
 
 matchapack takes every npm 10, 11 and 12 release whose pacote code it was
 tested with: it has no code per npm version, and what keeps it right on a new

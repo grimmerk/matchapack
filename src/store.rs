@@ -11,8 +11,8 @@
 //! shared by every install, exclusively by commands that remove entries), and
 //! for the inject engine `made-by/` (per entry: the keys of the extraction
 //! code under which it is known to be what pacote extracts; see serve.rs)
-//! and `declined-keys` (extraction code whose extraction the clones cannot
-//! reproduce: installs under it are npm's own).
+//! and `declined/` (one file per extraction code whose extraction the clones
+//! cannot reproduce: installs under it are npm's own).
 //!
 //! Tarballs come from npm's own content-addressed cache (`~/.npm/_cacache`).
 
@@ -317,33 +317,34 @@ impl Store {
         Ok(())
     }
 
-    fn declined_file(&self) -> PathBuf {
-        self.root.join("declined-keys")
+    /// The file that declines extraction-code `key`: one per key, named by
+    /// the key's SHA-256, so that two installs declining two keys at once
+    /// never rewrite each other's file (no read-modify-write of a list).
+    fn declined_file(&self, key: &str) -> PathBuf {
+        self.root.join("declined").join(hex::encode(sha2::Sha256::digest(key.as_bytes())))
     }
 
     /// Why installs under extraction-code `key` are left to npm in this
-    /// store (`decline_key`), or None.
+    /// store (`decline_key`), or None. Removing the file clears it.
     pub fn declined(&self, key: &str) -> Option<String> {
-        let text = fs::read_to_string(self.declined_file()).ok()?;
-        text.lines().find_map(|l| l.split_once('\t').filter(|(k, _)| *k == key).map(|(_, why)| why.to_string()))
+        let text = fs::read_to_string(self.declined_file(key)).ok()?;
+        let (k, why) = text.split_once('\n')?;
+        (k == key).then(|| why.trim_end().to_string())
     }
 
-    /// Put `key` on the store's decline list (`<store>/declined-keys`, one
-    /// `<key>\t<why>` line each), so that later installs under that code
-    /// let npm extract every package. Written whole (tmp, then rename).
+    /// Put `key` on the store's decline list, so that later installs under
+    /// that code let npm extract every package: `<store>/declined/<sha256 of
+    /// the key>`, holding the key on its first line and why on the second.
+    /// Written whole (tmp, then rename).
     pub fn decline_key(&self, key: &str, why: &str) -> Result<()> {
         if self.declined(key).is_some() {
             return Ok(());
         }
-        let f = self.declined_file();
-        let mut text = fs::read_to_string(&f).unwrap_or_default();
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
+        let f = self.declined_file(key);
+        fs::create_dir_all(f.parent().unwrap())?;
         let why: String = why.chars().map(|c| if c.is_control() { ' ' } else { c }).take(300).collect();
-        text.push_str(&format!("{key}\t{why}\n"));
         let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
-        fs::write(&tmp, text)?;
+        fs::write(&tmp, format!("{key}\n{why}\n"))?;
         fs::rename(&tmp, &f)?;
         Ok(())
     }
@@ -599,7 +600,7 @@ pub const EXTRACTION_TIME_SLACK: std::time::Duration = std::time::Duration::from
 /// `started`: pacote extracts with `noMtime` and no links, which is what
 /// the placement of a clone (then touched to now) reproduces.
 pub fn compare_extraction(extracted: &Path, entry: &Path, started: std::time::SystemTime) -> Result<Compared> {
-    let (want, odd) = tree(extracted, true, Some(started.checked_sub(EXTRACTION_TIME_SLACK).unwrap_or(std::time::UNIX_EPOCH)))?;
+    let (want, odd) = tree(extracted, true, Some(fresh_since(started)))?;
     if let Some(odd) = odd {
         return Ok(Compared::Unexpected(odd));
     }
@@ -631,10 +632,51 @@ enum Node {
     Other,
 }
 
+/// Why the path `rel` of pacote's extraction (file type `ft`, metadata
+/// `meta`, not followed) is not what a clone, touched to the install's time,
+/// reproduces: neither a file nor a directory, or a file last modified
+/// before `since`. None when it is. The one rule for the comparison and the
+/// fill (`compare_extraction`, `extraction_odd`).
+fn odd_path(rel: &Path, ft: fs::FileType, meta: &fs::Metadata, since: std::time::SystemTime) -> Result<Option<String>> {
+    if !ft.is_dir() && !ft.is_file() {
+        return Ok(Some(format!("{}: neither a file nor a directory", show_rel(rel))));
+    }
+    if ft.is_file() {
+        let mtime = meta.modified()?;
+        if mtime < since {
+            let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(-1);
+            return Ok(Some(format!("{}: modified at {} (seconds since 1970), before this install began", show_rel(rel), secs(mtime))));
+        }
+    }
+    Ok(None)
+}
+
+/// The earliest moment a file of pacote's extraction made by an install
+/// that began at `started` may carry (EXTRACTION_TIME_SLACK).
+fn fresh_since(started: std::time::SystemTime) -> std::time::SystemTime {
+    started.checked_sub(EXTRACTION_TIME_SLACK).unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// The check `compare_extraction` makes on pacote's extraction, alone, for
+/// an extraction that becomes a store entry with nothing to compare it
+/// with (a fill): metadata only, nothing read. The first path that is not
+/// what a clone reproduces, or None.
+pub fn extraction_odd(extracted: &Path, started: std::time::SystemTime) -> Result<Option<String>> {
+    let since = fresh_since(started);
+    // Unsorted: any odd path will do, and nothing is compared.
+    for e in walkdir::WalkDir::new(extracted).follow_links(false).follow_root_links(false) {
+        let e = e?;
+        let rel = e.path().strip_prefix(extracted).unwrap();
+        if let Some(odd) = odd_path(rel, e.file_type(), &e.metadata()?, since)? {
+            return Ok(Some(odd));
+        }
+    }
+    Ok(None)
+}
+
 /// Every path under `root` (`root` itself as ""), sorted, symlinks not
-/// followed. With `fresh_since`: the walk stops at the first path that is
-/// neither a file nor a directory, or the first file last modified before
-/// it, and says which (the second value).
+/// followed. With `fresh_since`: the walk stops at the first path
+/// `odd_path` names, and says why (the second value).
 fn tree(root: &Path, dir_modes: bool, fresh_since: Option<std::time::SystemTime>) -> Result<(Vec<(PathBuf, Node)>, Option<String>)> {
     let mut v = vec![];
     for e in walkdir::WalkDir::new(root).follow_links(false).follow_root_links(false).sort_by_file_name() {
@@ -644,15 +686,8 @@ fn tree(root: &Path, dir_modes: bool, fresh_since: Option<std::time::SystemTime>
         let meta = e.metadata()?;
         let mode = meta.permissions().mode() & 0o7777;
         if let Some(since) = fresh_since {
-            if !ft.is_dir() && !ft.is_file() {
-                return Ok((v, Some(format!("{}: neither a file nor a directory", show_rel(&rel)))));
-            }
-            if ft.is_file() {
-                let mtime = meta.modified()?;
-                if mtime < since {
-                    let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(-1);
-                    return Ok((v, Some(format!("{}: modified at {} (seconds since 1970), before this install began", show_rel(&rel), secs(mtime)))));
-                }
+            if let Some(odd) = odd_path(&rel, ft, &meta, since)? {
+                return Ok((v, Some(odd)));
             }
         }
         let n = if ft.is_dir() {
