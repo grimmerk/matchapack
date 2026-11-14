@@ -191,7 +191,7 @@ for ((i = 0; i < nsteps; i++)); do
   # B's log record: the last line of the trial log.
   rec=$(tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null)
   ra=$(record_of)
-  python3 -I - "$rec" "$sb" "$B" "$clones" "$unseen" "$rb" "$ra" <<'EOF' > "$work/rec.check" 2>&1 || { while IFS= read -r l; do say_fail "$l"; done < "$work/rec.check"; }
+  python3 -I - "$rec" "$sb" "$B" "$clones" "$unseen" "$rb" "$ra" <<'EOF' > "$work/rec.check" 2> "$work/rec.log" || { while IFS= read -r l; do say_fail "$l"; done < "$work/rec.check"; }
 import json, os, sys
 rec, status, root, clones, unseen, rb, ra = sys.argv[1:8]
 bad = []
@@ -241,7 +241,7 @@ print("\n".join(bad))
 print(f"  log: {r.get('outcome')} {r.get('command')}, cloned {cloned}, unseen {inj.get('unseen')} of {inj.get('installed')}, record {len(before)} -> {len(after)} entries", file=sys.stderr)
 sys.exit(1 if bad else 0)
 EOF
-  grep '^  log:' "$work/rec.check"
+  cat "$work/rec.log"
 done
 
 if [ "${MATCHAPACK_VERIFY_META:-0}" = 1 ]; then
