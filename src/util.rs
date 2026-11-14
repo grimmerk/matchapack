@@ -1,6 +1,9 @@
 //! Small shared helpers: quiet-aware logging, phase times, where npm is
 //! installed, matchapack's run and settings directories.
 
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUIET: AtomicBool = AtomicBool::new(false);
@@ -44,23 +47,393 @@ macro_rules! info {
     };
 }
 
-/// The npm installation the `npm` on PATH runs: bin/npm resolves to
-/// <dir>/bin/npm-cli.js. Used for npm's own modules (@npmcli/run-script,
-/// semver) and its version, so they always match the npm that runs, whatever
-/// manages it (nvm, Homebrew, Volta). `npm root -g` can point elsewhere.
-pub fn npm_dir() -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let bin = std::env::split_paths(&path).map(|d| d.join("npm")).find(|p| is_executable(p))?;
-    let cli = std::fs::canonicalize(&bin).ok()?;
-    let dir = cli.parent()?.parent()?.to_path_buf();
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()?;
-    (v.get("name").and_then(|n| n.as_str()) == Some("npm")).then_some(dir)
+/// The npm installation the `npm` on PATH runs, in this directory: the
+/// directory of npm's package, whose `bin/npm-cli.js` it starts. Used for
+/// npm's own modules (pacote) and its version, so they always match the npm
+/// that runs. `npm root -g` can point elsewhere. Looked up once per process
+/// (`find_npm`); None when it cannot be told for certain.
+pub fn npm_dir() -> Option<PathBuf> {
+    npm_lookup().ok()
 }
 
-pub fn npm_version() -> Option<String> {
-    let dir = npm_dir()?;
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()?;
-    v.get("version").and_then(|x| x.as_str()).map(String::from)
+/// `npm_dir`, or why there is none (for the decline message).
+pub fn npm_lookup() -> Result<PathBuf, String> {
+    npm_found().map(|(dir, _)| dir)
+}
+
+/// How to start node for that npm (`NodeStart`); `node` on PATH when there
+/// is no npm.
+pub fn npm_node() -> NodeStart {
+    npm_found().map(|(_, node)| node).unwrap_or_default()
+}
+
+fn npm_found() -> Result<(PathBuf, NodeStart), String> {
+    static NPM: std::sync::OnceLock<Result<(PathBuf, NodeStart), String>> = std::sync::OnceLock::new();
+    NPM.get_or_init(|| {
+        let path = std::env::var_os("PATH").ok_or("no PATH")?;
+        let cwd = std::env::current_dir().map_err(|e| format!("the current directory: {e}"))?;
+        find_npm(&path, &cwd, &|| private_run_dir().map_err(|e| format!("{e:#}")))
+    })
+    .clone()
+}
+
+/// How matchapack starts node for npm or Yarn: the `node` on PATH with
+/// matchapack's own environment (npm's or Yarn's files are on PATH, as nvm
+/// puts them), or exactly the node a launcher on PATH starts, with its
+/// argv[0] and its whole environment (`Launch`, from `probe_launcher`).
+#[derive(Debug, Clone)]
+pub enum NodeStart {
+    /// `node` (or the given node), with this process's environment, less
+    /// every `DYLD_*` variable when `drop_dyld` (`entry_drops_dyld`).
+    Path { node: PathBuf, drop_dyld: bool },
+    Launch(Launch),
+}
+
+impl Default for NodeStart {
+    fn default() -> Self {
+        NodeStart::Path { node: PathBuf::from("node"), drop_dyld: false }
+    }
+}
+
+impl NodeStart {
+    /// The `node` on PATH for the user's entry `entry` (the `npm` or `yarn`
+    /// on PATH): as plain npm or Yarn sees it (`entry_drops_dyld`).
+    pub fn for_entry(entry: &Path) -> Self {
+        NodeStart::Path { node: PathBuf::from("node"), drop_dyld: entry_drops_dyld(entry) }
+    }
+
+    #[cfg(test)]
+    pub fn path(p: impl Into<PathBuf>) -> Self {
+        NodeStart::Path { node: p.into(), drop_dyld: false }
+    }
+
+    /// A Command for this node; the caller's `env` calls apply on top.
+    pub fn command(&self) -> Command {
+        match self {
+            NodeStart::Path { node, drop_dyld } => {
+                let mut c = Command::new(node);
+                if *drop_dyld {
+                    for (k, _) in std::env::vars_os() {
+                        if k.as_encoded_bytes().starts_with(b"DYLD_") {
+                            c.env_remove(k);
+                        }
+                    }
+                }
+                c
+            }
+            NodeStart::Launch(l) => {
+                use std::os::unix::process::CommandExt;
+                let mut c = Command::new(&l.node);
+                c.arg0(&l.argv0).env_clear().envs(l.env.iter().map(|(k, v)| (k, v)));
+                c
+            }
+        }
+    }
+}
+
+/// Whether plain npm or Yarn, started through `entry` (the file on PATH,
+/// symlinks followed, as exec follows them), reaches node without `DYLD_*`:
+/// on macOS, when `entry` is a script whose interpreter is a protected
+/// system binary (`#!/usr/bin/env node`, `#!/bin/sh`, `#!/bin/bash`: under
+/// /bin, /sbin, /usr/bin or /usr/sbin), because macOS removes every
+/// `DYLD_*` variable when it starts one. npm's `bin/npm-cli.js`, Yarn 1's
+/// `bin/yarn.js` and `bin/yarn`, Homebrew's and corepack's launchers all
+/// are. matchapack starts node itself, so without this its npm or Yarn
+/// would see variables plain npm or Yarn does not (measured: cargo's
+/// `DYLD_FALLBACK_LIBRARY_PATH` reaches `node -e` and not npm through its
+/// shebang). An entry that names node directly (`#!/path/to/node`) or is
+/// not a script keeps them, as plain npm does.
+pub fn entry_drops_dyld(entry: &Path) -> bool {
+    use std::io::Read;
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(entry).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+    protected_interpreter(&head[..n])
+}
+
+/// `head` starts with a `#!` line whose interpreter is under /bin, /sbin,
+/// /usr/bin or /usr/sbin (the system directories macOS protects).
+fn protected_interpreter(head: &[u8]) -> bool {
+    let Some(rest) = head.strip_prefix(b"#!") else { return false };
+    let line = rest.split(|b| *b == b'\n').next().unwrap_or(&[]);
+    let line = String::from_utf8_lossy(line);
+    let interp = line.split_whitespace().next().unwrap_or("");
+    ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"].iter().any(|d| interp.starts_with(d))
+}
+
+/// The node a launcher started, as it started it: the binary
+/// (`process.execPath`), argv[0] and the environment, with the user's own
+/// NODE_OPTIONS in place of the probe's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Launch {
+    pub node: PathBuf,
+    pub argv0: String,
+    pub env: Vec<(String, String)>,
+}
+
+pub fn npm_version() -> Result<String, String> {
+    let dir = npm_lookup()?;
+    package_json(&dir).and_then(|v| v["version"].as_str().map(String::from)).ok_or_else(|| format!("no version in {}/package.json", dir.display()))
+}
+
+fn package_json(dir: &Path) -> Option<serde_json::Value> {
+    serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()
+}
+
+/// The directory of npm's package when `cli` (symlinks resolved) is a file
+/// in its `bin` (`<dir>/bin/npm-cli.js`).
+fn npm_package_of(cli: &Path) -> Option<PathBuf> {
+    let cli = std::fs::canonicalize(cli).ok()?;
+    let dir = cli.parent()?.parent()?.to_path_buf();
+    (package_json(&dir)?["name"] == "npm").then_some(dir)
+}
+
+/// The first executable `name` on `path`.
+pub fn on_path(path: &OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path).map(|d| d.join(name)).find(|p| is_executable(p))
+}
+
+/// The npm the first `npm` on `path` runs in `cwd`. Usually that file is a
+/// symlink to npm's `bin/npm-cli.js` (nvm, fnm, Homebrew's node, the
+/// official installer, mise with PATH activation). Otherwise it is a
+/// launcher (a version manager's shim: volta, asdf, mise in shim mode), and
+/// `probe_launcher` asks it what it starts.
+fn find_npm(path: &OsStr, cwd: &Path, run_dir: &dyn Fn() -> Result<PathBuf, String>) -> Result<(PathBuf, NodeStart), String> {
+    let bin = on_path(path, "npm").ok_or("no npm on PATH")?;
+    if let Some(dir) = npm_package_of(&bin) {
+        return Ok((dir, NodeStart::for_entry(&bin)));
+    }
+    known_launcher(&bin, "npm")?;
+    let (main, launch) = probe_launcher(&bin, "npm", path, cwd, &run_dir()?)?;
+    // The script itself, not a file beside it: a launcher that starts
+    // another script in npm's `bin` (a policy wrapper) is not npm.
+    let dir = main.ends_with("bin/npm-cli.js").then(|| npm_package_of(&main)).flatten().ok_or_else(|| {
+        let what = if main.ends_with("dist/npm.js") { "corepack's npm launcher, which matchapack does not handle" } else { "not npm's bin/npm-cli.js" };
+        format!("the npm on PATH ({}) starts {}: {what}", bin.display(), main.display())
+    })?;
+    Ok((dir, NodeStart::Launch(launch)))
+}
+
+/// Which version manager's launcher `entry` (the `npm` or `yarn` on PATH)
+/// is, or why matchapack does not follow it. Only launchers whose contract
+/// is to pass the user's arguments through unchanged, whatever they are,
+/// are followed: a probe with `--version` cannot show what another
+/// launcher would add for `install` (`--ignore-scripts`, say). Each is told
+/// by its install layout, which another wrapper does not have by accident:
+/// - volta: `<VOLTA_HOME>/bin/<name>`, a symlink, with
+///   `<VOLTA_HOME>/tools/image`, to a file named `volta-shim` beside the
+///   `volta` executable (Volta's release archive);
+/// - mise: `<data>/shims/<name>`, a symlink, with `<data>/installs`, to a
+///   file named `mise` (mise's shim mode links every shim to itself);
+/// - asdf: the script asdf writes, exactly: `#!/usr/bin/env bash`, one or
+///   more `# asdf-plugin: nodejs <version>` lines, then `exec <asdf> exec
+///   "<name>" "$@"` (asdf 0.16+; asdf before 0.16 adds `# asdf_allow:
+///   ' asdf '`), only for the nodejs plugin (the one run here);
+/// - corepack (`yarn` only): `<corepack package>/shims/yarn`, symlinks
+///   followed, corepack's own sh wrapper.
+pub(crate) fn known_launcher(entry: &Path, name: &str) -> Result<&'static str, String> {
+    let real = std::fs::canonicalize(entry).map_err(|e| format!("resolving {}: {e}", entry.display()))?;
+    let is_link = std::fs::symlink_metadata(entry).is_ok_and(|m| m.file_type().is_symlink());
+    let parent = entry.parent();
+    let home = parent.and_then(Path::parent);
+    let named = |p: Option<&Path>, n: &str| p.and_then(Path::file_name).is_some_and(|f| f == n);
+    if is_link && named(parent, "bin") && home.is_some_and(|h| h.join("tools/image").is_dir()) && real.file_name().is_some_and(|f| f == "volta-shim") && is_executable(&real.with_file_name("volta")) {
+        return Ok("volta");
+    }
+    if is_link && named(parent, "shims") && home.is_some_and(|h| h.join("installs").is_dir()) && real.file_name().is_some_and(|f| f == "mise") {
+        return Ok("mise");
+    }
+    if std::fs::metadata(entry).is_ok_and(|m| m.len() <= 4096) && std::fs::read_to_string(entry).is_ok_and(|t| asdf_nodejs_shim(&t, name)) {
+        return Ok("asdf");
+    }
+    if name == "yarn" && real.file_name().is_some_and(|f| f == "yarn") && named(real.parent(), "shims") {
+        let pkg = real.parent().and_then(Path::parent).and_then(package_json);
+        if pkg.is_some_and(|v| v["name"] == "corepack") {
+            return Ok("corepack");
+        }
+    }
+    let what = if real.ends_with("dist/npm.js") && real.parent().and_then(Path::parent).and_then(package_json).is_some_and(|v| v["name"] == "corepack") {
+        "corepack's npm launcher, which matchapack does not handle".to_string()
+    } else {
+        format!("a launcher matchapack does not follow ({}; only volta's, mise's and asdf's shims, and corepack's yarn, are followed)", real.display())
+    };
+    Err(format!("the {name} on PATH ({}) is {what}", entry.display()))
+}
+
+/// `text` is the shim asdf writes for `name` from the nodejs plugin.
+fn asdf_nodejs_shim(text: &str, name: &str) -> bool {
+    let mut lines = text.strip_suffix('\n').unwrap_or(text).split('\n');
+    if lines.next() != Some("#!/usr/bin/env bash") {
+        return false;
+    }
+    let mut plugin_lines = 0;
+    for line in lines.by_ref() {
+        if let Some(v) = line.strip_prefix("# asdf-plugin: nodejs ") {
+            if v.is_empty() || v.contains(char::is_whitespace) {
+                return false;
+            }
+            plugin_lines += 1;
+            continue;
+        }
+        let line = line.strip_suffix(" # asdf_allow: ' asdf '").unwrap_or(line);
+        let Some(rest) = line.strip_prefix("exec ") else { return false };
+        let Some((asdf, tail)) = rest.split_once(' ') else { return false };
+        let asdf_ok = asdf == "asdf" || (asdf.starts_with('/') && asdf.ends_with("/asdf") && !asdf.contains(['"', '\'', '$', '`', '\\']));
+        return plugin_lines > 0 && asdf_ok && tail == format!("exec \"{name}\" \"$@\"") && lines.next().is_none();
+    }
+    false
+}
+
+/// Preloaded into node through NODE_OPTIONS by `probe_launcher`: reports how
+/// node was started (binary, argv[0], options, working directory,
+/// environment, script and its arguments) and exits before that script
+/// runs.
+const PROBE_JS: &str = "'use strict';\n\
+// matchapack: what a launcher on PATH starts (src/util.rs, probe_launcher).\n\
+require('fs').writeSync(1, '\\nMATCHAPACK-PROBE ' + JSON.stringify({ main: process.argv[1] ?? null, args: process.argv.slice(2), node: process.execPath, argv0: process.argv0, exec_argv: process.execArgv, cwd: process.cwd(), env: process.env }) + '\\n');\n\
+process.exit(0);\n";
+
+/// How long a launcher may take to start node (`probe_launcher`). The first
+/// run after a version manager installed a Node took 0.7 s here; one that
+/// downloads a Node first takes longer, and is then plain npm or Yarn once
+/// (which downloads it).
+pub(crate) const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What `launcher` (the `npm` or `yarn` on PATH, a version manager's shim)
+/// starts in `cwd`: the script node is given (symlinks resolved) and how
+/// node was started (`Launch`). Found by running `<launcher> --version` with
+/// a probe preloaded into node (NODE_OPTIONS=--require). A tool-independent
+/// answer: whatever the launcher reads to choose a version (`.nvmrc`,
+/// `.node-version`, `.tool-versions`, `mise.toml`, package.json `volta`) it
+/// reads here, in this directory.
+///
+/// matchapack then starts that script with exactly that node binary,
+/// argv[0] and environment (`NodeStart::Launch`), so npm or Yarn, and the
+/// scripts they run, see what they see under the launcher: its PATH, its
+/// own variables, and none of the `DYLD_*` variables macOS removes on the
+/// way (`#!/usr/bin/env node`, a bash shim). What matchapack cannot pass on
+/// is declined: node options on the command line (`execArgv`: the install's
+/// node gets none), arguments the launcher adds to the script's, another
+/// working directory, a launcher that changes
+/// NODE_OPTIONS, and an environment JSON cannot carry exactly.
+///
+/// `--version`, never the user's arguments: a launcher that does not start
+/// node with the probe (it ignores NODE_OPTIONS, or is not a node launcher)
+/// then only prints a version. A bare `yarn` would install. The launcher
+/// runs in its own process group, killed at PROBE_DEADLINE.
+pub(crate) fn probe_launcher(launcher: &Path, name: &str, path: &OsStr, cwd: &Path, run_dir: &Path) -> Result<(PathBuf, Launch), String> {
+    probe_launcher_within(launcher, name, path, cwd, run_dir, std::env::var_os("NODE_OPTIONS"), PROBE_DEADLINE)
+}
+
+/// `probe_launcher` with the user's NODE_OPTIONS and the deadline given.
+fn probe_launcher_within(launcher: &Path, name: &str, path: &OsStr, cwd: &Path, run_dir: &Path, user_options: Option<std::ffi::OsString>, within: std::time::Duration) -> Result<(PathBuf, Launch), String> {
+    use std::os::unix::process::CommandExt;
+    let prefix = format!("the {name} on PATH ({})", launcher.display());
+    let user_options = match user_options {
+        None => None,
+        Some(o) => Some(o.into_string().map_err(|_| format!("{prefix}: NODE_OPTIONS is not UTF-8"))?),
+    };
+    let js = run_dir.join("launcher-probe.js");
+    let js_str = js.to_str().filter(|s| !s.contains(['"', '\\', '\n'])).ok_or_else(|| format!("{prefix}: cannot name {} in NODE_OPTIONS", js.display()))?;
+    // The probe first: node runs `--require` preloads in order, so the
+    // probe records the environment before any preload of the user's runs,
+    // and exits; the user's preloads then run once, in the install's node.
+    let node_options = match user_options.as_deref() {
+        Some(o) if !o.trim().is_empty() => format!("--require \"{js_str}\" {o}"),
+        _ => format!("--require \"{js_str}\""),
+    };
+    // Output to files, not pipes: no pipe for another thread's spawn to
+    // inherit (NOTES "The cause (2026-11-13)"), and nothing to read until
+    // the launcher has exited.
+    let files = [js.clone(), run_dir.join("launcher-probe.out"), run_dir.join("launcher-probe.err")];
+    let remove = || {
+        for f in &files {
+            let _ = std::fs::remove_file(f);
+        }
+    };
+    remove();
+    let t0 = std::time::Instant::now();
+    let ran = (|| -> Result<(String, String), String> {
+        std::fs::write(&js, PROBE_JS).map_err(|e| format!("writing {}: {e}", js.display()))?;
+        let create = |p: &PathBuf| std::fs::File::create(p).map_err(|e| format!("{}: {e}", p.display()));
+        let mut child = Command::new(launcher)
+            .arg("--version")
+            .current_dir(cwd)
+            .env("PATH", path)
+            .env("NODE_OPTIONS", &node_options)
+            .stdin(Stdio::null())
+            .stdout(create(&files[1])?)
+            .stderr(create(&files[2])?)
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("starting it: {e}"))?;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s,
+                Ok(None) if t0.elapsed() < within => std::thread::sleep(std::time::Duration::from_millis(5)),
+                Ok(None) => {
+                    // The whole group: a shim's node may be a grandchild.
+                    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                    let _ = child.wait();
+                    return Err(format!("did not start node within {:.0} s", within.as_secs_f64()));
+                }
+                Err(e) => return Err(format!("waiting for it: {e}")),
+            }
+        };
+        let read = |p: &PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+        let err = read(&files[2]).lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("").to_string();
+        Ok((read(&files[1]), if err.is_empty() { format!("{status}") } else { err }))
+    })();
+    remove();
+    record("launcher probe", t0.elapsed().as_secs_f64());
+    let (out, said) = ran.map_err(|e| format!("{prefix}: {e}"))?;
+    let probe = out.lines().rev().find_map(|l| l.strip_prefix("MATCHAPACK-PROBE ")).and_then(|j| serde_json::from_str::<Probe>(j).ok());
+    let probe = probe.ok_or_else(|| format!("{prefix} is a launcher matchapack could not see start node ({said})"))?;
+    exact_launch(&prefix, probe, cwd, &node_options, user_options.as_deref())
+}
+
+#[derive(serde::Deserialize)]
+struct Probe {
+    main: Option<String>,
+    args: Vec<String>,
+    node: String,
+    argv0: String,
+    exec_argv: Vec<String>,
+    cwd: String,
+    env: std::collections::BTreeMap<String, String>,
+}
+
+/// The script and the `Launch` that starts node exactly as the launcher did,
+/// or why matchapack cannot.
+fn exact_launch(prefix: &str, p: Probe, cwd: &Path, node_options: &str, user_options: Option<&str>) -> Result<(PathBuf, Launch), String> {
+    let main = p.main.as_deref().ok_or_else(|| format!("{prefix} starts node without a script"))?;
+    // The launcher's own arguments to the script (`exec node yarn.js "$@"
+    // --ignore-scripts`): matchapack passes the user's alone.
+    if p.args != ["--version"] {
+        return Err(format!("{prefix} passes the script arguments of its own ({}), matchapack would pass the user's alone", p.args.join(" ")));
+    }
+    if !p.exec_argv.is_empty() {
+        return Err(format!("{prefix} starts node with options ({}), matchapack would start it without", p.exec_argv.join(" ")));
+    }
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if real(Path::new(&p.cwd)) != real(cwd) {
+        return Err(format!("{prefix} starts node in {}, not in {}", p.cwd, cwd.display()));
+    }
+    if p.env.get("NODE_OPTIONS").map(String::as_str) != Some(node_options) {
+        return Err(format!("{prefix} changes NODE_OPTIONS"));
+    }
+    // process.env is text: a variable that was not UTF-8 arrives changed.
+    if let Some((k, _)) = p.env.iter().find(|(k, v)| k.contains('\u{fffd}') || v.contains('\u{fffd}')) {
+        return Err(format!("{prefix}: the variable {k} cannot be passed on exactly"));
+    }
+    let mut env: Vec<(String, String)> = p.env.into_iter().filter(|(k, _)| k != "NODE_OPTIONS").collect();
+    if let Some(o) = user_options {
+        env.push(("NODE_OPTIONS".into(), o.into()));
+    }
+    let main = std::fs::canonicalize(main).map_err(|e| format!("{prefix} starts {main}: {e}"))?;
+    Ok((main, Launch { node: PathBuf::from(p.node), argv0: p.argv0, env }))
 }
 
 fn is_executable(p: &std::path::Path) -> bool {
@@ -97,4 +470,491 @@ pub fn remove_run_dir() {
 /// ~/.config/matchapack (trial scope `paths`, `npm-verified`).
 pub fn config_dir() -> std::path::PathBuf {
     std::env::var_os("MATCHAPACK_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| crate::home().join(".config/matchapack"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    /// The real node binary, as the working `node` reports it (the `node` on
+    /// PATH may itself be a shim: asdf's is a bash script), or None (the
+    /// probe tests are skipped without it).
+    pub(crate) fn real_node() -> Option<PathBuf> {
+        let o = Command::new("node").args(["-p", "process.execPath"]).output().ok()?;
+        let p = PathBuf::from(String::from_utf8(o.stdout).ok()?.trim());
+        (o.status.success() && p.is_absolute()).then(|| std::fs::canonicalize(p).unwrap())
+    }
+
+    fn write_exec(p: &Path, text: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A package whose `bin/<file>` must never run: the probe stops node
+    /// before it.
+    fn package(dir: &Path, name: &str, version: &str, file: &str) {
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("package.json"), format!(r#"{{"name":"{name}","version":"{version}"}}"#)).unwrap();
+        write_exec(&dir.join("bin").join(file), &format!("#!/usr/bin/env node\nthrow new Error('{name} ran: the probe should have stopped node first');\n"));
+    }
+
+    /// A simulated version manager under `d`, the shape of `flavor`'s shims
+    /// (the real tools: NOTES "Version managers"):
+    /// - `volta`: `shims/{node,npm,yarn}` are symlinks to one binary that
+    ///   dispatches on its name; an npm can be pinned apart from node (its
+    ///   own image, `.fakenpm` here);
+    /// - `mise`: the same, the binary named `mise`; it starts npm as
+    ///   `node <npm>/bin/npm-cli.js`;
+    /// - `asdf`: `shims/*` are bash scripts running `asdf exec <name>`; npm
+    ///   goes through the nodejs plugin's wrapper, which puts directories on
+    ///   PATH again (one of them missing).
+    ///
+    /// Each sets a variable of its own, puts the chosen Node's `bin` on
+    /// PATH and removes HOME (so a variable the launcher removed shows). The Node is 24.0.0 (npm 11.0.0), or the one a `.fakepin` in the
+    /// working directory names (22.0.0: npm 10.0.0); both are the real node.
+    /// Yarn 1.22.22 is a standalone package. A `.fakeyarnprefix` makes the
+    /// `yarn` shim set PREFIX, as Homebrew's launcher does (only for Yarn);
+    /// `.fakeflags` makes the `npm` shim start node with an option, `.fakecd`
+    /// makes it change directory first, `.fakeargs` makes the `npm` and
+    /// `yarn` shims add `--ignore-scripts` after the user's arguments. Returns the shims directory.
+    pub(crate) fn fake_version_manager(d: &Path, flavor: &str, node: &Path) -> PathBuf {
+        let img = d.join("img");
+        for (v, npm) in [("24.0.0", "11.0.0"), ("22.0.0", "10.0.0")] {
+            let n = img.join("node").join(v);
+            std::fs::create_dir_all(n.join("bin")).unwrap();
+            symlink(node, n.join("bin/node")).unwrap();
+            package(&n.join("lib/node_modules/npm"), "npm", npm, "npm-cli.js");
+            symlink("../lib/node_modules/npm/bin/npm-cli.js", n.join("bin/npm")).unwrap();
+        }
+        package(&img.join("npm/10.9.2"), "npm", "10.9.2", "npm-cli.js");
+        package(&img.join("yarn/1.22.22"), "yarn", "1.22.22", "yarn.js");
+        for b in ["node/24.0.0/lib/node_modules/npm/bin", "yarn/1.22.22/bin"] {
+            write_exec(&img.join(b).join("policy.js"), "#!/usr/bin/env node\nthrow new Error('policy.js ran');\n");
+        }
+        let r = d.display();
+        let script = format!(
+            r#"#!/bin/bash
+d="{r}"; flavor={flavor}
+name=${{0##*/}}
+if [ $flavor = asdf ]; then name=$2; shift 2; fi
+v=24.0.0; [ -f .fakepin ] && v=$(cat .fakepin)
+case $flavor in volta) export _FAKE_VOLTA_RECURSION=1 ;; mise) export __FAKE_MISE_SHIM=1 ;; asdf) export ASDF_INSTALL_VERSION=$v ;; esac
+front="$d/img/yarn/1.22.22/bin:$d/img/node/$v/bin"
+export PATH="$front:$PATH"
+unset HOME
+case $name in
+  node) exec "$d/img/node/$v/bin/node" "$@" ;;
+  npm)
+    [ -f .fakeflags ] && exec "$d/img/node/$v/bin/node" --max-old-space-size=4096 "$d/img/node/$v/lib/node_modules/npm/bin/npm-cli.js" "$@"
+    [ -f .fakecd ] && cd "$(cat .fakecd)"
+    [ -f .fakeargs ] && exec "$d/img/node/$v/bin/node" "$d/img/node/$v/lib/node_modules/npm/bin/npm-cli.js" "$@" --ignore-scripts
+    [ -f .fakepolicy ] && exec "$d/img/node/$v/bin/node" "$d/img/node/$v/lib/node_modules/npm/bin/policy.js" "$@"
+    [ -f .fakenpm ] && exec "$d/img/node/$v/bin/node" "$d/img/npm/$(cat .fakenpm)/bin/npm-cli.js" "$@"
+    [ $flavor = mise ] && exec "$d/img/node/$v/bin/node" "$d/img/node/$v/lib/node_modules/npm/bin/npm-cli.js" "$@"
+    [ $flavor = asdf ] && export PATH="$front:$d/no-such-dir:$PATH"
+    exec "$d/img/node/$v/bin/npm" "$@" ;;
+  yarn)
+    [ -f .fakeyarnprefix ] && export PREFIX=/opt/fake-prefix
+    [ -f .fakeargs ] && exec "$d/img/node/$v/bin/node" "$d/img/yarn/1.22.22/bin/yarn.js" "$@" --ignore-scripts
+    [ -f .fakepolicy ] && exec "$d/img/node/$v/bin/node" "$d/img/yarn/1.22.22/bin/policy.js" "$@"
+    exec "$d/img/yarn/1.22.22/bin/yarn.js" "$@" ;;
+esac
+echo "fake $flavor: no $name" >&2; exit 127
+"#
+        );
+        // Each tool's layout (`known_launcher`): volta's home with
+        // tools/image and its release beside the shim binary; mise's data
+        // directory with installs; asdf's shim text.
+        let (shims, bin) = match flavor {
+            "volta" => {
+                std::fs::create_dir_all(d.join("vhome/tools/image")).unwrap();
+                write_exec(&d.join("volta-release/volta"), "#!/bin/sh\n");
+                (d.join("vhome/bin"), d.join("volta-release/volta-shim"))
+            }
+            "mise" => {
+                std::fs::create_dir_all(d.join("data/installs")).unwrap();
+                (d.join("data/shims"), d.join("bin/mise"))
+            }
+            _ => (d.join("shims"), d.join("bin/asdf")),
+        };
+        std::fs::create_dir_all(&shims).unwrap();
+        write_exec(&bin, &script);
+        for name in ["node", "npm", "yarn"] {
+            if flavor == "asdf" {
+                write_exec(&shims.join(name), &format!("#!/usr/bin/env bash\n# asdf-plugin: nodejs 24.0.0\n# asdf-plugin: nodejs 22.0.0\nexec {} exec \"{name}\" \"$@\"", bin.display()));
+            } else {
+                symlink(&bin, shims.join(name)).unwrap();
+            }
+        }
+        shims
+    }
+
+    /// PATH with `first` before the system's directories (no other node).
+    pub(crate) fn path_with(first: &Path) -> std::ffi::OsString {
+        std::env::join_paths([first, Path::new("/usr/bin"), Path::new("/bin")]).unwrap()
+    }
+
+    fn probe_dir(d: &Path) -> impl Fn() -> Result<PathBuf, String> + '_ {
+        move || {
+            let r = d.join("run");
+            std::fs::create_dir_all(&r).unwrap();
+            Ok(r)
+        }
+    }
+
+    /// The variables, argv[0] and binary a `NodeStart` gives node.
+    fn started_as(n: &NodeStart, cwd: &Path) -> (std::collections::BTreeMap<String, String>, String, PathBuf) {
+        started_as_on(n, cwd, None)
+    }
+
+    /// `started_as` with PATH set to `path` (a fixture's), so that a
+    /// `NodeStart::Path` resolves the fixture's `node`, not the developer's
+    /// (which may be a version manager's shim that changes the environment).
+    fn started_as_on(n: &NodeStart, cwd: &Path, path: Option<&OsStr>) -> (std::collections::BTreeMap<String, String>, String, PathBuf) {
+        let mut c = n.command();
+        if let Some(p) = path {
+            c.env("PATH", p);
+        }
+        let o = c.current_dir(cwd).args(["-e", "process.stdout.write(JSON.stringify([process.env, process.argv0, process.execPath]))"]).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let (env, argv0, node): (std::collections::BTreeMap<String, String>, String, String) = serde_json::from_slice(&o.stdout).unwrap();
+        (env, argv0, PathBuf::from(node))
+    }
+
+    /// The npm behind each version manager's shim is the one it would run in
+    /// that directory: its default, a project's pinned Node, a project's
+    /// pinned npm (volta); and node is started exactly as the shim starts it
+    /// for npm: binary, argv[0], every variable (the shim's own, its PATH),
+    /// no more (none of this process's: env_clear), nothing macOS removed on
+    /// the way (cargo's DYLD_FALLBACK_LIBRARY_PATH, behind a bash shim).
+    #[test]
+    fn npm_behind_version_manager_shims() {
+        let Some(node) = real_node() else { return eprintln!("SKIP: no node") };
+        let d = std::fs::canonicalize(crate::store::tests::scratch("npm-shims")).unwrap();
+        for flavor in ["volta", "mise", "asdf"] {
+            let t = d.join(flavor);
+            let path = path_with(&fake_version_manager(&t, flavor, &node));
+            let (plain, pinned, npm_pinned) = (t.join("plain"), t.join("pinned"), t.join("npm-pinned"));
+            for p in [&plain, &pinned, &npm_pinned] {
+                std::fs::create_dir_all(p).unwrap();
+            }
+            std::fs::write(pinned.join(".fakepin"), "22.0.0").unwrap();
+            std::fs::write(npm_pinned.join(".fakenpm"), "10.9.2").unwrap();
+            let found = |cwd: &Path| find_npm(&path, cwd, &probe_dir(&t));
+            let dir = |cwd: &Path| found(cwd).map(|(d, _)| d);
+            assert_eq!(dir(&plain), Ok(t.join("img/node/24.0.0/lib/node_modules/npm")), "{flavor}");
+            assert_eq!(dir(&pinned), Ok(t.join("img/node/22.0.0/lib/node_modules/npm")), "{flavor}");
+            assert_eq!(dir(&npm_pinned), Ok(t.join("img/npm/10.9.2")), "{flavor}");
+            // The probe's files are gone.
+            assert_eq!(std::fs::read_dir(t.join("run")).unwrap().count(), 0, "{flavor}");
+
+            let (_, start) = found(&pinned).unwrap();
+            let NodeStart::Launch(l) = &start else { panic!("{flavor}: not a Launch") };
+            assert_eq!(std::fs::canonicalize(&l.node).unwrap(), node, "{flavor}");
+            let (env, argv0, exec) = started_as(&start, &pinned);
+            assert_eq!(std::fs::canonicalize(exec).unwrap(), node, "{flavor}");
+            assert_eq!(argv0, l.argv0, "{flavor}");
+            let want: std::collections::BTreeMap<String, String> = l.env.iter().cloned().collect();
+            assert_eq!(env, want, "{flavor}: node sees exactly the launcher's environment");
+            let own = match flavor {
+                "volta" => "_FAKE_VOLTA_RECURSION",
+                "mise" => "__FAKE_MISE_SHIM",
+                _ => "ASDF_INSTALL_VERSION",
+            };
+            assert!(env.contains_key(own), "{flavor}: the shim's own variable");
+            assert!(env["PATH"].starts_with(&format!("{}/img/yarn/1.22.22/bin:{}/img/node/22.0.0/bin:", t.display(), t.display())), "{flavor}: the shim's PATH");
+            assert!(!env.contains_key("HOME"), "{flavor}: a variable the launcher removed is not passed on");
+            assert!(!env.contains_key("NODE_OPTIONS") || std::env::var_os("NODE_OPTIONS").is_some(), "{flavor}: not the probe's NODE_OPTIONS");
+            if std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH").is_some() {
+                assert!(!env.contains_key("DYLD_FALLBACK_LIBRARY_PATH"), "{flavor}: macOS removed it behind the bash shim, so node does not get it");
+            }
+        }
+    }
+
+    /// An `npm` that resolves to npm's package is taken as it is: no probe,
+    /// the `node` on PATH. Launchers that are not shims of a node npm, and
+    /// shims matchapack cannot follow exactly (a node option, another
+    /// directory), are declined, with why.
+    #[test]
+    fn npm_launchers_not_resolved() {
+        let Some(node) = real_node() else { return eprintln!("SKIP: no node") };
+        let d = std::fs::canonicalize(crate::store::tests::scratch("npm-launchers")).unwrap();
+        let no_probe = || -> Result<PathBuf, String> { panic!("probed an npm that resolves to its package") };
+        // nvm's layout.
+        let nvm = d.join("nvm");
+        package(&nvm.join("lib/node_modules/npm"), "npm", "11.0.0", "npm-cli.js");
+        std::fs::create_dir_all(nvm.join("bin")).unwrap();
+        symlink("../lib/node_modules/npm/bin/npm-cli.js", nvm.join("bin/npm")).unwrap();
+        let (dir, start) = find_npm(&path_with(&nvm.join("bin")), &d, &no_probe).unwrap();
+        assert_eq!(dir, nvm.join("lib/node_modules/npm"));
+        assert!(matches!(&start, NodeStart::Path { node, drop_dyld } if node == Path::new("node") && *drop_dyld == cfg!(target_os = "macos")), "{start:?}");
+
+        // A launcher matchapack does not know is declined without being
+        // run: a wrapper that adds --ignore-scripts only to installs would
+        // pass any probe (it forwards `--version` unchanged).
+        let wrap = d.join("wrap");
+        let log = d.join("wrap-args");
+        package(&wrap.join("lib/node_modules/npm"), "npm", "11.0.0", "npm-cli.js");
+        write_exec(
+            &wrap.join("bin/npm"),
+            &format!("#!/bin/sh\necho \"npm $*\" >> \"{}\"\ncase \"$1\" in ci|install) set -- \"$@\" --ignore-scripts ;; esac\nexec node \"{}\" \"$@\"\n", log.display(), wrap.join("lib/node_modules/npm/bin/npm-cli.js").display()),
+        );
+        symlink(&node, wrap.join("bin/node")).unwrap();
+        let e = find_npm(&path_with(&wrap.join("bin")), &d, &probe_dir(&d)).unwrap_err();
+        assert!(e.contains("is a launcher matchapack does not follow"), "{e}");
+        assert!(!log.exists(), "the wrapper was run");
+
+        // Not a node launcher at all: the probe (for a known launcher) runs
+        // it with --version only (a bare `yarn` would install).
+        let sh = d.join("sh");
+        let log = d.join("sh-args");
+        write_exec(&sh.join("yarn"), &format!("#!/bin/sh\necho \"yarn $*\" >> \"{}\"\necho 1.0.0\n", log.display()));
+        symlink(&node, sh.join("node")).unwrap();
+        let e = probe_launcher(&sh.join("yarn"), "yarn", &path_with(&sh), &d, &probe_dir(&d)().unwrap()).unwrap_err();
+        assert!(e.contains("could not see start node"), "{e}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "yarn --version\n");
+
+        // corepack's npm launcher (`corepack enable npm`).
+        let cp = d.join("cp");
+        package(&cp.join("lib/node_modules/corepack"), "corepack", "0.34.0", "corepack.js");
+        write_exec(&cp.join("lib/node_modules/corepack/dist/npm.js"), "#!/usr/bin/env node\nthrow new Error('corepack ran');\n");
+        std::fs::create_dir_all(cp.join("bin")).unwrap();
+        symlink("../lib/node_modules/corepack/dist/npm.js", cp.join("bin/npm")).unwrap();
+        symlink(&node, cp.join("bin/node")).unwrap();
+        let e = find_npm(&path_with(&cp.join("bin")), &d, &probe_dir(&d)).unwrap_err();
+        assert!(e.contains("corepack's npm launcher"), "{e}");
+
+        // A shim that starts node with an option, or in another directory.
+        let t = d.join("volta");
+        let path = path_with(&fake_version_manager(&t, "volta", &node));
+        let (flags, cd, args, policy) = (t.join("flags"), t.join("cd"), t.join("args"), t.join("policy"));
+        for p in [&flags, &cd, &args, &policy] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        // A known shim that starts another script in npm's bin, not npm.
+        std::fs::write(policy.join(".fakepolicy"), "").unwrap();
+        let e = find_npm(&path, &policy, &probe_dir(&t)).unwrap_err();
+        assert!(e.contains("/bin/policy.js: not npm's bin/npm-cli.js"), "{e}");
+        std::fs::write(args.join(".fakeargs"), "").unwrap();
+        let e = find_npm(&path, &args, &probe_dir(&t)).unwrap_err();
+        assert!(e.contains("passes the script arguments of its own (--version --ignore-scripts)"), "{e}");
+        std::fs::write(flags.join(".fakeflags"), "").unwrap();
+        std::fs::write(cd.join(".fakecd"), t.display().to_string()).unwrap();
+        let e = find_npm(&path, &flags, &probe_dir(&t)).unwrap_err();
+        assert!(e.contains("starts node with options (--max-old-space-size=4096)"), "{e}");
+        let e = find_npm(&path, &cd, &probe_dir(&t)).unwrap_err();
+        assert!(e.contains(&format!("starts node in {}, not in {}", t.display(), cd.display())), "{e}");
+    }
+
+    /// A user's `--require` preload that changes the environment runs once:
+    /// the probe, first in NODE_OPTIONS, records the environment before it,
+    /// and the install's node runs it (PATH prepended once, as under the
+    /// launcher alone).
+    #[test]
+    fn user_preloads_run_once() {
+        let Some(node) = real_node() else { return eprintln!("SKIP: no node") };
+        let d = std::fs::canonicalize(crate::store::tests::scratch("preload-once")).unwrap();
+        let path = path_with(&fake_version_manager(&d, "volta", &node));
+        let pre = d.join("preload.js");
+        std::fs::write(&pre, "process.env.PATH = '/preloaded:' + process.env.PATH;\n").unwrap();
+        let opts = format!("--require \"{}\"", pre.display());
+        let run = d.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let (_, l) = probe_launcher_within(&on_path(&path, "npm").unwrap(), "npm", &path, &d, &run, Some(opts.clone().into()), PROBE_DEADLINE).unwrap();
+        let env: std::collections::BTreeMap<String, String> = l.env.iter().cloned().collect();
+        assert_eq!(env.get("NODE_OPTIONS"), Some(&opts));
+        assert!(!env["PATH"].contains("/preloaded"), "the probe ran before the preload: {}", env["PATH"]);
+        let (seen, _, _) = started_as(&NodeStart::Launch(l), &d);
+        assert_eq!(seen["PATH"], format!("/preloaded:{}", env["PATH"]), "the preload ran once, in the install's node");
+    }
+
+    /// On the nvm-style path (npm's files on PATH, no probe), node gets
+    /// what plain npm's node gets: on macOS no DYLD_* when npm-cli.js runs
+    /// through `#!/usr/bin/env node`; all of them when the entry names node
+    /// directly.
+    #[test]
+    fn nvm_style_entry_and_dyld() {
+        for (head, protected) in [
+            ("#!/usr/bin/env node\n", true),
+            ("#! /usr/bin/env node\n", true),
+            ("#!/bin/sh\nexec node x", true),
+            ("#!/bin/bash\n", true),
+            ("#!/usr/sbin/x\n", true),
+            ("#!/usr/local/bin/node\n", false),
+            ("#!/Users/u/.nvm/versions/node/v24.22.1/bin/node\n", false),
+            ("#!/opt/homebrew/bin/bash\n", false),
+            ("'use strict';\n", false),
+            ("/usr/bin/env node\n", false),
+            ("\u{cf}\u{fa}\u{ed}\u{fe}", false),
+        ] {
+            assert_eq!(protected_interpreter(head.as_bytes()), protected, "{head:?}");
+        }
+        let Some(node) = real_node() else { return eprintln!("SKIP: no node") };
+        let d = std::fs::canonicalize(crate::store::tests::scratch("nvm-dyld")).unwrap();
+        let no_probe = || -> Result<PathBuf, String> { panic!("probed npm's own package") };
+        let ours = std::env::var("DYLD_FALLBACK_LIBRARY_PATH").ok();
+        for (name, shebang, drops) in [("env", "#!/usr/bin/env node".to_string(), cfg!(target_os = "macos")), ("direct", format!("#!{}", node.display()), false)] {
+            let nvm = d.join(name);
+            package(&nvm.join("lib/node_modules/npm"), "npm", "11.0.0", "npm-cli.js");
+            std::fs::write(nvm.join("lib/node_modules/npm/bin/npm-cli.js"), format!("{shebang}\n")).unwrap();
+            std::fs::create_dir_all(nvm.join("bin")).unwrap();
+            symlink("../lib/node_modules/npm/bin/npm-cli.js", nvm.join("bin/npm")).unwrap();
+            symlink(&node, nvm.join("bin/node")).unwrap();
+            let path = path_with(&nvm.join("bin"));
+            let (_, start) = find_npm(&path, &d, &no_probe).unwrap();
+            assert!(matches!(&start, NodeStart::Path { drop_dyld, .. } if *drop_dyld == drops), "{name}: {start:?}");
+            if let Some(v) = &ours {
+                // The fixture's node, not the developer's `node` on PATH (an
+                // asdf shim there would itself drop the variable).
+                let (env, _, _) = started_as_on(&start, &d, Some(&path));
+                assert_eq!(env.get("DYLD_FALLBACK_LIBRARY_PATH"), if drops { None } else { Some(v) }, "{name}");
+            }
+        }
+    }
+
+    /// A launcher that does not start node in time is stopped, with the
+    /// processes it started, and declined; its files are removed.
+    #[test]
+    fn a_stalled_launcher_is_stopped() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("stalled")).unwrap();
+        let pid = d.join("pid");
+        write_exec(&d.join("bin/npm"), &format!("#!/bin/sh\nsleep 30 &\necho $! > \"{}\"\nwait\n", pid.display()));
+        let run = d.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let t0 = std::time::Instant::now();
+        let e = probe_launcher_within(&d.join("bin/npm"), "npm", &path_with(&d.join("bin")), &d, &run, None, std::time::Duration::from_secs(2)).unwrap_err();
+        assert!(e.contains("did not start node within 2 s"), "{e}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+        assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0, "the probe's files are gone");
+        // The launcher's own child (`sleep`) was killed too.
+        let child: i32 = std::fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        let gone = (0..200).any(|_| {
+            let alive = unsafe { libc::kill(child, 0) } == 0;
+            if alive {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            !alive
+        });
+        assert!(gone, "sleep {child} still runs");
+    }
+
+    /// `NodeStart::Launch` runs its own node binary with its environment
+    /// only, whatever this process's PATH and variables are; `Path` runs
+    /// the named node with this process's environment.
+    #[test]
+    fn node_start_runs_the_launchers_node() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("node-start")).unwrap();
+        let fake = d.join("bin/fake-node");
+        write_exec(&fake, "#!/bin/sh\nprintf 'fake node %s, X=%s, HOME=%s' \"$1\" \"$X\" \"${HOME-unset}\"\n");
+        std::fs::create_dir_all(d.join("empty")).unwrap();
+        let l = Launch { node: fake.clone(), argv0: "node".into(), env: vec![("PATH".into(), d.join("empty").display().to_string()), ("X".into(), "1".into())] };
+        let o = NodeStart::Launch(l).command().arg("a").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "fake node a, X=1, HOME=unset");
+        let o = NodeStart::path(&fake).command().arg("b").env("X", "2").output().unwrap();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "unset".into());
+        assert_eq!(String::from_utf8_lossy(&o.stdout), format!("fake node b, X=2, HOME={home}"));
+    }
+
+    /// Each known launcher is told by its layout; the same files elsewhere,
+    /// or a near miss of asdf's text, are not it.
+    #[test]
+    fn known_launchers_by_layout() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("known")).unwrap();
+        let node = Path::new("/usr/bin/true");
+        for flavor in ["volta", "mise", "asdf"] {
+            let shims = fake_version_manager(&d.join(flavor), flavor, node);
+            for name in ["npm", "yarn"] {
+                assert_eq!(known_launcher(&shims.join(name), name), Ok(flavor), "{flavor} {name}");
+            }
+        }
+        // The same names, without the rest of the layout.
+        write_exec(&d.join("loose/volta-shim"), "");
+        write_exec(&d.join("loose/volta"), "");
+        std::fs::create_dir_all(d.join("loose/bin")).unwrap();
+        symlink(d.join("loose/volta-shim"), d.join("loose/bin/npm")).unwrap();
+        assert!(known_launcher(&d.join("loose/bin/npm"), "npm").unwrap_err().contains("does not follow"), "volta without tools/image");
+        // With tools/image, but no `volta` beside the shim binary.
+        std::fs::create_dir_all(d.join("lone/home/tools/image")).unwrap();
+        std::fs::create_dir_all(d.join("lone/home/bin")).unwrap();
+        write_exec(&d.join("lone/release/volta-shim"), "");
+        symlink(d.join("lone/release/volta-shim"), d.join("lone/home/bin/npm")).unwrap();
+        assert!(known_launcher(&d.join("lone/home/bin/npm"), "npm").is_err(), "volta-shim without volta beside it");
+        write_exec(&d.join("lone/release/volta"), "");
+        assert_eq!(known_launcher(&d.join("lone/home/bin/npm"), "npm"), Ok("volta"));
+        std::fs::create_dir_all(d.join("loose/shims")).unwrap();
+        write_exec(&d.join("loose/mise"), "");
+        symlink(d.join("loose/mise"), d.join("loose/shims/npm")).unwrap();
+        assert!(known_launcher(&d.join("loose/shims/npm"), "npm").is_err(), "mise without installs");
+        // asdf's text: exact.
+        let ok = "#!/usr/bin/env bash\n# asdf-plugin: nodejs 24.22.1\n# asdf-plugin: nodejs 22.13.0\nexec asdf exec \"npm\" \"$@\"";
+        assert!(asdf_nodejs_shim(ok, "npm"));
+        assert!(asdf_nodejs_shim(&format!("{ok}\n"), "npm"));
+        assert!(asdf_nodejs_shim("#!/usr/bin/env bash\n# asdf-plugin: nodejs 18.0.0\nexec /home/u/.asdf/bin/asdf exec \"npm\" \"$@\" # asdf_allow: ' asdf '\n", "npm"));
+        for bad in [
+            ok.replace("\"npm\" \"$@\"", "\"npm\" \"$@\" --ignore-scripts"),
+            ok.replace("\"npm\"", "\"yarn\""),
+            ok.replace("nodejs 24.22.1", "yarn 1.22.22"),
+            ok.replace("# asdf-plugin: nodejs 24.22.1\n# asdf-plugin: nodejs 22.13.0\n", ""),
+            ok.replace("exec asdf", "exec /tmp/x/notasdf"),
+            ok.replace("exec asdf", "exec $HOME/asdf"),
+            format!("{ok}\necho done"),
+            ok.replace("#!/usr/bin/env bash", "#!/bin/sh"),
+        ] {
+            assert!(!asdf_nodejs_shim(&bad, "npm"), "{bad}");
+        }
+        // corepack's shims/yarn, for yarn only.
+        let cp = d.join("corepack");
+        package(&cp, "corepack", "0.34.0", "corepack.js");
+        write_exec(&cp.join("shims/yarn"), "#!/bin/sh\n");
+        write_exec(&cp.join("shims/npm"), "#!/bin/sh\n");
+        assert_eq!(known_launcher(&cp.join("shims/yarn"), "yarn"), Ok("corepack"));
+        assert!(known_launcher(&cp.join("shims/npm"), "npm").is_err());
+        std::fs::write(cp.join("package.json"), r#"{"name":"not-corepack"}"#).unwrap();
+        assert!(known_launcher(&cp.join("shims/yarn"), "yarn").is_err());
+    }
+
+    fn probe(main: Option<&str>, exec_argv: &[&str], cwd: &Path, env: &[(&str, &str)]) -> Probe {
+        Probe {
+            main: main.map(String::from),
+            args: vec!["--version".into()],
+            node: "/n/node".into(),
+            argv0: "node".into(),
+            exec_argv: exec_argv.iter().map(|s| s.to_string()).collect(),
+            cwd: cwd.display().to_string(),
+            env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        }
+    }
+
+    /// What the launcher's node had is passed on whole, with the user's own
+    /// NODE_OPTIONS (or none) in place of the probe's; what cannot be
+    /// passed on is refused.
+    #[test]
+    fn launch_is_exact_or_refused() {
+        let d = std::fs::canonicalize(crate::store::tests::scratch("exact-launch")).unwrap();
+        let main = d.join("npm-cli.js");
+        write_exec(&main, "");
+        let m = main.to_str().unwrap();
+        let ours = "--require \"/run/launcher-probe.js\"";
+        let env = [("PATH", "/a:/a::/b"), ("TOOL", "1"), ("NODE_OPTIONS", ours), ("_", "/shims/npm")];
+        let (got, l) = exact_launch("x", probe(Some(m), &[], &d, &env), &d, ours, None).unwrap();
+        assert_eq!(got, main);
+        assert_eq!(l, Launch { node: "/n/node".into(), argv0: "node".into(), env: vec![("PATH".into(), "/a:/a::/b".into()), ("TOOL".into(), "1".into()), ("_".into(), "/shims/npm".into())] });
+        let mine = format!("--max-old-space-size=100 {ours}");
+        let (_, l) = exact_launch("x", probe(Some(m), &[], &d, &[("NODE_OPTIONS", &mine)]), &d, &mine, Some("--max-old-space-size=100")).unwrap();
+        assert_eq!(l.env, vec![("NODE_OPTIONS".into(), "--max-old-space-size=100".into())]);
+        let refused = |p: Probe| exact_launch("x", p, &d, ours, None).unwrap_err();
+        assert!(refused(probe(Some(m), &["--preserve-symlinks"], &d, &[("NODE_OPTIONS", ours)])).contains("with options (--preserve-symlinks)"));
+        assert!(refused(probe(Some(m), &[], Path::new("/"), &[("NODE_OPTIONS", ours)])).contains("starts node in /, not in"));
+        assert!(refused(probe(Some(m), &[], &d, &[("NODE_OPTIONS", "--other")])).contains("changes NODE_OPTIONS"));
+        assert!(refused(probe(Some(m), &[], &d, &[])).contains("changes NODE_OPTIONS"));
+        assert!(refused(probe(Some(m), &[], &d, &[("NODE_OPTIONS", ours), ("X", "a\u{fffd}b")])).contains("the variable X cannot be passed on exactly"));
+        assert!(refused(probe(None, &[], &d, &[("NODE_OPTIONS", ours)])).contains("without a script"));
+        for args in [vec!["--version", "--ignore-scripts"], vec!["--ignore-scripts", "--version"], vec![]] {
+            let mut p = probe(Some(m), &[], &d, &[("NODE_OPTIONS", ours)]);
+            p.args = args.iter().map(|a| a.to_string()).collect();
+            assert!(refused(p).contains("passes the script arguments of its own"), "{args:?}");
+        }
+    }
 }
