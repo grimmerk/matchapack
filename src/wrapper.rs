@@ -180,8 +180,9 @@ pub fn process_umask() -> u32 {
 /// with pacote's extraction; npm placing packages the hook never saw is
 /// reported). A major is listed once the inject harness has run on it
 /// (`scripts/verify-npm.sh`, `scripts/test-inject.sh`):
-/// 10 (10.8.2 and 10.9.2, also a 3-workspace project; NOTES), 11 (11.17–11.20
-/// in use), 12 (12.2.2).
+/// 10 (10.8.2 and 10.9.2, also a 3-workspace project; 10.5.2, 10.7.0 and
+/// 10.9.10; NOTES), 11 (11.17–11.20 in use), 12 (12.2.2). Inside a major,
+/// the pacote fingerprint gate (`npm_fingerprints`) decides.
 pub const INJECT_NPM_MAJORS: &[u32] = &[10, 11, 12];
 
 /// The inject engine's version gate: MATCHAPACK_NPM_VERSIONS when set (`any`,
@@ -264,8 +265,10 @@ mod tests {
     #[test]
     fn npm_fingerprint_list() {
         let list = npm_fingerprints();
-        // npm 10.8.0 and later: four class texts (NOTES "G-lite").
-        for p in ["e89576a31b8145ab", "2e43f4c0648d9b8d", "b1ead56a5de97d9b", "d384f9b730728433"] {
+        // The six class texts of npm 10.0.0 to 12.2.2 (NOTES "G-lite"): the
+        // two before 10.8.0 added after test-inject.sh passed on 10.5.2 and
+        // 10.7.0.
+        for p in ["eaaea911e04032d0", "2b01fc92939cb2c9", "e89576a31b8145ab", "2e43f4c0648d9b8d", "b1ead56a5de97d9b", "d384f9b730728433"] {
             assert!(list.iter().any(|f| f.starts_with(p)), "{p}");
         }
         assert!(list.iter().all(|f| is_fingerprint(f) && *f == f.to_ascii_lowercase()), "{list:?}");

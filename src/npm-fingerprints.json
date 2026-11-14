@@ -1,6 +1,16 @@
 {
   "about": "The pacote code the inject hook may be installed on: SHA-256 of the text of pacote's FetcherBase class, as `node src/inject.js --fingerprint <npm dir>` prints it. Embedded in the binary; an npm whose fingerprint is not here runs as plain npm (MATCHAPACK_NPM_FINGERPRINT=any, or a comma list, overrides). Add a fingerprint only after scripts/test-inject.sh and scripts/verify-npm.sh pass with an npm that has it. NOTES.md, \"G-lite: npm release safety (run time)\".",
   "fingerprints": {
+    "eaaea911e04032d015cac6009ff9ff790cce8aeacd81b0cf6da5e1bd990da864": {
+      "releases": "npm 10.0.0 to 10.5.2 (pacote 17.0.4 to 17.0.6)",
+      "verified_on": ["10.5.2"],
+      "added": "2026-11-14"
+    },
+    "2b01fc92939cb2c9da158ed5274b18050225ae5259c09b1efecad3943622b1a6": {
+      "releases": "npm 10.6.0 to 10.7.0 (pacote 18.0.2 to 18.0.3)",
+      "verified_on": ["10.7.0"],
+      "added": "2026-11-14"
+    },
     "e89576a31b8145ab7b8372dd2e7957ef2f0c85264d55423af7ed6c1ccbc914eb": {
       "releases": "npm 10.8.0 to 10.9.0 (pacote 18.0.6 to 19.0.0)",
       "verified_on": ["10.8.2"],

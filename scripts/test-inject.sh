@@ -342,13 +342,14 @@ env -u MATCHAPACK_ENGINE "$bin" install "$p" -- --no-audit --no-fund > "$work/ou
   && ok "MATCHAPACK_ENGINE empty, through the shell function: the inject engine" || bad "default engine wrapper: rc=$rc"
 
 # 10. npm's failures are npm's: same status, said once, nothing retried.
+#     (npm before 10.6 prints `npm ERR!`, later ones `npm error`.)
 p=$(project outofsync small "d['dependencies']['left-pad']='1.3.0'"); mkdir -p "$p/node_modules/sentinel"
 (cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
 install "$p"; rc=$?
-[ $want != 0 ] && [ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ -d "$p/node_modules/sentinel" ] \
+[ $want != 0 ] && [ $rc = $want ] && [ "$(grep -Ec 'npm (error|ERR!) code EUSAGE' "$work/out")" = 1 ] && [ -d "$p/node_modules/sentinel" ] \
   && ok "lockfile out of sync: npm's own error and status ($rc), node_modules untouched" || bad "out of sync: rc=$rc, npm ci gives $want"
 wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
-[ $rc = $want ] && [ "$(grep -c 'npm error code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
+[ $rc = $want ] && [ "$(grep -Ec 'npm (error|ERR!) code EUSAGE' "$work/out")" = 1 ] && [ "$(last_log "r['outcome'], r['engine'], r['code']")" = "npm_failed inject $want" ] \
   && ok "lockfile out of sync through the shell function: status $rc, npm not run again, logged as npm_failed" || bad "out of sync wrapper: rc=$rc ($(last_log "r['outcome']"))"
 
 # 10a. The version gate is by npm major: this npm (11 or 12) is taken with
