@@ -8,7 +8,9 @@
 # between plain Yarn and the study's prototype (an empty file among the first
 # copies; the file group under Node >= 22). Then the Yarn 1 engine
 # (`matchapack yarn`, NOTES "Yarn 1 engine"): identical to plain Yarn on
-# yarn1-many, yarn1-emptyfirst, a regrouped cache, a cache with extra
+# yarn1-many, yarn1-emptyfirst (at the default thread pool, where plain
+# Yarn's own race is tolerated on the engine side too, and strictly with one
+# pool thread; NOTES "The probe race", issue grimmerk/matchapack-private#57), a regrouped cache, a cache with extra
 # xattrs, refused clones, failed fix-ups, --production, workspaces, an
 # incremental install, umask 002 and (MATCHAPACK_YARN_PRIME_NODE=<node>) a
 # cache filled by another Node; install flags and workspace layouts
@@ -77,9 +79,16 @@ if [ "$(uname)" = Darwin ]; then has_xattr() { xattr "$1" 2>/dev/null | grep -qx
 else has_xattr() { python3 -c 'import os,sys; sys.exit(0 if sys.argv[2] in os.listxattr(sys.argv[1], follow_symlinks=False) else 1)' "$1" "$2"; }; fi
 # probe_only <case> <B dir> <B window> <B cache>: does <case>'s plain1
 # differ from <B dir> ONLY the way Yarn's time probe makes two plain runs
-# differ (NOTES "Yarn 1 harness")? Mtime differences only (at least one),
-# every one on a file of the y1-empty package; no other class, no path only
-# on one side, every .yarn-integrity byte-identical. Sets $why when not.
+# differ (NOTES "Yarn 1 harness", "The probe race")? Mtime differences only
+# (at least one), every one on a NON-EMPTY top-level file of the y1-empty
+# package; no other class, no path only on one side, every .yarn-integrity
+# byte-identical. The race: Yarn's one flag "do copies keep times?" is
+# written by every fixTimes call that starts before it is set, and the last
+# writer wins; a pool thread paused at the wrong moment leaves one data file
+# uncorrected, or the flag at "correct", which then corrects index.js and
+# package.json too. Node >= 22.12's copy gives an empty file the cache's
+# times, so an empty file's time never depends on the flag: an empty file
+# that differs is not the race. Sets $why when not.
 probe_only() {
   local args=(--meta "$work/$1/plain1" "$2" --a-run "$(window "$1" plain1)" --b-run "$3" --a-cache "$(cachedir "$1" plain1)" --b-cache "$4")
   why=
@@ -100,6 +109,7 @@ probe_only() {
   while IFS= read -r q; do
     case $q in node_modules/y1-empty/*/*) why="mtime outside the package's top level: $q"; return 1 ;; node_modules/y1-empty/?*) ;; *) why="mtime outside the package: $q"; return 1 ;; esac
     [ -f "$work/$1/plain1/$q" ] && [ ! -L "$work/$1/plain1/$q" ] || { why="not a package file: $q"; return 1; }
+    [ -s "$work/$1/plain1/$q" ] || { why="an empty file: not the race: $q"; return 1; }
   done < "$work/probe-paths.txt"
   return 0
 }
@@ -153,6 +163,13 @@ if [ -d "$work/empty/plain1" ]; then
   d=$(copy2 empty probe-a plain1); f=$d/node_modules/y1-empty/data00.txt; t=$(mtime_of "$f")
   if [ $(( t % 1000000 )) -ge 500000 ]; then set_ns "$f" $(( t - 1000 )); else set_ns "$f" $(( t + 1000 )); fi
   if probe_only empty "$d" "$pw" "$pc"; then ok "probe_only accepts an mtime-only difference on a package file"; else bad "probe_only rejected an mtime-only difference ($why)"; fi
+  # The race never moves an empty file's time (Node's copy gives it the
+  # cache's): one moved next to the data file's is a real difference.
+  d=$(copy2 empty probe-e plain1); f=$d/node_modules/y1-empty/e000.empty; t=$(mtime_of "$f")
+  set_ns "$d/node_modules/y1-empty/data00.txt" $(( $(mtime_of "$d/node_modules/y1-empty/data00.txt") + 1000 ))
+  set_ns "$f" $(( t + 1000 ))
+  if ! probe_only empty "$d" "$pw" "$pc" && [ "${why#an empty file}" != "$why" ]; then ok "probe_only rejects an mtime difference on an empty package file ($why)"
+  else bad "probe_only accepted an mtime difference on an empty file (${why:-accepted})"; fi
   if [ -n "$(groups_other "$f")" ]; then
     chgrp -h "$(groups_other "$f")" "$d/node_modules/y1-empty/data01.txt"
     if ! probe_only empty "$d" "$pw" "$pc" && [ "${why#class gid}" != "$why" ]; then ok "probe_only rejects a gid difference next to it"; else bad "probe_only accepted a gid difference (${why:-accepted})"; fi
@@ -285,11 +302,16 @@ ejson() { python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); y=r.get("
 copied() { ejson "$1" "y.get('copied', {}).get('$2', 0)"; }
 everify() { local c=$1; shift; verify "$c" --engine yarn1 "$@"; }
 same() { grep -q 'plain vs engine: IDENTICAL' "$work/out"; }
+# first128 <case>: Yarn's first copies were left to Node, all 128 of them
+# (Yarn's copy concurrency; the hook reads it from the bundle). Checked by
+# count: leaving none to Node changes the tree only in some runs (issue grimmerk/matchapack-private#57,
+# NOTES "The probe race"), the count always.
+first128() { [ "$(ejson "$1" "y['first']")" = 128 ] && [ "$(copied "$1" first-copies)" = 128 ]; }
 
 if [ "${TEST_YARN1_PART:-all}" != route ]; then
 everify e-many "$here/fixtures/yarn1-many"
 n=$(ejson e-many "y['cloned']")
-if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && [ "$(copied e-many first-copies)" = "$(ejson e-many "y['first']")" ] \
+if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && first128 e-many \
   && grep -q "engine: shared $n of" "$work/out"; then
   ok "yarn1-many: engine identical to plain (mtimes, gid, xattr names included); $n files cloned and sharing blocks, Yarn's first $(ejson e-many "y['first']") copies left to Node"
 else bad "yarn1-many engine (exit $rc, cloned ${n:-?})"; fi
@@ -422,12 +444,86 @@ mkdir -p "$work/e-in/cache"; touch "$work/e-in/cache/keep"
 verify e-in --cache-dir "$work/e-in/cache" "$here/fixtures/yarn1-many"
 if [ $rc = 2 ] && [ -f "$work/e-in/cache/keep" ]; then ok "a --cache-dir inside --work is refused and left alone"; else bad "--cache-dir inside --work (exit $rc)"; fi
 
+# yarn1-emptyfirst at the default thread pool: plain Yarn's own race (NOTES
+# "The probe race"; issue grimmerk/matchapack-private#57) can hit the engine's run as well as a plain
+# one, so the engine may differ from plain1 the way two plain runs can.
+# emptyfirst_engine_verdict <case> <exit> [<engine tree>]: the verdict on
+# such a case, whose harness output is in $work/out. Passes on exit 0; under
+# Node >= 22 on exit 3 with the engine identical to plain1 or differing only
+# where plain varies; and on exit 1 when the harness reached the comparison
+# (ENGINE DIFFERS) and the engine tree differs from plain1 only the way the
+# race does (probe_only: mtimes of non-empty package files). The evidence is
+# kept as emptyfirst-engine-race-<case>.txt. Sets $verdict. The strict
+# one-thread cases below have no tolerance: with one pool thread the race
+# cannot happen.
+emptyfirst_engine_verdict() {
+  local c=$1 r=$2 tree=${3:-$work/$1/engine}
+  verdict="exit $r"
+  if [ "$r" = 0 ] && grep -q 'plain vs engine: IDENTICAL' "$work/out"; then verdict="plain vs engine: IDENTICAL"; return 0; fi
+  [ "$node_major" -ge 22 ] || return 1
+  if [ "$r" = 3 ] && grep -Eq 'plain vs engine: (IDENTICAL|differs only where plain varies)' "$work/out"; then
+    verdict=$(grep -o 'plain vs engine: [a-zA-Z ]*' "$work/out" | head -1); return 0
+  fi
+  [ "$r" = 1 ] && grep -q 'plain vs engine: ENGINE DIFFERS' "$work/out" || return 1
+  if probe_only "$c" "$tree" "$(window "$c" engine)" "$(cachedir "$c" engine)"; then
+    cp "$work/$c/diff-engine.txt" "$work/emptyfirst-engine-race-$c.txt" 2>/dev/null
+    verdict="the probe race on the engine side: mtimes of non-empty package files only ($work/emptyfirst-engine-race-$c.txt)"; return 0
+  fi
+  verdict="the engine differs beyond the probe race ($why)"; return 1
+}
 for c in empty empty-empty; do
   if [ $c = empty ]; then everify e-$c "$here/fixtures/yarn1-emptyfirst"; else everify e-$c --cache empty "$here/fixtures/yarn1-emptyfirst"; fi
   n=$(ejson e-$c "y['cloned']")
-  if { [ $rc = 0 ] || { [ $rc = 3 ] && [ "$node_major" -ge 22 ]; }; } && grep -Eq 'plain vs engine: (IDENTICAL|differs only where plain varies)' "$work/out" && [ "${n:-0}" -gt 0 ]; then
-    ok "yarn1-emptyfirst ($c), node $node_major: engine as plain ($(grep -o 'plain vs engine: [a-zA-Z ]*' "$work/out" | head -1)); $n files cloned"
-  else bad "yarn1-emptyfirst engine ($c, exit $rc)"; fi
+  if emptyfirst_engine_verdict e-$c $rc && [ "${n:-0}" -gt 0 ] && first128 e-$c; then
+    ok "yarn1-emptyfirst ($c), node $node_major: engine as plain ($verdict); $n files cloned, Yarn's first 128 copies left to Node"
+  else bad "yarn1-emptyfirst engine ($c, exit $rc: $verdict; first $(ejson e-$c "y['first']"), first-copies $(copied e-$c first-copies))"; grep '^    ' "$work/probe.txt" 2>/dev/null | head -10; fi
+done
+# The verdict itself, on changed copies of e-empty's engine tree, with the
+# harness's ENGINE DIFFERS: a data file's mtime moved is the race (the
+# "forced race": the branch runs here even when the real race did not); an
+# empty file's mtime, a group, a content byte or .yarn-integrity's time is not.
+if [ -d "$work/e-empty/engine" ] && [ "$node_major" -ge 22 ]; then
+  out_kept=$work/out-e-empty; cp "$work/out" "$out_kept"
+  # forced <name> <change (sh, $d is the copy)>: the verdict on a copy with that change.
+  forced() {
+    d=$(copy2 e-empty "$1" engine); (cd "$d" && eval "$2")
+    printf 'plain vs engine: ENGINE DIFFERS (forced)\n' > "$work/out"
+    emptyfirst_engine_verdict e-empty 1 "$d"
+  }
+  nudge='f=node_modules/y1-empty/data05.txt; t=$(mtime_of "$f"); if [ $(( t % 1000000 )) -ge 500000 ]; then set_ns "$f" $(( t - 1000 )); else set_ns "$f" $(( t + 1000 )); fi'
+  if forced race-a "$nudge"; then ok "engine-side verdict: a data file's mtime moved (a forced race) is accepted as the race"
+  else bad "engine-side verdict rejected a forced race ($verdict)"; fi
+  if ! forced race-b "$nudge"'; set_ns node_modules/y1-empty/e007.empty $(( $(mtime_of node_modules/y1-empty/e007.empty) + 1000 ))'; then ok "engine-side verdict: an empty file's mtime is not the race ($verdict)"
+  else bad "engine-side verdict accepted an empty file's mtime"; fi
+  g=$(groups_other "$work/e-empty/engine/node_modules/y1-empty/data06.txt")
+  if [ -n "$g" ]; then
+    if ! forced race-c "$nudge"'; chgrp -h '"$g"' node_modules/y1-empty/data06.txt'; then ok "engine-side verdict: a group change is not the race ($verdict)"
+    else bad "engine-side verdict accepted a group change"; fi
+  fi
+  if ! forced race-d "$nudge"'; f=node_modules/y1-empty/data07.txt; t=$(mtime_of "$f"); printf y >> "$f"; set_ns "$f" "$t"'; then ok "engine-side verdict: a content change is not the race ($verdict)"
+  else bad "engine-side verdict accepted a content change"; fi
+  if ! forced race-e "$nudge"'; set_ns node_modules/.yarn-integrity 1700000000123456789'; then ok "engine-side verdict: .yarn-integrity's mtime is not the race ($verdict)"
+  else bad "engine-side verdict accepted .yarn-integrity's mtime"; fi
+  # Exit 1 for another reason than the comparison (here: no clones) is never the race.
+  printf 'engine: cloned 0 files, expected at least 1\n' > "$work/out"
+  if ! emptyfirst_engine_verdict e-empty 1 "$work/e-empty-race-a"; then ok "engine-side verdict: an exit 1 that is not ENGINE DIFFERS is not the race"
+  else bad "engine-side verdict accepted an exit 1 without ENGINE DIFFERS"; fi
+  cp "$out_kept" "$work/out"
+fi
+
+# The same fixture with one pool thread (UV_THREADPOOL_SIZE=1, which reaches
+# plain Yarn and the engine alike): libuv then finishes each operation in
+# the order it was queued, the last writer of Yarn's flag is always the 128th
+# copy (an empty file), and the race cannot happen. Strict: no tolerance of
+# any kind. These two cases guard the clones' times (an empty clone's, a
+# non-empty clone's), which the default-pool cases above cannot tell from
+# the race.
+for c in empty-uv1 empty-empty-uv1; do
+  if [ $c = empty-uv1 ]; then UV_THREADPOOL_SIZE=1 everify e-$c "$here/fixtures/yarn1-emptyfirst"; else UV_THREADPOOL_SIZE=1 everify e-$c --cache empty "$here/fixtures/yarn1-emptyfirst"; fi
+  n=$(ejson e-$c "y['cloned']")
+  if [ $rc = 0 ] && grep -q 'plain vs plain: IDENTICAL' "$work/out" && same && [ "${n:-0}" -gt 0 ] && first128 e-$c; then
+    ok "yarn1-emptyfirst ($c), one pool thread, node $node_major: plain vs plain and plain vs engine identical, no tolerance; $n files cloned"
+  else bad "yarn1-emptyfirst one pool thread ($c, exit $rc, cloned ${n:-?}, first $(ejson e-$c "y['first']"), first-copies $(copied e-$c first-copies))"; fi
 done
 
 # The group: under Node >= 22 Node's copy takes the cache file's group,
