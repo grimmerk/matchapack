@@ -136,6 +136,15 @@ check('new major, red, matchapack changed: run again', t13.length === 1 && t13[0
 t13 = poll13('fail', 'h')
 check('new major, red, matchapack unchanged: not run again', t13.length === 0, JSON.stringify(t13))
 
+// 11. The monthly run retests a release the line has verified: the diff
+//     against the release before was reported then, so a changed function
+//     asks for nobody (and the run stays green); a new one still does.
+const changedFn = (base) => ({ ...cmpSame(base), callerChanged: true, changed: [{ name: 'f', status: 'changed', file: 'diffs/f.diff', lines: 2 }] })
+r = report({ items: [{ item: item('11.21.1', { reason: 'monthly run', baseline: '11.21.0' }), linux: { known: true, compare: changedFn('11.21.0') }, files: { 'diffs/f.diff': '+x\n' } }] })
+check('monthly retest of a verified release, function changed: nobody asked, green', r.state.lines[11].suites === 'pass' && r.state.lines[11].action === 'none' && r.flags.notify === false && r.comments.length === 0, JSON.stringify({ line: r.state.lines[11], flags: r.flags }))
+r = report({ items: [{ item: item('11.21.2'), linux: { known: true, compare: changedFn('11.21.1') }, files: { 'diffs/f.diff': '+x\n' } }] })
+check('new release, function changed: read the diff, a comment, the run notifies', r.state.lines[11].action === 'read the diff' && r.flags.notify === true && r.comments.length === 1, JSON.stringify({ line: r.state.lines[11], flags: r.flags }))
+
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

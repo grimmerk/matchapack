@@ -583,10 +583,16 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     const classText = !r ? '?' : r.known === true ? 'known' : r.known === false ? 'new' : 'unknown'
     const caller = !r ? '?' : !r.compare ? (compareMissing ? 'missing' : '?') : r.compare.callerChanged ? 'changed' : 'same'
     const classChanged = !!(r && r.compare && r.compare.classChanged)
+    // A release this line has already verified (the monthly run, a retest by
+    // hand): its diff against the release before was reported when it was
+    // first tested, so a changed function asks for nobody again; a failure
+    // or a new class text still does.
+    const prior = state.lines[t.major] || {}
+    const reviewed = !!(prior.verified && cmp(prior.verified, t.version) >= 0)
     let action = 'none'
     if (suites !== 'pass' || classText !== 'known' || t.newMajor) {
       action = 'action needed'
-    } else if (caller === 'changed' || classChanged) {
+    } else if (!reviewed && (caller === 'changed' || classChanged)) {
       action = 'read the diff'
     }
     const row = { date: plan.date, version: t.version, reason: t.reason, baseline: (r && r.compare && r.compare.base) || t.baseline, suites, linux: r ? (linuxOk ? 'pass' : 'fail') : 'error', macos: macMissing ? 'missing' : macOk === null ? '-' : macOk ? 'pass' : 'fail', classText, fingerprint: r ? r.fingerprint : null, caller, action, head: plan.head, run }
