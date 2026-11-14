@@ -914,9 +914,14 @@ function watchReport (state, plan, res, run) {
   for (const t of N.todo) {
     const lin = jobResults((plan.nodeLinux || []).filter((e) => e.node === t.node), res.nodelinux)
     const mac = jobResults((plan.nodeMacos || []).filter((e) => e.node === t.node), res.nodemacos)
-    const suites = verdict([...lin, ...mac])
     const m = mac[0] && mac[0].s
     const facts = (m && m.facts) || null
+    // The facts are part of the check: a green macOS result without them
+    // is incomplete (not verified, tested again on the next poll).
+    let suites = verdict([...lin, ...mac])
+    if (suites === 'pass' && t.yarn && !facts) {
+      suites = 'incomplete'
+    }
     const prev = state.node.lines[t.line] || {}
     const factsChanged = !!(prev.facts && facts && !sameFacts(prev.facts, facts))
     // A new major always asks for a person (enabling it in pull-request CI

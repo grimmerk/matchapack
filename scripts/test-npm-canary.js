@@ -309,6 +309,11 @@ check('watch report: the npm suites on that Node missing: incomplete, red', w.st
 w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(false) })
 check('watch report: the Yarn suites red: fail, the failed case in the comment', w.state.node.lines[26].suites === 'fail' && w.flags.red && /FAIL yarn1-many engine/.test(w.comment), JSON.stringify(w.state.node.lines[26]))
 
+// 21b. Every suite green, but the macOS result has no facts: incomplete
+//      (not verified, retried on the next poll).
+w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(true, null) })
+check('watch report: green but no facts: incomplete, not verified, red', w.state.node.lines[26].suites === 'incomplete' && w.state.node.lines[26].verified === '26.13.1' && w.flags.red, JSON.stringify(w.state.node.lines[26]))
+
 // 22. A new major, all green: still a comment and a notice.
 const n27 = { node: '27.0.0', line: 27, uv: '1.53.0', reason: 'Node 27 is new', npm: true, yarn: true, newMajor: true }
 const n27jobs = { nodeLinux: ['10.9.10'].map((v) => ({ key: `node27.0.0-npm${v}`, node: '27.0.0', npm: v })), nodeMacos: [{ key: 'node27.0.0', node: '27.0.0', yarn: '1.22.22' }] }

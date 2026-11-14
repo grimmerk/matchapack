@@ -390,6 +390,11 @@ if [ -n "$command" ]; then
     # ran plain, unseen by the hook. Only a case that clones nothing.
     echo "engine: $child_declined"
     [ "$min_clones" = 0 ] || { echo "engine: the workspace's Yarn ran without the hook"; exit 1; }
+  elif [ "$min_clones" = 0 ]; then
+    # A case that expects no clone may also have nothing to link (an
+    # upgrade-interactive with nothing to upgrade returns before Yarn's
+    # Install).
+    echo "engine: link steps $steps (none required: --engine-min-clones 0)"
   else
     [ "$steps" -ge 1 ] 2>/dev/null || { echo "engine: the hook saw no link step"; exit 1; }
   fi

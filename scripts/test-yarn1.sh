@@ -907,6 +907,14 @@ if [ $rc = 0 ] && same && [ "${n:-0}" -gt 285 ] && [ "$(ejson c-ws-relcache "y['
   ok "yarn workspace w2 add --cache-folder <relative>: resolved in the workspace's directory, as Yarn does; engine identical; $n files cloned"
 else bad "workspace command with a relative --cache-folder (exit $rc, cloned ${n:-?}, cache $(ejson c-ws-relcache "y['cache']"))"; fi
 
+# A command with nothing to do and no link step (upgrade-interactive after
+# `upgrade --latest`: every dependency up to date, Yarn returns before its
+# Install): passes when the case expects no clone.
+cverify c-ui-noop "upgrade-interactive --latest" --command-tty --command-before "upgrade --latest" --engine-min-clones 0 "$here/fixtures/yarn1-upgrade"
+if [ $rc = 0 ] && same && said ": exit 0 in every run" && grep -q 'All of your dependencies are up to date' "$work/c-ui-noop/engine.log" && [ "$(ejson c-ui-noop "y['link_steps']")" = 0 ]; then
+  ok "yarn upgrade-interactive with nothing to upgrade: no prompt, no link step; engine identical"
+else bad "yarn upgrade-interactive with nothing to upgrade (exit $rc, link steps $(ejson c-ui-noop "y['link_steps']"))"; fi
+
 # The harness itself: a command that changes nothing reads "none" / "no",
 # so a case cannot pass because the command did nothing.
 cverify c-noop "install --force" --engine-min-clones 0 "$here/fixtures/yarn1-small"
