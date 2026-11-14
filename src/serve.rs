@@ -1596,6 +1596,46 @@ mod tests {
         let _ = i;
     }
 
+    /// The other way round: the store's tmp/ is setgid (a store under a
+    /// shared group, #41), the project's directory is not. On Linux the
+    /// directories made in tmp/ get the bit there; npm's extraction in the
+    /// project gives none, so a directory moved in must lose it.
+    #[test]
+    fn directories_lose_the_setgid_bit_a_setgid_store_hands_on() {
+        let fx = Fx::new("serve-setgid-store");
+        if !fx.can_clone() {
+            return;
+        }
+        let (i, sri) = fx.entry(&[("package.json", 0o644, "{}\n"), ("lib/deep/x.js", 0o644, "x\n")]);
+        let tmp = fx.store.root.join("tmp");
+        let m = fs::metadata(&tmp).unwrap().permissions().mode();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(m | libc::S_ISGID as u32)).unwrap();
+        let nm = fx.root.join("node_modules");
+        fs::create_dir_all(&nm).unwrap();
+        let setgid = |d: &Path| -> Vec<String> {
+            walkdir::WalkDir::new(d)
+                .sort_by_file_name()
+                .into_iter()
+                .map(|e| e.unwrap())
+                .filter(|e| e.file_type().is_dir() && fs::metadata(e.path()).unwrap().mode() & libc::S_ISGID as u32 != 0)
+                .map(|e| e.path().strip_prefix(d).unwrap().display().to_string())
+                .collect()
+        };
+        for mode in modes() {
+            let s = fx.server(mode);
+            let fast = nm.join(format!("fast-{mode:?}"));
+            assert_eq!(placed(s.place_entry(&sri, &fast)).0, Kind::Fast);
+            let merge = nm.join(format!("merge-{mode:?}"));
+            fs::create_dir_all(merge.join("node_modules")).unwrap();
+            assert_eq!(placed(s.place_entry(&sri, &merge)).0, Kind::Merge);
+            for d in [&fast, &merge] {
+                assert_eq!(setgid(d), Vec::<String>::new(), "{mode:?} {}: setgid directories", d.display());
+            }
+            drop(s);
+        }
+        let _ = i;
+    }
+
     fn extract_to(o: Outcome, want: &str) -> PathBuf {
         match o {
             Outcome::Extract { to, why } if why == want => to,

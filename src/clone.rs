@@ -213,8 +213,8 @@ pub fn settle_placed(src: &Path, dst: &Path, touch: bool, want: Option<NewPaths>
 }
 
 /// Give `c` (not followed if a symlink) the group of `w` unless it has it
-/// already, and a directory the setgid bit when `w` hands it on. True when
-/// something was changed.
+/// already, and a directory the setgid bit when `w` hands it on, or take the
+/// bit away when `w` does not. True when something was changed.
 fn regroup(c: &std::ffi::CStr, w: NewPaths) -> Result<bool> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::lstat(c.as_ptr(), &mut st) } != 0 {
@@ -229,9 +229,13 @@ fn regroup(c: &std::ffi::CStr, w: NewPaths) -> Result<bool> {
         changed = true;
     }
     let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-    if w.setgid_dirs && is_dir && st.st_mode & libc::S_ISGID == 0 {
-        if unsafe { libc::chmod(c.as_ptr(), (st.st_mode & 0o7777) | libc::S_ISGID) } != 0 {
-            bail!("chmod g+s {:?}: {}", c, std::io::Error::last_os_error());
+    let has = st.st_mode & libc::S_ISGID != 0;
+    // Both ways: a directory made in a setgid tmp/ of the store got the bit
+    // there (Linux), and npm's extraction in a plain directory gives none.
+    if is_dir && has != w.setgid_dirs {
+        let mode = if w.setgid_dirs { (st.st_mode & 0o7777) | libc::S_ISGID } else { st.st_mode & 0o7777 & !libc::S_ISGID };
+        if unsafe { libc::chmod(c.as_ptr(), mode) } != 0 {
+            bail!("chmod g{}s {:?}: {}", if w.setgid_dirs { '+' } else { '-' }, c, std::io::Error::last_os_error());
         }
         changed = true;
     }
