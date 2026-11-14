@@ -708,9 +708,9 @@ echo "fake $flavor: no $name" >&2; exit 127
         let run = d.join("run");
         std::fs::create_dir_all(&run).unwrap();
         let t0 = std::time::Instant::now();
-        let e = probe_launcher_within(&d.join("bin/npm"), "npm", &path_with(&d.join("bin")), &d, &run, None, std::time::Duration::from_millis(500)).unwrap_err();
-        assert!(e.contains("did not start node within 0 s") || e.contains("did not start node within 1 s"), "{e}");
-        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "{:?}", t0.elapsed());
+        let e = probe_launcher_within(&d.join("bin/npm"), "npm", &path_with(&d.join("bin")), &d, &run, None, std::time::Duration::from_secs(2)).unwrap_err();
+        assert!(e.contains("did not start node within 2 s"), "{e}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
         assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0, "the probe's files are gone");
         // The launcher's own child (`sleep`) was killed too.
         let child: i32 = std::fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
