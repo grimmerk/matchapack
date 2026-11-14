@@ -331,6 +331,13 @@ async function main () {
     if (pkg.name !== 'yarn' || !/^1\./.test(yarnVersion || '')) {
       return decline(`${yarnJs} is not Yarn 1's npm package (${launcher ? `${launcher} chose ` : ''}yarn ${yarnVersion || 'of an unknown version'})`)
     }
+    // The version floor, as src/yarn1.rs `yarn1_clones` (a Yarn corepack
+    // chose is checked only here): an older Yarn 1 asks for no clone. The
+    // minor number as a number.
+    const minor = Number((/^1\.(\d+)\./.exec(yarnVersion) || [])[1])
+    if (!(minor >= 10)) {
+      return decline(`yarn ${yarnVersion} is older than 1.10.0, the first Yarn 1 that asks for a clone: nothing could be cloned`)
+    }
     try {
       bundle = require.resolve(path.join(path.dirname(yarnJs), '..', 'lib', 'cli'))
     } catch (e) {

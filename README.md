@@ -241,6 +241,8 @@ and prints why when:
 - `node_modules` is a symlink;
 - the project is outside the trial scope (`~/.config/matchapack/paths`);
 - `--modules-folder`, `--cwd` or `--global-folder` move the install;
+- the Yarn is older than 1.10.0, the first Yarn 1 that asks for a clone
+  (an older one would cost a start-up for nothing);
 - Yarn's code does not have the shape the hook needs, or Node's own copy has
   changed (it keeps a file's time, or clones).
 

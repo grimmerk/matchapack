@@ -212,8 +212,22 @@ pub struct YarnBin {
     pub env: Vec<(String, String)>,
 }
 
+/// The first Yarn 1 whose link step asks for a clone (`fs.copyFile` with
+/// COPYFILE_FICLONE, yarn-classic `src/util/fs-normalized.js`). An older one
+/// copies with no flag, the hook leaves every copy to Node, and the engine
+/// would cost a start-up for no clone (measured on all 17 releases from
+/// 1.0.0 to 1.9.4: 0 files cloned; NOTES "Yarn 1 commands").
+const YARN1_FLOOR_MINOR: u32 = 10;
+
+/// Whether Yarn 1 `version` is at or above 1.10.0 (`YARN1_FLOOR_MINOR`):
+/// the minor number compared as a number ("1.9" sorts after "1.10" as text).
+fn yarn1_clones(version: &str) -> bool {
+    let minor = version.strip_prefix("1.").and_then(|r| r.split('.').next()).and_then(|m| m.parse::<u32>().ok());
+    minor.is_some_and(|m| m >= YARN1_FLOOR_MINOR)
+}
+
 /// The version of Yarn 1's npm package whose `bin/yarn.js` is `js`, or why
-/// it is not one.
+/// it is not one (or one too old to clone with).
 fn yarn1_package(js: &Path) -> std::result::Result<String, String> {
     let pkg = js.parent().and_then(|b| b.parent()).map(|d| d.join("package.json"));
     let v: Option<Value> = pkg.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
@@ -224,6 +238,9 @@ fn yarn1_package(js: &Path) -> std::result::Result<String, String> {
     }
     if !version.starts_with("1.") {
         return Err(format!("yarn {version} at {} is not Yarn 1", js.display()));
+    }
+    if !yarn1_clones(&version) {
+        return Err(format!("yarn {version} is older than 1.{YARN1_FLOOR_MINOR}.0, the first Yarn 1 that asks for a clone: nothing could be cloned"));
     }
     Ok(version)
 }
@@ -1528,6 +1545,29 @@ mod tests {
 
     /// Homebrew's `bin/yarn` is recognized only as `write_env_script` writes
     /// it, naming its own keg's `libexec/bin/yarn.js`.
+    /// The version floor (1.10.0): by number, not text; checked on the
+    /// package matchapack finds itself.
+    #[test]
+    fn yarn_older_than_1_10_is_declined() {
+        for (v, ok) in [("1.9.4", false), ("1.0.0", false), ("1.10.0", true), ("1.10.1", true), ("1.22.22", true), ("1.100.0", true), ("1.x", false), ("2.4.3", false)] {
+            assert_eq!(yarn1_clones(v), ok, "{v}");
+        }
+        let d = std::fs::canonicalize(crate::store::tests::scratch("y1-floor")).unwrap();
+        for v in ["1.9.4", "1.10.0", "1.22.22"] {
+            let js = d.join(v).join("bin/yarn.js");
+            std::fs::create_dir_all(js.parent().unwrap()).unwrap();
+            std::fs::write(&js, "").unwrap();
+            std::fs::write(d.join(v).join("package.json"), format!(r#"{{"name":"yarn","version":"{v}"}}"#)).unwrap();
+            let got = yarn1_package(&js);
+            if v == "1.9.4" {
+                let e = got.unwrap_err();
+                assert!(e.contains("yarn 1.9.4 is older than 1.10.0"), "{e}");
+            } else {
+                assert_eq!(got.as_deref(), Ok(v));
+            }
+        }
+    }
+
     #[test]
     fn homebrew_launcher_shape() {
         let d = std::fs::canonicalize(crate::store::tests::scratch("y1-homebrew")).unwrap();

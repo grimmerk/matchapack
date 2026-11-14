@@ -915,6 +915,11 @@ gate() { # gate <name> <expected reason text> <dir> [VAR=value...] -- [yarn args
   else bad "gate $name (exit $rc)"; fi
 }
 d=$(project yarnpath); printf 'yarn-path "%s"\n' "$yarnjs" > "$d/.yarnrc"; gate yarn-path 'sets yarn-path' "$d" --
+# The version floor: a Yarn 1 older than 1.10.0 asks for no clone (a copy of
+# the Yarn under test whose package.json says 1.9.4).
+oy=$work/yarn-1.9.4; rm -rf "${oy:?}"; mkdir -p "$oy"; cp -R "$(dirname "$(dirname "$yarnjs")")/." "$oy/"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["version"]="1.9.4"; json.dump(d, open(p,"w"))' "$oy/package.json"
+d=$(project floor); gate "Yarn older than 1.10.0" 'yarn 1.9.4 is older than 1.10.0' "$d" MATCHAPACK_YARN_JS="$oy/bin/yarn.js" --
 # A Yarn 2+ project is told from its files before anything else, and is
 # plain Yarn unlogged (NOTES "Yarn 1 shell route"): exit 3 here, the reason
 # printed, no log line.
@@ -1038,6 +1043,18 @@ else
       if [ $rc = 0 ] && grep -q 'running plain yarn instead' "$work/out" && grep -q '^FAKE-YARN install' "$work/out"; then ok "corepack chose a release that is not Yarn 1: declined, then plain corepack runs it"
       else bad "corepack non-Yarn-1, plain run (exit $rc)"; fi
     else bad "corepack non-Yarn-1 declined (exit $rc)"; fi
+    # corepack chose a Yarn 1 older than 1.10.0: the hook declines before
+    # Yarn starts (the version floor; matchapack never saw that Yarn).
+    fo=$ch/v1/yarn/1.9.4; mkdir -p "$fo/bin" "$fo/lib"
+    printf '{"locator":{"name":"yarn","reference":"1.9.4"},"bin":{"yarn":"./bin/yarn.js"},"hash":"sha512.fake"}' > "$fo/.corepack"
+    printf '{"name":"yarn","version":"1.9.4"}' > "$fo/package.json"
+    printf "#!/usr/bin/env node\nrequire('../lib/cli')\n" > "$fo/bin/yarn.js"
+    printf "const CONCURRENT_QUEUE_ITEMS = require('fs').copyFile ? 128 : 4;\nconsole.log('OLD-YARN ' + process.argv.slice(2).join(' '))\n" > "$fo/lib/cli.js"
+    d=$(project cpold); setpm "$d" yarn@1.9.4
+    myarn "$d" COREPACK_HOME="$ch" MATCHAPACK_YARN_JS="$cpjs" MATCHAPACK_NO_FALLBACK=1 --
+    if [ $rc = 3 ] && grep -q "yarn 1.9.4 is older than 1.10.0" "$work/out" && ! grep -q OLD-YARN "$work/out" && [ "$(lastlog 'r["outcome"]')" = declined ]; then
+      ok "corepack chose Yarn 1.9.4: the hook declines (older than 1.10.0) before Yarn starts"
+    else bad "corepack chose an old Yarn 1 (exit $rc)"; fi
   fi
 fi
 
