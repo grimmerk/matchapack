@@ -106,7 +106,11 @@ fn walk(dir: &Path, store_root: &Path) -> Walked {
                     Ok(m) if m.is_file() => w.found.push(dir.to_path_buf()),
                     Ok(m) if m.file_type().is_symlink() => w.skipped.push((dir.to_path_buf(), "hidden lockfile is a symlink".into())),
                     Ok(_) => w.skipped.push((dir.to_path_buf(), "hidden lockfile is not a file".into())),
-                    Err(_) => w.no_hidden_lock += 1,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => w.no_hidden_lock += 1,
+                    // Not "no hidden lockfile": a node_modules this process
+                    // cannot search may hold one, and its project would go
+                    // unrecorded without a word.
+                    Err(e) => w.skipped.push((dir.to_path_buf(), format!("hidden lockfile unreadable: {e}"))),
                 }
             }
         }
@@ -140,7 +144,8 @@ pub struct AdoptReport {
     pub complete: usize,
     /// Projects none of whose packages is in the store: nothing to record.
     pub no_entry: usize,
-    /// Distinct store entries the projects found use.
+    /// Distinct store entries gc will keep for the projects found: those
+    /// adopted plus those their existing records list.
     pub entries: usize,
     /// Distinct integrities their hidden lockfiles list that are not in the store.
     pub not_in_store: usize,
@@ -189,7 +194,7 @@ pub fn adopt(store: &Store, dirs: &[PathBuf], dry_run: bool) -> Result<AdoptRepo
         let l = read_hidden_lock(&p);
         (p, l)
     }).collect();
-    let mut used_all: HashSet<&Integrity> = HashSet::new();
+    let mut used_all: HashSet<Integrity> = HashSet::new();
     let mut missing: HashSet<&Integrity> = HashSet::new();
     for (dir, listed) in &read {
         let listed = match listed {
@@ -203,13 +208,17 @@ pub fn adopt(store: &Store, dirs: &[PathBuf], dry_run: bool) -> Result<AdoptRepo
         let (here, absent): (Vec<&Integrity>, Vec<&Integrity>) = listed.iter().partition(|i| in_store.contains(*i));
         r.list.push((dir.clone(), "none", here.len(), absent.len()));
         missing.extend(absent);
+        // gc keeps what the project's record already lists (adopting never
+        // narrows it) as well as what is adopted now: count both.
+        let old = store.recorded_entries(dir);
+        used_all.extend(old.iter().flatten().filter_map(|k| Integrity::from_key(k)).filter(|i| in_store.contains(i)));
         if here.is_empty() {
             r.no_entry += 1;
             continue;
         }
-        used_all.extend(here.iter().copied());
+        used_all.extend(here.iter().map(|i| (*i).clone()));
         let keys: Vec<String> = here.iter().map(|i| i.key()).collect();
-        match store.recorded_entries(dir) {
+        match old {
             Some(old) => {
                 let old: HashSet<String> = old.into_iter().collect();
                 if keys.iter().all(|k| old.contains(k)) {
@@ -418,10 +427,15 @@ mod tests {
         let records = || std::fs::read_dir(d.join("store/projects")).unwrap().count();
         let dry = adopt(&store, &[root.clone()], true).unwrap();
         assert_eq!((dry.projects, dry.written, dry.extended, dry.complete, dry.no_hidden_lock), (2, 1, 1, 0, 1));
-        assert_eq!((dry.entries, dry.not_in_store), (1, 1), "a is used; `absent` is listed but not in the store");
+        assert_eq!((dry.entries, dry.not_in_store), (2, 1), "kept: a (adopted) and c (p4's record); `absent` is listed but not in the store");
         let mut why: Vec<&str> = dry.skipped.iter().map(|(_, w)| w.split(':').next().unwrap()).collect();
         why.sort();
-        assert_eq!(why, ["hidden lockfile is a symlink", "node_modules is a symlink", "unreadable"]);
+        // Root (CAP_DAC_OVERRIDE, a Docker run) reads a mode-000 directory.
+        let mut want = vec!["hidden lockfile is a symlink", "node_modules is a symlink"];
+        if std::fs::read_dir(root.join("locked")).is_err() {
+            want.push("unreadable");
+        }
+        assert_eq!(why, want);
         assert_eq!(adopt(&store, &[root.join("p1/node_modules")], true).unwrap().projects, 0, "a node_modules named as the directory is not entered either");
         assert_eq!(records(), 1, "a dry run writes no record");
         assert_eq!(record_of(&store, &root.join("p4")), [c.key()], "nor changes one");
@@ -429,14 +443,14 @@ mod tests {
         drop(store);
         let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
         let r = adopt(&store, &[root.clone()], false).unwrap();
-        assert_eq!((r.written, r.extended), (1, 1));
+        assert_eq!((r.written, r.extended, r.entries), (1, 1, 2));
         assert_eq!(records(), 2, "p1 and p4 only");
         assert_eq!(record_of(&store, &root.join("p1")), [a.key()], "only entries in the store");
         let mut both = vec![a.key(), c.key()];
         both.sort();
         assert_eq!(record_of(&store, &root.join("p4")), both, "an existing record is added to, never narrowed");
         let again = adopt(&store, &[root.clone(), root.join("p1")], false).unwrap();
-        assert_eq!((again.projects, again.written, again.extended, again.complete), (2, 0, 0, 2), "adopting twice changes nothing");
+        assert_eq!((again.projects, again.written, again.extended, again.complete, again.entries), (2, 0, 0, 2, 2), "adopting twice changes nothing");
 
         // gc keeps what adopted projects use and removes b, which only
         // projects behind symlinks, inside a package and inside .git use.
@@ -444,6 +458,35 @@ mod tests {
         assert_eq!(g.removed, 1);
         assert!(!store.dir_for(&b).exists() && store.dir_for(&a).exists() && store.dir_for(&c).exists());
         std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn adopt_reports_a_node_modules_it_cannot_search() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::fs::canonicalize(scratch("adopt-nosearch")).unwrap();
+        let cacache = d.join("cacache");
+        let a = cached_tarball(&cacache, &[("index.js", 0o644, "a")]);
+        let store = Store::new(d.join("store"), cacache.clone()).unwrap();
+        store.ensure(&a, "http://x").unwrap();
+        // A project whose node_modules this process cannot search: its
+        // hidden lockfile cannot even be looked at.
+        let p = d.join("root/p");
+        hidden(&p, &[&a]);
+        let nm = p.join("node_modules");
+        std::fs::set_permissions(&nm, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::symlink_metadata(nm.join(".package-lock.json")).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+        if denied {
+            let r = adopt(&store, &[d.join("root")], true).unwrap();
+            assert_eq!((r.projects, r.no_hidden_lock), (0, 0), "not counted as a node_modules without a hidden lockfile");
+            assert_eq!(r.skipped.len(), 1);
+            assert_eq!(r.skipped[0].0, p, "reported with the project's path");
+            assert!(r.skipped[0].1.starts_with("hidden lockfile unreadable: "), "{}", r.skipped[0].1);
+        } else {
+            // Root (CAP_DAC_OVERRIDE) searches it anyway: nothing to test.
+            eprintln!("skipped: a mode-000 node_modules is searchable here (root?)");
+        }
+        std::fs::set_permissions(&nm, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&d);
     }
 }

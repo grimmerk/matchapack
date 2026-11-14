@@ -202,13 +202,16 @@ copies=$(grep -l "\"$vw/" "$store"/projects/*.json 2>/dev/null | wc -l | tr -d '
 #     records existed. A (odd-tarballs, 2 entries) is under the scanned
 #     directory; B (fixtures/small) is outside it, reached only through
 #     symlinks, a symlinked node_modules and a copy of its hidden lockfile
-#     inside a package. Adopting records A only; gc then keeps A's entries,
+#     inside a package; a copy of it in a node_modules nobody can search
+#     (reported, not taken for "no hidden lockfile"). Adopting records A
+#     only; gc then keeps A's entries,
 #     removes B's, and B's files still read the same (clones are
 #     independent of the store entries they were cloned from).
 if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
   store=$work/store-adopt; export MATCHAPACK_STORE=$store MATCHAPACK_LOG_DIR=$work/logs-adopt
   ar=$work/adopt-root; ao=$work/adopt-other
   [ -d "$ar/locked" ] && chmod 755 "$ar/locked"
+  [ -d "$ar/e/node_modules" ] && chmod 755 "$ar/e/node_modules"
   rm -rf "${store:?}" "${work:?}/logs-adopt" "${ar:?}" "${ao:?}"
   mkdir -p "$ar/a" "$ao/b"
   cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$ar/a/"
@@ -220,16 +223,27 @@ if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
   mkdir -p "$ar/c" "$ar/d/node_modules/pkg/node_modules"; ln -s "$ao/b/node_modules" "$ar/c/node_modules"
   cp "$ao/b/node_modules/.package-lock.json" "$ar/d/node_modules/pkg/node_modules/"
   mkdir -p "$ar/locked"; chmod 000 "$ar/locked"
+  mkdir -p "$ar/e/node_modules"; cp "$ao/b/node_modules/.package-lock.json" "$ar/e/node_modules/"; chmod 000 "$ar/e/node_modules"
+  # Root (CAP_DAC_OVERRIDE, a Docker run) reads mode-000 directories: then
+  # there is nothing unreadable to report, and e would be a project using
+  # B's entries, so it is removed.
+  skips="1 node_modules is a symlink"
+  if [ -e "$ar/e/node_modules/.package-lock.json" ]; then
+    chmod 755 "$ar/e/node_modules"; rm -r "${ar:?}/e"
+  else
+    skips="1 hidden lockfile unreadable, $skips"
+  fi
+  ls "$ar/locked" >/dev/null 2>&1 || skips="$skips, 1 unreadable"
   adopt() { "$bin" store adopt "$@" > "$work/out" 2>&1; }
   # 14a. Dry run: lists A, writes nothing.
   adopt --dry-run "$ar" && grep -q ': 1 npm projects' "$work/out" && grep -q 'records to write: 1 new' "$work/out" \
     && grep -q "^  $ar/a: would record, $na store entries" "$work/out" && [ "$(records)" = 0 ] \
     && ok "adopt --dry-run: lists the one project, writes no record" || bad "adopt --dry-run (records $(records))"
   # 14b. The real run: one record, A's entries; nothing behind a symlink or
-  #      inside a node_modules; the unreadable directory is skipped.
+  #      inside a node_modules; what it cannot read is reported.
   adopt "$ar" && [ "$(records)" = 1 ] && grep -q "$ar/a\"" "$store"/projects/*.json \
     && grep -q "now kept by these projects: $na of $((na + nb))" "$work/out" \
-    && grep -q 'skipped: 1 node_modules is a symlink, 1 unreadable' "$work/out" \
+    && grep -q "skipped: $skips (" "$work/out" \
     && ok "adopt: records the project, follows no symlink, skips node_modules contents and what it cannot read" || bad "adopt: records $(records)"
   # 14c. B's files share blocks with the store before gc (they are clones);
   #      gc removes B's entries; B's files read the same afterwards.
@@ -251,7 +265,7 @@ print(h.hexdigest())' "$1"; }
   case $shared in shared\ 0\ *|'') shared_ok=no ;; *) shared_ok=yes ;; esac
   [ "$shared_ok" = yes ] && [ "$(sum "$ao/b/node_modules")" = "$before" ] && (cd "$ao/b" && node -e 'require("lodash")') \
     && ok "gc: an unadopted project's files read the same after its entries are removed (before: $shared)" || bad "gc: B's files after removal (before: $shared)"
-  chmod 755 "$ar/locked"
+  chmod 755 "$ar/locked"; [ -d "$ar/e/node_modules" ] && chmod 755 "$ar/e/node_modules"
 else
   echo "SKIP adopt: the fixtures' tarball server is not running (127.0.0.1:48321)"
 fi
