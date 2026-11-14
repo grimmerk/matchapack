@@ -50,7 +50,9 @@
 # the copies are removed at the end, as verify.sh does.
 # MATCHAPACK_VERIFY_STEPS_CORRUPT=<path> (the harness's self-test): after
 # B's first step, change one byte of B's <path>; the run must fail and name
-# it.
+# it. MATCHAPACK_VERIFY_STEPS_SELFTEST=checker-dies (the log checker exits
+# before printing anything) or wrong-command (it expects another npm
+# command than the step's): the run must fail.
 set -uo pipefail
 src=${1:?usage: verify-steps.sh <source> <work> [--start bare|ci|nolock] [--pre cmd] -- <step> [-- <step> ...]}
 work=$2; shift 2
@@ -151,7 +153,7 @@ for ((i = 0; i < nsteps; i++)); do
   done
   label="${envs[*]+${envs[*]} }npm ${args[*]}"
   [ "$sub" != . ] && label="(in $sub) $label"
-  rb=$(record_of)
+  record_of > "$work/rec.before"
   marker=$work/.step-start; touch "$marker"; sleep 1
   t=$(ns); [ -z "$ta0" ] && ta0=$t
   (cd "$A/$sub" && env ${envs[@]+"${envs[@]}"} npm "${args[@]}" "${common[@]}" > "$work/step$i-A.log" 2>&1); sa=$?
@@ -191,20 +193,38 @@ for ((i = 0; i < nsteps; i++)); do
   extra=$(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | wc -l | tr -d ' ')
   [ "$extra" = 0 ] || say_fail "$extra paths older than the step in B only: $(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | head -3 | tr '\n' ' ')"
   # B's log record: the last line of the trial log.
-  rec=$(tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null)
-  ra=$(record_of)
-  python3 -I - "$rec" "$sb" "$B" "$clones" "$unseen" "$rb" "$ra" <<'EOF' > "$work/rec.check" 2> "$work/rec.log" || { while IFS= read -r l; do say_fail "$l"; done < "$work/rec.check"; }
-import json, os, sys
-rec, status, root, clones, unseen, rb, ra = sys.argv[1:8]
+  # (Files, not arguments: a record of a large project is over Linux's
+  # 128 KiB limit for one argument.)
+  tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" > "$work/rec.json" 2>/dev/null
+  record_of > "$work/rec.after"
+  # Fail closed: a checker that could not run, or stopped before printing
+  # why, fails the step too.
+  if ! python3 -I - "$work/rec.json" "$sb" "$B" "$clones" "$unseen" "$work/rec.before" "$work/rec.after" "${args[0]}" "$here/src/wrapper.rs" <<'EOF' > "$work/rec.check" 2> "$work/rec.log"; then
+import json, os, re, sys
+recf, status, root, clones, unseen, rbf, raf, word, table = sys.argv[1:10]
+# The harness's self-test: a checker that dies before saying anything.
+if os.environ.get("MATCHAPACK_VERIFY_STEPS_SELFTEST") == "checker-dies":
+    sys.exit(1)
 bad = []
 try:
-    r = json.loads(rec)
+    r = json.loads(open(recf).read())
 except ValueError:
     print("no log record"); sys.exit(1)
+rb, ra = open(rbf).read(), open(raf).read()
 inj = r.get("inject") or {}
 want = "installed" if status == "0" else "npm_failed"
 if r.get("outcome") != want:
     bad.append(f"outcome {r.get('outcome')} ({r.get('reason')}), want {want}")
+# npm's command for the step's first word, by the routing table itself
+# (src/wrapper.rs ROUTED: `i`, `add`, `up`, `rm`, ... are aliases).
+routed = dict(re.findall(r'^\s*\("([^"]+)", "([^"]+)"\),\s*$', open(table).read(), re.M))
+want_cmd = routed.get(word)
+if os.environ.get("MATCHAPACK_VERIFY_STEPS_SELFTEST") == "wrong-command":
+    want_cmd = "update" if want_cmd != "update" else "install"
+if want_cmd is None:
+    bad.append(f"the step's first word {word!r} is not a routed npm command")
+elif r.get("command") != want_cmd or inj.get("command") != want_cmd:
+    bad.append(f"command {r.get('command')} (npm's: {inj.get('command')}), want {want_cmd}")
 if r.get("root") != root or inj.get("root") != root:
     bad.append(f"root {r.get('root')}, want {root}")
 cloned = inj.get("cloned")
@@ -243,6 +263,13 @@ print("\n".join(bad))
 print(f"  log: {r.get('outcome')} {r.get('command')}, cloned {cloned}, unseen {inj.get('unseen')} of {inj.get('installed')}, record {len(before)} -> {len(after)} entries", file=sys.stderr)
 sys.exit(1 if bad else 0)
 EOF
+    fail=1
+    if [ -s "$work/rec.check" ]; then
+      while IFS= read -r l; do say_fail "$l"; done < "$work/rec.check"
+    else
+      say_fail "the log check could not run: $(tail -3 "$work/rec.log" | tr '\n' ' ')"
+    fi
+  fi
   cat "$work/rec.log"
 done
 

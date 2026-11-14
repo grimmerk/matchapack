@@ -133,6 +133,18 @@ elif grep -q 'FAIL cmp: package-lock.json differs' "$st" && grep -q 'FAIL diff:'
 else
   fail=1; echo "FAIL  steps self-test: the run failed, but not by both the diff and the cmp of package-lock.json (log: $st)"
 fi
+# The log check fails closed: a checker that dies before printing anything,
+# and a record of another npm command than the step's, each fail the run.
+for t in checker-dies:'the log check could not run' wrong-command:'want update'; do
+  st=$work/steps-selftest-${t%%:*}.txt
+  if MATCHAPACK_VERIFY_STEPS_SELFTEST=${t%%:*} "$here/scripts/verify-steps.sh" "$here/fixtures/workspaces" "$work/steps-selftest-${t%%:*}" --start ci -- install > "$st" 2>&1; then
+    fail=1; echo "FAIL  steps self-test ${t%%:*}: the run passed (log: $st)"
+  elif grep -F "${t#*:}" "$st" | grep -q FAIL; then
+    echo "ok    steps self-test (${t%%:*}: the run fails)"
+  else
+    fail=1; echo "FAIL  steps self-test ${t%%:*}: the run failed, but not by the log check (log: $st)"
+  fi
+done
 small=$here/fixtures/small; ws=$here/fixtures/workspaces
 edit_pkg='node -e "const fs=require(\"fs\");const p=JSON.parse(fs.readFileSync(\"package.json\"));p.dependencies[\"left-pad\"]=\"1.3.0\";delete p.dependencies.lodash;fs.writeFileSync(\"package.json\",JSON.stringify(p,null,2)+\"\\n\")"'
 # Starting without node_modules.
