@@ -177,7 +177,10 @@ process.on('exit', () => {
         }
       }
     })
-    child.on('exit', (code) => {
+    // 'close', not 'exit': 'exit' may come before the last stderr or fd 3
+    // data has been read (Node's child_process docs), so a run could look
+    // as if it had no probe line or fewer messages.
+    child.on('close', (code) => {
       const line = err.split('\n').find(l => l.startsWith('PROBE '))
       resolve({ code, out, err, messages, probe: line ? JSON.parse(line.slice(6)) : null })
     })
