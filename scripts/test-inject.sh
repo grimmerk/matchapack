@@ -587,18 +587,20 @@ wrapped "$p" "npm ci --dry-run --no-audit --no-fund"; rc=$?
 
 # 11b. A workspace directory that is a symlink to a directory outside the
 #      project: npm installs the workspace's own dependency there, as npm ci
-#      does; matchapack refuses to clone outside the project (rejected-dest),
-#      so that package is npm's own extraction.
+#      does; the hook leaves it to pacote without asking (a destination
+#      outside the root npm reported: "outside the root left to pacote"),
+#      so that package is npm's own extraction, and it is not counted as a
+#      package of the project the hook missed.
 p=$work/wslink; rm -rf "${p:?}" "${work:?}/outside-ws"; mkdir -p "$p/packages" "$work/outside-ws"
 echo '{"name":"wsroot","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}' > "$p/package.json"
 echo '{"name":"ws","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}' > "$work/outside-ws/package.json"
 ln -s "$work/outside-ws" "$p/packages/ws"
 (cd "$p" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$work/out" 2>&1)
 install "$p"; rc=$?
-[ $rc = 0 ] && [ "$(cloned)" = 1 ] && grep -q 'rejected-dest 1' "$work/out" && grep -q 'outside the project' "$work/out" \
+[ $rc = 0 ] && [ "$(cloned)" = 1 ] && [ "$(by_npm)" = 0 ] && grep -q ', 1 outside the root left to pacote' "$work/out" \
   && ! grep -q "went through matchapack's hook" "$work/out" \
   && grep -q '"version":"2.0.0"' "$work/outside-ws/node_modules/lc-s/package.json" && grep -q '"version":"1.0.0"' "$p/node_modules/lc-s/package.json" \
-  && ok "a workspace symlinked out of the project: its dependency is refused by the clone server and extracted by npm" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
+  && ok "a workspace symlinked out of the project: its dependency is left to pacote by the hook, never asked for" || bad "symlinked workspace: rc=$rc, cloned $(cloned)"
 
 # 11b. `npm ci` inside a workspace of a monorepo: npm installs into the
 #      root's node_modules (the workspace's subset). npm reports that root,
@@ -705,6 +707,80 @@ if [ "$npm_major" -ge 12 ]; then
 else
   echo "SKIP patchedDependencies: npm $npm_major has no npm patch (npm 12 does)"
 fi
+
+# 16. The install family (npm install / update / uninstall) through the
+#     shell function: npm's own command with the hook, and the bookkeeping
+#     of an incremental install (NOTES "The install family"). The trees
+#     themselves are compared with plain npm by scripts/verify-steps.sh.
+rec_of() { python3 -c "
+import glob, json, sys
+for f in glob.glob(sys.argv[1] + '/projects/*.json'):
+    r = json.load(open(f))
+    if r.get('path') == sys.argv[2]:
+        print(len(r['entries'])); break
+else:
+    print('-')" "$store" "$1"; }
+p=$(project fam small)
+wrapped "$p" "npm ci --no-audit --no-fund" || bad "family: npm ci"
+n_rec=$(rec_of "$p")
+# Nothing to do: no matchapack line at all (Q6), unseen 0, record unchanged.
+wrapped "$p" "npm install --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && ! grep -q '^matchapack' "$work/out" && [ "$n_rec" -gt 0 ] && [ "$(rec_of "$p")" = "$n_rec" ] \
+  && [ "$(last_log "r['outcome'], r['command'], r['root'] == '$p', r['inject']['cloned'], r['inject']['installed'], r['inject']['unseen']")" = "installed install True 0 0 0" ] \
+  && ok "npm install with nothing to do: silent, unseen 0 (no false alarm), the gc record keeps its $n_rec entries" \
+  || bad "family noop: rc=$rc, record $(rec_of "$p") (was $n_rec), $(last_log "r['outcome'], r.get('command'), (r.get('inject') or {}).get('unseen')")"
+# One package added: one line, cloned, the record grows by one, gc keeps it.
+wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && grep -qx 'matchapack: 1 package cloned from the store, npm extracted 0 (inject engine; MATCHAPACK=0 npm install for plain npm)' "$work/out" \
+  && [ "$(grep -c '^matchapack' "$work/out")" = 1 ] && [ "$(rec_of "$p")" = $((n_rec + 1)) ] && grep -q '"left-pad": "^1.3.0"' "$p/package.json" \
+  && [ "$(last_log "r['outcome'], r['inject']['cloned'], r['inject']['installed'], r['inject']['unseen']")" = "installed 1 1 0" ] \
+  && find "$store/v2" -mindepth 3 -maxdepth 3 -type d -exec touch -t 202001010000 {} + \
+  && "$bin" store gc --dry-run > "$work/gc" 2>&1 && grep -q 'would remove 0 of' "$work/gc" \
+  && ok "npm install left-pad@1.3.0: 1 cloned, said in one line, the record grows to $((n_rec + 1)) entries, gc would remove nothing" \
+  || bad "family add: rc=$rc, record $(rec_of "$p"), $(grep '^matchapack' "$work/out" | head -2), $(grep 'would remove' "$work/gc")"
+# Removed again: nothing placed (silent), the record drops the entry no
+# package has any more.
+wrapped "$p" "npm uninstall left-pad --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && ! grep -q '^matchapack' "$work/out" && [ "$(rec_of "$p")" = "$n_rec" ] && [ ! -e "$p/node_modules/left-pad" ] \
+  && [ "$(last_log "r['outcome'], r['command'], r['inject']['unseen']")" = "installed uninstall 0" ] \
+  && ok "npm uninstall left-pad: silent, the record is back to the $n_rec entries of npm ci" || bad "family uninstall: rc=$rc, record $(rec_of "$p")"
+# The hook not installed (what an npm that no longer calls the method looks
+# like): the package npm added is counted as unseen, and said.
+p=$(project fam-nohook small)
+wrapped "$p" "npm ci --no-audit --no-fund" || bad "family: npm ci (no hook)"
+MATCHAPACK_INJECT_HOOK=none wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && grep -q "matchapack: npm installed 1 packages in this run, but 1 of them did not go through matchapack's hook" "$work/out" \
+  && [ "$(last_log "r['outcome'], r['inject']['cloned'], r['inject']['installed'], r['inject']['unseen']")" = "installed 0 1 1" ] \
+  && ok "the hook not installed: npm install left-pad@1.3.0 reports the 1 package the hook never saw" || bad "family no hook: rc=$rc, $(grep '^matchapack' "$work/out" | head -2)"
+# npm's own failure: its status once, logged, not retried.
+(cd "$p" && npm install does-not-exist-matchapack-xyz --no-audit --no-fund > "$work/plain.out" 2>&1); want=$?
+wrapped "$p" "npm install does-not-exist-matchapack-xyz --no-audit --no-fund"; rc=$?
+[ $want != 0 ] && [ $rc = $want ] && [ "$(grep -Ec 'npm (error|ERR!) code E404' "$work/out")" = 1 ] && ! grep -q '^matchapack' "$work/out" \
+  && [ "$(last_log "r['outcome'], r['command'], r['code']")" = "npm_failed install $want" ] \
+  && ok "npm install of a package that does not exist: npm's error and status ($rc), once, logged as npm_failed" || bad "family npm failure: rc=$rc, plain npm $want"
+# A decline on npm's root with MATCHAPACK_NO_FALLBACK=1: status 3.
+p=$(project fam-global small); echo 'global=true' > "$p/.npmrc"
+(cd "$p" && PATH="$(dirname "$bin"):$PATH" MATCHAPACK_NO_FALLBACK=1 zsh -c ". '$here/shell/matchapack.sh'; npm install left-pad@1.3.0" > "$work/out" 2>&1); rc=$?
+[ $rc = 3 ] && grep -q 'not handled, left unchanged (npm installs globally)' "$work/out" && ! grep -q 'Exit handler never called' "$work/out" && [ ! -e "$p/node_modules" ] \
+  && ok "npm install with global=true in the project's .npmrc, MATCHAPACK_NO_FALLBACK=1: declined on npm's root, status 3, nothing installed" || bad "family no fallback: rc=$rc"
+# The result trap during the install family (the doctored npm of 10d): no
+# automatic repair (Q5). The run stops loudly with npm's files left as npm
+# wrote them, the key named and the repair command given; npm is not run
+# again; logged as broke (stopped), counted by `matchapack report`.
+p=$(project fam-trap small)
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$tr_log wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap: npm ci"
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$tr_log wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
+[ $rc = 1 ] && grep -q "matchapack: npm read \`files\` (1×) of what matchapack's hook returned" "$work/out" \
+  && grep -qF 'Check `git diff` of package.json and package-lock.json, then rebuild with plain npm: MATCHAPACK=0 npm ci left-pad@1.3.0 --no-audit --no-fund' "$work/out" \
+  && ! grep -q 'running npm ci to rebuild' "$work/out" && [ "$(grep -c 'added [0-9]* package' "$work/out")" = 1 ] \
+  && [ "$(last_log_in "$tr_log" "r['outcome'], r['repair'], r['command'], '\`files\`' in r['reason']")" = "broke stopped install True" ] \
+  && ok "trap during npm install: stopped loudly (status 1), the key and the repair command said, npm not run again, logged" \
+  || bad "family trap: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
+  && grep -q 'failed and stopped 1' "$work/report" \
+  && grep -q "in 1 runs npm read an unexpected key of the hook's result, and the run stopped with the repair command" "$work/report" \
+  && grep -q 'commands: ci 2, install 1' "$work/report" \
+  && ok "trap during npm install: matchapack report counts it apart, and the runs per command" || bad "family trap report: $(grep -E 'runs|commands|unexpected' "$work/report")"
 
 # Every run of the shell function above that read an unexpected key of the
 # hook's result was rebuilt by plain npm and so looks fine: it must still

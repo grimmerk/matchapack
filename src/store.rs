@@ -402,9 +402,26 @@ impl Store {
     }
 
     /// Record which entries the project at `root` (canonical) was installed
-    /// from, for `matchapack store gc`. Replaces the project's earlier record.
+    /// from, for `matchapack store gc`. Replaces the project's earlier record:
+    /// `npm ci` emptied node_modules, so the earlier record says nothing.
     pub fn record_project(&self, root: &Path, used: &[Integrity]) -> Result<()> {
         self.write_record(root, used.iter().map(Integrity::key).collect(), None)
+    }
+
+    /// The record after a command of the install family (`npm install`,
+    /// `update`, `uninstall`), which leaves the packages it does not change
+    /// in place: the earlier record and this run's entries, less the
+    /// entries no package in the hidden lockfile npm wrote has any more
+    /// (`in_tree`: entry keys; None, no hidden lockfile: nothing is
+    /// dropped). So `store gc` keeps every entry the project still uses, and
+    /// may remove one a removed or replaced package used (the plan's G2).
+    pub fn merge_project(&self, root: &Path, used: &[Integrity], in_tree: Option<&std::collections::HashSet<String>>) -> Result<()> {
+        let mut keys = self.recorded_entries(root).unwrap_or_default();
+        keys.extend(used.iter().map(Integrity::key));
+        if let Some(t) = in_tree {
+            keys.retain(|k| t.contains(k));
+        }
+        self.write_record(root, keys, None)
     }
 
     /// The entry keys of the project's record, if it has one.
@@ -929,6 +946,40 @@ pub(crate) mod tests {
         assert_eq!(store.remove_orphan_locks(), 1);
         let lock = |i: &Integrity| d.join("store/locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]);
         assert!(lock(&kept).exists() && !lock(&gone).exists());
+    }
+
+    #[test]
+    fn the_install_family_keeps_the_record_and_drops_what_left_the_tree() {
+        let d = scratch("store-merge-record");
+        let store = Store::new(d.join("store"), d.join("cacache")).unwrap();
+        let root = d.join("project");
+        let i = |c: &str| Integrity { algo: "sha512".into(), hex: c.repeat(128) };
+        let (a, b, c) = (i("a"), i("b"), i("c"));
+        let keys = |v: &[&Integrity]| v.iter().map(|i| i.key()).collect::<std::collections::HashSet<String>>();
+        let rec = || {
+            let mut v = store.recorded_entries(&root).unwrap();
+            v.sort();
+            v
+        };
+        // npm ci: replaced.
+        store.record_project(&root, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(rec(), [a.key(), b.key()]);
+        // npm install c with nothing else changed: the earlier entries stay.
+        store.merge_project(&root, std::slice::from_ref(&c), Some(&keys(&[&a, &b, &c]))).unwrap();
+        assert_eq!(rec(), [a.key(), b.key(), c.key()]);
+        // npm install with nothing to place (or npm uninstall): the record
+        // keeps what the tree still has, and loses what it no longer has.
+        store.merge_project(&root, &[], Some(&keys(&[&a, &c]))).unwrap();
+        assert_eq!(rec(), [a.key(), c.key()]);
+        // No hidden lockfile after the run: nothing is dropped.
+        store.merge_project(&root, std::slice::from_ref(&b), None).unwrap();
+        assert_eq!(rec(), [a.key(), b.key(), c.key()]);
+        // No record yet: this run's entries that are in the tree.
+        let other = d.join("other");
+        store.merge_project(&other, &[a.clone(), b.clone()], Some(&keys(&[&a]))).unwrap();
+        assert_eq!(store.recorded_entries(&other).unwrap(), [a.key()]);
+        drop(store);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

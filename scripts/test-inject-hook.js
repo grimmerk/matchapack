@@ -268,9 +268,38 @@ async function helperCases () {
       check('helper: in a workspace member, npm\'s root is the workspace root; --dry-run is reported',
         JSON.stringify(roots(r3).map(m => [m.root, m.dry_run])), JSON.stringify([[ws, true]]))
     }
+    // A package given as a URL (the fixtures' tarball server, which
+    // test-inject.sh starts): pacote reads its manifest by extracting it
+    // into a temporary directory in npm's cache, through the hooked method.
+    // That is outside the root: set aside, not a request or a note. The
+    // install itself is a request (here refused) for a destination in the
+    // project; with the hook off, a note that carries the destination.
+    if (await reachable('http://127.0.0.1:48321/lc-s-1.0.0.tgz')) {
+      for (const hook of ['on', 'off']) {
+        const d = project('url-' + hook)
+        const r = await helperRun({
+          args: ['install', 'http://127.0.0.1:48321/lc-s-1.0.0.tgz'],
+          rootAnswer: (m) => ({ ok: true, root: m.root }),
+          cwd: d,
+          env: hook === 'off' ? { MATCHAPACK_INJECT_HOOK: 'off' } : {},
+        })
+        const dests = r.messages.filter(m => m.dest !== undefined).map(m => [m.integrity !== undefined ? 'request' : 'note', m.dest])
+        check(`helper: npm install <url>, hook ${hook}: the manifest read is set aside, the install has its destination`,
+          JSON.stringify([r.code, r.messages.some(m => m.aside === 'outside-root'), [...new Set(dests.map(JSON.stringify))].map(JSON.parse)]),
+          JSON.stringify([0, true, [[hook === 'on' ? 'request' : 'note', path.join(d, 'node_modules', 'lc-s')]]]))
+      }
+    } else {
+      console.log('SKIP helper: npm install <url> (no tarball server on 127.0.0.1:48321; test-inject.sh starts one)')
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
+}
+
+function reachable (url) {
+  return new Promise((resolve) => {
+    require('http').get(url, (res) => { res.resume(); resolve(res.statusCode === 200) }).on('error', () => resolve(false))
+  })
 }
 
 ;(async () => {

@@ -26,7 +26,10 @@
 //!                                                    every package itself)
 //!     {"id":7,"integrity":"sha512-…","dest":"/abs/dir"}
 //!     {"id":8,"integrity":"sha512-…","dest":"/abs/dir","extracted":"/…/tmp/…/x3"}
-//!     {"note":"type-FileFetcher"}                    a package the hook left to npm, and why
+//!     {"note":"type-FileFetcher","dest":"/abs/dir"} a package the hook left to npm, and why
+//!     {"aside":"outside-root"}                       an extraction outside the root left to
+//!                                                    pacote (a manifest read, a workspace
+//!                                                    symlinked out of the project)
 //!     {"result_read":"foo","expected":false}         npm read this key of what the hook's
 //!                                                    extract resolved to (`expected`:
 //!                                                    resolved, integrity or from)
@@ -93,7 +96,7 @@ use crate::clone::{self, Mode};
 use crate::store::{Integrity, Store, TmpDir};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
@@ -185,6 +188,22 @@ pub struct Stats {
     /// the hook may not give, so the tree may not be npm's (inject.rs then
     /// reports the install as broken).
     pub result_unexpected: BTreeMap<String, usize>,
+    /// Every destination the hook saw inside the root (a request or a
+    /// `note`), relative to the root as npm's hidden lockfile keys its
+    /// packages (`node_modules/a`): compared with what npm placed
+    /// ("unseen", inject.rs).
+    pub seen: HashSet<String>,
+    /// Extractions the hook left to pacote because their destination is
+    /// outside the root (`aside`), by reason: not installs into the project
+    /// (pacote reading a URL, file or git package's manifest in a temporary
+    /// directory; a workspace symlinked out of the project).
+    pub asides: BTreeMap<String, usize>,
+    /// The root's hidden lockfile as it was when npm reported the root,
+    /// before its command ran (commands other than `ci`; None: there was
+    /// none, or it could not be read), and whether the root's node_modules
+    /// was then absent or empty.
+    pub hidden_before: Option<Vec<u8>>,
+    pub nm_empty_before: bool,
     first: Option<Instant>,
     last: Option<Instant>,
 }
@@ -229,6 +248,7 @@ impl Stats {
             "no_root": self.no_root,
             "result_reads": self.result_reads,
             "result_unexpected": self.result_unexpected,
+            "asides": self.asides,
         })
     }
 }
@@ -279,14 +299,19 @@ fn known_key(key: &str) -> bool {
 }
 
 /// The commands whose install root the server accepts (npm's names, after
-/// its alias resolution): what the shell function routes.
-const ROOT_COMMANDS: &[&str] = &["ci"];
+/// its alias resolution): what the shell function routes (wrapper.rs
+/// `ROUTED`). Any other command npm maps a routed word to (`npm u` is no
+/// command on npm 10) is declined before it runs.
+pub(crate) const ROOT_COMMANDS: &[&str] = &["ci", "install", "update", "uninstall"];
 
 pub struct Server<'a> {
     store: &'a Store,
     /// The install root npm reported (canonical), set once by the `root`
     /// message (or given to `new`, tests); requests are refused until then.
     root: std::sync::OnceLock<PathBuf>,
+    /// The root as npm reported it (`npm.prefix`, not canonical): the hook's
+    /// destinations are under it.
+    reported: std::sync::OnceLock<PathBuf>,
     /// Whether the root must be inside the trial scope (trial::in_scope):
     /// the shell function's runs, not `matchapack install`.
     trial_scope: AtomicBool,
@@ -346,6 +371,17 @@ fn dest_state(dst: &Path) -> std::io::Result<DestState> {
 
 fn is_real_dir(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// `<root>/node_modules/.package-lock.json` as it is now (None: none, or
+/// unreadable), and whether `<root>/node_modules` is absent or empty.
+fn hidden_lockfile_before(root: &Path) -> (Option<Vec<u8>>, bool) {
+    let nm = root.join("node_modules");
+    let empty = match std::fs::read_dir(&nm) {
+        Ok(mut rd) => rd.next().is_none(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    (std::fs::read(nm.join(".package-lock.json")).ok(), empty)
 }
 
 /// Move every entry of `from` into `to`; a directory present on both sides (a
@@ -408,6 +444,7 @@ impl<'a> Server<'a> {
         Ok(Server {
             store,
             root: root_cell,
+            reported: std::sync::OnceLock::new(),
             trial_scope: AtomicBool::new(false),
             mode,
             tmp,
@@ -444,6 +481,26 @@ impl<'a> Server<'a> {
     fn is_root(&self, p: &Path) -> bool {
         let Some(root) = self.root.get() else { return false };
         p == root || (p.is_absolute() && std::fs::canonicalize(p).is_ok_and(|c| &c == root))
+    }
+
+    /// `dest` relative to the pinned root, as npm's hidden lockfile names a
+    /// package's directory (`node_modules/a`); None outside the root (or
+    /// before a root). Lexically under the root as npm reported it or as
+    /// pinned, else with its parent's symlinks resolved.
+    fn rel_key(&self, dest: &Path) -> Option<String> {
+        let root = self.root.get()?;
+        let rel = self
+            .reported
+            .get()
+            .and_then(|r| dest.strip_prefix(r).ok())
+            .or_else(|| dest.strip_prefix(root).ok())
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let real = std::fs::canonicalize(dest.parent()?).ok()?.join(dest.file_name()?);
+                real.strip_prefix(root).ok().map(Path::to_path_buf)
+            })?;
+        let s = rel.to_str()?;
+        (!s.is_empty()).then(|| s.to_string())
     }
 
     /// The gates on the install root npm reported (the `root` message), and
@@ -1140,7 +1197,17 @@ impl<'a> Server<'a> {
             // A reason is a short word chosen by the hook; keep the log sane
             // whatever arrives.
             let key: String = note.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
-            *self.stats.lock().unwrap().fallbacks.entry(key).or_default() += 1;
+            let seen = v.get("dest").and_then(|d| d.as_str()).map(Path::new).filter(|d| d.is_absolute()).and_then(|d| self.rel_key(d));
+            let mut s = self.stats.lock().unwrap();
+            *s.fallbacks.entry(key).or_default() += 1;
+            if let Some(k) = seen {
+                s.seen.insert(k);
+            }
+            return true;
+        }
+        if let Some(why) = v.get("aside").and_then(|n| n.as_str()) {
+            let key: String = why.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
+            *self.stats.lock().unwrap().asides.entry(key).or_default() += 1;
             return true;
         }
         if let Some(key) = v.get("result_read").and_then(|k| k.as_str()) {
@@ -1177,11 +1244,25 @@ impl<'a> Server<'a> {
                 Some(_) => Err("npm reported its install root twice".to_string()),
                 None => self.accept_root(&v),
             };
+            // What the install family's "unseen" count compares with
+            // (inject.rs): the hidden lockfile before the command runs. npm
+            // ci empties node_modules first, so it needs none.
+            let before = match (&verdict, command.as_deref()) {
+                (Ok(root), Some(c)) if c != "ci" => Some(hidden_lockfile_before(root)),
+                _ => None,
+            };
             let mut s = self.stats.lock().unwrap();
             s.command = command;
             return vec![match verdict {
                 Ok(root) => {
                     let _ = self.root.set(root.clone());
+                    if let Some(r) = v.get("root").and_then(|r| r.as_str()) {
+                        let _ = self.reported.set(PathBuf::from(r));
+                    }
+                    if let Some((hidden, empty)) = before {
+                        s.hidden_before = hidden;
+                        s.nm_empty_before = empty;
+                    }
                     s.root = Some(root.clone());
                     json!({ "id": id, "ok": true, "root": root })
                 }
@@ -1197,6 +1278,9 @@ impl<'a> Server<'a> {
             s.first.get_or_insert_with(Instant::now);
         }
         let str_of = |k: &str| v.get(k).and_then(|x| x.as_str());
+        if let (Some(_), Some(k)) = (str_of("integrity"), str_of("dest").map(Path::new).filter(|d| d.is_absolute()).and_then(|d| self.rel_key(d))) {
+            self.stats.lock().unwrap().seen.insert(k);
+        }
         let answers: Vec<(Value, Outcome)> = match (str_of("integrity"), str_of("dest")) {
             // No root reported yet (npm's could not be read): nothing is placed.
             (Some(_), Some(_)) if self.root.get().is_none() => {
@@ -2185,7 +2269,7 @@ mod tests {
         std::os::unix::fs::symlink(fx.dir.join("elsewhere"), nm_link.join("node_modules")).unwrap();
         for (msg, want) in [
             (root_msg(&fx.root, json!({ "global": true })), "npm installs globally"),
-            (root_msg(&fx.root, json!({ "command": "install", "typed": "i" })), "npm runs `install` for `i`"),
+            (root_msg(&fx.root, json!({ "command": "install-test", "typed": "it" })), "npm runs `install-test` for `it`"),
             (root_msg(&fx.root, json!({ "command": null, "typed": "u" })), "npm has no command `u`"),
             (root_msg(&fx.root, json!({ "dry_run": true })), "this run installs nothing (--dry-run)"),
             (root_msg(&fx.root, json!({ "package_lock_only": true })), "this run installs nothing (--package-lock-only)"),
@@ -2229,6 +2313,77 @@ mod tests {
         assert_eq!((j["hook"].as_str(), j["hook_reason"].as_str(), j["command"].as_str()), (Some("not-installed"), Some("no FetcherBase"), Some("ci")));
         assert_eq!(j["root"].as_str(), fx.root.to_str());
         assert!(j["no_root"].as_str().unwrap().contains("no Npm.prototype.exec"));
+    }
+
+    #[test]
+    fn destinations_the_hook_saw_are_kept_relative_to_the_root() {
+        let fx = Fx::new("serve-seen");
+        let new = || Server::new(&fx.store, None, clone::Mode::File, Some("pacote@1.0.0 tar@2.0.0".into()), CheckPolicy::OneIn(50)).unwrap();
+        let root_msg = |root: &Path, command: &str| json!({ "id": 0, "root": root, "global": false, "command": command, "typed": command, "dry_run": false, "package_lock_only": false, "usage": false });
+        let seen = |s: &Server| {
+            let mut v: Vec<String> = s.stats.lock().unwrap().seen.iter().cloned().collect();
+            v.sort();
+            v
+        };
+        // Before a root, nothing can be placed relative to it.
+        let s = new();
+        assert!(s.record_message(&json!({ "note": "hook-off", "dest": fx.root.join("node_modules/a") })));
+        assert!(seen(&s).is_empty());
+        drop(s);
+
+        // The root reported through a symlink (npm's prefix as typed),
+        // pinned canonical. Destinations under either form (as npm names
+        // them: lexically), or whose parent resolves into the root, are
+        // keyed as npm's hidden lockfile keys packages.
+        fs::create_dir_all(fx.root.join("packages/w/node_modules")).unwrap();
+        std::os::unix::fs::symlink(fx.root.join("packages/w/node_modules"), fx.dir.join("wlink")).unwrap();
+        let link = fx.dir.join("root-link-seen");
+        std::os::unix::fs::symlink(&fx.root, &link).unwrap();
+        let hidden = r#"{"name":"p","lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}}"#;
+        fs::write(fx.root.join("node_modules/.package-lock.json"), hidden).unwrap();
+        let s = new();
+        assert_eq!(serde_json::from_str::<Value>(&s.handle_line(&root_msg(&link, "install").to_string())[0]).unwrap()["ok"], true);
+        assert!(s.record_message(&json!({ "note": "hook-off", "dest": link.join("node_modules/a") })));
+        assert!(s.record_message(&json!({ "note": "type-git", "dest": fx.root.join("node_modules/@s/b") })));
+        assert!(s.record_message(&json!({ "note": "no-integrity", "dest": fx.dir.join("wlink/c") })));
+        assert!(s.record_message(&json!({ "note": "no-integrity", "dest": fx.dir.join("elsewhere/node_modules/d") })));
+        assert!(s.record_message(&json!({ "note": "no-integrity" })));
+        s.handle_line(&json!({ "id": 1, "integrity": "sha512-x", "dest": link.join("node_modules/e") }).to_string());
+        s.handle_line(&json!({ "id": 2, "integrity": "sha512-x", "dest": "relative/node_modules/f" }).to_string());
+        assert_eq!(seen(&s), ["node_modules/@s/b", "node_modules/a", "node_modules/e", "packages/w/node_modules/c"]);
+        assert!(s.record_message(&json!({ "aside": "outside-root" })));
+        assert!(s.record_message(&json!({ "aside": "outside-root" })));
+        let st = s.stats.lock().unwrap();
+        assert_eq!(st.asides.get("outside-root"), Some(&2));
+        assert_eq!(st.fallbacks.get("no-integrity"), Some(&3), "notes are still packages left to npm");
+        assert_eq!(st.to_json()["asides"]["outside-root"], 2);
+        // The hidden lockfile before the command: read for a command other
+        // than ci, with node_modules not empty.
+        assert_eq!((st.hidden_before.as_deref(), st.nm_empty_before), (Some(hidden.as_bytes()), false));
+        drop(st);
+        drop(s);
+
+        // npm ci empties node_modules itself: nothing is read.
+        let s = new();
+        s.handle_line(&root_msg(&fx.root, "ci").to_string());
+        assert_eq!(s.stats.lock().unwrap().hidden_before, None);
+        drop(s);
+        // An empty node_modules, and none at all.
+        fs::remove_dir_all(fx.root.join("node_modules")).unwrap();
+        for make in [true, false] {
+            if make {
+                fs::create_dir(fx.root.join("node_modules")).unwrap();
+            }
+            let s = new();
+            s.handle_line(&root_msg(&fx.root, "update").to_string());
+            let st = s.stats.lock().unwrap();
+            assert_eq!((st.hidden_before.is_none(), st.nm_empty_before), (true, true), "node_modules made: {make}");
+            drop(st);
+            drop(s);
+            if make {
+                fs::remove_dir(fx.root.join("node_modules")).unwrap();
+            }
+        }
     }
 
     /// Answer lines from `handle_line`, by id.

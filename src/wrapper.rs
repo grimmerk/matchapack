@@ -1,10 +1,11 @@
 //! `matchapack npm <args>`: what the shell wrapper calls instead of npm.
 //!
-//! Only `npm ci` (or one of its aliases) is a candidate. Everything else, and
+//! Candidates are `npm ci`, `npm install`, `npm update` and `npm uninstall`
+//! under the first words of `ROUTED` (their aliases). Everything else, and
 //! every candidate that fails a check, runs the real npm with the original
 //! arguments, so the worst case is plain npm.
 //!
-//! The inject engine (`run_inject`) takes `npm ci` with any arguments and
+//! The inject engine (`run_inject`) takes them with any arguments and
 //! declines before npm starts only what needs no node (`decide_inject`,
 //! `inject::gates`: npm major 10–12, umask 022, the exact flags that make it
 //! global or install nothing, a start directory outside the trial scope).
@@ -17,21 +18,66 @@ use serde_json::{json, Value};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-const CI_ALIASES: [&str; 5] = ["ci", "clean-install", "ic", "install-clean", "isntall-clean"];
+/// The first words the shell function sends to `matchapack npm` (shell/
+/// matchapack.sh and .fish list the same words; a test compares them), with
+/// the npm command each names: npm's own aliases and typos
+/// (`lib/utils/cmd-list.js`, the same in npm 10.0.0 to 12.2.1, except `u`,
+/// an alias of `update` from npm 11; on npm 10 `npm u` is no command, and
+/// the root check declines it before it runs). Abbreviations npm also
+/// accepts (`npm upd`) are not routed: plain npm. Not routed although the
+/// engine would handle them: install-test, install-ci-test, dedupe, prune,
+/// `audit fix`, link, exec (the owner's decision, 2026-11-15).
+pub const ROUTED: &[(&str, &str)] = &[
+    ("ci", "ci"),
+    ("clean-install", "ci"),
+    ("ic", "ci"),
+    ("install-clean", "ci"),
+    ("isntall-clean", "ci"),
+    ("install", "install"),
+    ("i", "install"),
+    ("in", "install"),
+    ("ins", "install"),
+    ("inst", "install"),
+    ("insta", "install"),
+    ("instal", "install"),
+    ("isnt", "install"),
+    ("isnta", "install"),
+    ("isntal", "install"),
+    ("isntall", "install"),
+    ("add", "install"),
+    ("update", "update"),
+    ("up", "update"),
+    ("upgrade", "update"),
+    ("udpate", "update"),
+    ("u", "update"),
+    ("uninstall", "uninstall"),
+    ("un", "uninstall"),
+    ("unlink", "uninstall"),
+    ("remove", "uninstall"),
+    ("rm", "uninstall"),
+    ("r", "uninstall"),
+];
+
+/// The npm command a routed first word names, or None (not routed).
+pub fn routed(word: &str) -> Option<&'static str> {
+    ROUTED.iter().find(|(w, _)| *w == word).map(|(_, c)| *c)
+}
 
 pub fn run(args: Vec<String>) -> i32 {
     if std::env::var("MATCHAPACK").as_deref() == Ok("0") {
         return exec_npm(&args);
     }
-    if !args.first().is_some_and(|a| CI_ALIASES.contains(&a.as_str())) {
+    let Some(command) = args.first().and_then(|a| routed(a)) else {
         return exec_npm(&args);
-    }
+    };
     // Before anything of the install runs (`load_end`: trial::append).
     let load_start = trial::loadavg();
     let dir = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
     let npm_version = util::npm_version().unwrap_or_default();
+    // `command`: npm's name for the routed word (npm's own once npm reported
+    // it, `inject.command`); `root`: npm's install root, once npm reported it.
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "phases": util::phases(), "load_start": load_start });
+        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "command": command, "phases": util::phases(), "load_start": load_start });
         if let (Value::Object(m), Value::Object(x)) = (&mut rec, extra) {
             m.extend(x);
         }
@@ -45,13 +91,47 @@ pub fn run(args: Vec<String>) -> i32 {
         log("declined", json!({ "engine": "inject", "reason": reason }));
         return decline(&args, &reason);
     }
-    run_inject(&args, &log)
+    run_inject(&args, command, &log)
 }
 
-/// `npm ci` through the inject engine: npm itself runs, with the user's
+/// npm's command and install root as the run's `inject` record has them
+/// (npm reported them), for the log's top level.
+fn command_and_root(inject: Option<&Value>) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    for k in ["command", "root"] {
+        if let Some(v) = inject.and_then(|i| i[k].as_str()) {
+            m.insert(k.into(), v.into());
+        }
+    }
+    m
+}
+
+/// `extra` with npm's command and root added (`command_and_root`).
+fn with_root(mut extra: Value, inject: Option<&Value>) -> Value {
+    if let Value::Object(m) = &mut extra {
+        m.extend(command_and_root(inject));
+    }
+    extra
+}
+
+/// How a user rebuilds after a run of the install family that broke: the
+/// command's own arguments on `npm ci` (npm ci takes an install command's
+/// flags and ignores package names; the owner's notes, Q5 §18), shell-quoted.
+fn repair_command(args: &[String]) -> String {
+    let q = |a: &String| {
+        if !a.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_=.,/:@+%^".contains(&b)) {
+            a.clone()
+        } else {
+            format!("'{}'", a.replace('\'', "'\\''"))
+        }
+    };
+    std::iter::once("MATCHAPACK=0 npm ci".to_string()).chain(args.iter().skip(1).map(q)).collect::<Vec<_>>().join(" ")
+}
+
+/// The command through the inject engine: npm itself runs, with the user's
 /// arguments unchanged; matchapack declines only what it must know before
-/// npm starts.
-fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
+/// npm starts. `command`: npm's name for the routed word.
+fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 {
     let opts = match decide_inject(args) {
         Ok(o) => o,
         Err(reason) => {
@@ -60,11 +140,28 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
         }
     };
     util::set_quiet(true);
-    eprintln!("matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm)");
+    // The install family is typed often and usually places nothing: no
+    // banner, and one line at the end only when something was placed
+    // (the owner's decision Q6).
+    let ci = command == "ci";
+    if ci {
+        eprintln!("matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm)");
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::inject::run(&opts)));
     let outcome = match outcome {
         Ok(o) => o,
         Err(_) => Err(InstallError::Broke(anyhow::anyhow!("internal error (panic)"))),
+    };
+    // For the install family a second run of the command would not repair
+    // anything (npm leaves in place what is there), and npm ci rebuilds
+    // from the lockfile, which is not what plain npm would have produced
+    // (the owner's decision Q5): stop, say how to check and rebuild.
+    let stop = |e: &anyhow::Error, what: &str| {
+        eprintln!(
+            "matchapack: {}; {what}. Check `git diff` of package.json and package-lock.json, then rebuild with plain npm: {}",
+            one_line(e),
+            repair_command(args)
+        );
     };
     match outcome {
         Ok(s) => {
@@ -74,14 +171,26 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
                 Some(i) if i["hook"] == "not-installed" => i["installed"].as_u64().unwrap_or(by_npm),
                 _ => by_npm,
             };
-            eprintln!(
-                "matchapack: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})",
-                s.placed, s.secs
-            );
+            if ci {
+                eprintln!(
+                    "matchapack: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})",
+                    s.placed, s.secs
+                );
+            } else if s.placed as u64 + by_npm > 0 {
+                eprintln!(
+                    "matchapack: {} package{} cloned from the store, npm extracted {by_npm} (inject engine; MATCHAPACK=0 npm {} for plain npm)",
+                    s.placed,
+                    if s.placed == 1 { "" } else { "s" },
+                    args[0]
+                );
+            }
             log(
                 "installed",
-                json!({ "engine": "inject", "secs": s.secs, "packages": s.placed, "store_new": s.store_new,
-                        "bytes_logical": s.bytes_logical, "bytes_store_new": s.bytes_store_new, "inject": s.inject }),
+                with_root(
+                    json!({ "engine": "inject", "secs": s.secs, "packages": s.placed, "store_new": s.store_new,
+                            "bytes_logical": s.bytes_logical, "bytes_store_new": s.bytes_store_new, "inject": s.inject }),
+                    s.inject.as_ref(),
+                ),
             );
             0
         }
@@ -91,13 +200,29 @@ fn run_inject(args: &[String], log: &dyn Fn(&str, Value)) -> i32 {
         }
         // npm ran and failed, and has said why: its status is the answer.
         Err(InstallError::Npm { code, inject }) => {
-            log("npm_failed", json!({ "engine": "inject", "code": code, "reason": format!("npm exited with status {code}"), "inject": inject }));
+            log("npm_failed", with_root(json!({ "engine": "inject", "code": code, "reason": format!("npm exited with status {code}"), "inject": inject }), Some(&inject)));
             code
         }
+        // npm read a key of the hook's result that pacote's own result does
+        // not have (inject.rs `trap_fired`).
+        Err(InstallError::Trap { error, code, inject }) => {
+            let ci = inject["command"].as_str().unwrap_or(command) == "ci";
+            log("broke", with_root(json!({ "engine": "inject", "reason": one_line(&error), "repair": if ci { "npm ci" } else { "stopped" }, "inject": inject }), Some(&inject)));
+            if ci {
+                eprintln!("matchapack: failed while npm was running ({}); running npm ci to rebuild node_modules", one_line(&error));
+                return exec_npm(args);
+            }
+            stop(&error, "node_modules, package.json and package-lock.json may not be what npm would have written");
+            if code != 0 { code } else { 1 }
+        }
         Err(InstallError::Broke(e)) => {
-            log("broke", json!({ "engine": "inject", "reason": one_line(&e) }));
-            eprintln!("matchapack: failed while npm was running ({}); running npm ci to rebuild node_modules", one_line(&e));
-            exec_npm(args)
+            log("broke", json!({ "engine": "inject", "reason": one_line(&e), "repair": if ci { "npm ci" } else { "stopped" } }));
+            if ci {
+                eprintln!("matchapack: failed while npm was running ({}); running npm ci to rebuild node_modules", one_line(&e));
+                return exec_npm(args);
+            }
+            stop(&e, "npm may not have finished as it would have alone");
+            1
         }
     }
 }
@@ -301,6 +426,47 @@ mod tests {
         for a in [&["--prefix", "x"][..], &["--prefix=x"], &["-C", "x"], &["--no-audit", "-C=x"]] {
             assert_eq!(f(a), Ok(true), "{a:?}");
         }
+    }
+
+    /// The three lists of routed first words cannot drift: the Rust table,
+    /// the `case` pattern of shell/matchapack.sh, the `contains` list of
+    /// shell/matchapack.fish.
+    #[test]
+    fn the_shell_functions_route_the_words_of_the_table() {
+        let table: Vec<&str> = super::ROUTED.iter().map(|(w, _)| *w).collect();
+        // The sh `case` pattern: from `case "${1-}" in` to the `)` that ends it.
+        let sh = include_str!("../shell/matchapack.sh");
+        let pat = sh.split("case \"${1-}\" in").nth(1).and_then(|r| r.split(')').next()).unwrap();
+        let sh_words: Vec<&str> = pat.split(['|', '\\', '\n', ' ']).map(str::trim).filter(|w| !w.is_empty()).collect();
+        assert_eq!(sh_words, table, "shell/matchapack.sh");
+        // The fish `contains` list, over continued lines.
+        let fish = include_str!("../shell/matchapack.fish");
+        let rest = fish.split("contains -- \"$argv[1]\"").nth(1).unwrap();
+        let mut fish_words = vec![];
+        for line in rest.lines() {
+            let cont = line.trim_end().ends_with('\\');
+            fish_words.extend(line.trim_end().trim_end_matches('\\').split_whitespace());
+            if !cont {
+                break;
+            }
+        }
+        assert_eq!(fish_words, table, "shell/matchapack.fish");
+        // Each word names one of the commands the server accepts.
+        for (w, c) in super::ROUTED {
+            assert!(crate::serve::ROOT_COMMANDS.contains(c), "{w} → {c}");
+            assert_eq!(super::routed(w), Some(*c));
+        }
+        for w in ["run", "test", "exec", "link", "dedupe", "it", "cit", "upd", "--version", "", "--prefix"] {
+            assert_eq!(super::routed(w), None, "{w}");
+        }
+    }
+
+    #[test]
+    fn the_repair_command_keeps_the_commands_arguments() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::repair_command(&a(&["install", "--omit=dev", "left-pad@1.3.0"])), "MATCHAPACK=0 npm ci --omit=dev left-pad@1.3.0");
+        assert_eq!(super::repair_command(&a(&["i", "a b", "it's", ""])), "MATCHAPACK=0 npm ci 'a b' 'it'\\''s' ''");
+        assert_eq!(super::repair_command(&a(&["uninstall"])), "MATCHAPACK=0 npm ci");
     }
 
     #[test]

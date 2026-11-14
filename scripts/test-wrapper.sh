@@ -120,6 +120,41 @@ runs=$(wc -l < "$d/runs.txt" 2>/dev/null | tr -d ' ')
 [ "$rc" != 0 ] && [ "$runs" = 1 ] && ! grep -q 'running npm ci to rebuild\|running plain npm' "$d.out" && r=ok || r=bad
 check root-killed "a root script killed by a signal → npm's failure, not retried (ran $runs time(s))" $r "$d"
 
+# 31. The install family is routed; other commands, a flag first, and the
+#     two bypasses never start matchapack (it would log a line).
+logn() { { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl"; } 2>/dev/null || echo 0; }
+lastrec() { tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
+d=$work/ci
+for w in "i --no-audit --no-fund" "update --no-audit --no-fund" "rm left-pad --no-audit --no-fund"; do
+  n0=$(logn); CMD="npm $w"; rc=$(run "$d")
+  want=$(case ${w%% *} in i) echo install;; update) echo update;; rm) echo uninstall;; esac)
+  [ "$rc" = 0 ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"], r["command"], r["args"][0]')" = "('installed', '$want', '${w%% *}')" ] && r=ok || r=bad
+  check "routed-${w%% *}" "npm $w → matchapack npm, npm's $want" $r "$d"
+done
+for c in "run nope" "test" "--version" "exec -- node -e 0" "link --dry-run" "dedupe --dry-run" "--prefix $d install --no-audit --no-fund"; do
+  n0=$(logn); CMD="npm $c"; rc=$(run "$d")
+  [ "$(logn)" = "$n0" ] && ! grep -q '^matchapack' "$d.out" && r=ok || r=bad
+  check "not-routed" "npm $c → npm itself, matchapack not started" $r "$d"
+done
+n0=$(logn); CMD="npm install --no-audit --no-fund"; rc=$(run "$d" MATCHAPACK=0)
+[ "$rc" = 0 ] && [ "$(logn)" = "$n0" ] && r=ok || r=bad
+check opt-out-install "MATCHAPACK=0 npm install → plain npm, not logged" $r "$d"
+n0=$(logn); CMD="command npm install --no-audit --no-fund"; rc=$(run "$d")
+[ "$rc" = 0 ] && [ "$(logn)" = "$n0" ] && r=ok || r=bad
+check command-install "command npm install bypasses the function" $r "$d"
+# `npm u`: an alias of update from npm 11; on npm 10 no command at all. The
+# shell function routes it either way; on npm 10 matchapack declines on
+# npm's own answer and npm prints its own error, once.
+n0=$(logn); CMD="npm u --no-audit --no-fund"; rc=$(run "$d")
+if [ "$(npm -v | cut -d. -f1)" = 10 ]; then
+  [ "$rc" != 0 ] && [ "$(lastrec 'r["outcome"]')" = declined ] && grep -q 'running plain npm instead (npm has no command `u`)' "$d.out" \
+    && [ "$(grep -Ec 'Unknown command: "u"' "$d.out")" = 1 ] && ! grep -q 'Exit handler never called' "$d.out" && r=ok || r=bad
+  check npm-u "npm u on npm 10: declined on npm's answer, npm's own unknown-command error once" $r "$d"
+else
+  [ "$rc" = 0 ] && [ "$(lastrec 'r["outcome"], r["command"]')" = "('installed', 'update')" ] && r=ok || r=bad
+  check npm-u "npm u on npm $(npm -v): routed, npm's update" $r "$d"
+fi
+
 # 16. the run log records installs and declines (in the test's own log dir)
 n_inst=$(grep -c '"outcome":"installed"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
 n_decl=$(grep -c '"outcome":"declined"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)

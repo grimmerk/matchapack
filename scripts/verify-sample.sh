@@ -29,6 +29,12 @@ for l in reversed(lines):
     except ValueError:
         continue
     d = r.get("dir")
+    # Replayed as npm ci: only npm ci runs (records without a command are
+    # from before the install family was routed). `npm install` in a
+    # workspace member or with --prefix installs elsewhere (`root`).
+    if r.get("command", "ci") != "ci":
+        continue
+    d = r.get("root") or d
     if r.get("outcome") == "installed" and d and d not in seen and os.path.isdir(d):
         seen.add(d); out.append(d)
     if len(out) >= n:

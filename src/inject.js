@@ -369,7 +369,22 @@ function main () {
   // Set in step 4, when npm has loaded pacote.
   let pacote = null
   let origExtract = null
+  // Set in step 3 when matchapack accepted npm's install root: the root as
+  // npm reported it and as matchapack pinned it (canonical).
+  let roots = null
+  const insideRoot = (d) => roots.some(r => d === r || d.startsWith(r.endsWith(path.sep) ? r : r + path.sep))
   const matchapackExtract = async function (dest) {
+    const to = path.resolve(dest)
+    // Not an install into the project: pacote extracts a package given as
+    // a URL, a local tarball or a git repository into a temporary directory
+    // in npm's cache to read its manifest, through this same method; a
+    // workspace that is a symlink to a directory outside the project gets
+    // its own node_modules there. pacote's own extract, and counted apart
+    // (not a package npm extracted into the project; src/serve.rs).
+    if (roots && !insideRoot(to)) {
+      send({ aside: 'outside-root' })
+      return origExtract.call(this, dest)
+    }
     let why
     try {
       why = down || ineligible(pacote, this, processUmask)
@@ -377,7 +392,9 @@ function main () {
       why = 'hook-error'
     }
     if (why) {
-      send({ note: why })
+      // The destination: matchapack compares the packages npm placed with
+      // the destinations the hook saw ("unseen", src/inject.rs).
+      send({ note: why, dest: to })
       return origExtract.call(this, dest)
     }
     // npm's own project root, as it passes it to pacote (ci.js builds the
@@ -386,7 +403,7 @@ function main () {
     // reported in step 3 (`npm-root-elsewhere`); the destination check uses
     // the pinned root.
     const npmRoot = this.opts && typeof this.opts.path === 'string' && path.isAbsolute(this.opts.path) ? this.opts.path : undefined
-    const req = { integrity: String(this.integrity), dest: path.resolve(dest), npm_root: npmRoot }
+    const req = { integrity: String(this.integrity), dest: to, npm_root: npmRoot }
     let answer
     try {
       answer = await request(req)
@@ -416,8 +433,9 @@ function main () {
       return origExtract.call(this, dest)
     }
     // What pacote's extract resolves to. arborist does not read it today; a
-    // read of any other key is reported, and matchapack then rebuilds the
-    // tree with plain npm (wrapper.rs, the "broke" path).
+    // read of any other key is reported, and matchapack treats the run as
+    // broken (wrapper.rs: npm ci is rebuilt with plain npm ci; the install
+    // family stops with the repair command).
     return resultTrap(
       { resolved: this.resolved, integrity: this.integrity && String(this.integrity), from: this.from },
       (key, expected) => send({ result_read: key, expected }))
@@ -471,6 +489,9 @@ function main () {
         answer = await request(report)
       } catch {
         // matchapack is gone: every later request falls back to pacote
+      }
+      if (answer && answer.ok === true) {
+        roots = [report.root, answer.root].filter(r => typeof r === 'string' && path.isAbsolute(r))
       }
       if (answer && answer.ok === false) {
         // Refused (the reason is recorded): npm has loaded its config and

@@ -20,6 +20,7 @@ use rayon::prelude::*;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -104,16 +105,50 @@ fn is_package_key(key: &str) -> bool {
     }
 }
 
-/// How many packages npm left installed that it had to extract: the entries
-/// of the hidden lockfile it wrote that sit in a node_modules, without links
-/// and bundled packages (those come inside their bundler's tarball). Every
-/// one of them went through pacote's extract, so the hook should have seen
-/// at least as many.
-fn installed_packages(root: &std::path::Path) -> Option<usize> {
-    let text = std::fs::read(root.join("node_modules/.package-lock.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&text).ok()?;
+/// A hidden lockfile's packages that npm extracts, inside the root: the
+/// entries that sit in a node_modules, without links and bundled packages
+/// (those come inside their bundler's tarball), and without the ones outside
+/// the root (`../ws/node_modules/a`: a workspace symlinked out of the
+/// project, whose packages the hook sets aside). Key → (version, integrity),
+/// what npm's diff compares (arborist `lib/diff.js`: version, then
+/// integrity; a changed `resolved` alone extracts nothing).
+type Packages = BTreeMap<String, (Option<String>, Option<String>)>;
+
+fn hidden_packages(text: &[u8]) -> Option<Packages> {
+    let v: serde_json::Value = serde_json::from_slice(text).ok()?;
     let flag = |p: &serde_json::Value, k: &str| p.get(k).and_then(|x| x.as_bool()) == Some(true);
-    Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| is_package_key(k) && !flag(p, "link") && !flag(p, "inBundle")).count())
+    let s = |p: &serde_json::Value, k: &str| p.get(k).and_then(|x| x.as_str()).map(String::from);
+    Some(
+        v.get("packages")?
+            .as_object()?
+            .iter()
+            .filter(|(k, p)| is_package_key(k) && !k.starts_with("../") && !k.starts_with('/') && !flag(p, "link") && !flag(p, "inBundle"))
+            .map(|(k, p)| (k.clone(), (s(p, "version"), s(p, "integrity"))))
+            .collect(),
+    )
+}
+
+/// The packages npm must have extracted in this run, so the hook should
+/// have seen each (by its destination): read from the hidden lockfile npm
+/// wrote. `npm ci` empties node_modules first: every package. The install
+/// family changes only some (NOTES "The install family"; the plan's U2): a
+/// package that is new in the hidden lockfile since `before` (read when npm
+/// reported its root, before the command ran), or whose version or
+/// integrity changed. Without a hidden lockfile before: every package when
+/// node_modules was absent or empty, else nothing can be said (None). A
+/// lower bound: npm may extract more (a package directory removed by hand),
+/// never fewer, so it cannot raise a false alarm on a node_modules npm
+/// itself made.
+fn expected_packages(command: &str, root: &std::path::Path, before: Option<&[u8]>, nm_empty_before: bool) -> Option<BTreeSet<String>> {
+    let after = hidden_packages(&std::fs::read(root.join("node_modules/.package-lock.json")).ok()?)?;
+    if command == "ci" {
+        return Some(after.into_keys().collect());
+    }
+    match before.and_then(hidden_packages) {
+        Some(before) => Some(after.into_iter().filter(|(k, v)| before.get(k) != Some(v)).map(|(k, _)| k).collect()),
+        None if nm_empty_before => Some(after.into_keys().collect()),
+        None => None,
+    }
 }
 
 /// The error for reads of unexpected keys of the hook's result, or None.
@@ -125,7 +160,7 @@ fn trap_fired(unexpected: &std::collections::BTreeMap<String, usize>) -> Option<
     }
     let keys: Vec<String> = unexpected.iter().map(|(k, n)| format!("`{k}` ({n}×)")).collect();
     Some(anyhow!(
-        "npm read {} of what matchapack's hook returned for a cloned package instead of pacote's extract: this npm uses the result, so node_modules may not be npm ci's",
+        "npm read {} of what matchapack's hook returned for a cloned package instead of pacote's extract: this npm uses the result, so what it installed may not be npm's own",
         keys.join(", ")
     ))
 }
@@ -267,7 +302,15 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // root (npm stopped before its command, or its root could not be read)
     // nothing was cloned.
     if let Some(root) = &root {
-        if let Err(e) = store.record_project(root, &stats.used) {
+        let recorded = if stats.command.as_deref().unwrap_or("ci") == "ci" {
+            store.record_project(root, &stats.used)
+        } else {
+            // The packages npm did not touch stay, and so do their entries;
+            // also after a failed run, which npm rolled back.
+            let in_tree = crate::gc::read_hidden_lock(root).ok().map(|v| v.iter().map(|i| i.key()).collect());
+            store.merge_project(root, &stats.used, in_tree.as_ref())
+        };
+        if let Err(e) = recorded {
             crate::info!("could not record the project for `matchapack store gc`: {e:#}");
         }
     }
@@ -279,12 +322,16 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     }
     let kinds: Vec<String> = stats.kinds.iter().map(|(k, v)| format!("{k} {}", v.0)).collect();
     let falls: Vec<String> = stats.fallbacks.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    let asides: usize = stats.asides.values().sum();
     crate::info!(
-        "inject: cloned {} ({}), extracted by npm {} ({}), {} new in the store, {} checked against pacote, {} paths regrouped; npm {:.2}s, clone requests {:.2}s",
+        "inject: cloned {} ({}), extracted by npm {} ({}){}, {} new in the store, {} checked against pacote, {} paths regrouped; npm {:.2}s, clone requests {:.2}s",
         stats.cloned,
         if kinds.is_empty() { "-".to_string() } else { kinds.join(", ") },
         stats.fallback_total(),
         if falls.is_empty() { "-".to_string() } else { falls.join(", ") },
+        // Extractions outside the root: pacote reading a manifest, a
+        // workspace symlinked out of the project.
+        if asides > 0 { format!(", {asides} outside the root left to pacote") } else { String::new() },
         stats.filled.len(),
         stats.checked,
         stats.paths_regrouped,
@@ -337,16 +384,17 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // npm read a key of what the hook's extract resolved to other than the
     // three pacote's own value has (src/inject.js `resultTrap`): this npm
     // uses something of the result that a clone may not give as pacote
-    // would. The tree must be npm's, so this is a broken install: through
-    // the shell function npm ci runs again, plain (wrapper.rs), also when
-    // npm failed (the hook may be why).
-    if let Some(e) = trap_fired(&stats.result_unexpected) {
-        return Err(InstallError::Broke(e));
+    // would. The tree must be npm's, so this is a broken install, also when
+    // npm failed (the hook may be why): through the shell function npm ci
+    // runs again, plain; the install family stops and says how to rebuild
+    // (wrapper.rs).
+    let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+    if let Some(error) = trap_fired(&stats.result_unexpected) {
+        return Err(InstallError::Trap { error, code, inject });
     }
     if !status.success() {
         // npm reported its own failure (a script, the lockfile, the network);
         // `npm ci` would have failed the same way. Not retried.
-        let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
         return Err(InstallError::Npm { code, inject });
     }
     // The hook is a patch of a method npm does not promise to keep calling.
@@ -355,16 +403,29 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // hook never saw. Said out loud and logged (`matchapack report` counts it).
     // When the hook was knowingly not installed, the line above said so.
     let hook_absent = stats.hook.as_deref() == Some("not-installed");
-    if let Some(installed) = root.as_deref().and_then(installed_packages) {
-        let seen = stats.cloned + stats.fallback_total();
-        let unseen = installed.saturating_sub(seen);
+    let command = stats.command.as_deref().unwrap_or("ci");
+    let expected = root.as_deref().and_then(|r| expected_packages(command, r, stats.hidden_before.as_deref(), stats.nm_empty_before));
+    if let Some(expected) = expected {
+        // Compared by destination, not by count: pacote's temporary
+        // extractions and npm's extra ones cannot hide a package the hook
+        // missed.
+        let installed = expected.len();
+        let unseen = expected.iter().filter(|k| !stats.seen.contains(*k)).count();
         inject["installed"] = serde_json::json!(installed);
         inject["unseen"] = serde_json::json!(unseen);
         if unseen > 0 && !hook_absent {
-            eprintln!(
-                "matchapack: npm installed {installed} packages, but only {seen} went through matchapack's hook: \
-                 this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)"
-            );
+            if command == "ci" {
+                eprintln!(
+                    "matchapack: npm installed {installed} packages, but only {} went through matchapack's hook: \
+                     this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)",
+                    installed - unseen
+                );
+            } else {
+                eprintln!(
+                    "matchapack: npm installed {installed} packages in this run, but {unseen} of them did not go through matchapack's hook: \
+                     this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for them)"
+                );
+            }
         }
     }
     let bytes_logical = stats.used.par_iter().map(|i| store.entry_size(i)).sum();
@@ -386,7 +447,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn installed_packages_counts_what_npm_extracted() {
+    fn the_packages_npm_must_have_extracted_in_this_run() {
         for k in ["node_modules/a", "node_modules/@s/b", "node_modules/a/node_modules/b", "packages/w/node_modules/@s/b", "node_modules/.store/a@1.0.0/node_modules/a"] {
             assert!(is_package_key(k), "{k}");
         }
@@ -397,16 +458,37 @@ mod tests {
         }
         let d = crate::store::tests::scratch("inject-installed");
         std::fs::create_dir_all(d.join("node_modules")).unwrap();
-        assert_eq!(installed_packages(&d), None, "no hidden lockfile");
+        assert_eq!(expected_packages("ci", &d, None, true), None, "no hidden lockfile");
         let hidden = serde_json::json!({ "name": "p", "lockfileVersion": 3, "requires": true, "packages": {
-            "node_modules/a": { "version": "1.0.0" },
+            "node_modules/a": { "version": "1.0.0", "integrity": "sha512-a" },
             "node_modules/a/node_modules/b": { "version": "1.0.0", "inBundle": true },
             "node_modules/@s/w": { "resolved": "packages/w", "link": true },
             "packages/w": { "version": "1.0.0" },
-            "packages/w/node_modules/c": { "version": "2.0.0" },
+            "packages/w/node_modules/c": { "version": "2.0.0", "integrity": "sha512-c" },
+            "../out/node_modules/o": { "version": "1.0.0", "integrity": "sha512-o" },
         }});
         std::fs::write(d.join("node_modules/.package-lock.json"), hidden.to_string()).unwrap();
-        assert_eq!(installed_packages(&d), Some(2), "a and packages/w/node_modules/c");
+        let set = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>());
+        let all = set(&["node_modules/a", "packages/w/node_modules/c"]);
+        assert_eq!(expected_packages("ci", &d, None, false), all, "npm ci: every package npm extracts, inside the root");
+        // The install family: what changed since the hidden lockfile before.
+        let before = |p: serde_json::Value| serde_json::json!({ "lockfileVersion": 3, "packages": p }).to_string().into_bytes();
+        let same = before(hidden["packages"].clone());
+        assert_eq!(expected_packages("install", &d, Some(&same), false), set(&[]), "nothing changed");
+        assert_eq!(expected_packages("ci", &d, Some(&same), false), all, "npm ci ignores what was there");
+        let b = before(serde_json::json!({
+            "node_modules/a": { "version": "0.9.0", "integrity": "sha512-a" },
+            "packages/w/node_modules/c": { "version": "2.0.0", "integrity": "sha512-c", "resolved": "elsewhere" },
+            "node_modules/gone": { "version": "1.0.0" },
+        }));
+        assert_eq!(expected_packages("update", &d, Some(&b), false), set(&["node_modules/a"]), "a new version; a new resolved alone extracts nothing");
+        let b = before(serde_json::json!({ "node_modules/a": { "version": "1.0.0", "integrity": "sha512-x" } }));
+        assert_eq!(expected_packages("install", &d, Some(&b), false), all, "a new integrity, and a new key");
+        // No hidden lockfile before: everything when node_modules was absent
+        // or empty, else nothing can be said.
+        assert_eq!(expected_packages("install", &d, None, true), all);
+        assert_eq!(expected_packages("install", &d, None, false), None);
+        assert_eq!(expected_packages("uninstall", &d, Some(b"not json"), false), None);
     }
 
     #[test]

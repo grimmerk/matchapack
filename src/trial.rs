@@ -322,12 +322,16 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         report_yarn1(&yruns);
     }
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
+    // A run of the install family that broke stops with the repair command
+    // (`repair: stopped`); `npm ci` is rebuilt by plain npm ci.
+    let stopped = runs.iter().filter(|r| r["outcome"] == "broke" && r["repair"] == "stopped").count();
     println!(
-        "runs {}: installed {}, plain npm {}, failed then npm {}{}{}",
+        "runs {}: installed {}, plain npm {}, failed then npm {}{}{}{}",
         runs.len(),
         count("installed"),
         count("declined"),
-        count("broke"),
+        count("broke") - stopped,
+        if stopped > 0 { format!(", failed and stopped {stopped}") } else { String::new() },
         // npm itself ran and exited non-zero (the inject engine).
         if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() },
         // A root or dependency script failed in the classic engine's own
@@ -340,6 +344,16 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     if !runs.is_empty() {
         let n_inject = runs.iter().filter(|r| r["engine"] == "inject").count();
         println!("engines: inject {n_inject}, classic (removed in PR C2; older runs) {}", runs.len() - n_inject);
+        // npm's command; records without one are npm ci's (before the
+        // install family was routed).
+        let mut by_cmd: std::collections::BTreeMap<&str, usize> = Default::default();
+        for r in &runs {
+            *by_cmd.entry(r["command"].as_str().unwrap_or("ci")).or_default() += 1;
+        }
+        if by_cmd.keys().any(|c| *c != "ci") {
+            let list: Vec<String> = by_cmd.iter().map(|(c, n)| format!("{c} {n}")).collect();
+            println!("commands: {}", list.join(", "));
+        }
     }
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] != "installed") {
@@ -391,20 +405,23 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         );
     }
     // The trap on the hook's result (src/inject.js `resultTrap`): npm read a
-    // key of it other than resolved / integrity / from, and npm ci rebuilt
-    // node_modules (inject.rs `trap_fired`).
-    let trapped: Vec<&str> = runs
-        .iter()
-        .filter(|r| r["outcome"] == "broke")
-        .filter_map(|r| r["reason"].as_str())
-        .filter(|w| w.contains("of what matchapack's hook returned"))
-        .collect();
-    if !trapped.is_empty() {
-        println!(
-            "inject engine: in {} runs npm read an unexpected key of the hook's result, and npm ci rebuilt node_modules; first: {}",
-            trapped.len(),
-            trapped[0].chars().take(120).collect::<String>()
-        );
+    // key of it other than resolved / integrity / from (inject.rs
+    // `trap_fired`). npm ci: plain npm ci rebuilt node_modules; the install
+    // family: the run stopped and said how to rebuild.
+    for (stop, what) in [(false, "npm ci rebuilt node_modules"), (true, "the run stopped with the repair command (install, update, uninstall)")] {
+        let trapped: Vec<&str> = runs
+            .iter()
+            .filter(|r| r["outcome"] == "broke" && (r["repair"] == "stopped") == stop)
+            .filter_map(|r| r["reason"].as_str())
+            .filter(|w| w.contains("of what matchapack's hook returned"))
+            .collect();
+        if !trapped.is_empty() {
+            println!(
+                "inject engine: in {} runs npm read an unexpected key of the hook's result, and {what}; first: {}",
+                trapped.len(),
+                trapped[0].chars().take(120).collect::<String>()
+            );
+        }
     }
     // One line per matchapack build, in order of first use, so numbers from
     // different binaries are never read as one series.

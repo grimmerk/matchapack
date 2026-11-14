@@ -8,7 +8,8 @@
 //!
 //! Which projects: every install records its directory and entries under
 //! `<store>/projects/` (Store::record_project). Projects installed before
-//! records existed are found through the trial log (outcome `installed`),
+//! records existed are found through the trial log (outcome `installed`; the
+//! run's `root`, or its `dir` in logs from before npm reported its root),
 //! with the entries their hidden lockfile
 //! (`node_modules/.package-lock.json`) lists, or recorded by `store adopt`
 //! (`adopt` below, #30), which finds them by walking directories.
@@ -46,7 +47,7 @@ fn hidden_lock_entries(dir: &Path) -> Vec<Integrity> {
 /// could not be read. Every package with one (links and bundled packages
 /// have none): each was extracted from its tarball, so its integrity names
 /// the store entry an install would have cloned it from.
-fn read_hidden_lock(dir: &Path) -> std::result::Result<Vec<Integrity>, String> {
+pub(crate) fn read_hidden_lock(dir: &Path) -> std::result::Result<Vec<Integrity>, String> {
     let text = std::fs::read_to_string(dir.join("node_modules/.package-lock.json")).map_err(|e| format!("hidden lockfile unreadable: {e}"))?;
     let v = serde_json::from_str::<Value>(&text).map_err(|e| format!("hidden lockfile is not JSON: {e}"))?;
     let pkgs = v.get("packages").and_then(|p| p.as_object()).ok_or("hidden lockfile has no `packages`")?;
@@ -281,7 +282,9 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|v| v["outcome"] == "installed")
-        .filter_map(|v| v["dir"].as_str().map(PathBuf::from))
+        // npm's install root (a workspace root, a --prefix) where the run
+        // has one; older runs installed into `dir`.
+        .filter_map(|v| v["root"].as_str().or(v["dir"].as_str()).map(PathBuf::from))
         .collect();
     for dir in logged {
         let canon = std::fs::canonicalize(&dir).unwrap_or(dir);
@@ -349,7 +352,9 @@ mod tests {
         let sri = format!("sha512-{}", base64::engine::general_purpose::STANDARD.encode(hex::decode(&logged.hex).unwrap()));
         std::fs::write(c.join("node_modules/.package-lock.json"), format!(r#"{{"packages":{{"node_modules/c":{{"integrity":"{sri}"}}}}}}"#)).unwrap();
         let log = d.join("log.jsonl");
-        std::fs::write(&log, format!("{}\n{}\n", serde_json::json!({"outcome":"installed","dir":c}), serde_json::json!({"outcome":"declined","dir":d.join("x")}))).unwrap();
+        // Started in a workspace member: npm's root (`root`) is the project,
+        // not the start directory (`dir`).
+        std::fs::write(&log, format!("{}\n{}\n", serde_json::json!({"outcome":"installed","dir":c.join("packages/m"),"root":c}), serde_json::json!({"outcome":"declined","dir":d.join("x")}))).unwrap();
         drop(store);
 
         let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
