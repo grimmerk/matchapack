@@ -75,6 +75,18 @@ matchapack install . -- --no-audit   # directly; after `--`: npm's own arguments
 ```
 
 In detail:
+- Nothing of npm is loaded before npm's own start-up code runs: the helper
+  that starts npm reads pacote's `lib/fetcher.js` as a file (its fingerprint,
+  below), and installs its replacement of the extraction only when npm itself
+  has loaded pacote (#59). So npm's process is plain npm's, `fs` patches and
+  module load order included.
+- Where npm installs is npm's own answer: when npm starts the command, after
+  it loaded its config, it reports its install root (`npm.prefix`), and
+  matchapack runs its checks on that directory (the trial scope, a
+  symlinked `node_modules`, a global install) and clones only inside it
+  (#36). So `npm ci` inside a workspace of a monorepo clones into the
+  workspace root's `node_modules`, and `npm ci --prefix <dir>` into that
+  directory.
 - Every `npm ci` flag and npm setting is npm's to read (`--omit=dev`,
   `--workspace`, `--workspaces`, `--install-strategy`, `NODE_ENV=production`,
   `.npmrc` settings; each of these is compared with plain `npm ci` on a
@@ -110,28 +122,37 @@ In detail:
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
   Docker, `scripts/linux-test.sh`).
 
-matchapack runs plain npm instead, and prints why, before anything starts,
-when:
+matchapack runs plain npm instead, and prints why, when (before npm starts,
+unless marked "npm's root": those are decided on the root npm reports, after
+npm loaded its config and before its command ran, so the project is
+unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
 - npm is not a major version this engine has been run on: 10, 11 and 12. It
   has no code per npm version, so every 10.x, 11.x and 12.x passes this check
   (`INJECT_NPM_MAJORS` in src/wrapper.rs; `MATCHAPACK_NPM_VERSIONS=any`, or a
   list such as `13.1`, overrides it; `matchapack report` counts these runs);
-- npm's pacote code (the part matchapack replaces) is not code this build of
-  matchapack was tested with, as after a new npm release: the message names
-  its fingerprint; update matchapack, or set `MATCHAPACK_NPM_FINGERPRINT=any`
-  (or that fingerprint) to try it;
+- npm's pacote code (the part matchapack replaces: its `lib/fetcher.js`) is
+  not code this build of matchapack was tested with, as after a new npm
+  release: the message names its fingerprint; update matchapack, or set
+  `MATCHAPACK_NPM_FINGERPRINT=any` (or that fingerprint) to try it;
 - the umask is not 022;
-- the project's `node_modules` is a symlink;
-- the project is outside the trial scope (`~/.config/matchapack/paths`);
-- `--prefix` / `--global` / `--location` point npm at another directory;
-- the directory has no `package-lock.json` or `npm-shrinkwrap.json` (inside
-  a workspace of a monorepo, `npm ci` installs into the root's
-  `node_modules`; #36);
-- the command installs nothing (`--dry-run`, `--help`);
+- npm installs globally: `-g`, `--global`, `--location=global` on the command
+  line, or (npm's root) `global=true` in the environment or an npmrc;
+- the install root's `node_modules` is a symlink (npm's root);
+- the install root is outside the trial scope (`~/.config/matchapack/paths`;
+  the start directory is checked before npm starts unless `--prefix` was
+  typed, then npm's root);
+- the install root does not exist (`--prefix` naming a new directory; npm's
+  root);
+- the command installs nothing (`--dry-run`, `--package-lock-only`,
+  `--help`; npm's root also catches them set in an npmrc);
 - `MATCHAPACK_ENGINE` names another engine (`classic` was removed in PR C2).
 When the filesystem cannot clone, npm extracts every package itself, and
 matchapack says so: the first clone the filesystem refuses stops cloning for
-that install.
+that install. The same happens, said the same way, when npm's root cannot be
+read (an npm whose `Npm` class changed) or npm's pacote turns out, once npm
+has loaded it, not to have the shape the replacement needs. A directory
+without `package.json` or a lockfile is npm's to judge: npm finds its root
+above it, or `npm ci` prints its own error (logged as `npm_failed`).
 
 Limits that do not change the tree, only what is saved:
 - On macOS, in a directory whose group the user does not belong to (a project
@@ -336,8 +357,8 @@ working directory in.
 
 matchapack takes every npm 10, 11 and 12 release whose pacote code it was
 tested with: it has no code per npm version, and what keeps it right on a new
-release is checked while it runs (pacote's shape and its fingerprint before
-npm starts, every store entry compared with the new pacote/tar's extraction
+release is checked while it runs (pacote's fingerprint before npm starts and
+its shape when npm loads it, every store entry compared with the new pacote/tar's extraction
 before its first use, packages npm placed that the hook never saw, npm reading
 what the hook returns). Most npm releases do not change that pacote code. After
 an upgrade the harness is still worth running:

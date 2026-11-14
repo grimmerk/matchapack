@@ -43,8 +43,9 @@ const HISTORY_MAX = 60
 // The one coupling with the run-time half (the fingerprint gate in
 // src/inject.js and its list); adapt here only:
 //   node src/inject.js --fingerprint <npm package dir>
-//     prints the hex sha256 of pacote's FetcherBase class text, as the hook
-//     computes it at run time;
+//     prints the hex sha256 of pacote's lib/fetcher.js (the file of its
+//     FetcherBase class; until 2026-11-15 the class text alone), as the hook
+//     computes it at run time. The reports still call it the "class text";
 //   src/npm-fingerprints.json
 //     {"fingerprints": {"<hex>": {"releases", "verified_on", "added"}}}, the
 //     fingerprints the binary accepts without MATCHAPACK_NPM_FINGERPRINT.
