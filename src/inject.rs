@@ -319,6 +319,13 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         npm_secs,
         stats.wall_secs()
     );
+    let version = |k: &str| stats.hello.as_ref().and_then(|h| h.get(k)).and_then(|v| v.as_str()).unwrap_or("?").to_string();
+    crate::info!(
+        "inject: pacote {}, tar {} (code {}…), extraction code {key}",
+        version("pacote"),
+        version("tar"),
+        stats.tar_fingerprint.as_deref().map(|f| &f[..16]).unwrap_or("?")
+    );
     for e in &stats.errors {
         crate::info!("inject: {e}");
     }
@@ -344,7 +351,6 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         let why = stats.errors.iter().find(|e| e.starts_with("clone-unsupported")).map(String::as_str).unwrap_or("clone-unsupported");
         eprintln!("matchapack: no clones from the store here, npm extracted the packages itself ({why})");
     }
-    let version = |k: &str| stats.hello.as_ref().and_then(|h| h.get(k)).and_then(|v| v.as_str()).unwrap_or("?").to_string();
     // Entries that differed from pacote's extraction were replaced and the
     // packages placed from pacote's: this install is right. What it says
     // about the store depends on who made them (serve.rs).

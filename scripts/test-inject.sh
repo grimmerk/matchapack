@@ -411,11 +411,11 @@ npm_copy() {
 ks=$work/store-key; rm -rf "${ks:?}"
 p=$(project key-fill small)
 MATCHAPACK_STORE=$ks install "$p" && [ "$(filled)" = "$d_small" ] || bad "key: fill with this npm ($(cloned) cloned)"
-kv=$(npm_copy key-version)
+kv=$(npm_copy npm-key-version)
 python3 -c "import json,sys;p=sys.argv[1];d=json.load(open(p));d['version']=d['version']+'-matchapack';json.dump(d,open(p,'w'),indent=2)" "$kv/npm/node_modules/pacote/package.json"
 p=$(project key-version small)
 (PATH=$kv/bin:$PATH; MATCHAPACK_STORE=$ks MATCHAPACK_INJECT_CHECK=1000000 install "$p") && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = 0 ] && same "$ref_small" "$p" \
-  && ! grep -q 'extraction code was new to the store' "$work/out" \
+  && grep -q "inject: pacote [0-9.]*-matchapack, .*, extraction code $want_key\$" "$work/out" && ! grep -q 'extraction code was new to the store' "$work/out" \
   && ok "key: another pacote version with the same code compares nothing ($n_small cloned, 0 checked), tree identical" \
   || bad "key: same code, other pacote version: cloned $(cloned), checked $(checked)"
 
@@ -423,7 +423,7 @@ p=$(project key-version small)
 #     compared once under the new code (and the summary says why the install
 #     was slow), none in the next install, the records hold both keys, and
 #     back on the original npm nothing is compared.
-kt=$(npm_copy key-tar)
+kt=$(npm_copy npm-key-tar)
 tar_main=$(node -e "
 const path = require('path')
 const pacote = require.resolve('pacote', { paths: [path.join(process.argv[1], 'node_modules/@npmcli/arborist')] })
@@ -432,7 +432,7 @@ printf '\n// matchapack test: changed tar code\n' >> "$tar_main"
 tar_key=$(node "$here/src/inject.js" --key "$kt/npm" | head -1)
 p=$(project key-tar small)
 (PATH=$kt/bin:$PATH; MATCHAPACK_STORE=$ks MATCHAPACK_INJECT_CHECK=1000000 install "$p") && [ "$(cloned)" = "$n_small" ] && [ "$(checked)" = "$n_small" ] && same "$ref_small" "$p" \
-  && [ "$tar_key" != "$want_key" ] && [ "${tar_key%% *}" = "${want_key%% *}" ] \
+  && [ "$tar_key" != "$want_key" ] && [ "${tar_key%% *}" = "${want_key%% *}" ] && grep -q "extraction code $tar_key\$" "$work/out" \
   && grep -q "matchapack: this npm's extraction code was new to the store: $n_small packages were compared with npm's own extraction, once (matchapack store verify does this ahead of time)" "$work/out" \
   && ok "key: tar's code changed (${tar_main#"$kt/npm/"}): all $n_small compared once, the summary says why, tree identical" \
   || bad "key: tar changed: cloned $(cloned), checked $(checked), key $tar_key"
@@ -457,7 +457,7 @@ MATCHAPACK_STORE=$ks MATCHAPACK_INJECT_CHECK=1000000 install "$p" && [ "$(checke
 #     the install: through the shell function the run counts as broken and
 #     plain npm ci rebuilds node_modules, and the code goes on the store's
 #     decline list. The next install under it leaves every package to npm.
-km=$(npm_copy key-mtime)
+km=$(npm_copy npm-key-mtime)
 python3 - "$km/npm/node_modules/pacote/lib/fetcher.js" <<'PY' || bad "key: could not turn pacote's noMtime off"
 import sys
 p = sys.argv[1]; s = open(p).read()
