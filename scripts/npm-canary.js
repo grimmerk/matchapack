@@ -627,7 +627,10 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     fs.mkdirSync(dir, { recursive: true })
     packComments(plan, run, intro.join('\n'), sections).forEach((c, k) => fs.writeFileSync(path.join(dir, `${String(k + 1).padStart(2, '0')}.md`), c))
   }
-  writeJson(path.join(outDir, 'flags.json'), { red, attention })
+  // notify: the workflow fails the run (its notice to the owner) when a
+  // release is red or the comment asks for a person.
+  const notify = red || attention || plan.skipped.length > 0
+  writeJson(path.join(outDir, 'flags.json'), { red, attention, skipped: plan.skipped.length, notify })
   console.log(`${rows.length} versions reported; ${attention ? 'a comment asks for a person' : 'nothing for a person'}${red ? '; at least one red' : ''}`)
   return { red, attention }
 }

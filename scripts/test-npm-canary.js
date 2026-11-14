@@ -69,7 +69,7 @@ const item = (version, extra = {}) => ({ version, major: Number(version.split('.
 
 // 1. The ordinary case: a listed fingerprint, Linux green, comparison done.
 let r = report({ item: item('11.21.2'), linux: { known: true, compare: cmpSame('11.21.1') } })
-check('known, Linux green, compared: verified, nobody asked', r.state.lines[11].verified === '11.21.2' && r.state.lines[11].suites === 'pass' && !r.flags.attention && !r.flags.red, JSON.stringify(r.state.lines[11]))
+check('known, Linux green, compared: verified, nobody asked', r.state.lines[11].verified === '11.21.2' && r.state.lines[11].suites === 'pass' && !r.flags.attention && !r.flags.red && r.flags.notify === false, JSON.stringify(r.state.lines[11]))
 
 // 2. macOS required (fingerprint not listed) and its result missing: a
 //    failure, not a skip.
@@ -83,7 +83,7 @@ check('new major, no macOS result: fail, not verified', r.state.lines[13].suites
 
 // 4. macOS required and green: verified (but a new class text still asks).
 r = report({ item: item('11.21.2'), linux: { known: false, compare: cmpSame('11.21.1') }, macos: suitesOk })
-check('macOS required and green: pass, verified, a person asked about the new text', r.state.lines[11].suites === 'pass' && r.state.lines[11].verified === '11.21.2' && r.flags.attention && !r.flags.red, JSON.stringify(r.state.lines[11]))
+check('macOS required and green: pass, verified, a person asked about the new text', r.state.lines[11].suites === 'pass' && r.state.lines[11].verified === '11.21.2' && r.flags.attention && !r.flags.red && r.flags.notify === true, JSON.stringify(r.state.lines[11]))
 
 // 5. The planned comparison missing (baseline install or inspection
 //    failed): incomplete, not verified, a comment, and the next poll

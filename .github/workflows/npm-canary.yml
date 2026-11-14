@@ -20,7 +20,14 @@
 #   report  rewrites the tracking issue's body (a table per line, a history,
 #           the state) and comments when a person should look: the suites,
 #           the fingerprint, each changed function's diff, the changelog lines
-#           and the compare link. The run is red when a release is red.
+#           and the compare link. The run is red when a release is red
+#           AND whenever it commented for a person (a new fingerprint, a
+#           changed function, a new major, releases not tested): the issue
+#           comment says which. Red is the notice: GitHub emails a failed
+#           scheduled run to the user who created the workflow (or last
+#           changed its cron), with the default "Actions: failed workflows
+#           only, Email" setting, while a plain issue comment reaches email
+#           only if "Participating" email is on, for every repository.
 #
 # State: one JSON block in the tracking issue's body, rewritten by the
 # workflow (review 2026-11-14, section 9.3). Why there: it needs only
@@ -230,5 +237,8 @@ jobs:
           # stops at the failed post).
           for f in out/comments/*.md; do [ -f "$f" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$f"; done
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file out/body.md
-      - name: red when a release is red
-        run: jq -e '.red == false' out/flags.json
+      - name: red when a release is red or a person should look
+        run: |
+          jq . out/flags.json
+          jq -e '.notify == false' out/flags.json > /dev/null || {
+            echo "::error::the tracking issue has a new comment for a person (red: a release failed; otherwise: read it)"; exit 1; }
