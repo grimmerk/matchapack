@@ -1,0 +1,25 @@
+{
+  "about": "The pacote code the inject hook may be installed on: SHA-256 of the text of pacote's FetcherBase class, as `node src/inject.js --fingerprint <npm dir>` prints it. Embedded in the binary; an npm whose fingerprint is not here runs as plain npm (MATCHAPACK_NPM_FINGERPRINT=any, or a comma list, overrides). Add a fingerprint only after scripts/test-inject.sh and scripts/verify-npm.sh pass with an npm that has it. NOTES.md, \"G-lite: npm release safety (run time)\".",
+  "fingerprints": {
+    "e89576a31b8145ab7b8372dd2e7957ef2f0c85264d55423af7ed6c1ccbc914eb": {
+      "releases": "npm 10.8.0 to 10.9.0 (pacote 18.0.6 to 19.0.0)",
+      "verified_on": ["10.8.2"],
+      "added": "2026-11-14"
+    },
+    "2e43f4c0648d9b8d6453600b4f65b3a9dcfd8b42f8e6e75adb274689e0cbfa9e": {
+      "releases": "npm 10.9.1 to 10.9.10 and 11.0.0 to 11.10.1 (pacote 19.0.1 to 19.0.3, 21.0.0 to 21.3.1)",
+      "verified_on": ["10.9.2", "10.9.10", "11.3.0", "11.6.0", "11.6.1"],
+      "added": "2026-11-14"
+    },
+    "b1ead56a5de97d9b8775343bb41b9a86031e92eba074851955b56a676b74278f": {
+      "releases": "npm 11.11.0 to 11.21.2 (pacote 21.4.0 to 21.5.2)",
+      "verified_on": ["11.12.1", "11.14.1", "11.15.0", "11.16.0", "11.17.0", "11.19.1", "11.20.0", "11.21.2"],
+      "added": "2026-11-14"
+    },
+    "d384f9b73072843382c2209772903d12c0574f8fac64d90bd3da58220a710984": {
+      "releases": "npm 12.0.0 to 12.2.2 (pacote 22.0.0 to 22.0.1)",
+      "verified_on": ["12.2.2"],
+      "added": "2026-11-14"
+    }
+  }
+}

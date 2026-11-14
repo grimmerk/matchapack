@@ -10,10 +10,15 @@
 //!     {"id":7,"integrity":"sha512-…","dest":"/abs/dir"}
 //!     {"id":8,"integrity":"sha512-…","dest":"/abs/dir","extracted":"/…/tmp/…/x3"}
 //!     {"note":"type-FileFetcher"}                    a package the hook left to npm, and why
+//!     {"result_read":"foo","expected":false}         npm read this key of what the hook's
+//!                                                    extract resolved to (`expected`:
+//!                                                    resolved, integrity or from)
+//!     {"id":"declined","declined":"…"}               the hook stops before npm starts, and why
 //!   matchapack → node
 //!     {"id":7,"ok":true,"kind":"fast","filled":false,"checked":false}
 //!     {"id":7,"ok":false,"extract_to":"/…/tmp/…/x3","why":"fill"}
 //!     {"id":7,"ok":false,"reason":"rejected-dest","message":"…","fatal":false}
+//!     {"id":"declined","ok":true}                    recorded (the helper then exits 90)
 //! Requests are served concurrently (npm starts every extraction at once);
 //! answers come back in any order. `fatal` means no later request can succeed
 //! (the filesystem cannot clone): the hook stops asking.
@@ -139,6 +144,15 @@ pub struct Stats {
     pub paths_regrouped: usize,
     /// The first few refusal messages, for the log.
     pub errors: Vec<String>,
+    /// Why the hook stopped before npm started (the helper's `declined`).
+    pub declined: Option<String>,
+    /// Reads of `resolved`, `integrity` or `from` of what the hook's extract
+    /// resolved to, by key: npm does not read them today; noted.
+    pub result_reads: BTreeMap<String, usize>,
+    /// Reads of any other key of it: npm uses something of pacote's result
+    /// the hook may not give, so the tree may not be npm's (inject.rs then
+    /// reports the install as broken).
+    pub result_unexpected: BTreeMap<String, usize>,
     first: Option<Instant>,
     last: Option<Instant>,
 }
@@ -175,6 +189,9 @@ impl Stats {
             "serve_wall_secs": r(self.wall_secs()),
             "errors": self.errors,
             "pacote": self.hello.as_ref().and_then(|h| h.get("pacote")).cloned().unwrap_or(Value::Null),
+            "fingerprint": self.hello.as_ref().and_then(|h| h.get("fingerprint")).cloned().unwrap_or(Value::Null),
+            "result_reads": self.result_reads,
+            "result_unexpected": self.result_unexpected,
         })
     }
 }
@@ -1011,6 +1028,14 @@ impl<'a> Server<'a> {
             *self.stats.lock().unwrap().fallbacks.entry(key).or_default() += 1;
             return true;
         }
+        if let Some(key) = v.get("result_read").and_then(|k| k.as_str()) {
+            // A property name npm used: printable, bounded.
+            let key: String = key.chars().filter(|c| c.is_ascii_graphic()).take(60).collect();
+            let mut s = self.stats.lock().unwrap();
+            let map = if v.get("expected").and_then(|e| e.as_bool()) == Some(true) { &mut s.result_reads } else { &mut s.result_unexpected };
+            *map.entry(key).or_default() += 1;
+            return true;
+        }
         false
     }
 
@@ -1024,6 +1049,12 @@ impl<'a> Server<'a> {
             return vec![];
         }
         let Some(id) = v.get("id").cloned() else { return vec![] };
+        // Answered, so that the helper knows the reason is recorded before
+        // it exits (a line still unread when the child is gone can be lost).
+        if let Some(why) = v.get("declined").and_then(|d| d.as_str()) {
+            self.stats.lock().unwrap().declined = Some(why.chars().take(300).collect());
+            return vec![json!({ "id": id, "ok": true }).to_string()];
+        }
         {
             let mut s = self.stats.lock().unwrap();
             s.first.get_or_insert_with(Instant::now);
@@ -2074,6 +2105,33 @@ mod tests {
         assert_eq!(st.hello.as_ref().unwrap()["pacote"], "9.9.9");
         assert_eq!(st.fallbacks.get("hook-off"), Some(&1));
         assert_eq!(st.cloned + st.fallbacks.values().sum::<usize>(), 1, "the request was dropped, not served");
+    }
+
+    #[test]
+    fn result_reads_and_the_helpers_decline_are_recorded() {
+        let fx = Fx::new("serve-result-reads");
+        let s = fx.server(Mode::File);
+        assert!(s.record_message(&json!({ "result_read": "resolved", "expected": true })));
+        assert!(s.record_message(&json!({ "result_read": "integrity", "expected": true })));
+        assert!(s.record_message(&json!({ "result_read": "resolved", "expected": true })));
+        // Anything not marked expected is unexpected; the key is kept printable.
+        assert!(s.record_message(&json!({ "result_read": "files" })));
+        assert!(s.record_message(&json!({ "result_read": "a b\n", "expected": false })));
+        // The decline is answered, so the helper can wait for it to be recorded.
+        let answers = s.handle_line(&json!({ "id": "declined", "declined": "npm 9 has pacote code …" }).to_string());
+        assert_eq!(answers.len(), 1);
+        let a: Value = serde_json::from_str(&answers[0]).unwrap();
+        assert_eq!((a["id"].as_str(), a["ok"].as_bool()), (Some("declined"), Some(true)));
+        let st = s.stats.lock().unwrap();
+        assert_eq!(st.result_reads.get("resolved"), Some(&2));
+        assert_eq!(st.result_reads.get("integrity"), Some(&1));
+        assert_eq!(st.result_unexpected.get("files"), Some(&1));
+        assert_eq!(st.result_unexpected.get("ab"), Some(&1));
+        assert_eq!(st.declined.as_deref(), Some("npm 9 has pacote code …"));
+        assert_eq!(st.fallbacks.len(), 0, "neither is a package left to npm");
+        let j = st.to_json();
+        assert_eq!(j["result_unexpected"]["files"], 1);
+        assert_eq!(j["result_reads"]["resolved"], 2);
     }
 
     #[test]
