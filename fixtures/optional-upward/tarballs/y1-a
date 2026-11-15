@@ -1,0 +1,24 @@
+{
+  "name": "y1-a",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "y1-a",
+      "version": "1.0.0",
+      "main": "lib/index.js",
+      "bin": {
+        "y1a": "bin/cli.js"
+      },
+      "dependencies": {
+        "y1-b": "http://127.0.0.1:48321/y1-b-1.0.0.tgz",
+        "y1-c": "http://127.0.0.1:48321/y1-c-1.0.0.tgz"
+      },
+      "dist": {
+        "tarball": "http://127.0.0.1:48321/y1-a-1.0.0.tgz",
+        "shasum": "4dc476c23fe8c082875856988b87b084f559a4ce"
+      }
+    }
+  }
+}

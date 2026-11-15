@@ -1,0 +1,19 @@
+{
+  "name": "y1-rootpath",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "y1-rootpath",
+      "version": "1.0.0",
+      "scripts": {
+        "install": "node build.js"
+      },
+      "dist": {
+        "tarball": "http://127.0.0.1:48321/y1-rootpath-1.0.0.tgz",
+        "shasum": "0f0bbb082132f6c9d294188fe1a245fbf9a111c3"
+      }
+    }
+  }
+}

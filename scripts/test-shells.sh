@@ -134,7 +134,26 @@ YARN [install] [--frozen-lockfile]" "yarn; yarn install --frozen-lockfile"
   check yarn-install "MATCHAPACK-YARN [install] [--frozen-lockfile]" "yarn install --frozen-lockfile"
   check yarn-flag   "MATCHAPACK-YARN [--frozen-lockfile] [--cache-folder] [/c d]" "yarn --frozen-lockfile --cache-folder '/c d'"
   check yarn-args   "MATCHAPACK-YARN [install] [a b] [] [*]" "yarn install 'a b' '' '*'"
-  check yarn-add    "YARN [add] [x]"                     "yarn add x"
+  # The commands that copy packages into node_modules (NOTES "Yarn 1
+  # commands"); `workspace <name>` with add, remove, upgrade or
+  # upgrade-interactive only.
+  check yarn-add    "MATCHAPACK-YARN [add] [x] [--dev]"  "yarn add x --dev"
+  check yarn-cmds   "MATCHAPACK-YARN [upgrade]
+MATCHAPACK-YARN [upgrade] [x] [--latest]
+MATCHAPACK-YARN [remove] [x]
+MATCHAPACK-YARN [upgrade-interactive] [--latest]
+MATCHAPACK-YARN [upgradeInteractive]
+MATCHAPACK-YARN [workspace] [w] [add] [x]
+MATCHAPACK-YARN [workspace] [w] [remove] [x]
+MATCHAPACK-YARN [workspace] [w] [upgrade]
+MATCHAPACK-YARN [workspace] [w] [upgrade-interactive] [--latest]
+MATCHAPACK-YARN [workspace] [w] [upgradeInteractive]" "yarn upgrade; yarn upgrade x --latest; yarn remove x; yarn upgrade-interactive --latest; yarn upgradeInteractive; yarn workspace w add x; yarn workspace w remove x; yarn workspace w upgrade; yarn workspace w upgrade-interactive --latest; yarn workspace w upgradeInteractive"
+  check yarn-not-routed "YARN [global] [add] [x]
+YARN [workspace] [w] [run] [add]
+YARN [workspace] [w] [install]
+YARN [workspace] [w]
+YARN [workspaces] [run] [add]
+YARN [why] [add]" "yarn global add x; yarn workspace w run add; yarn workspace w install; yarn workspace w; yarn workspaces run add; yarn why add"
   check yarn-run    "YARN [run] [install]"               "yarn run install"
   check yarn-version "YARN [--version]
 YARN [-v]

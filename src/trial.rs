@@ -257,6 +257,16 @@ fn report_yarn1(runs: &[Value]) {
         count("yarn_failed"),
         count("broke")
     );
+    // Which commands (src/yarn1.rs `engine_command`; a record from before
+    // the field existed is an install).
+    let mut commands: std::collections::BTreeMap<&str, usize> = Default::default();
+    for r in runs {
+        *commands.entry(r["command"].as_str().unwrap_or("install")).or_default() += 1;
+    }
+    if !commands.is_empty() {
+        let list: Vec<String> = commands.iter().map(|(c, n)| format!("{c} {n}")).collect();
+        println!("  by command: {}", list.join(", "));
+    }
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] == "declined") {
         let key: String = r["reason"].as_str().unwrap_or("?").chars().take(90).collect();

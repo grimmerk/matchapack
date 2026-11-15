@@ -1,0 +1,16 @@
+{
+  "name": "y1-c",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "y1-c",
+      "version": "1.0.0",
+      "dist": {
+        "tarball": "http://127.0.0.1:48321/y1-c-1.0.0.tgz",
+        "shasum": "7575091a527e7c35ea67361c98d8ac4105845b28"
+      }
+    }
+  }
+}

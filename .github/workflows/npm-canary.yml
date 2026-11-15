@@ -18,13 +18,24 @@
 #   decide  macOS only when the class text is not on the list (or could not
 #           be told) or for a new major.
 #   macos   the same suites, for those releases only (macOS bills 10x).
+#   node-linux / node-macos  the Node and Yarn 1 release watch (the poll reads
+#           nodejs.org/dist/index.json, libuv's version.h and fs.c at each
+#           new release's tag, and Yarn's version list): when a new Node major
+#           appears, or the libuv of a watched line's newest release changes
+#           (its version, or its fs.c: Node cherry-picks libuv fixes), the npm suites on Linux (btrfs; each supported npm line at
+#           its last verified release, the real gates) and the Yarn suites on
+#           macOS (test-yarn1.sh, scripts/yarn-suites.sh, with the hook's
+#           facts) on that Node; a new stable Yarn 1 release, the Yarn suites
+#           with it. NOTES "The Node and Yarn 1 release watch".
 #   report  rewrites the tracking issue's body (a table per line, a history,
 #           the state) and comments when a person should look: the suites,
 #           the fingerprint, each changed function's diff, the changelog lines
 #           and the compare link. The run is red when a release is red
 #           AND whenever it commented for a person (a new fingerprint, a
-#           changed function, a new major, releases not tested): the issue
-#           comment says which. Red is the notice: GitHub emails a failed
+#           changed function, a new major, releases not tested, a release
+#           watch that could not read nodejs.org or libuv's files: then the
+#           npm half still runs and nothing of the watch is recorded): the
+#           issue comment says which. Red is the notice: GitHub emails a failed
 #           scheduled run to the user who created the workflow (or last
 #           changed its cron), with the default "Actions: failed workflows
 #           only, Email" setting, while a plain issue comment reaches email
@@ -62,6 +73,10 @@ on:
         description: also test the current release of every supported line (the monthly run)
         type: boolean
         default: false
+      node:
+        description: a Node release to run the npm and Yarn suites on (X.Y.Z; empty = what the watch finds)
+        required: false
+        default: ''
 concurrency:
   group: npm-canary
   cancel-in-progress: false
@@ -79,6 +94,9 @@ jobs:
     outputs:
       any: ${{ steps.poll.outputs.any }}
       matrix: ${{ steps.poll.outputs.matrix }}
+      node_any: ${{ steps.poll.outputs.node_any }}
+      node_linux: ${{ steps.poll.outputs.node_linux }}
+      node_macos: ${{ steps.poll.outputs.node_macos }}
     env:
       GH_TOKEN: ${{ github.token }}
       ISSUE: ${{ vars.NPM_CANARY_ISSUE }}
@@ -95,24 +113,38 @@ jobs:
         env:
           VERSIONS: ${{ inputs.versions }}
           CURRENT: ${{ inputs.current }}
+          NODE: ${{ inputs.node }}
         run: |
           args=(--head "$GITHUB_SHA")
           [ -n "${VERSIONS:-}" ] && args+=(--versions "$VERSIONS")
           [ "${CURRENT:-}" = true ] && args+=(--current)
+          [ -n "${NODE:-}" ] && args+=(--node "$NODE")
           node scripts/npm-canary.js poll canary/state.json "${args[@]}" > canary/plan.json
           jq -r '"to test: \([.todo[] | "\(.version) (\(.reason), against \(.baseline))"] | join(", ") | if . == "" then "nothing" else . end)"' canary/plan.json
-          echo "matrix=$(jq -c .todo canary/plan.json)" >> "$GITHUB_OUTPUT"
-          echo "any=$(jq -r '.todo | length > 0' canary/plan.json)" >> "$GITHUB_OUTPUT"
+          # A failed read of the release watch: the npm half goes on, the
+          # report says so and the run ends red (flags.json watchFailed).
+          jq -r 'if .watchError then "watch: FAILED (\(.watchError)); the npm half goes on" else "watch: \([(.node.todo[] | "Node \(.node) (\(.reason))"), (.yarn.todo[] | "Yarn \(.yarn) (\(.reason))")] | join(", ") | if . == "" then "nothing to test" else . end); recorded: \([.node.record[] | "Node \(.newest) (libuv \(.uv))"] | join(", ") | if . == "" then "-" else . end)" end' canary/plan.json
+          {
+            echo "matrix=$(jq -c .todo canary/plan.json)"
+            echo "any=$(jq -r '.todo | length > 0' canary/plan.json)"
+            echo "node_linux=$(jq -c .nodeLinux canary/plan.json)"
+            echo "node_macos=$(jq -c .nodeMacos canary/plan.json)"
+            echo "node_any=$(jq -r '(.nodeLinux | length) + (.nodeMacos | length) > 0' canary/plan.json)"
+          } >> "$GITHUB_OUTPUT"
       - name: nothing to test, record the poll date
-        if: steps.poll.outputs.any == 'false'
+        if: steps.poll.outputs.any == 'false' && steps.poll.outputs.node_any == 'false'
         run: |
           node scripts/npm-canary.js report canary/state.json canary/plan.json "$RUNNER_TEMP/none" canary/out --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           # Comments first, the state last: a failed post leaves the state
           # as it was, so the next poll tries again (bash -e stops here).
           for f in canary/out/comments/*.md; do [ -f "$f" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$f"; done
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file canary/out/body.md
+          # Red when the comment asks for a person (on a day with nothing to
+          # test: the release watch's reads failed).
+          jq -e '.notify == false' canary/out/flags.json > /dev/null || {
+            echo "::error::the tracking issue has a new comment for a person (the release watch could not poll; read it)"; exit 1; }
       - uses: actions/upload-artifact@v4
-        if: steps.poll.outputs.any == 'true'
+        if: steps.poll.outputs.any == 'true' || steps.poll.outputs.node_any == 'true'
         with:
           name: canary-plan
           path: canary/*.json
@@ -212,9 +244,96 @@ jobs:
           name: canary-macos-${{ matrix.version }}
           path: out/canary-macos-${{ matrix.version }}
 
+  # The release watch, Linux: the npm suites with the real gates (no
+  # override: a supported npm must pass them on the new Node). Billed: about
+  # 4 minutes per job, one job per supported npm line.
+  node-linux:
+    needs: poll
+    if: needs.poll.outputs.node_any == 'true' && needs.poll.outputs.node_linux != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.poll.outputs.node_linux) }}
+    name: node-linux (Node ${{ matrix.node }}, npm ${{ matrix.npm }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: build
+        run: cargo build --release
+      - name: btrfs on a loop device, zsh
+        run: |
+          sudo apt-get install -y -qq zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zsh >/dev/null; }
+          scripts/btrfs-scratch.sh "$RUNNER_TEMP/btrfs"
+      - name: npm suites on this Node
+        env:
+          NPM_V: ${{ matrix.npm }}
+          KEY: ${{ matrix.key }}
+        run: |
+          rc=0; scripts/npm-suites.sh "$NPM_V" "$RUNNER_TEMP/btrfs/w" || rc=$?
+          mkdir -p "out/canary-nodelinux-$KEY"
+          cp "$RUNNER_TEMP"/btrfs/w/*.json "$RUNNER_TEMP"/btrfs/w/*.log "out/canary-nodelinux-$KEY/" || true
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-nodelinux-${{ matrix.key }}
+          path: out/canary-nodelinux-${{ matrix.key }}
+
+  # The release watch, macOS: test-yarn1.sh on the new Node (matrix.node;
+  # null for a new Yarn 1 release: the pinned Node) with that Yarn 1. Billed:
+  # about 5 macOS minutes per job.
+  node-macos:
+    needs: poll
+    if: needs.poll.outputs.node_any == 'true' && needs.poll.outputs.node_macos != '[]'
+    runs-on: macos-15
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.poll.outputs.node_macos) }}
+    name: node-macos (${{ matrix.key }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The cache filled by another Node (MATCHAPACK_YARN_PRIME_NODE), as in
+      # ci.yml; the Node under test is set up last, so it is first on PATH.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+      - name: remember the second Node
+        run: echo "MATCHAPACK_YARN_PRIME_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node || env.NODE_VERSION }}
+      - name: build
+        run: cargo build --release
+      - name: Yarn suites
+        env:
+          YARN_V: ${{ matrix.yarn }}
+          KEY: ${{ matrix.key }}
+        run: |
+          npm install --prefix "$RUNNER_TEMP/yarn1" --ignore-scripts --no-audit --no-fund "yarn@$YARN_V"
+          MATCHAPACK_YARN_JS="$RUNNER_TEMP/yarn1/node_modules/yarn/bin/yarn.js" scripts/yarn-suites.sh "$RUNNER_TEMP/y" "out/canary-nodemacos-$KEY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-nodemacos-${{ matrix.key }}
+          path: out/canary-nodemacos-${{ matrix.key }}
+
   report:
-    needs: [poll, linux, decide, macos]
-    if: always() && needs.poll.outputs.any == 'true'
+    needs: [poll, linux, decide, macos, node-linux, node-macos]
+    if: always() && (needs.poll.outputs.any == 'true' || needs.poll.outputs.node_any == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
