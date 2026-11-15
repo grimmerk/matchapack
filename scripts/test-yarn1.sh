@@ -197,14 +197,17 @@ else bad "sample: identical replay (exit $rc, $(vrec 'r.get("result"), r.get("re
 # (TMPDIR also gets Yarn's own temporary files.)
 if [ -z "$(ls -d "$sp/tmp"/matchapack-verify-yarn.* 2>/dev/null)" ]; then ok "sample: its work directory is removed"; else bad "sample: left $(ls -d "$sp/tmp"/matchapack-verify-yarn.*)"; fi
 
-# 2. A workspace directory, without --frozen-lockfile: replayed in that
-# directory with the same (no) flags.
+# 2. A workspace directory whose package.json is ahead of yarn.lock, with
+# --pure-lockfile (Yarn installs what package.json asks for and leaves
+# yarn.lock as it is): replayed in that directory with that flag only (a
+# --frozen-lockfile added by the replay would make Yarn refuse).
 pw=$(sp_project ws yarn1-workspaces)
-sp_install "$pw/packages/w2"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["dependencies"]["y1-many"]="http://127.0.0.1:48321/y1-many-2.0.0.tgz"; json.dump(d, open(p,"w"), indent=2)' "$pw/packages/w2/package.json"
+sp_install "$pw/packages/w2" --pure-lockfile
 sp_sample -- 1
-if [ $rc = 0 ] && [ "$(vrec 'r["result"]')" = IDENTICAL ] && [ "$(vrec 'r["subdir"]')" = packages/w2 ] && [ "$(vrec 'r["args"]')" = "[]" ] \
-  && [ "$(vrec 'r["manifests_copied"]')" = 4 ]; then
-  ok "sample: a workspace directory, no --frozen-lockfile: replayed there with no flags, IDENTICAL"
+if [ $rc = 0 ] && [ "$(vrec 'r["result"]')" = IDENTICAL ] && [ "$(vrec 'r["subdir"]')" = packages/w2 ] && [ "$(vrec 'r["args"]')" = "['--pure-lockfile']" ] \
+  && [ "$(vrec 'r["manifests_copied"]')" = 4 ] && [ "$(vrec 'r["cloned"] > 0')" = True ]; then
+  ok "sample: a workspace directory, package.json ahead of yarn.lock, --pure-lockfile: replayed there with that flag only, IDENTICAL"
 else bad "sample: workspace replay (exit $rc, $(vrec 'r.get("result"), r.get("subdir"), r.get("args"), r.get("manifests_copied"), r.get("reason")'))"; fi
 
 # 3. A damaged engine tree: a content byte; an mtime on a tree without empty
