@@ -20,7 +20,8 @@
 # --ignore-engines, NODE_ENV=production; where plain Yarn refuses, the engine
 # must fail the same way); its gates, the start-up probe, the report,
 # two volumes (a disk image); Homebrew's yarn launcher, and (MATCHAPACK_FISH=
-# <fish>) the yarn function under fish. Needs the release binary, node and Yarn 1
+# <fish>) the yarn function under fish; the sampled verification of logged
+# runs (verify-sample.sh --yarn, #77). Needs the release binary, node and Yarn 1
 # (MATCHAPACK_YARN_NODE / MATCHAPACK_YARN_JS as in verify-yarn1.sh).
 # Installs from the local tarball server only; never touches the real Yarn
 # cache or ~/.yarnrc (checked).
@@ -128,7 +129,193 @@ groups_other() { # a group the user is in, other than the one of $1
 # TEST_YARN1_PART=route only `matchapack yarn` run directly, corepack, the
 # shell route and convert-existing.sh (not the engine's fixture cases);
 # TEST_YARN1_PART=commands only the Yarn commands that change dependencies
-# (add, upgrade, remove, upgrade-interactive, workspace).
+# (add, upgrade, remove, upgrade-interactive, workspace);
+# TEST_YARN1_PART=sample only the sampled verification (verify-sample.sh --yarn).
+# --- Sampled verification of real runs (verify-sample.sh --yarn, #77) ---------
+# TEST_YARN1_PART=sample: only these. A scratch run log, filled by
+# `matchapack yarn` run on fixtures (the logged runs), then
+# verify-sample.sh --yarn on it: a replay identical to plain Yarn (a root
+# with --frozen-lockfile, a workspace directory without it); a damaged engine
+# tree reported as DIFFERENT, or RACE-SHAPED where plain Yarn's own probe race
+# (#57) could have made it; the skips (directory gone, yarn.lock changed, a
+# hidden argument, an older record, another Yarn, an rc file above the
+# project, a relative --use-yarnrc, an unusable cache); the npm sampler
+# leaving `matchapack yarn` records alone; the report. Every run of it has
+# its own log and cache folder under the work directory, and TMPDIR there.
+if [ "${TEST_YARN1_PART:-all}" = sample ] || [ "${TEST_YARN1_PART:-all}" = all ]; then
+sp=$work/sp; rm -rf "${sp:?}"; mkdir -p "$sp/log" "$sp/cache" "$sp/tmp"
+spenv() {
+  env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK YARN_DISABLE_SELF_UPDATE_CHECK=true \
+    PATH="$(dirname "$node"):$PATH" MATCHAPACK_YARN_JS="$yarnjs" MATCHAPACK_STORE="$sp/mp/store" \
+    MATCHAPACK_LOG_DIR="$sp/log" MATCHAPACK_CONFIG_DIR="$sp/mp/config" "$@"
+}
+# sp_project <name> <fixture>: a copy of the fixture's files in $sp/<name>.
+sp_project() { local d=$sp/$1; rm -rf "${d:?}"; cp -p -R "$here/fixtures/$2" "$d"; echo "$d"; }
+# sp_install <dir> [yarn args]: the logged run, `matchapack yarn` in <dir>.
+sp_install() { local d=$1; shift; (cd "$d" && spenv "$bin" yarn "$@" --cache-folder "$sp/cache") > "$work/out" 2>&1; rc=$?; }
+# sp_sample [env...] -- [verify-sample.sh args]: output in $work/out, exit in $rc.
+sp_sample() {
+  local e=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do e+=("$1"); shift; done
+  shift
+  env ${e[@]+"${e[@]}"} MATCHAPACK_LOG_DIR_REAL="$sp/log" TMPDIR="$sp/tmp" MATCHAPACK_YARN_NODE= MATCHAPACK_YARN_JS= \
+    "$here/scripts/verify-sample.sh" --yarn "$@" > "$work/out" 2>&1; rc=$?
+}
+# vrec <python expression over r, the last line of verify.jsonl>
+vrec() { python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); print(eval(sys.argv[2]))' "$sp/log/verify.jsonl" "$1" 2>/dev/null; }
+# lrec <python expression over r, the last line of the run log>
+lrec() { python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); print(eval(sys.argv[2]))' "$sp/log/log.jsonl" "$1" 2>/dev/null; }
+# sp_fake <python statements changing r, a copy of the first logged run>:
+# appends that record to the run log (a skip case needs no install).
+sp_fake() {
+  python3 -c '
+import json, sys
+p = sys.argv[1]
+r = json.loads(open(p).read().splitlines()[0])
+exec(sys.argv[2])
+open(p, "a").write(json.dumps(r) + "\n")' "$sp/log/log.jsonl" "$1"
+}
+loglines() { wc -l < "$sp/log/log.jsonl" | tr -d ' '; }
+
+# The logged run, and what its record holds for a replay.
+pm=$(sp_project many yarn1-many)
+sp_install "$pm" install --frozen-lockfile
+pm_real=$(cd "$pm" && pwd -P)
+if [ $rc = 0 ] && [ "$(lrec 'r["root"]')" = "$pm_real" ] && [ "$(lrec 'r["replay"]["args"]')" = "['--frozen-lockfile']" ] \
+  && [ "$(lrec 'r["yarn1"]["yarn_js"]')" = "$yarnjs" ] && [ "$(lrec 'r["yarn1"]["node"]')" = "$("$node" -v)" ] \
+  && [ "$(lrec 'r["manifests"]["yarn.lock"][0]')" = "$(wc -c < "$pm/yarn.lock" | tr -d ' ')" ] && [ -x "$(lrec 'r["yarn1"]["node_path"]')" ]; then
+  ok "sample: the log record carries the root, the replay's arguments, Yarn's and node's paths and the manifests' state"
+else bad "sample: the logged run's record (exit $rc): $(tail -1 "$sp/log/log.jsonl" | head -c 600)"; fi
+
+# 1. Replayed: identical, and nothing written to the run log it read.
+before=$(loglines)
+sp_sample -- 1
+if [ $rc = 0 ] && [ "$(vrec 'r["result"]')" = IDENTICAL ] && [ "$(vrec 'r["dir"]')" = "$pm_real" ] && [ "$(vrec 'r["args"]')" = "['--frozen-lockfile']" ] \
+  && [ "$(vrec 'r["cloned"] > 0')" = True ] && [ "$(vrec 'r["yarn"]')" = "$("$node" "$yarnjs" --version)" ] && [ "$(loglines)" = "$before" ]; then
+  ok "sample: a logged install replayed: IDENTICAL, $(vrec 'r["cloned"]') files cloned, the run log unchanged"
+else bad "sample: identical replay (exit $rc, $(vrec 'r.get("result"), r.get("reason")'))"; fi
+# (TMPDIR also gets Yarn's own temporary files.)
+if [ -z "$(ls -d "$sp/tmp"/matchapack-verify-yarn.* 2>/dev/null)" ]; then ok "sample: its work directory is removed"; else bad "sample: left $(ls -d "$sp/tmp"/matchapack-verify-yarn.*)"; fi
+
+# 2. A workspace directory, without --frozen-lockfile: replayed in that
+# directory with the same (no) flags.
+pw=$(sp_project ws yarn1-workspaces)
+sp_install "$pw/packages/w2"
+sp_sample -- 1
+if [ $rc = 0 ] && [ "$(vrec 'r["result"]')" = IDENTICAL ] && [ "$(vrec 'r["subdir"]')" = packages/w2 ] && [ "$(vrec 'r["args"]')" = "[]" ] \
+  && [ "$(vrec 'r["manifests_copied"]')" = 4 ]; then
+  ok "sample: a workspace directory, no --frozen-lockfile: replayed there with no flags, IDENTICAL"
+else bad "sample: workspace replay (exit $rc, $(vrec 'r.get("result"), r.get("subdir"), r.get("args"), r.get("manifests_copied"), r.get("reason")'))"; fi
+
+# 3. A damaged engine tree: a content byte; an mtime on a tree without empty
+# package files; an mtime on a non-empty package file of a tree with empty
+# ones (the race's shape under Node >= 22.12; otherwise DIFFERENT).
+sp_sample MATCHAPACK_VERIFY_YARN_DAMAGE='printf x >> node_modules/y1-b/index.js' -- "$pm"
+if [ "$(vrec 'r["result"]')" = DIFFERENT ] && [ "$(vrec '"content node_modules/y1-b/index.js" in r["differing"]')" = True ]; then
+  ok "sample: a content byte changed in the engine's tree: DIFFERENT, the path recorded"
+else bad "sample: content damage ($(vrec 'r.get("result"), r.get("differing"), r.get("reason")'))"; fi
+sp_sample MATCHAPACK_VERIFY_YARN_DAMAGE='touch -t 200001010000 node_modules/y1-b/index.js' -- "$pm"
+if [ "$(vrec 'r["result"]')" = DIFFERENT ] && [ "$(vrec 'r["differing"]')" = "['mtime node_modules/y1-b/index.js']" ]; then
+  ok "sample: an mtime changed in a tree without empty package files: DIFFERENT (not the race)"
+else bad "sample: mtime damage without empty files ($(vrec 'r.get("result"), r.get("differing"), r.get("reason")'))"; fi
+pe=$(sp_project empty yarn1-emptyfirst)
+sp_install "$pe" --frozen-lockfile
+# One pool thread: plain Yarn's own race cannot happen (NOTES "The probe
+# race"), so the damage is the only difference.
+sp_sample UV_THREADPOOL_SIZE=1 MATCHAPACK_VERIFY_YARN_DAMAGE='touch -t 200001010000 node_modules/y1-empty/index.js' MATCHAPACK_VERIFY_KEEP=1 -- "$pe"
+want=DIFFERENT; "$node" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=12)?0:1)' && want=RACE-SHAPED
+if [ "$(vrec 'r["result"]')" = $want ] && [ "$(vrec '"mtime node_modules/y1-empty/index.js" in r["differing"]')" = True ]; then
+  ok "sample: an mtime on a non-empty package file next to empty ones: $want (node $("$node" -v))"
+else bad "sample: race-shaped damage, want $want ($(vrec 'r.get("result"), r.get("differing"), r.get("reason")'))"; fi
+# The race rule on that kept tree, called directly: an empty file's mtime,
+# a content difference, .yarn-integrity, a path outside node_modules, or
+# Node before 22.12 is not the race.
+kept=$(sed -n 's/^  kept: //p' "$work/out" | tail -1)
+if [ -d "$kept/v/engine" ]; then
+  r=$(python3 -I -B -c '
+import importlib.util, sys
+s = importlib.util.spec_from_file_location("vs", sys.argv[1]); vs = importlib.util.module_from_spec(s); s.loader.exec_module(vs)
+t = sys.argv[2]
+import os
+empty = next(os.path.relpath(os.path.join(d, f), t) for d, _, fs in os.walk(os.path.join(t, "node_modules/y1-empty")) for f in fs if os.path.getsize(os.path.join(d, f)) == 0)
+cases = [
+  ([("mtime", "node_modules/y1-empty/index.js")], "v24.22.1", True),
+  ([("mtime", "node_modules/y1-empty/index.js")], "v22.11.0", False),
+  ([("mtime", empty)], "v24.22.1", False),
+  ([("content", "node_modules/y1-empty/index.js")], "v24.22.1", False),
+  ([("mtime", "node_modules/.yarn-integrity")], "v24.22.1", False),
+  ([("mtime", "package.json")], "v24.22.1", False),
+  ([("mtime", "node_modules/y1-empty/index.js"), ("gid", "node_modules/y1-empty/package.json")], "v24.22.1", False),
+  ([], "v24.22.1", False),
+]
+print(" ".join("%s" % (vs.race_shaped(o, t, n) == want) for o, n, want in cases))' "$here/scripts/verify-sample.py" "$kept/v/engine")
+  if [ "$r" = "True True True True True True True True" ]; then ok "sample: the race rule rejects an empty file, other classes, .yarn-integrity, files outside node_modules, Node < 22.12"
+  else bad "sample: race rule cases: $r"; fi
+  rm -rf "${kept:?}"
+else bad "sample: no kept work directory for the race rule ($kept)"; fi
+
+# 4. Skips, each recorded with its reason.
+skip() { # skip <label> <expected reason text> [verify-sample.sh args]
+  local label=$1 want=$2; shift 2
+  sp_sample -- "$@"
+  local got; got=$(vrec 'r["result"] + ": " + r.get("reason", "")')
+  case $got in "SKIPPED: "*"$want"*) ok "sample: skipped, $label ($got)" ;; *) bad "sample: $label: got '$got', exit $rc" ;; esac
+}
+touch "$pm/yarn.lock"
+skip "yarn.lock changed" "yarn.lock changed since the logged run" "$pm"
+gone=$sp/gone; sp_fake "r['root'] = r['dir'] = '$gone'"
+skip "directory gone" "the project directory is gone" "$gone"
+pk=$(sp_project secret yarn1-many); pk=$(cd "$pk" && pwd -P)
+fake_at() { # fake_at <dir> <python statements>: a record for <dir>, its manifests' state as they are now
+  sp_fake "import os
+r['root'] = r['dir'] = '$1'
+r['manifests'] = {n: [os.stat('$1/' + n).st_size, os.stat('$1/' + n).st_mtime_ns] for n in ('yarn.lock', 'package.json')}
+$2"
+}
+fake_at "$pk" "r['replay']['args'] = ['--otp', '***']"
+skip "a hidden argument" "an argument was hidden in the log" "$pk"
+fake_at "$pk" "r['replay']['args'] = ['--use-yarnrc', 'rc/x']"
+skip "a relative --use-yarnrc" "--use-yarnrc rc/x is relative" "$pk"
+fake_at "$pk" "del r['root']"
+skip "a record from before replays were recorded" "the log record has no root" "$pk"
+fake_at "$pk" "r['yarn'] = '1.22.0'"
+skip "another Yarn now" "the run used 1.22.0" "$pk"
+fake_at "$pk" "r['yarn1']['node'] = 'v1.0.0'"
+skip "another node now" "the run used v1.0.0" "$pk"
+fake_at "$pk" "r['yarn1']['cache'] = 'unusable: on another volume'"
+skip "an unusable cache" "not usable in the run (on another volume)" "$pk"
+mkdir -p "$sp/above"; pa=$sp/above/p; cp -p -R "$here/fixtures/yarn1-many" "$pa"; pa=$(cd "$pa" && pwd -P); echo 'registry=http://127.0.0.1:1/' > "$sp/above/.npmrc"
+fake_at "$pa" ""
+skip "an .npmrc above the project" "$sp/above/.npmrc, above the project" "$pa"
+skip "a directory with no logged install" "no \`matchapack yarn\` full install of this directory" "$here/fixtures/yarn1-small"
+
+# 5. Picking: N distinct projects, newest first; an incremental command is
+# not a full install.
+sp_fake "r['command'] = 'add'; r['root'] = r['dir'] = '$sp/added'"
+n0=$(wc -l < "$sp/log/verify.jsonl")
+sp_sample -- 2
+picked=$(tail -n +$((n0 + 1)) "$sp/log/verify.jsonl" | python3 -c 'import json,sys; print(" ".join(json.loads(l)["dir"].rsplit("/", 1)[-1] for l in sys.stdin))')
+if [ "$picked" = "p secret" ]; then ok "sample: N=2 picks the two most recent distinct projects with a full install ($picked)"
+else bad "sample: picked '$picked'"; fi
+
+# 6. The npm sampler leaves `matchapack yarn` records alone (one without a
+# command, as Yarn logged them before the commands were routed).
+mkdir -p "$sp/npmlog"; head -1 "$sp/log/log.jsonl" | python3 -c 'import json,sys; r=json.load(sys.stdin); r.pop("command"); print(json.dumps(r))' > "$sp/npmlog/log.jsonl"
+MATCHAPACK_LOG_DIR_REAL="$sp/npmlog" "$here/scripts/verify-sample.sh" 1 > "$work/out" 2>&1; rc=$?
+if [ $rc = 0 ] && grep -q '^nothing to verify' "$work/out" && [ ! -e "$sp/npmlog/verify.jsonl" ]; then ok "sample: the npm sampler does not take a matchapack yarn record for an npm ci"
+else bad "sample: npm sampler on a yarn record (exit $rc)"; fi
+
+# 7. The report shows the Yarn samples beside the npm ones.
+MATCHAPACK_LOG_DIR="$sp/log" "$bin" report > "$work/out" 2>&1
+if grep -q '^verification samples (npm ci): none yet' "$work/out" && grep -Eq '^verification samples \(yarn install\): [0-9]+ run: identical [1-9]' "$work/out" \
+  && grep -Eq '^verification samples \(yarn install\): .*skipped [1-9]' "$work/out" && grep -Eq '^  .* SKIPPED +/' "$work/out"; then ok "sample: matchapack report shows the Yarn samples"
+else bad "sample: report"; fi
+fi # TEST_YARN1_PART sample
+if [ "${TEST_YARN1_PART:-all}" = sample ]; then
+  if [ "$(ls -l ~/.yarnrc 2>/dev/null || echo absent)" = "$yarnrc_before" ]; then ok "~/.yarnrc untouched"; else bad "~/.yarnrc changed"; fi
+  echo "passed $pass, failed $fail"; [ $fail = 0 ]; exit
+fi
+
 if [ "${TEST_YARN1_PART:-all}" = all ]; then
 # --- Plain against plain -----------------------------------------------------
 verify small "$here/fixtures/yarn1-small"
