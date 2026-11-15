@@ -904,6 +904,11 @@ mod tests {
         let s = adv(&["install", "--no-tag", "false", "-w", "a", "x", "--ignore-scripts", "--omit=dev", "--no-audit"], "install", &unsure);
         assert!(s.contains("plain npm. matchapack could not repeat your options safely, so the whole-project command below has none of them: add the ones you need (you used --ignore-scripts, --omit=dev, --audit=false: add them).\n"), "{s}");
         ends(s, &format!("\n  MATCHAPACK=0 npm ci --prefix {root}"));
+        // The options it names are shown as the log shows them: no secret.
+        let secret = RepairSettings { missing: a(&["--otp=123456", "--//r.example/:_authToken=FAKETOKEN123", "--_password=hunter2"]), ..unsure.clone() };
+        let s = adv(&["install", "--include", "false", "-w", "a"], "install", &secret);
+        assert!(s.contains("(you used '--otp=***', '--//r.example/:_authToken=***', '--_password=***': add them)") && s.contains("credentials in the command line are shown as ***"), "{s}");
+        assert!(!s.contains("123456") && !s.contains("FAKETOKEN") && !s.contains("hunter2"), "{s}");
         let of = |repair: serde_json::Value| RepairSettings::of(&serde_json::json!({ "workspace_filter": true, "repair": repair }));
         for r in [
             serde_json::json!({ "args": ["--omit=dev"], "checked": null }),

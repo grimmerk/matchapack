@@ -94,7 +94,11 @@ pub fn redact_args(args: &[String]) -> Vec<String> {
         // starts with `-`, so the rule below would not hide it).
         if a.contains("PRIVATE KEY-----") || (a.contains("-----BEGIN") && a.contains("KEY-----")) {
             hide_next = false;
-            out.push(if a.starts_with("--") && a.contains('=') { format!("{}=***", a.split('=').next().unwrap_or("")) } else { "***".to_string() });
+            // `--key=<PEM>` keeps its name; a key that is a word of its own
+            // starts with `-----BEGIN` and may hold `=` (base64 padding):
+            // then the whole word goes.
+            let name = a.split('=').next().unwrap_or("");
+            out.push(if a.starts_with("--") && a.contains('=') && !name.contains("-----BEGIN") { format!("{name}=***") } else { "***".to_string() });
             continue;
         }
         if std::mem::take(&mut hide_next) && !a.starts_with('-') {
@@ -126,20 +130,24 @@ pub fn redact_args(args: &[String]) -> Vec<String> {
 /// `redact_args`, every other string through `redact_userinfo` (a reason
 /// can quote an argument).
 fn redact(v: &mut Value) {
+    redact_in(v, false)
+}
+
+/// `argv`: inside `repair` (src/inject.js `repairInfo`), where every list of
+/// strings is command-line words (`args`, `missing`, any later one).
+fn redact_in(v: &mut Value, argv: bool) {
     match v {
         Value::String(s) => *s = redact_userinfo(s),
-        Value::Array(a) => a.iter_mut().for_each(redact),
+        Value::Array(a) => a.iter_mut().for_each(|x| redact_in(x, argv)),
         Value::Object(m) => {
             for (k, x) in m.iter_mut() {
+                let words = argv || k == "args";
                 match x {
-                    Value::Array(a) if k == "args" => {
-                        let strs: Option<Vec<String>> = a.iter().map(|y| y.as_str().map(String::from)).collect();
-                        match strs {
-                            Some(v) => *x = json!(redact_args(&v)),
-                            None => redact(x),
-                        }
+                    Value::Array(a) if words && a.iter().all(|y| y.is_string()) => {
+                        let strs: Vec<String> = a.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+                        *x = json!(redact_args(&strs));
                     }
-                    _ => redact(x),
+                    _ => redact_in(x, argv || k == "repair"),
                 }
             }
         }
@@ -918,6 +926,32 @@ mod tests {
             redact_args(&v(&["install", "--key", "-----BEGIN PRIVATE KEY-----\nMIIx\n-----END PRIVATE KEY-----", "--cert", "-----BEGIN CERTIFICATE-----y", "x", "--x=-----BEGIN EC KEY-----z"])),
             v(&["install", "--key", "***", "--cert", "-----BEGIN CERTIFICATE-----y", "x", "--x=***"])
         );
+        // With base64 padding (`=`), on several lines and on one, as a word
+        // of its own and after `--key=`; a certificate stays.
+        assert_eq!(
+            redact_args(&v(&[
+                "install",
+                "--key",
+                "-----BEGIN PRIVATE KEY-----\nFAKEBODYFAKEBODYFA==\n-----END PRIVATE KEY-----",
+                "--key",
+                "-----BEGIN RSA PRIVATE KEY-----FAKE=-----END RSA PRIVATE KEY-----",
+                "--key=-----BEGIN PRIVATE KEY-----\nFAKE==\n-----END PRIVATE KEY-----",
+                "--cert=-----BEGIN CERTIFICATE-----\nFAKE==\n-----END CERTIFICATE-----"
+            ])),
+            v(&["install", "--key", "***", "--key", "***", "--key=***", "--cert=-----BEGIN CERTIFICATE-----\nFAKE==\n-----END CERTIFICATE-----"])
+        );
+        // Every field with command-line words: the record's `args`, and
+        // every list under `inject.repair` (`args`, `missing`, a later one).
+        let secrets = ["--otp=123456", "--//r.example/:_authToken=FAKETOKEN123", "--_password=hunter2", "--audit=false"];
+        let hidden = json!(["--otp=***", "--//r.example/:_authToken=***", "--_password=***", "--audit=false"]);
+        let mut rec = json!({ "args": secrets, "inject": { "repair": { "args": secrets, "missing": secrets, "later": secrets, "npmrc": ["project"], "checked": false } } });
+        redact(&mut rec);
+        assert_eq!(rec["args"], hidden);
+        for k in ["args", "missing", "later"] {
+            assert_eq!(rec["inject"]["repair"][k], hidden, "{k}");
+        }
+        assert_eq!(rec["inject"]["repair"]["npmrc"], json!(["project"]));
+        assert!(!rec.to_string().contains("123456") && !rec.to_string().contains("FAKETOKEN") && !rec.to_string().contains("hunter2"), "{rec}");
         let mut rec = json!({ "args": ["--proxy", "http://u:p@h"], "reason": "x http://a:b@h y", "yarn1": { "errors": ["https://c:d@e"] } });
         redact(&mut rec);
         assert_eq!(rec, json!({ "args": ["--proxy", "http://***@h"], "reason": "x http://***@h y", "yarn1": { "errors": ["https://***@e"] } }));
