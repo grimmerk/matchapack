@@ -53,6 +53,11 @@ run() { # name script args...
   echo "$rc" > "$work/$name.status" || echo "    could not write $work/$name.status (the filesystem may be full)"
 }
 run test-inject "$here/scripts/test-inject.sh" "$work/inject"
+# Its trees are not needed once its log is written, and verify-npm.sh
+# needs the space (CI's btrfs image is 6 GB).
+for d in "$work/inject" "$work/inject.foreign"; do
+  [ -d "$d" ] && { chmod -R u+w "${d:?}" 2>/dev/null; rm -rf "${d:?}"; }
+done
 run verify-npm "$here/scripts/verify-npm.sh" "$work/vi"
 
 python3 - "$work" "$version" "$(node -v)" "$(uname -sm)" "${fs:-?}" <<'PY'

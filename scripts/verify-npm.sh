@@ -61,6 +61,14 @@ fi
 trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
 
 fail=0
+# Each case's trees go once the case is done (its log stays): on a
+# fixed-size filesystem (CI's 6 GB btrfs image, scripts/btrfs-scratch.sh)
+# the cases do not fit together. fixtures/small alone is about 74 MB and
+# 6,000 files per plain install, and most of the ~60 cases install it at
+# least once, plainly, in copy A (copy B's clones are cheap). Kept were
+# they, the cases after about the 35th ran out of space on Linux.
+ran=()
+drop() { ran+=("$1"); [ -d "$1" ] || return 0; chmod -R u+w "${1:?}" 2>/dev/null; rm -rf "${1:?}"; }
 case_() { # name env-assignments... -- source [matchapack install args...]
   local name=$1; shift
   local envs=()
@@ -73,6 +81,7 @@ case_() { # name env-assignments... -- source [matchapack install args...]
   else
     fail=1; echo "FAIL  $name (log: $out)"; tail -15 "$out" | sed 's/^/      /'
   fi
+  drop "$work/$name"
 }
 # rootpath: an install script names a file after its own directory, so A and
 # B have another path there; verify.sh's --normalize-roots must make them the
@@ -125,6 +134,7 @@ steps_() { # name source [verify-steps.sh options] -- step [-- step ...]
     { grep -E '^step ' "$out" | head -8; awk '/FAIL/ {p=1} p' "$out" | head -32; } | cut -c1-240 | sed 's/^/      /'
     echo "      (free on the work directory: $(df -Pk "$work" | awk 'NR==2 {print int($4/1024) " MB"}'))"
   fi
+  drop "$work/steps-$name"
 }
 # The harness's own self-test: one byte of B's package-lock.json changed
 # after the step must fail the run, by the tree comparison and by the line
@@ -137,6 +147,7 @@ elif grep -q 'FAIL cmp: package-lock.json differs' "$st" && grep -q 'FAIL diff:'
 else
   fail=1; echo "FAIL  steps self-test: the run failed, but not by both the diff and the cmp of package-lock.json (log: $st)"
 fi
+drop "$work/steps-selftest"
 # The log check fails closed: a checker that dies before printing anything,
 # a record of another npm command than the step's, a file B touched that
 # plain npm left alone, and two log records for one step each fail the run.
@@ -149,6 +160,7 @@ for t in checker-dies:'the log check could not run' wrong-command:'want update' 
   else
     fail=1; echo "FAIL  steps self-test ${t%%:*}: the run failed, but not by the log check (log: $st)"
   fi
+  drop "$work/steps-selftest-${t%%:*}"
 done
 small=$here/fixtures/small; ws=$here/fixtures/workspaces
 edit_pkg='node -e "const fs=require(\"fs\");const p=JSON.parse(fs.readFileSync(\"package.json\"));p.dependencies[\"left-pad\"]=\"1.3.0\";delete p.dependencies.lodash;fs.writeFileSync(\"package.json\",JSON.stringify(p,null,2)+\"\\n\")"'
@@ -268,6 +280,13 @@ if [ "${npm_version%%.*}" -ge 12 ]; then
   steps_ npm12-patch "$here/fixtures/npm12-patch" --start ci --pre "sed -i.bak 's/patched by gl-patch-fixture/patched again by gl-patch-fixture/' patches/is-number@7.0.0.patch && rm patches/is-number@7.0.0.patch.bak" -- install
 fi
 
+# No case's trees are left behind (the space they took is back).
+left=$(for d in ${ran[@]+"${ran[@]}"}; do [ -e "$d" ] && echo "$d"; done | head -3)
+if [ -n "$left" ]; then
+  fail=1; echo "FAIL  case trees left in the work directory: $(echo "$left" | tr '\n' ' ')"
+else
+  echo "ok    no case trees left (free on the work directory: $(df -Pk "$work" | awk 'NR==2 {print int($4/1024) " MB"}'))"
+fi
 if [ $fail != 0 ]; then
   echo "npm $npm_version: matchapack is NOT identical to npm ci here (see the failing cases)"
   exit 1
