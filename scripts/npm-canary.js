@@ -27,7 +27,8 @@
 // `node`: per watched Node line its newest release seen, that release's
 // libuv (version, and the sha256 of its fs.c: `uvSrc`), the release last tested, its results and the hook's facts; `yarn`:
 // the newest Yarn 1 release seen and the one last tested (NOTES "The Node and
-// Yarn 1 release watch").
+// Yarn 1 release watch"); `watchFailed`: the date and error of the last
+// poll whose watch reads failed (null once it polls again).
 'use strict'
 const fs = require('node:fs')
 const path = require('node:path')
@@ -91,9 +92,12 @@ const major = (v) => parts(v)[0]
 const today = () => new Date().toISOString().slice(0, 10)
 // Every fetch of the poll. CANARY_NO_NETWORK (the offline tests) makes one a
 // failure, so a test that forgot to give a file cannot pass on the network.
+// The error is thrown, not a die: a fetch of the release watch that fails
+// is the watch's failure (watchPoll), one of the npm half fails the poll
+// (main's catch).
 const netFetch = (url, init) => {
   if (process.env.CANARY_NO_NETWORK) {
-    die(`network disabled (CANARY_NO_NETWORK): ${url}`)
+    return Promise.reject(new Error(`network disabled (CANARY_NO_NETWORK): ${url}`))
   }
   return fetch(url, init)
 }
@@ -112,7 +116,7 @@ function supportedMajors () {
 // --- state -----------------------------------------------------------------
 
 function emptyState () {
-  return { version: 1, polled: null, monthly: null, lines: {}, history: [], node: null, yarn: null }
+  return { version: 1, polled: null, monthly: null, lines: {}, history: [], node: null, yarn: null, watchFailed: null }
 }
 function stateFromBody (body) {
   const i = body.indexOf(STATE_OPEN)
@@ -255,7 +259,20 @@ async function poll (stateFile, opts) {
       }
     }
   }
-  const watch = await watchPoll(state, opts, all, supported, date)
+  // The release watch reads other hosts (nodejs.org, raw.githubusercontent.com,
+  // Yarn's registry document). When one of its reads fails, the npm half
+  // still runs and reports; the watch plans nothing, the report records
+  // nothing for it (no release seen, none verified), says what failed, and
+  // the run is red (flags.json `watchFailed`). Fail closed for the watch,
+  // without taking the npm releases of that day with it.
+  let watch
+  try {
+    watch = await watchPoll(state, opts, all, supported, date)
+  } catch (e) {
+    const why = e instanceof WatchFailure ? e.message : `${e && e.name ? e.name : 'Error'}: ${e && e.message ? e.message : e}`
+    process.stderr.write(`release watch failed: ${why} (the npm half goes on)\n`)
+    watch = { node: null, yarn: null, nodeLinux: [], nodeMacos: [], watchError: why }
+  }
   return { date, month: monthly ? month : null, head: opts.head || null, supported, newMajor: all.length && major(all[all.length - 1]) > Math.max(...supported) ? major(all[all.length - 1]) : null, todo, skipped, ...watch }
 }
 
@@ -277,6 +294,12 @@ const NODE_WATCH_DAYS = 183
 // The Yarn 1 the Node items run with, until the watch has verified a newer
 // one (.github/workflows/ci.yml pins the same).
 const YARN_PINNED = '1.22.22'
+// A read of the release watch that failed or returned something unusable:
+// thrown, caught in poll (the watch's failure, not the poll's).
+class WatchFailure extends Error {}
+const watchFail = (msg) => {
+  throw new WatchFailure(msg)
+}
 const isNodeVersion = (v) => /^v\d+\.\d+\.\d+$/.test(v)
 const days = (from, to) => (Date.parse(to) - Date.parse(from)) / 86400000
 
@@ -292,22 +315,22 @@ async function nodeReleases (file) {
   } else {
     const res = await netFetch('https://nodejs.org/dist/index.json')
     if (!res.ok) {
-      die(`nodejs.org: HTTP ${res.status}`)
+      watchFail(`nodejs.org: HTTP ${res.status}`)
     }
     doc = await res.json()
   }
   if (!Array.isArray(doc)) {
-    die('nodejs.org/dist/index.json is not a list')
+    watchFail('nodejs.org/dist/index.json is not a list')
   }
   const out = doc.filter((e) => e && typeof e.version === 'string' && isNodeVersion(e.version)).map((e) => ({ version: e.version.slice(1), date: String(e.date || '') }))
   if (out.length < 500) {
-    die(`nodejs.org/dist/index.json: only ${out.length} releases, refusing to decide on that`)
+    watchFail(`nodejs.org/dist/index.json: only ${out.length} releases, refusing to decide on that`)
   }
   // A date that does not parse would drop its line from the watched lines
   // (an age of NaN days is never within NODE_WATCH_DAYS): fail instead.
   const undated = out.find((r) => Number.isNaN(Date.parse(r.date)))
   if (undated) {
-    die(`nodejs.org/dist/index.json: v${undated.version} has no readable date (${JSON.stringify(undated.date)}), refusing to decide which lines are watched`)
+    watchFail(`nodejs.org/dist/index.json: v${undated.version} has no readable date (${JSON.stringify(undated.date)}), refusing to decide which lines are watched`)
   }
   return out.sort((a, b) => cmp(a.version, b.version))
 }
@@ -320,21 +343,21 @@ async function uvOf (version, dir) {
   if (dir) {
     const f = path.join(dir, `v${version}.h`)
     if (!fs.existsSync(f)) {
-      die(`libuv of Node ${version}: ${f} not found`)
+      watchFail(`libuv of Node ${version}: ${f} not found`)
     }
     text = fs.readFileSync(f, 'utf8')
   } else {
     const url = `https://raw.githubusercontent.com/nodejs/node/v${version}/deps/uv/include/uv/version.h`
     const res = await netFetch(url)
     if (!res.ok) {
-      die(`libuv of Node ${version}: ${url}: HTTP ${res.status}`)
+      watchFail(`libuv of Node ${version}: ${url}: HTTP ${res.status}`)
     }
     text = await res.text()
   }
   const n = (k) => (text.match(new RegExp(`#define UV_VERSION_${k}\\s+(\\d+)`)) || [])[1]
   const v = [n('MAJOR'), n('MINOR'), n('PATCH')]
   if (v.some((x) => x === undefined)) {
-    die(`libuv of Node ${version}: version.h has no UV_VERSION_MAJOR, _MINOR and _PATCH`)
+    watchFail(`libuv of Node ${version}: version.h has no UV_VERSION_MAJOR, _MINOR and _PATCH`)
   }
   return v.join('.')
 }
@@ -351,19 +374,19 @@ async function uvSrcOf (version, dir) {
   if (dir) {
     const f = path.join(dir, `v${version}.fs.c`)
     if (!fs.existsSync(f)) {
-      die(`libuv source of Node ${version}: ${f} not found`)
+      watchFail(`libuv source of Node ${version}: ${f} not found`)
     }
     text = fs.readFileSync(f)
   } else {
     const url = `https://raw.githubusercontent.com/nodejs/node/v${version}/deps/uv/src/unix/fs.c`
     const res = await netFetch(url)
     if (!res.ok) {
-      die(`libuv source of Node ${version}: ${url}: HTTP ${res.status}`)
+      watchFail(`libuv source of Node ${version}: ${url}: HTTP ${res.status}`)
     }
     text = Buffer.from(await res.arrayBuffer())
   }
   if (!text.length) {
-    die(`libuv source of Node ${version}: fs.c is empty`)
+    watchFail(`libuv source of Node ${version}: fs.c is empty`)
   }
   return crypto.createHash('sha256').update(text).digest('hex')
 }
@@ -380,12 +403,12 @@ async function yarn1Versions (file) {
   } else {
     const res = await netFetch('https://registry.npmjs.org/yarn', { headers: { accept: 'application/vnd.npm.install-v1+json' } })
     if (!res.ok) {
-      die(`registry (yarn): HTTP ${res.status}`)
+      watchFail(`registry (yarn): HTTP ${res.status}`)
     }
     vs = Object.keys((await res.json()).versions || {})
   }
   if (vs.length < 50) {
-    die(`registry: only ${vs.length} versions of yarn, refusing to decide on that`)
+    watchFail(`registry: only ${vs.length} versions of yarn, refusing to decide on that`)
   }
   return vs.filter((v) => /^1\.\d+\.\d+$/.test(v)).sort(cmp)
 }
@@ -933,6 +956,14 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
   sections.push(...w.sections)
   red = red || w.red
   attention = attention || w.attention
+  // The watch's reads failed (poll): nothing of it recorded (watchReport
+  // saw no `node`, no `yarn`); said in a comment and the body; the run red.
+  const watchFailed = !!plan.watchError
+  state.watchFailed = watchFailed ? { date: plan.date, error: plan.watchError } : null
+  if (watchFailed) {
+    attention = true
+    sections.push([`### Release watch: not polled (${plan.date})`, '', `- ${plan.watchError}`, '- Nothing was recorded or verified for the Node and Yarn 1 watch today; the next poll tries again. The npm releases above were polled as usual.', ''].join('\n'))
+  }
   state.polled = plan.date
   if (plan.month) {
     state.monthly = plan.month
@@ -954,8 +985,8 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
   }
   // notify: the workflow fails the run (its notice to the owner) when a
   // release is red or the comment asks for a person.
-  const notify = red || attention || plan.skipped.length > 0
-  writeJson(path.join(outDir, 'flags.json'), { red, attention, skipped: plan.skipped.length, notify })
+  const notify = red || attention || watchFailed || plan.skipped.length > 0
+  writeJson(path.join(outDir, 'flags.json'), { red, attention, skipped: plan.skipped.length, watchFailed, notify })
   console.log(`${rows.length} versions reported; ${attention ? 'a comment asks for a person' : 'nothing for a person'}${red ? '; at least one red' : ''}`)
   return { red, attention }
 }
@@ -1023,7 +1054,10 @@ function watchReport (state, plan, res, run) {
   for (const t of N.todo) {
     const lin = jobResults((plan.nodeLinux || []).filter((e) => e.node === t.node), res.nodelinux)
     const mac = jobResults((plan.nodeMacos || []).filter((e) => e.node === t.node), res.nodemacos)
-    const m = mac[0] && mac[0].s
+    // The result's own facts and libuv only when it is of the release asked
+    // for: another Node's (or Yarn's) probe stored under this line would be
+    // what the next test compares with.
+    const m = mac[0] && !mac[0].wrong ? mac[0].s : null
     const facts = (m && m.facts) || null
     // The facts are part of the check: a green macOS result without them
     // is incomplete (not verified, tested again on the next poll).
@@ -1088,7 +1122,7 @@ function watchReport (state, plan, res, run) {
   for (const t of Y.todo) {
     const mac = jobResults((plan.nodeMacos || []).filter((e) => e.yarn === t.yarn && e.node === null), res.nodemacos)
     const suites = verdict(mac)
-    const m = mac[0] && mac[0].s
+    const m = mac[0] && !mac[0].wrong ? mac[0].s : null
     const prev = state.yarn || {}
     // A new Yarn 1 release always asks for a person: none is expected (the
     // line is frozen), and the engine has never seen its code.
@@ -1238,6 +1272,9 @@ function body (state, plan) {
   for (const m of Object.keys(state.lines).map(Number).sort((a, b) => a - b)) {
     const l = state.lines[m]
     L.push(`| ${m}${l.newMajor ? ' (not enabled)' : ''} | ${l.newest} | ${l.checked}${l.run ? ` ([run](${l.run}))` : ''} | ${l.suites} | ${l.classText} | ${l.caller} | ${l.verified || '-'} | ${l.action} |`)
+  }
+  if (state.watchFailed) {
+    L.push('', `**Release watch: the poll of ${state.watchFailed.date} failed** (${state.watchFailed.error}); nothing was recorded for it. The next poll tries again.`)
   }
   if (state.node) {
     L.push('', '**Node release watch** (a new major, or a libuv change inside a watched line: the Yarn suites on macOS and the npm suites on Linux on that Node).', '')

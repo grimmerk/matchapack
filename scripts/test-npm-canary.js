@@ -75,6 +75,15 @@ function wpoll (state, index, extra = []) {
   return runStatus('poll', f, '--registry-json', npmReg, '--date', '2026-11-15', '--head', 'h', '--node-index-json', index, '--node-uv-dir', path.join(W, 'uv'), '--yarn-registry-json', yarnReg, ...extra)
 }
 const plan = (r) => (r.status === 0 ? JSON.parse(r.stdout) : { error: r.stderr })
+// A failed read of the watch: the poll itself succeeds (the npm half), the
+// plan has no watch item and no job for it, and names the failure.
+const watchFailed = (r, re) => {
+  if (r.status !== 0) {
+    return false
+  }
+  const p = JSON.parse(r.stdout)
+  return p.node === null && p.yarn === null && p.nodeLinux.length === 0 && p.nodeMacos.length === 0 && re.test(p.watchError || '')
+}
 
 const suitesOk = { 'test-inject': { status: 0, pass: 70, fail: 0, skip: 0, failed: [] }, 'verify-npm': { status: 0, pass: 14, fail: 0, skip: 0, failed: [] } }
 const cmpSame = (base) => ({ base, classChanged: false, callerChanged: false, deps: {}, changed: [], changelog: null })
@@ -238,16 +247,16 @@ check('watch: a new 26.x with another libuv: one item, npm and Yarn suites', pl.
 
 // 16. Fail closed: version.h unreadable, a short release list.
 let r16 = wpoll(watchState(steady), nodeIndex('no-uv', [...lines, ['26.15.0', '2026-11-14']]))
-check('watch: version.h of a new release cannot be read: the poll fails', r16.status !== 0 && /libuv of Node 26\.15\.0/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: version.h of a new release cannot be read: the watch fails, the npm half goes on', watchFailed(r16, /libuv of Node 26\.15\.0/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 fs.writeFileSync(path.join(W, 'uv', 'v26.15.1.h'), '/* no version here */\n')
 r16 = wpoll(watchState(steady), nodeIndex('bad-uv', [...lines, ['26.15.1', '2026-11-14']]))
-check('watch: a version.h without the version: the poll fails', r16.status !== 0 && /version\.h has no UV_VERSION_MAJOR/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: a version.h without the version: the watch fails, the npm half goes on', watchFailed(r16, /version\.h has no UV_VERSION_MAJOR/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 const short = path.join(W, 'short.json')
 write(short, lines.map(([v, date]) => ({ version: `v${v}`, date })))
 r16 = wpoll(watchState(steady), short)
-check('watch: a release list of 4 entries: the poll fails', r16.status !== 0 && /only 4 releases/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: a release list of 4 entries: the watch fails, the npm half goes on', watchFailed(r16, /only 4 releases/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 r16 = runStatus('poll', path.join(W, 'state-0.json'), '--registry-json', npmReg, '--date', '2026-11-15')
-check('watch: with no file given and no network allowed, the poll fails (never decides without the list)', r16.status !== 0 && /CANARY_NO_NETWORK/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: with no file given and no network allowed, the watch fails (never decides without the list), the npm half goes on', watchFailed(r16, /CANARY_NO_NETWORK/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 
 // 17. Retries: a red line again when matchapack changed; a line only
 //     recorded (never tested) is not "red".
@@ -315,17 +324,17 @@ check('watch: no fs.c hash yet, a new 26.x whose fs.c differs from the newest re
 //      missing for a seed, empty.
 uvh('26.15.2', '1.52.1', null)
 r16 = wpoll(watchState(steady), nodeIndex('no-src', [...lines, ['26.15.2', '2026-11-14']]))
-check('watch: fs.c of a new release cannot be read: the poll fails', r16.status !== 0 && /libuv source of Node 26\.15\.2/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: fs.c of a new release cannot be read: the watch fails, the npm half goes on', watchFailed(r16, /libuv source of Node 26\.15\.2/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 r16 = wpoll(watchState({ lines: { ...noSrc.lines, 26: { ...noSrc.lines[26], newest: '26.15.2' } } }), nodeIndex('no-src', [...lines, ['26.15.2', '2026-11-14']]))
-check('watch: fs.c of the release a hash is seeded from cannot be read: the poll fails', r16.status !== 0 && /libuv source of Node 26\.15\.2/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: fs.c of the release a hash is seeded from cannot be read: the watch fails, the npm half goes on', watchFailed(r16, /libuv source of Node 26\.15\.2/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 uvh('26.15.3', '1.52.1', '')
 r16 = wpoll(watchState(steady), nodeIndex('empty-src', [...lines, ['26.15.3', '2026-11-14']]))
-check('watch: an empty fs.c: the poll fails', r16.status !== 0 && /fs\.c is empty/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: an empty fs.c: the watch fails, the npm half goes on', watchFailed(r16, /fs\.c is empty/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 
 // 17i. A release whose date does not parse fails the poll (its line would
 //      otherwise drop out of the watched lines).
 r16 = wpoll(watchState(steady), nodeIndex('undated', [...lines, ['26.13.2', 'soon']]))
-check('watch: a release with a date that does not parse: the poll fails', r16.status !== 0 && /v26\.13\.2 has no readable date/.test(r16.stderr), `${r16.status} ${r16.stderr}`)
+check('watch: a release with a date that does not parse: the watch fails, the npm half goes on', watchFailed(r16, /v26\.13\.2 has no readable date/), `${r16.status} ${r16.stdout.slice(0, 300)} ${r16.stderr}`)
 
 // 17j. `node: { lines: {} }` (an edited state) is a first run, not three
 //      new majors.
@@ -409,6 +418,12 @@ check('watch report: an older release requested and green does not hide the newe
 //      npm or Yarn ran): a failure, never a pass, and said so.
 w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(true, factsOk, 'v24.22.1') })
 check('watch report: the macOS result ran on another Node: fail, not verified, WRONG in the comment', w.state.node.lines[26].suites === 'fail' && w.state.node.lines[26].verified === '26.13.1' && w.flags.red && /not of the release asked for\*\* \(ran on Node v24\.22\.1, not 26\.14\.0\)/.test(w.comment), JSON.stringify({ l: w.state.node.lines[26], c: w.comment.slice(0, 400) }))
+// Its probe's facts and libuv are another Node's: not kept for the line
+// (the next test would compare with them).
+w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites(true, { ...factsOk, mtime: true, atime: false }, 'v24.22.1', '1.22.22', '1.52.1') })
+check('watch report: a result of another Node: its facts and libuv are not stored for the line', JSON.stringify(w.state.node.lines[26].facts) === JSON.stringify(steady.lines[26].facts) && w.state.node.lines[26].uvRuntime === null, JSON.stringify(w.state.node.lines[26]))
+w = wreport(watchState(steady), { node: { todo: [], record: [], watched: [22, 24, 26] }, yarn: { todo: [{ yarn: '1.22.23', reason: 'Yarn 1.22.23 is new' }], record: null }, nodeLinux: [], nodeMacos: [{ key: 'yarn1.22.23', node: null, yarn: '1.22.23' }] }, { 'nodemacos-yarn1.22.23': ysuites(true, factsOk, 'v24.22.1', '1.22.22', '1.52.1') })
+check('watch report: a Yarn item whose result ran another Yarn: fail, and its facts and Node are not stored', w.state.yarn.suites === 'fail' && w.state.yarn.facts === null && w.state.yarn.node === null, JSON.stringify(w.state.yarn))
 w = wreport(watchState(steady), wplan([uvItem]), { ...linuxOk, 'nodelinux-node26.14.0-npm11.21.1': { npm: '11.21.2', node: 'v26.14.0', suites: suitesOk }, 'nodemacos-node26.14.0': ysuites() })
 check('watch report: a Linux result of another npm: fail', w.state.node.lines[26].suites === 'fail' && /ran npm 11\.21\.2, not 11\.21\.1/.test(w.comment), JSON.stringify(w.state.node.lines[26]))
 
@@ -458,6 +473,39 @@ check('watch report: Yarn 1.22.23, green: verified, and a comment asks for a per
 
 // 25. The workflow: the watch's jobs and the report wait for them.
 check('workflow: node-linux and node-macos jobs; the report needs both', /\n  node-linux:\n/.test(wf) && /\n  node-macos:\n/.test(wf) && /needs: \[poll, linux, decide, macos, node-linux, node-macos\]/.test(wf), '')
+
+// 26. A read of the release watch fails (nodejs.org or raw.githubusercontent.com
+//     down) on a day with a new npm release: the npm release is planned and
+//     reported as usual; the watch plans nothing, records nothing (its state
+//     unchanged), says what failed (comment, body, state), and the run is red.
+const npmReg2 = path.join(W, 'npm2.json')
+write(npmReg2, { versions: Object.fromEntries(['10.9.10', '11.21.1', '11.21.2', '12.2.1'].map((v) => [v, {}])) })
+const st26 = watchState(steady)
+const f26 = path.join(W, 'state-26.json')
+write(f26, st26)
+const r26 = runStatus('poll', f26, '--registry-json', npmReg2, '--date', '2026-11-15', '--head', 'h', '--node-index-json', nodeIndex('no-uv-26', [...lines, ['26.15.0', '2026-11-14']]), '--node-uv-dir', path.join(W, 'uv'), '--yarn-registry-json', yarnReg)
+const p26 = plan(r26)
+check('watch read fails, a new npm release: the npm release is planned, the watch plans nothing and names the failure', watchFailed(r26, /libuv of Node 26\.15\.0/) && p26.todo.length === 1 && p26.todo[0].version === '11.21.2', `${r26.status} ${r26.stdout.slice(0, 300)} ${r26.stderr}`)
+const d26 = path.join(tmp, 'w26')
+write(path.join(d26, 'state.json'), st26)
+write(path.join(d26, 'plan.json'), p26)
+if (p26.todo && p26.todo[0]) {
+  write(path.join(d26, 'results', 'canary-linux-11.21.2', 'result.json'), { version: '11.21.2', baseline: p26.todo[0].baseline, newMajor: false, suitesPass: true, suites: suitesOk, fingerprint: 'f'.repeat(64), fingerprintError: null, bareAwait: true, known: true, compare: cmpSame(p26.todo[0].baseline) })
+}
+const rr26 = runStatus('report', path.join(d26, 'state.json'), path.join(d26, 'plan.json'), path.join(d26, 'results'), path.join(d26, 'out'))
+const o26 = (f) => fs.readFileSync(path.join(d26, 'out', f), 'utf8')
+const s26 = rr26.status === 0 ? JSON.parse(o26('state.json')) : {}
+const g26 = rr26.status === 0 ? JSON.parse(o26('flags.json')) : {}
+const c26 = rr26.status === 0 && fs.existsSync(path.join(d26, 'out', 'comments')) ? fs.readdirSync(path.join(d26, 'out', 'comments')).map((f) => o26(path.join('comments', f))).join('\n') : ''
+check('watch read fails: the npm release verified; the watch state unchanged; the run red; comment, body and state say what failed', rr26.status === 0 && s26.lines[11].verified === '11.21.2' &&
+  JSON.stringify(s26.node) === JSON.stringify(st26.node) && JSON.stringify(s26.yarn) === JSON.stringify(st26.yarn) && g26.watchFailed === true && g26.notify === true &&
+  /Release watch: not polled \(2026-11-15\)/.test(c26) && /libuv of Node 26\.15\.0/.test(c26) && /the poll of 2026-11-15 failed/.test(o26('body.md')) && s26.watchFailed && s26.watchFailed.date === '2026-11-15', `${rr26.stderr} ${JSON.stringify({ g26, wf: s26.watchFailed })}`)
+w = wreport({ ...watchState(steady), watchFailed: { date: '2026-11-14', error: 'x' } }, wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites() })
+check('watch report: a watch that polls again clears the failure', w.state.watchFailed === null && !/poll of 2026-11-14 failed/.test(w.body), JSON.stringify(w.state.watchFailed))
+// The npm half's own read failing still fails the poll.
+const r26b = runStatus('poll', f26, '--date', '2026-11-15', '--node-index-json', nodeIndex('ordinary', lines), '--node-uv-dir', path.join(W, 'uv'), '--yarn-registry-json', yarnReg)
+check('the npm registry read fails: the poll fails', r26b.status !== 0 && /CANARY_NO_NETWORK/.test(r26b.stderr), `${r26b.status} ${r26b.stderr}`)
+check('workflow: on a day with nothing to test, the poll job fails the run when the report asks for a person; the plan line survives a failed watch', /record the poll date[\s\S]*?jq -e '\.notify == false' canary\/out\/flags\.json/.test(wf) && /if \.watchError then/.test(wf), '')
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`${pass} passed, ${fail} failed`)
