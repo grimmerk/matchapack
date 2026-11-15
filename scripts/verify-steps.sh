@@ -17,6 +17,8 @@
 #                              directory next to --prefix)
 #     NAME=value               set for both sides (npm_config_before=...,
 #                              MATCHAPACK_INJECT_HOOK=none: B only reads it)
+#     RUN=<shell>              run in A and in B (at the project) before the
+#                              step: the same change on both sides
 #     CLONES=some|none|<n>     an expectation, not passed on: what B's hook
 #                              cloned in this step
 #     UNSEEN=<n>               the "unseen" count B must log (default 0)
@@ -147,16 +149,22 @@ fi
 
 for ((i = 0; i < nsteps; i++)); do
   eval "step=(\"\${steps_$i[@]}\")"
-  sub=.; envs=(); clones=; unseen=0; args=()
+  sub=.; envs=(); clones=; unseen=0; args=(); run=
   for w in "${step[@]}"; do
     if [ ${#args[@]} = 0 ] && [ "${w:0:1}" = @ ] && [ "$sub" = . ]; then sub=${w:1}
     elif [ ${#args[@]} = 0 ] && [[ "$w" =~ ^CLONES=(.*)$ ]]; then clones=${BASH_REMATCH[1]}
+    elif [ ${#args[@]} = 0 ] && [[ "$w" =~ ^RUN=(.*)$ ]]; then run=${BASH_REMATCH[1]}
     elif [ ${#args[@]} = 0 ] && [[ "$w" =~ ^UNSEEN=(.*)$ ]]; then unseen=${BASH_REMATCH[1]}
     elif [ ${#args[@]} = 0 ] && [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then envs+=("$w")
     else args+=("$w"); fi
   done
   label="${envs[*]+${envs[*]} }npm ${args[*]}"
   [ "$sub" != . ] && label="(in $sub) $label"
+  if [ -n "$run" ]; then
+    (cd "$A" && eval "$run") > "$work/run$i-A.log" 2>&1 || { echo "RUN failed in A: $run"; exit 1; }
+    (cd "$B" && eval "$run") > "$work/run$i-B.log" 2>&1 || { echo "RUN failed in B: $run"; exit 1; }
+    label="(after: $run) $label"
+  fi
   record_of > "$work/rec.before"
   # B's hidden lockfile before the step: how many packages left or changed.
   cp "$B/node_modules/.package-lock.json" "$work/hidden.before" 2>/dev/null || : > "$work/hidden.before"

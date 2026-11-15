@@ -202,12 +202,14 @@ mkfx() { # name package.json [npmrc] -> $work/fx-<name> (with package-lock.json 
 }
 fx=$(mkfx nested '{"name":"nested","version":"1.0.0","dependencies":{"chalk":"2.4.2","ms":"2.1.3"}}')
 steps_ nested-behind         "$fx" --start ci --pre 'node -e "const fs=require(\"fs\");const p=\"node_modules/.package-lock.json\";const h=JSON.parse(fs.readFileSync(p));delete h.packages[\"node_modules/chalk\"];fs.writeFileSync(p,JSON.stringify(h,null,2)+\"\\n\")"' -- CLONES=some install ansi-styles@4.3.0
-# No package-lock.json (package-lock=false), and a root postinstall that
-# makes node_modules/.cache, so npm stops trusting the hidden lockfile: its
-# kept packages have neither an integrity nor a resolved; the gc record must
-# keep their entries (store.rs update_record).
-fx=$(mkfx nolock-cache '{"name":"nolock-cache","version":"1.0.0","scripts":{"postinstall":"mkdir -p node_modules/.cache"},"dependencies":{"chalk":"2.4.2","ms":"2.1.3","is-number":"7.0.0"}}' 'package-lock=false')
-steps_ nolock-untrusted       "$fx" -- npm_config_before=$day CLONES=some install -- CLONES=1 install left-pad@1.3.0
+# No package-lock.json (package-lock=false), and node_modules/.cache made
+# after the first install (as a tool would), so npm stops trusting the
+# hidden lockfile: its kept packages have neither an integrity nor a
+# resolved; the gc record must keep their entries (store.rs update_record).
+# (Made between the steps, a second later: a root postinstall making it
+# races with npm's own write of the hidden lockfile, in plain npm too.)
+fx=$(mkfx nolock-cache '{"name":"nolock-cache","version":"1.0.0","dependencies":{"chalk":"2.4.2","ms":"2.1.3","is-number":"7.0.0"}}' 'package-lock=false')
+steps_ nolock-untrusted       "$fx" -- npm_config_before=$day CLONES=some install -- 'RUN=sleep 1; mkdir node_modules/.cache' CLONES=1 install left-pad@1.3.0
 # --install-strategy=linked (npm 10 lists hoisted paths as symlinks into
 # node_modules/.store): npm ci and npm install, no "unseen" alarm.
 steps_ ci-linked             "$small" -- ci --install-strategy=linked --ignore-scripts

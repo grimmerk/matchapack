@@ -768,14 +768,15 @@ wrapped "$p" "npm install --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && [ "$(rec_of "$p")" = $((d_small + 1)) ] \
   && ok "a gc record behind the tree (1 entry) is completed by a no-op npm install: $((d_small + 1)) entries" \
   || bad "family behind: rc=$rc, record $(rec_of "$p") (want $((d_small + 1)))"
-# No package-lock.json (package-lock=false), and a root postinstall that
-# makes node_modules/.cache, so npm stops trusting the hidden lockfile: the
-# packages npm keeps then have neither an integrity nor a resolved in it.
-# The record must not drop their entries.
+# No package-lock.json (package-lock=false), and node_modules/.cache made
+# afterwards (as a tool would), so npm stops trusting the hidden lockfile:
+# the packages npm keeps then have neither an integrity nor a resolved in
+# it. The record must not drop their entries.
 p=$work/fam-nolock-cache; rm -rf "${p:?}"; mkdir -p "$p"
-echo '{"name":"nolock-cache","version":"1.0.0","scripts":{"postinstall":"mkdir -p node_modules/.cache"},"dependencies":{"chalk":"2.4.2","ms":"2.1.3","is-number":"7.0.0"}}' > "$p/package.json"
+echo '{"name":"nolock-cache","version":"1.0.0","dependencies":{"chalk":"2.4.2","ms":"2.1.3","is-number":"7.0.0"}}' > "$p/package.json"
 echo 'package-lock=false' > "$p/.npmrc"
 wrapped "$p" "npm install --no-audit --no-fund" || bad "family nolock-cache: first install"
+sleep 1; mkdir "$p/node_modules/.cache"
 r1=$(rec_of "$p")
 wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && [ "$r1" -ge 9 ] && [ "$(rec_of "$p")" = $((r1 + 1)) ] \
