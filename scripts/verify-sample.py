@@ -176,10 +176,10 @@ def files_state(r, root, kind, now_state):
     if not isinstance(fb, dict) or not isinstance(fa, dict) or not fb:
         return None, None, "the log record has no hashes of the files before and after the run (logged by a matchapack build from before replays were recorded)"
     if r.get("files_complete") is not True:
-        return None, None, "the logged file set may be incomplete (a workspace pattern matchapack does not expand, or its listing budget ran out)" \
+        return None, None, "the logged file set may be incomplete: %s" % (r.get("files_incomplete") or "a workspace pattern matchapack does not expand, or its listing budget ran out") \
             if r.get("files_complete") is False else "the log record does not say whether its file set is complete (logged by an older matchapack build)"
     if now_state.get("complete") is not True:
-        return None, None, "the project's workspaces cannot all be found now (a pattern matchapack does not expand, or its listing budget ran out)"
+        return None, None, "the project's workspaces cannot all be found now: %s" % (now_state.get("incomplete") or "a pattern matchapack does not expand, or its listing budget ran out")
     now = now_state.get("files") or {}
     if set(now) != set(fa) or set(fb) != set(fa):
         added = sorted(set(now) - set(fa))
@@ -329,11 +329,16 @@ def cloned_as_logged(plan, cloned, result, reason):
         return "ERROR", "the replay cloned 0, the logged run %s: the comparison would not test matchapack" % plan["logged_cloned"]
     if cloned == 0 and plan.get("logged_cloned") is None:
         return "ERROR", "the replay cloned nothing: the comparison would not test matchapack"
-    # Fewer than the logged run: the replay did not repeat it (every faithful
-    # replay measured cloned as many: 194, 314, 632, 190; npm 2, 3). More is
-    # fine: the logged run's store may have lacked some packages.
-    if isinstance(plan.get("logged_cloned"), int) and cloned < plan["logged_cloned"]:
-        return "ERROR", "the replay cloned %d, the logged run %d: it did not repeat the run" % (cloned, plan["logged_cloned"])
+    # Another count than the logged run: the replay did not repeat it (every
+    # faithful replay measured cloned as many: 194, 314, 632, 190; npm 2, 3).
+    # Fewer: some of it was not cloned (or not installed). More: the replay
+    # ran under other settings than the run (NODE_ENV=production, a .yarnrc
+    # since changed: neither is logged; measured 176 logged, 618 replayed).
+    # Only a Yarn install that ran over an existing node_modules may clone
+    # more ("replayed fresh": the run itself left in place what was there).
+    logged = plan.get("logged_cloned")
+    if isinstance(logged, int) and (cloned < logged or (cloned > logged and plan.get("equal_clones", True))):
+        return "ERROR", "the replay cloned %d, the logged run %d: it did not repeat the run" % (cloned, logged)
     return result, reason
 
 
@@ -439,7 +444,8 @@ def yarn_plan(r, d, here):
         p = os.path.dirname(p)
     return {"kind": kind, "root": root, "sub": sub, "files": files, "source": source, "node": node, "node_version": nv, "yarn_js": yarn_js,
             "yarn": version, "cache_root": os.path.dirname(cache), "args": args, "logged_cloned": y.get("cloned"),
-            "fresh": kind == "full" and r.get("node_modules_before") not in STARTED_EMPTY}, None
+            "fresh": kind == "full" and r.get("node_modules_before") not in STARTED_EMPTY,
+            "equal_clones": not (kind == "full" and r.get("node_modules_before") not in STARTED_EMPTY)}, None
 
 
 def window_secs(runs_file, name):
@@ -492,14 +498,19 @@ def yarn_result(rc, out, v, here, node_version, race_possible=True):
     if rc == 0 and "plain vs engine: IDENTICAL" in out:
         return "IDENTICAL", None, extra
     if rc == 3 and re.search(r"plain vs engine: (IDENTICAL|differs only where plain varies)", out):
-        # Two plain runs differ; the engine differs from plain1 only where
-        # they do, in the same class (scripts/yarn1-own-diffs.sh).
+        # Two plain runs differ. Either the engine's tree is plain1's
+        # (IDENTICAL), or it differs from plain1 only where the two plain
+        # runs do, in the same class (scripts/yarn1-own-diffs.sh): that one
+        # is run again (yarn_one), since a difference of the engine's own
+        # can hide where plain varies.
         try:
             plain = [l.strip() for l in open(os.path.join(v, "diff-plain.txt"), errors="replace") if l.startswith("    ")]
         except OSError:
             plain = []
         extra["plain_varies"] = plain[:20]
-        return "PLAIN-VARIES", "plain Yarn varies between two runs; the engine differs only there", extra
+        if "plain vs engine: IDENTICAL" in out:
+            return "IDENTICAL", "plain Yarn varies between two runs; the engine's tree is the first plain run's", extra
+        return "PLAIN-VARIES", "plain Yarn varies between two runs; the engine differs from the first only where they do", extra
     if rc == 1 and "plain vs engine: ENGINE DIFFERS" in out:
         p = subprocess.run([os.path.join(here, "scripts/yarn1-own-diffs.sh"), os.path.join(v, "classes-plain.txt"), os.path.join(v, "classes-engine.txt")],
                            capture_output=True, text=True)
@@ -586,15 +597,21 @@ def yarn_one(plan, here, work):
         result, reason, extra, cloned = yarn_run(plan, here, src, v, True)
         rec["rerun"] = "one pool thread"
         rec["rerun_result"], rec["rerun_reason"] = result, reason
+        plain_varies_again = "plain_varies" in extra
         if first == "RACE-SHAPED" and result in ("IDENTICAL", "PLAIN-VARIES"):
             result, reason, extra = first, first_reason + "; gone with one pool thread, which does not prove it was the race: sample it again", first_extra
-        elif result == "PLAIN-VARIES":
-            # Not the race (one thread): output that varies from run to run,
-            # in which the engine differs only where plain Yarn does.
+        elif first == "PLAIN-VARIES" and result in ("IDENTICAL", "PLAIN-VARIES") and not plain_varies_again:
+            # With one thread plain Yarn did not vary, and the engine was
+            # identical: what the first run excused as plain's variation may
+            # have been the engine's, shown only with several pool threads
+            # (measured: 1 of 70 naturally, 3 of 3 forced). Undecided.
+            result, reason, extra = "RACE-SHAPED", first_reason + "; with one pool thread plain Yarn did not vary and the engine was identical, so the first run's difference is not proven plain Yarn's: sample it again", first_extra
+        elif result == "PLAIN-VARIES" or (result == "IDENTICAL" and plain_varies_again):
+            # Plain Yarn varies with one thread too (not the race: output
+            # that varies from run to run), and the engine differs only
+            # where plain does there.
             result = "IDENTICAL"
             reason = "plain Yarn varies between two runs with one pool thread too (not the race); the engine differs only there"
-    if result == "PLAIN-VARIES":
-        result = "IDENTICAL"
     rec.update(result=result, cloned=cloned)
     if reason:
         rec["reason"] = reason

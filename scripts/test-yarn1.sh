@@ -296,6 +296,57 @@ print(" ".join("%s" % (vs.race_shaped(o, t, n) == want) for o, n, want in cases)
   else bad "sample: race rule cases: $r"; fi
   rm -rf "${kept:?}"
 else bad "sample: no kept work directory for the race rule ($kept)"; fi
+# Plain Yarn varying (a root postinstall that sets one package file's mtime
+# at random): the engine differs from plain1 only where plain varies. That
+# can hide a difference of the engine's own, so it is run again with one pool
+# thread. Plain varying only with several threads (the script does nothing
+# under UV_THREADPOOL_SIZE=1): then the one-thread run is identical, which
+# does not prove the first difference was plain's: RACE-SHAPED, not
+# IDENTICAL (measured before: IDENTICAL). Plain varying with one thread too:
+# IDENTICAL.
+pv_project() { # pv_project <name> <js condition>
+  local d; d=$(sp_project "$1" yarn1-many); d=$(cd "$d" && pwd -P)
+  python3 -c '
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["scripts"] = {"postinstall": "node -e \"if (" + sys.argv[2] + ") { const t = Date.now() / 1000 - Math.floor(Math.random() * 1e6); require(\x27fs\x27).utimesSync(\x27node_modules/y1-b/index.js\x27, t, t) }\""}
+json.dump(d, open(p, "w"), indent=2)' "$d/package.json" "$2"
+  echo "$d"
+}
+pv1=$(pv_project pvmany "process.env.UV_THREADPOOL_SIZE !== '1'")
+sp_install "$pv1" --frozen-lockfile
+sp_sample -- "$pv1"
+if [ "$(vrec '(r["result"], r.get("first_result"), r.get("rerun_result"))')" = "('RACE-SHAPED', 'PLAIN-VARIES', 'IDENTICAL')" ]; then
+  ok "sample: plain Yarn varying only with several pool threads, the engine identical with one: RACE-SHAPED, not IDENTICAL"
+else bad "sample: plain varies with several threads only ($(vrec 'r.get("result"), r.get("first_result"), r.get("rerun_result"), r.get("reason")'))"; fi
+pv2=$(pv_project pvalways "true")
+sp_install "$pv2" --frozen-lockfile
+sp_sample -- "$pv2"
+if [ "$(vrec '(r["result"], r.get("first_result"), r.get("rerun_result"))')" = "('IDENTICAL', 'PLAIN-VARIES', 'PLAIN-VARIES')" ]; then
+  ok "sample: plain Yarn varying with one pool thread too, the engine only where plain does: IDENTICAL"
+else bad "sample: plain varies always ($(vrec 'r.get("result"), r.get("first_result"), r.get("rerun_result"), r.get("reason")'))"; fi
+# The logged run under NODE_ENV=production (not logged): the replay installs
+# the devDependencies too and clones more than the run did (measured
+# before: IDENTICAL, 176 logged, 618 replayed).
+pp=$(sp_project prodenv yarn1-many); pp=$(cd "$pp" && pwd -P)
+(cd "$pp" && NODE_ENV=production spenv "$bin" yarn --frozen-lockfile --cache-folder "$sp/cache") > "$work/out" 2>&1
+sp_sample -- "$pp"
+case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
+  "ERROR: the replay cloned "*", the logged run "*": it did not repeat the run") ok "sample: a run logged under NODE_ENV=production, replayed without it: ERROR (clones $(vrec 'r["cloned"]') against $(vrec 'r["logged_cloned"]'))" ;;
+  *) bad "sample: NODE_ENV run ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned"), r.get("logged_cloned")'))" ;;
+esac
+# A workspace that is a symlink: the logged set is incomplete, and the skip
+# says why.
+pl=$(sp_project wslink yarn1-workspaces); pl=$(cd "$pl" && pwd -P)
+mv "$pl/packages/w2" "$sp/wslink-w2"; ln -s "$sp/wslink-w2" "$pl/packages/w2"
+sp_install "$pl" --frozen-lockfile
+lr=$(lrec '(r["files_complete"], r.get("files_incomplete", "")[:31])')
+sp_sample -- "$pl"
+case "$lr $(vrec 'r["result"] + ": " + r.get("reason", "")')" in
+  "(False, 'a workspace that is a symlink (') SKIPPED: the logged file set may be incomplete: a workspace that is a symlink ("*) ok "sample: a symlinked workspace: SKIPPED, saying so" ;;
+  *) bad "sample: symlinked workspace (logged $lr; $(vrec 'r.get("result"), r.get("reason")'))" ;;
+esac
 # The verdict when matchapack fails or declines where plain Yarn installed,
 # called directly on verify-yarn1.sh's output.
 r=$(python3 -I -B -c '
