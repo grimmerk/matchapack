@@ -1048,7 +1048,8 @@ p=$(project fam-trap small)
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$tr_log wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap: npm ci"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$tr_log wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
 [ $rc = 1 ] && grep -q "matchapack: npm read \`files\` (1×) of what matchapack's hook returned" "$work/out" \
-  && grep -qF 'Check `git diff` of package.json and package-lock.json, then rebuild with plain npm: MATCHAPACK=0 npm ci left-pad@1.3.0 --no-audit --no-fund' "$work/out" \
+  && grep -qF 'Check `git diff` of package.json and package-lock.json, then rebuild with plain npm:' "$work/out" \
+  && grep -qxF "  rm -rf $p/node_modules" "$work/out" && grep -qxF '  MATCHAPACK=0 npm ci left-pad@1.3.0 --no-audit --no-fund' "$work/out" \
   && ! grep -q 'running npm ci to rebuild' "$work/out" && [ "$(grep -c 'added [0-9]* package' "$work/out")" = 1 ] \
   && [ "$(last_log_in "$tr_log" "r['outcome'], r['repair'], r['command'], '\`files\`' in r['reason']")" = "broke stopped install True" ] \
   && ok "trap during npm install: stopped loudly (status 1), the key and the repair command said, npm not run again, logged" \
@@ -1059,13 +1060,15 @@ p=$(project fam-trap small)
 p=$(project fam-trap-nolock small)
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap, no lockfile: npm ci"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm install --no-package-lock left-pad@1.3.0 --no-audit --no-fund"); rc=$?
-[ $rc = 1 ] && grep -qF "There is no package-lock.json from this run for npm ci to rebuild from: check \`git diff\` of package.json, then remove $p/node_modules and run the command again with plain npm: MATCHAPACK=0 npm install --no-package-lock left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
+[ $rc = 1 ] && grep -qF "There is no package-lock.json from this run for npm ci to rebuild from: check \`git diff\` of package.json, then remove node_modules and run the command again with plain npm:" "$work/out" \
+  && grep -qxF "  rm -rf $p/node_modules" "$work/out" && grep -qxF "  MATCHAPACK=0 npm install --no-package-lock left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
   && ok "trap during npm install --no-package-lock: the repair is the same command with plain npm on an emptied node_modules, not npm ci" \
   || bad "family trap, no lockfile: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
 # --no-save: the lockfile does not have what the run added, so npm ci is
 # not the repair either.
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm install --no-save semver@7.6.0 --no-audit --no-fund"); rc=$?
-[ $rc = 1 ] && grep -qF "This run saved neither package.json nor package-lock.json (--no-save), so npm ci would rebuild without what it added: check \`git diff\` of package.json, then remove $p/node_modules and run the command again with plain npm: MATCHAPACK=0 npm install --no-save semver@7.6.0 --no-audit --no-fund" "$work/out" \
+[ $rc = 1 ] && grep -qF "This run saved neither package.json nor package-lock.json (--no-save), so npm ci would rebuild without what it added: check \`git diff\` of package.json, then remove node_modules and run the command again with plain npm:" "$work/out" \
+  && grep -qxF "  MATCHAPACK=0 npm install --no-save semver@7.6.0 --no-audit --no-fund" "$work/out" \
   && ok "trap during npm install --no-save: the repair is the same command with plain npm, not npm ci" \
   || bad "family trap, --no-save: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
 # A command filtered to one workspace (started inside a member): npm ci
@@ -1074,7 +1077,8 @@ p=$(project fam-trap-nolock small)
 p=$work/fam-trap-ws; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap, workspace: npm ci"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p/packages/app" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
-[ $rc = 1 ] && grep -qF "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check \`git diff\` of package.json and package-lock.json, then rebuild the whole project with plain npm: MATCHAPACK=0 npm ci --prefix $p --no-audit --no-fund" "$work/out" \
+[ $rc = 1 ] && grep -qF "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check \`git diff\` of package.json and package-lock.json, then rebuild the whole project with plain npm." "$work/out" \
+  && grep -qxF "  rm -rf $p/node_modules $p/packages/app/node_modules" "$work/out" && grep -qxF "  MATCHAPACK=0 npm ci --prefix $p --audit=false --fund=false" "$work/out" \
   && ! grep -q 'npmrc sets a workspace filter' "$work/out" \
   && ok "trap during npm install inside a workspace member: the repair is npm ci of the whole project, from its root" \
   || bad "family trap, workspace member: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
@@ -1084,7 +1088,7 @@ p=$work/fam-trap-ws; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
 # unset; npm is not run again. npm ci is rebuilt with plain npm ci.
 (export npm_config_workspace=ws-app MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
 [ $rc = 1 ] && grep -qF "matchapack: waiting for npm: a lost child status (MATCHAPACK_TEST_BROKE); npm may not have finished as it would have alone. The command was filtered to some workspaces" "$work/out" \
-  && grep -qF "env -u npm_config_workspace MATCHAPACK=0 npm ci --prefix $p --no-audit --no-fund" "$work/out" && [ "$(grep -c 'added [0-9]* package\|up to date' "$work/out")" = 1 ] \
+  && grep -qxF "  env -u npm_config_workspace MATCHAPACK=0 npm ci --prefix $p --audit=false --fund=false" "$work/out" && [ "$(grep -c 'added [0-9]* package\|up to date' "$work/out")" = 1 ] \
   && [ "$(last_log_in "$work/logs-broke" "r['outcome'], r['repair'], r['root'] == '$p', r['inject']['workspace_filter']")" = "broke stopped True True" ] \
   && ok "a broken npm install filtered by npm_config_workspace: stopped, the whole-project rebuild with that variable unset, npm not run again" \
   || bad "broke, family: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
@@ -1093,24 +1097,67 @@ p=$work/fam-trap-ws; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
 # --no-save, the whole project is reinstalled from npm's root (not the
 # start directory) and then the command runs again.
 (export MATCHAPACK_TEST_BROKE=panic; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p/packages/app" "npm install --no-save left-pad@1.3.0 --no-audit --no-fund"); rc=$?
-[ $rc = 1 ] && grep -qF "matchapack: internal error (panic); npm may not have finished as it would have alone. This run saved neither package.json nor package-lock.json (--no-save), so npm ci would rebuild without what it added, and the command was filtered to some workspaces: check \`git diff\` of package.json, then remove $p/node_modules, reinstall the whole project with plain npm: MATCHAPACK=0 npm install --prefix $p --no-save --no-audit --no-fund, and run the command again: MATCHAPACK=0 npm install --no-save left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
+[ $rc = 1 ] && grep -qF "matchapack: internal error (panic); npm may not have finished as it would have alone. This run saved neither package.json nor package-lock.json (--no-save), so npm ci would rebuild without what it added, and the command was filtered to some workspaces: check \`git diff\` of package.json, then remove node_modules, reinstall the whole project with plain npm, and run the command again." "$work/out" \
+  && grep -qxF "  rm -rf $p/node_modules $p/packages/app/node_modules" "$work/out" && grep -qxF "  MATCHAPACK=0 npm install --prefix $p --save=false --audit=false --fund=false" "$work/out" \
+  && grep -qxF "  MATCHAPACK=0 npm install --no-save left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
   && [ "$(last_log_in "$work/logs-broke" "r['outcome'], r['repair'], r['root'] == '$p'")" = "broke stopped True" ] \
   && ! grep -q 'npmrc sets a workspace filter' "$work/out" \
   && ok "a panic during npm install --no-save inside a member: npm's settings kept, the whole project reinstalled from its root, then the command" \
   || bad "broke, panic: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
-# Options npm's own parser does not read back the same (a negated text
-# option with a value): the whole-project command has none of them, and the
-# advice says so; logged as `checked: false`. Started through a symlink to
-# the project: the printed root is the canonical one.
+# Options npm's own parser does not read back the same (a list option
+# given `false`): the whole-project command has none of them, and the
+# advice says so first, naming the ones that change what an install does;
+# logged as `checked: false`. Started through a symlink to the project: the
+# printed root is the canonical one.
 ln -s "$p" "$work/fam-trap-ws-link" 2>/dev/null
-(export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$work/fam-trap-ws-link" "npm install --no-tag false left-pad@1.3.0 -w ws-app --no-audit --no-fund"); rc=$?
-[ $rc = 1 ] && grep -qF "rebuild the whole project with plain npm: MATCHAPACK=0 npm ci --prefix $p That command has none of your options: matchapack could not repeat them safely, so add the ones you need." "$work/out" \
+(export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$work/fam-trap-ws-link" "npm install --include false left-pad@1.3.0 -w ws-app --ignore-scripts --no-audit --no-fund"); rc=$?
+[ $rc = 1 ] && grep -qF "rebuild the whole project with plain npm. matchapack could not repeat your options safely, so the whole-project command below has none of them: add the ones you need (you used --ignore-scripts: add it)." "$work/out" \
+  && grep -qxF "  MATCHAPACK=0 npm ci --prefix $p" "$work/out" \
   && [ "$(last_log_in "$work/logs-broke" "r['inject']['repair']['checked'], r['inject']['repair']['unsure']")" = "False True" ] \
   && ok "options npm's parser does not read back the same: the whole-project command without them, said, logged; the root canonical through a symlink" \
   || bad "broke, unsure: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
 (export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
 [ $rc = 0 ] && grep -q 'running npm ci to rebuild node_modules' "$work/out" && [ "$(last_log_in "$work/logs-broke" "r['outcome'], r['repair']")" = "broke npm ci" ] \
   && ok "a broken npm ci: rebuilt with plain npm ci, as before" || bad "broke, ci: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+# Following the advice rebuilds every node_modules of the project, a
+# workspace member's own too (npm ci before 10.8.1 removes only the root's,
+# and an install keeps what it finds): a marker put into a package in
+# packages/app/node_modules before a broken run must be gone after running
+# exactly the commands the advice printed (the lines two spaces in), with
+# plain npm. The forms: the default (npm ci), filtered (the whole project),
+# --no-save (the command again).
+# follow_advice <dir>: run those lines of $work/out in <dir>.
+follow_advice() {
+  awk '/^matchapack: .*git diff/ {on = 1; next} on && /^  / {print substr($0, 3); next} on {exit}' "$work/out" > "$work/advice.sh"
+  [ -s "$work/advice.sh" ] && (cd "$1" && sh -e "$work/advice.sh" > "$work/follow.out" 2>&1)
+}
+p=$work/fam-follow; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
+wrapped "$p" "npm ci --no-audit --no-fund" || bad "follow the advice: npm ci"
+mk=$p/packages/app/node_modules/y1-b/MARKER
+for c in "npm install --no-audit --no-fund" "npm install -w ws-app --no-audit --no-fund" "npm install --no-save --no-audit --no-fund"; do
+  [ -d "$(dirname "$mk")" ] && echo broken > "$mk"
+  (export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "$c"); rc=$?
+  if [ $rc = 1 ] && [ -f "$mk" ] && follow_advice "$p" && [ ! -e "$mk" ] && [ -f "$p/packages/app/node_modules/y1-b/package.json" ] && [ -f "$p/node_modules/y1-a/package.json" ]; then
+    ok "following the advice of a broken $c rebuilds a member's own node_modules too ($(grep -c . "$work/advice.sh") commands)"
+  else
+    bad "follow the advice of $c: rc=$rc, marker $([ -e "$mk" ] && echo still there || echo gone), advice: $(tr '\n' '|' < "$work/advice.sh" 2>/dev/null)"
+  fi
+done
+# The automatic plain npm ci after a broken npm ci removes them first too
+# (npm ci does it itself from 10.8.1 on).
+[ -d "$(dirname "$mk")" ] && echo broken > "$mk"
+(export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q 'running npm ci to rebuild node_modules' "$work/out" && [ ! -e "$mk" ] && [ -f "$p/packages/app/node_modules/y1-b/package.json" ] \
+  && ok "a broken npm ci: the automatic plain npm ci rebuilds a member's own node_modules too" \
+  || bad "broke, ci, member node_modules: rc=$rc, marker $([ -e "$mk" ] && echo still there || echo gone)"
+# npm 11 warns about an abbreviation (`--prod`) once; the repair options'
+# second parse must not say it again.
+p=$(project prod-warn bundled)
+(cd "$p" && npm ci --prod --no-audit --no-fund > "$work/plain.out" 2>&1)
+want=$(grep -c 'Expanding --prod' "$work/plain.out")
+wrapped "$p" "npm ci --prod --no-audit --no-fund"
+[ "$(grep -c 'Expanding --prod' "$work/out")" = "$want" ] && ok "npm ci --prod: npm's abbreviation warning as often as with plain npm ($want)" \
+  || bad "npm ci --prod: the warning $(grep -c 'Expanding --prod' "$work/out") times, plain npm $want"
 MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
   && grep -q 'failed and stopped 1' "$work/report" \
   && grep -q "in 1 runs npm read an unexpected key of the hook's result, and the run stopped with the repair command" "$work/report" \

@@ -225,14 +225,20 @@ adds or changes is replaced by clones. So:
   keeps a package the hidden lockfile did not list (only the root's
   `node_modules` removed in a workspaces project), where a kept package
   gets a nested `node_modules`, and with npm 10's
-  `--install-strategy=linked`;
+  `--install-strategy=linked`. It is a warning only (log and report; an
+  install script or another npm can also place packages). On a filesystem
+  with 1-second timestamps the count can vary between runs; nothing is
+  cloned there anyway;
 - if matchapack breaks during one of these commands (npm read something of
   the hook's result that pacote's own result does not have, or matchapack
   itself failed), it does not repair anything by itself: running the
   command again would not rebuild what is in place, and `npm ci` is a
   rebuild from the lockfile, not what plain `npm install` would have left
   (NOTES). It stops with a non-zero status and prints the repair that fits,
-  from npm's own settings for that run:
+  from npm's own settings for that run: a sentence or two, then each command
+  on a line of its own. Every form first removes every `node_modules` of the
+  project, a workspace member's own too (`npm ci` before npm 10.8.1 removes
+  only the root's, and an install keeps what it finds):
   - usually: check `git diff` of `package.json` and `package-lock.json`,
     then `MATCHAPACK=0 npm ci <the same arguments>`;
   - no lockfile to rebuild from (no `package-lock.json` or
@@ -243,9 +249,13 @@ adds or changes is replaced by clones. So:
   - a command filtered to some workspaces (`-w`, `--workspaces`, or started
     inside a member): `npm ci` with the filter would remove the other
     workspaces' packages, so: rebuild the whole project,
-    `MATCHAPACK=0 npm ci --prefix <root> <its options>`, without the filter
-    (the options as npm parsed them, one word each, so abbreviations such as
-    `--prefi` are gone too), with `env -u` for a filter set in the
+    `MATCHAPACK=0 npm ci --prefix <root> <its options>`, without the filter.
+    The options are the ones npm parsed from your command line, written out
+    one per value as npm holds them: full option names, absolute paths, ISO
+    dates, `--audit=false` for `--no-audit` (so abbreviations such as
+    `--prefi` are gone too). Each such list is parsed again by npm's own
+    parser and given only when npm reads it exactly as it read your command
+    line; with `env -u` for a filter set in the
     environment (in any case: `NPM_CONFIG_workspace` too); a filter set in an
     npmrc file is named, since a command line cannot unset it. `--prefix
     <root>` run from where you are is close to, not the same as, running at
@@ -254,17 +264,23 @@ adds or changes is replaced by clones. So:
     a global npm command), and a relative path in an npmrc value resolves
     against the directory you ran it in. When npm's own parser does not read
     the options back as it read your command line (a line npm reads oddly,
-    such as a negated text option with a value), the command is given
-    without any of them, and the advice says so;
+    such as a list option given `false`), or npm reported none, the command
+    is given without any of them, and the advice says so before it, naming
+    the ones you used that change what an install does (`--ignore-scripts`,
+    `--omit`, `--include`, `--production`, `--legacy-peer-deps`, `--force`
+    and the like);
   - both: remove `node_modules`, reinstall the whole project the same way
     (`npm install` instead of `npm ci`), then run the command again.
 
   The advice works the same after a panic of matchapack (npm's settings for
-  the run are kept apart). Credentials typed on the command line
-  (`--//host/:_authToken=…`, `--_password=…`) are shown as `***`, as in the
-  run log, and the advice says to add them back or put them in `.npmrc`.
+  the run are kept apart). When a run breaks before npm reported its install
+  root, matchapack had placed nothing, and the advice is only the same
+  command again with plain npm. Credentials typed on the command line
+  (`--//host/:_authToken=…`, `--_password=…`, npm's client key `--key=…`,
+  a secret in a URL's query such as `?private_token=…`; not the user name
+  of an ssh URL) are shown as `***`, as in the run log, and the advice says to add them back or put them in `.npmrc`.
   (`npm ci` itself is rebuilt with plain `npm ci` automatically, as
-  before.) For tests, `MATCHAPACK_TEST_BROKE=1` makes a run of the family
+  before, after matchapack removes every `node_modules` of the project.) For tests, `MATCHAPACK_TEST_BROKE=1` makes a run of the family
   end as if its child status was lost, and `MATCHAPACK_TEST_BROKE=panic`
   as if matchapack panicked, after npm ran.
 

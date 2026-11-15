@@ -458,12 +458,12 @@ async function helperCases () {
         JSON.stringify([...[r, r5, r6, r3].map(x => roots(x).map(m => [m.save, m.workspace_filter])[0])]),
         JSON.stringify([[true, false], [false, false], [true, true], [true, true]]))
       // What the repair advice keeps of the command (src/inject.js
-      // repairInfo), from npm's own parse: each kept option as ONE token
-      // (`--name=value`), the workspace filter and the root gone
-      // (abbreviations too: --prefi, --include-workspace-r), every
-      // positional token (the command word, package names) dropped by its
-      // position, never by its value. And each npmrc layer that sets a
-      // workspace filter, also when a typed -w is the one in effect.
+      // repairInfo): npm's own parse of the command line, serialised one
+      // token per value (`--name=value`, `--flag`, `--flag=false`; full
+      // names, as npm holds them), the workspace filter and the root gone
+      // (abbreviations too: --prefi, --include-workspace-r); the command
+      // word and package names are not options. And each npmrc layer that
+      // sets a workspace filter, also when a typed -w is the one in effect.
       // (npm 12 refuses abbreviated options: there the full names.)
       const abbr = Number(require(path.join(npmDir, 'package.json')).version.split('.')[0]) < 12
       const repairOf = async (args, cwd) => {
@@ -486,11 +486,11 @@ async function helperCases () {
         // `-` (nopt refuses one only for text): kept with it, so the next
         // option is not swallowed when the command is repeated.
         [['install', '--fetch-retries', '-1', '--ignore-scripts', '-w', 'a'], ['--fetch-retries=-1', '--ignore-scripts']],
-        [['install', '--depth', '-1', '--no-audit', '-w', 'a'], ['--depth=-1', '--no-audit']],
+        [['install', '--depth', '-1', '--no-audit', '-w', 'a'], ['--depth=-1', '--audit=false']],
         [['install', '--otp', '-abc123', '-w', 'a'], ['--otp=-abc123']],
-        // A flag goes out as the value npm gave it.
+        // A flag goes out as the value npm gave it (`--flag`, `--flag=false`).
         [['install', '--no-ignore-scripts=false', '-w', 'a'], ['--ignore-scripts']],
-        [['install', '--ignore-scripts', 'false', 'x', '-w', 'a'], ['--no-ignore-scripts']],
+        [['install', '--ignore-scripts', 'false', 'x', '-w', 'a'], ['--ignore-scripts=false']],
       ]
       const got = []
       for (const [args] of cases) {
@@ -503,7 +503,7 @@ async function helperCases () {
       const n2 = await repairOf(['install', '-w', 'a'], ws)
       fs.rmSync(path.join(ws, '.npmrc'))
       check('helper: an npmrc that sets a workspace filter is named, also behind a typed -w',
-        JSON.stringify([n1, n2]), JSON.stringify([{ args: ['--no-save'], npmrc: ['project'], checked: true }, { args: [], npmrc: ['project'], checked: true }]))
+        JSON.stringify([n1, n2]), JSON.stringify([{ args: ['--save=false'], npmrc: ['project'], checked: true }, { args: [], npmrc: ['project'], checked: true }]))
       // Started inside a member: npm sets `workspace` on its default layer,
       // which every npmrc layer's data inherits; no npmrc sets it.
       const m1 = await repairOf(['install'], path.join(ws, 'packages', 'a'))
@@ -513,12 +513,12 @@ async function helperCases () {
       fs.writeFileSync(path.join(tmp, 'npmrc'), '')
       check('helper: inside a member no npmrc is named; a user npmrc filter is',
         JSON.stringify([m1 && m1.npmrc, m2 && m2.npmrc]), JSON.stringify([[], ['user']]))
-      // The self-check: a line npm reads in an odd way (a negated option
-      // that is not a flag, with a value) is not repeated; the advice then
-      // gives no options.
-      const u1 = await repairOf(['install', '--no-tag', 'false', '-w', 'a'], d)
-      check('helper: options npm\'s parser does not read back the same are not given (unsure)',
-        JSON.stringify(u1 && [u1.args, u1.unsure, u1.checked]), JSON.stringify([null, true, false]))
+      // The self-check: a line whose parse does not read back the same
+      // (a list option given `false`) is not repeated; the advice then gives
+      // no options, and names the ones that change what an install does.
+      const u1 = await repairOf(['install', '--include', 'false', '-w', 'a', '--ignore-scripts', '--omit=dev'], d)
+      check('helper: options npm\'s parser does not read back the same are not given (unsure), the safety ones named',
+        JSON.stringify(u1 && [u1.args, u1.unsure, u1.checked, u1.missing]), JSON.stringify([null, true, false, ['--ignore-scripts', '--omit=dev']]))
     }
     // The probe of the tarball server gives up on a listener that accepts
     // and never answers.
@@ -599,8 +599,19 @@ async function sweepRepair () {
   const words = ['foo', '5', '-1', '-x', 'null', 'false', 'true', 'always', '--ignore-scripts']
   let n = 0
   const wrong = []
-  const oddUnsure = []
   let unsure = 0
+  // npm's log events (proc-log emits them on process) while repairInfo runs:
+  // its second parse must say nothing.
+  let logs = 0
+  const onLog = () => { logs++ }
+  const repair = (config) => {
+    process.on('log', onLog)
+    try {
+      return repairInfo(config) || {}
+    } finally {
+      process.off('log', onLog)
+    }
+  }
   try {
     for (const key of Object.keys(defs.definitions)) {
       for (const neg of [false, true]) {
@@ -613,16 +624,9 @@ async function sweepRepair () {
             continue // npm itself refuses the line
           }
           n++
-          const info = repairInfo(A.config) || {}
+          const info = repair(A.config)
           if (info.unsure) {
             unsure++
-            const t = defs.definitions[key].type
-            const flag = t === Boolean || (Array.isArray(t) && t.includes(Boolean))
-            // (A flag that is also text, such as `browser`, reads `false` as text.)
-            const text = Array.isArray(t) && t.includes(String)
-            if (!((neg && (!flag || (w !== 'true' && w !== 'false'))) || (flag && text) || w === 'null' || w === 'always' || w === 'foo' || w === '5')) {
-              oddUnsure.push(a.join(' '))
-            }
             continue
           }
           let B
@@ -653,11 +657,52 @@ async function sweepRepair () {
         }
       }
     }
+    // Everyday command lines: always repeated (checked), never unsure.
+    const everyday = [
+      ['--omit', 'dev'], ['--omit=dev', '--omit=optional'], ['--ignore-scripts'], ['--legacy-peer-deps'], ['--force'],
+      ['--save-exact'], ['-E'], ['--save-dev'], ['-D'], ['--no-save'], ['--tag', 'latest'], ['--registry', 'https://r.example/'],
+      ['--no-audit', '--no-fund'], ['--include=dev'], ['--install-strategy=linked'], ['--prefer-offline'], ['--before', '2026-01-01'],
+      ['--fetch-retries', '5'], ['--loglevel', 'silent'], ['-w', 'a'], ['--workspaces'], ['--@s:registry=https://r.example/'],
+      ['--//r.example/:_authToken=x'], ['--cache', '/tmp/c'], ['--no-package-lock'], ['--production'], ['--omit', 'peer', '--strict-peer-deps'],
+    ]
+    const notRepeated = []
+    for (const line of everyday) {
+      let A
+      try {
+        A = await parse(['install', ...line, 'pkg'])
+      } catch {
+        continue // npm itself refuses the line
+      }
+      const info = repair(A.config)
+      if (info.unsure || info.checked !== true) {
+        notRepeated.push(line.join(' '))
+      }
+    }
+    check('repair: everyday command lines are always repeated (checked, never unsure)', notRepeated.join(' | '), '')
+    // nopt's handlers are off for the second parse, and put back: an
+    // abbreviation there (none in what repairInfo builds) says nothing.
+    const { sameParse } = require(injectJs)
+    const A = await parse(['install', '--omit=dev', 'pkg'])
+    const nopt = require(path.join(npmDir, 'node_modules', 'nopt'))
+    const had = Object.prototype.hasOwnProperty.call(nopt, 'abbrevHandler')
+    const before = nopt.abbrevHandler
+    let fired = 0
+    nopt.abbrevHandler = () => { fired++ }
+    const counter = nopt.abbrevHandler
+    sameParse(A.config, ['--prod'])
+    const back = nopt.abbrevHandler === counter
+    if (had) {
+      nopt.abbrevHandler = before
+    } else {
+      delete nopt.abbrevHandler
+    }
+    check('repair: the second parse runs with nopt\'s handlers off, and puts them back',
+      JSON.stringify([fired, back]), JSON.stringify([0, true]))
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true })
   }
   check(`repair sweep over npm's option table (${n} command lines, ${unsure} unsure): no wrong token list`, wrong.slice(0, 3).join(' | '), '')
-  check('repair sweep: unsure only where npm\'s reading is itself odd (a negated option that is not a flag, or followed by a word; a flag followed by a word; a flag that is also text)', oddUnsure.slice(0, 3).join(' | '), '')
+  check('repair sweep: npm logs nothing while the repair options are built', String(logs), '0')
 }
 
 ;(async () => {

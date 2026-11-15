@@ -364,104 +364,40 @@ function resultTrap (value, report) {
 // The options that filter a command to some workspaces or name its root.
 const FILTERS = new Set(['workspace', 'workspaces', 'include-workspace-root', 'prefix'])
 
+// Options that change what an install does or runs: when the repair advice
+// cannot repeat the options, it names these if the user typed them.
+const SAFETY = new Set(['ignore-scripts', 'omit', 'include', 'production', 'dev', 'only', 'also', 'legacy-peer-deps', 'force', 'strict-peer-deps', 'install-strategy', 'install-links'])
+
+// One token per value of a parsed option: `--name`, `--name=false`,
+// `--name=<value>` (a date as ISO text). npm's own parser reads them back
+// (`sameParse` checks it).
+function optionTokens (key, value) {
+  return (Array.isArray(value) ? value : [value]).map((x) => {
+    if (x === true) {
+      return `--${key}`
+    }
+    if (x instanceof Date) {
+      return `--${key}=${x.toISOString()}`
+    }
+    return `--${key}=${x === null ? 'null' : x}`
+  })
+}
+
 // `{ args, npmrc, checked }` for the repair advice of a broken run
 // (wrapper.rs), or null.
-// `args`: the command's options as npm parsed them, each as ONE token
-// (`--name=value`, `--flag`, `--no-flag`), without the options in FILTERS
-// (an abbreviation such as `--prefi` resolved as npm's nopt resolves it).
-// nopt's `cooked` list splits `--name=value`; repeated split, an option
-// npm's definitions do not know (`--//host/:_authToken=…`) would be a flag
-// and its value a package name, so a value goes out joined to its option
-// whenever npm's parse took it as that option's value. A flag goes out as
-// the value npm gave it (`--no-ignore-scripts=false` is
-// `--ignore-scripts`). Every other token (the command word, package names,
-// whatever follows `--`) is dropped by its position, never by its value.
+// `args`: the options of the command line as npm parsed them (the `cli`
+// config layer's `raw`), serialised one token per value (`optionTokens`),
+// without the options in FILTERS; the command word and package names are
+// not options, so they are not there. Normalised as npm holds them: full
+// option names, absolute paths, ISO dates.
+// `checked`: whether npm's own parser reads `args` exactly as it read the
+// typed command line (`sameParse`). Anything but true: `args` is null,
+// `unsure` true, and `missing` lists the tokens of the options in SAFETY,
+// for the advice to name.
 // `npmrc`: the npmrc layers (project, user, global, builtin) that set
 // `workspace` or `workspaces` themselves.
-// `checked`: whether npm's own parser reads `args` exactly as it read the
-// typed command line (`sameParse`). false: the options are not given
-// (`args` null, `unsure` true) and the advice says so; null: it could not
-// be asked, the tokens stand as built.
 function repairInfo (config) {
   try {
-    const cooked = config.parsedArgv && config.parsedArgv.cooked
-    const defs = config.definitions
-    if (!Array.isArray(cooked) || !defs) {
-      return null
-    }
-    const names = Object.keys(defs)
-    // nopt resolves an abbreviation to the one option it starts (`abbrev`).
-    const resolve = (name) => {
-      if (defs[name]) {
-        return name
-      }
-      const hits = names.filter(n => n.startsWith(name))
-      return hits.length === 1 ? hits[0] : null
-    }
-    const isBool = (key) => {
-      const t = defs[key] && defs[key].type
-      return t === Boolean || (Array.isArray(t) && t.includes(Boolean))
-    }
-    // nopt leaves a word that looks like an option alone only after an
-    // option whose type is text; every other kind (number, path, date,
-    // list) takes whatever follows, except a bare `--`.
-    const isText = (t) => t === String || (Array.isArray(t) && t.length === 1 && t[0] === String)
-    const original = new Set((Array.isArray(config.parsedArgv.original) ? config.parsedArgv.original : []).map(String))
-    const args = []
-    for (let i = 0; i < cooked.length; i++) {
-      const t = String(cooked[i])
-      if (t === '--') {
-        break
-      }
-      if (!(t.startsWith('--') && t.length > 2)) {
-        // A short flag npm does not know (`-x`) is repeated as typed; a
-        // positional word is dropped.
-        if (t.length > 1 && t.startsWith('-')) {
-          args.push(t)
-        }
-        continue
-      }
-      let name = t.slice(2)
-      let neg = false
-      if (!defs[name] && name.startsWith('no-')) {
-        name = name.slice(3)
-        neg = true
-      }
-      const key = resolve(name)
-      const next = cooked[i + 1] === undefined ? undefined : String(cooked[i + 1])
-      const type = key ? defs[key].type : undefined
-      // Typed as `--name=value`: the value is this option's, whatever it is.
-      const withEq = next !== undefined && original.has(`${t}=${next}`)
-      let token = t
-      let take = false
-      if (neg || (key && isBool(key))) {
-        // As nopt: a flag, or any option negated, takes `true` / `false`
-        // (a negated one inverts it); a flag of a listed type also takes
-        // one of its words.
-        if (next === 'true' || next === 'false') {
-          take = true
-          token = `--${(next === 'true') !== neg ? '' : 'no-'}${name}`
-        } else if (!neg && (withEq || (Array.isArray(type) && type.includes(next)))) {
-          take = true
-          token = `${t}=${next}`
-        }
-      } else if (key) {
-        take = next !== undefined && (withEq || (isText(type) ? !/^-{1,2}[^-]+/.test(next) : !/^-{2,}$/.test(next)))
-      } else {
-        // An option npm does not know takes a value only with `=`.
-        take = withEq
-      }
-      if (take && token === t) {
-        token = `${t}=${next}`
-      }
-      if (take) {
-        i++
-      }
-      if (key && FILTERS.has(key)) {
-        continue
-      }
-      args.push(token)
-    }
     const npmrc = []
     for (const where of ['project', 'user', 'global', 'builtin']) {
       const layer = config.data && typeof config.data.get === 'function' ? config.data.get(where) : null
@@ -475,11 +411,28 @@ function repairInfo (config) {
         npmrc.push(where)
       }
     }
-    const checked = sameParse(config, args)
-    if (checked === false) {
-      return { args: null, npmrc, checked, unsure: true }
+    const cli = config.data && typeof config.data.get === 'function' ? config.data.get('cli') : null
+    const raw = cli && cli.raw
+    if (!raw || typeof raw !== 'object') {
+      return { args: null, npmrc, checked: null, unsure: true, missing: [] }
     }
-    return { args, npmrc, checked }
+    const tokens = []
+    const missing = []
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === 'argv' || FILTERS.has(key)) {
+        continue
+      }
+      const t = optionTokens(key, value)
+      tokens.push(...t)
+      if (SAFETY.has(key)) {
+        missing.push(...t)
+      }
+    }
+    const checked = sameParse(config, tokens)
+    if (checked !== true) {
+      return { args: null, npmrc, checked, unsure: true, missing }
+    }
+    return { args: tokens, npmrc, checked }
   } catch {
     return null
   }
@@ -489,7 +442,10 @@ function repairInfo (config) {
 // `install <tokens>` exactly as it read the typed command line (the `cli`
 // config layer keeps what it read, `raw`), apart from the options in
 // FILTERS, which must be gone, and with no positional word left: true or
-// false; null when that cannot be asked.
+// false; null when that cannot be asked. nopt's handlers (npm 11's config
+// leaves its warnings for abbreviations, unknown and invalid options on
+// the module) are off for this second parse: npm already said what it had
+// to about the typed line.
 function sameParse (config, tokens) {
   try {
     const cli = config.data && typeof config.data.get === 'function' ? config.data.get('cli') : null
@@ -498,7 +454,23 @@ function sameParse (config, tokens) {
       return null
     }
     const nopt = require(path.join(config.npmPath, 'node_modules', 'nopt'))
-    const again = nopt(config.types, config.shorthands || {}, ['install', ...tokens], 0)
+    const HANDLERS = ['invalidHandler', 'unknownHandler', 'abbrevHandler']
+    const saved = HANDLERS.map(h => [h, Object.prototype.hasOwnProperty.call(nopt, h), nopt[h]])
+    let again
+    try {
+      for (const h of HANDLERS) {
+        nopt[h] = false
+      }
+      again = nopt(config.types, config.shorthands || {}, ['install', ...tokens], 0)
+    } finally {
+      for (const [h, had, v] of saved) {
+        if (had) {
+          nopt[h] = v
+        } else {
+          delete nopt[h]
+        }
+      }
+    }
     const words = again.argv && again.argv.remain
     delete again.argv
     const typed = { ...raw }
@@ -976,5 +948,5 @@ if (require.main === module && process.argv[2] === '--fingerprint') {
     fail(`before npm started: ${e && e.stack ? e.stack : e}`)
   }
 } else {
-  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, repairInfo, RESULT_KEYS, tarPackages, tarFingerprint, extractionKey, extractionCode }
+  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, repairInfo, sameParse, RESULT_KEYS, tarPackages, tarFingerprint, extractionKey, extractionCode }
 }
