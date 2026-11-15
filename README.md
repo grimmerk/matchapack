@@ -243,7 +243,12 @@ adds or changes is replaced by clones. So:
   Nothing else: not what another tool or an earlier install put there, and
   nothing behind a symlink to outside the project. Each such directory is
   on a line of its own; more than 20 are listed in a file in the run log's
-  directory, removed by one command:
+  directory (readable by you only; lists older than a day are removed),
+  removed by one command. Of a package directory that has a
+  `node_modules` (npm keeps nested packages there and moves them back
+  under a package it replaces), only the other entries are removed, and
+  only while it is still the directory matchapack placed (npm puts its own
+  back when it rolls back after a failed install script):
   - usually: check `git diff` of `package.json` and `package-lock.json`,
     then `MATCHAPACK=0 npm ci <the same arguments>`;
   - no lockfile to rebuild from (no `package-lock.json` or
@@ -271,9 +276,8 @@ adds or changes is replaced by clones. So:
     the options back as it read your command line (a line npm reads oddly,
     such as a list option given `false`), or npm reported none, the command
     is given without any of them, and the advice says so before it, naming
-    the ones you used that change what an install does (`--ignore-scripts`,
-    `--omit`, `--include`, `--production`, `--legacy-peer-deps`, `--force`
-    and the like);
+    every option it could not repeat (shown as the log shows them: secrets
+    as `***`);
   - both: remove `node_modules`, reinstall the whole project the same way
     (`npm install` instead of `npm ci`), then run the command again.
 
@@ -289,7 +293,9 @@ adds or changes is replaced by clones. So:
   that run outside the root's `node_modules`; the root's own is left to
   `npm ci`, which empties it after checking the lockfile.) For tests, `MATCHAPACK_TEST_BROKE=1` makes a run of the family
   end as if its child status was lost, and `MATCHAPACK_TEST_BROKE=panic`
-  as if matchapack panicked, after npm ran.
+  as if matchapack panicked, after npm ran, and `MATCHAPACK_TEST_BROKE=no-server`
+  as if the clone server's thread could not start (matchapack then stops
+  npm before it answers).
 
 matchapack runs plain npm instead, and prints why, when (before npm starts,
 unless marked "npm's root": those are decided on the root npm reports, after

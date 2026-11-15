@@ -1336,6 +1336,16 @@ import json, sys
 recs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 sys.exit(0 if any(r.get("root", "").endswith("cl-member-placed/mp/proj") and "packages/b/node_modules/lc-s" in (r.get("inject") or {}).get("placed_outside", []) for r in recs if r.get("outcome") == "broke") else 1)
 PY
+# The clone server's thread cannot start (MATCHAPACK_TEST_BROKE=no-server):
+# npm is stopped before matchapack answers, so the automatic plain npm ci
+# is the only npm that finishes (one "added" line), and the tree is its.
+p=$(project no-server bundled)
+(export MATCHAPACK_TEST_BROKE=no-server; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q 'could not start the clone server' "$work/out" && grep -q 'running npm ci to rebuild node_modules' "$work/out" \
+  && [ "$(grep -Ec '^added [0-9]+ package' "$work/out")" = 1 ] && [ -f "$p/node_modules/lc-s/package.json" ] \
+  && [ "$(last_log_in "$work/logs-broke" "r['outcome'], r['repair']")" = "broke npm ci" ] \
+  && ok "the clone server's thread cannot start: npm is stopped, then plain npm ci alone rebuilds" \
+  || bad "no server thread: rc=$rc, added $(grep -Ec '^added [0-9]+ package' "$work/out"), $(grep '^matchapack' "$work/out" | head -2)"
 # npm 11 warns about an abbreviation (`--prod`) once; the repair options'
 # second parse must not say it again.
 p=$(project prod-warn bundled)

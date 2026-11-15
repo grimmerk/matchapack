@@ -322,7 +322,24 @@ pub(crate) fn run_serving(
     drop(theirs);
     let closer = ours.try_clone();
     Ok(std::thread::scope(|s| {
-        let serving = s.spawn(move || serve(ours));
+        // MATCHAPACK_TEST_BROKE=no-server: as if the thread could not start.
+        let spawned = if std::env::var("MATCHAPACK_TEST_BROKE").as_deref() == Ok("no-server") {
+            Err(std::io::Error::other("MATCHAPACK_TEST_BROKE=no-server"))
+        } else {
+            std::thread::Builder::new().spawn_scoped(s, move || serve(ours))
+        };
+        let serving = match spawned {
+            Ok(h) => h,
+            Err(e) => {
+                // npm is running and nothing answers it: stop it before
+                // saying so, so that no second npm (the automatic plain npm
+                // ci after a broken npm ci) runs beside it.
+                let _ = child.kill();
+                let _ = child.wait();
+                stop();
+                return Err(std::io::Error::other(format!("could not start the clone server: {e}")));
+            }
+        };
         let status = child.wait();
         // The child is gone: drop what is still queued and end the stream,
         // also when a process the child started still holds the socket.
