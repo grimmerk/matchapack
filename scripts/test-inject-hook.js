@@ -298,7 +298,10 @@ function keyCases () {
 
   // An ES module tar ("type": "module"), loaded through require (Node 22.12
   // and later load ES modules that way): the files it imports are not in
-  // require.cache, so every ES module file of it counts.
+  // require.cache, so every ES module file of the closure counts. Its
+  // closure: `edep`, an ES module dependency it imports (no file of it in
+  // require.cache, its version unchanged), and `cdep`, a CommonJS one it
+  // imports (whose file does show in require.cache).
   const tmpEsm = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'matchapack-tarfp-esm-'))
   try {
     const nm = path.join(tmpEsm, 'node_modules')
@@ -307,9 +310,14 @@ function keyCases () {
       fs.writeFileSync(path.join(nm, rel), text)
     }
     write('pacote/package.json', JSON.stringify({ name: 'pacote', version: '1.0.0' }))
-    write('tar/package.json', JSON.stringify({ name: 'tar', version: '1.0.0', type: 'module', main: 'index.js' }))
-    write('tar/index.js', "export { unpack } from './lib/unpack.js'\n")
+    write('tar/package.json', JSON.stringify({ name: 'tar', version: '1.0.0', type: 'module', main: 'index.js', dependencies: { edep: '*', cdep: '*' } }))
+    write('tar/index.js', "export { unpack } from './lib/unpack.js'\nexport { e } from 'edep'\nexport { default as c } from 'cdep'\n")
     write('tar/lib/unpack.js', 'export const unpack = 1\n')
+    write('edep/package.json', JSON.stringify({ name: 'edep', version: '1.0.0', type: 'module', main: 'index.js' }))
+    write('edep/index.js', "export { e } from './lib/e.js'\n")
+    write('edep/lib/e.js', 'export const e = 1\n')
+    write('cdep/package.json', JSON.stringify({ name: 'cdep', version: '1.0.0', main: 'index.js' }))
+    write('cdep/index.js', 'module.exports = 1\n')
     const fakePacote = path.join(nm, 'pacote')
     let loaded = true
     try {
@@ -321,7 +329,17 @@ function keyCases () {
     if (loaded) {
       const a = tarFingerprint(fakePacote)
       fs.writeFileSync(path.join(nm, 'tar', 'lib', 'unpack.js'), 'export const unpack = 2\n')
-      check('key: in an ES module tar, a byte changed in a file it imports changes the tar fingerprint', tarFingerprint(fakePacote) !== a, true)
+      const b = tarFingerprint(fakePacote)
+      check('key: in an ES module tar, a byte changed in a file it imports changes the tar fingerprint', b !== a, true)
+      // The ES module dependency: none of its files is in require.cache, its
+      // version stays; a byte changed in it changes the fingerprint.
+      const inCache = (pkg) => Object.keys(require.cache).some(k => k.startsWith(path.join(nm, pkg) + path.sep))
+      fs.writeFileSync(path.join(nm, 'edep', 'lib', 'e.js'), 'export const e = 2\n')
+      check('key: an ES module dependency of an ES module tar (not in require.cache, same version): a byte changed in it changes the tar fingerprint',
+        JSON.stringify([inCache('edep'), tarFingerprint(fakePacote) !== b]), JSON.stringify([false, true]))
+      // What the rule rests on: a CommonJS file an ES module imports is in
+      // require.cache (so it is hashed as a loaded file).
+      check(`key: a CommonJS dependency imported by an ES module is in require.cache (Node ${process.versions.node})`, inCache('cdep'), true)
     }
   } finally {
     fs.rmSync(tmpEsm, { recursive: true, force: true })

@@ -209,8 +209,10 @@ function esmFiles (dir, types) {
 //     package's own package.json (code that only reads a version would
 //     otherwise change it; which files its fields make Node load is counted
 //     anyway);
-//   - the same for every ES module file of a package one of whose loaded
-//     files is an ES module: its own imports do not show in require.cache.
+//   - when any loaded file of those packages is an ES module, the same for
+//     every ES module file of every one of them: an ES module's imports can
+//     reach any package of the closure, and no ES module shows in
+//     require.cache (a CommonJS file an ES module imports does).
 // What counts is what Node loaded: called once pacote is loaded, which
 // loads tar. Throws when no file of tar itself is loaded.
 function tarFingerprint (pacoteDir, cache = require.cache) {
@@ -246,8 +248,8 @@ function tarFingerprint (pacoteDir, cache = require.cache) {
   if (ofTar === 0) {
     throw new Error(`no file of tar (${tarDir}) is loaded`)
   }
-  for (const [dir, p] of pkgs) {
-    if (esm.has(dir)) {
+  if (esm.size > 0) {
+    for (const [dir, p] of pkgs) {
       for (const file of esmFiles(dir, types)) {
         lines.add(line(dir, p.name, file))
       }
