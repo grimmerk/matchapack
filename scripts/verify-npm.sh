@@ -134,8 +134,9 @@ else
   fail=1; echo "FAIL  steps self-test: the run failed, but not by both the diff and the cmp of package-lock.json (log: $st)"
 fi
 # The log check fails closed: a checker that dies before printing anything,
-# and a record of another npm command than the step's, each fail the run.
-for t in checker-dies:'the log check could not run' wrong-command:'want update'; do
+# a record of another npm command than the step's, a file B touched that
+# plain npm left alone, and two log records for one step each fail the run.
+for t in checker-dies:'the log check could not run' wrong-command:'want update' touch-b:'that plain npm left alone' extra-record:'grew by 2 records'; do
   st=$work/steps-selftest-${t%%:*}.txt
   if MATCHAPACK_VERIFY_STEPS_SELFTEST=${t%%:*} "$here/scripts/verify-steps.sh" "$here/fixtures/workspaces" "$work/steps-selftest-${t%%:*}" --start ci -- install > "$st" 2>&1; then
     fail=1; echo "FAIL  steps self-test ${t%%:*}: the run passed (log: $st)"
@@ -186,6 +187,12 @@ steps_ ws-add-in-member      "$ws" --start ci -- @packages/app CLONES=1 install 
 steps_ ws-ci-in-member       "$ws" -- @packages/app CLONES=some ci
 steps_ ws-update             "$ws" --start ci -- CLONES=none update
 steps_ ws-uninstall-w        "$ws" --start ci -- CLONES=none uninstall y1-b -w ws-app
+# Packages new in the hidden lockfile that npm keeps on disk (it takes their
+# integrity from package-lock.json, extracts nothing): no "unseen" alarm.
+# Only the root's node_modules removed (a member's own stays), and a hidden
+# lockfile missing an entry (as after an npm stopped before saving it).
+steps_ ws-root-nm-removed    "$ws" --start ci --pre 'rm -rf node_modules' -- CLONES=some install
+steps_ hidden-lockfile-behind "$small" --start ci --pre 'node -e "const fs=require(\"fs\");const p=\"node_modules/.package-lock.json\";const h=JSON.parse(fs.readFileSync(p));delete h.packages[\"node_modules/lodash\"];fs.writeFileSync(p,JSON.stringify(h,null,2)+\"\\n\")"' -- CLONES=none install
 # --prefix: started in a directory with its own package.json, pointing npm
 # at the project.
 steps_ prefix-elsewhere      "$small" --start ci --pre 'mkdir other && echo "{\"name\":\"other\",\"version\":\"1.0.0\"}" > other/package.json' -- @other CLONES=1 install --prefix .. left-pad@1.3.0

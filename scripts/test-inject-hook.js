@@ -272,6 +272,14 @@ async function helperCases () {
       const r3 = await helperRun({ args: ['ci', '--dry-run'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: path.join(ws, 'packages', 'a') })
       check('helper: in a workspace member, npm\'s root is the workspace root; --dry-run is reported',
         JSON.stringify(roots(r3).map(m => [m.root, m.dry_run])), JSON.stringify([[ws, true]]))
+      // save (false with --no-save) and the workspace filter (-w, or started
+      // inside a member, where npm sets `workspace` itself): what a repair
+      // after a broken run must rebuild (wrapper.rs).
+      const r5 = await helperRun({ args: ['install', '--no-save'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
+      const r6 = await helperRun({ args: ['install', '-w', 'a'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: ws })
+      check('helper: save and the workspace filter are reported',
+        JSON.stringify([...[r, r5, r6, r3].map(x => roots(x).map(m => [m.save, m.workspace_filter])[0])]),
+        JSON.stringify([[true, false], [false, false], [true, true], [true, true]]))
     }
     // The probe of the tarball server gives up on a listener that accepts
     // and never answers.

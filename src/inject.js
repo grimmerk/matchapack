@@ -484,6 +484,20 @@ function main () {
           // --no-package-lock or package-lock=false): what a repair after
           // a broken run can rebuild from (wrapper.rs).
           package_lock: flag('package-lock'),
+          // Whether npm saves package.json and package-lock.json (false
+          // with --no-save), and whether the command is filtered to some
+          // workspaces (-w, --workspaces, or started inside a member, where
+          // npm sets `workspace` itself): the repair must then rebuild the
+          // whole project.
+          save: flag('save'),
+          workspace_filter: (() => {
+            try {
+              const w = this.config.get('workspace')
+              return (Array.isArray(w) && w.length > 0) || this.config.get('workspaces') === true
+            } catch {
+              return false
+            }
+          })(),
           usage: flag('usage'),
         }
       } catch (e) {

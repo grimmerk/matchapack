@@ -15,7 +15,8 @@
 //!     {"hello":true,"pacote":"21.5.1","fingerprint":"…","hook":"pending"}
 //!                                                    once, before npm starts
 //!     {"id":0,"root":"/abs/dir","global":false,"command":"ci","typed":"ic",
-//!      "dry_run":false,"package_lock_only":false,"usage":false,"package_lock":true}
+//!      "dry_run":false,"package_lock_only":false,"usage":false,"package_lock":true,
+//!      "save":true,"workspace_filter":false}
 //!                                                    npm's install root and command,
 //!                                                    once, before the command runs
 //!     {"no_root":"…"}                                npm's root could not be read: no
@@ -156,6 +157,10 @@ pub struct Stats {
     /// npm's `package-lock` setting at the root report (false: npm writes
     /// no package-lock.json in this run).
     pub package_lock: Option<bool>,
+    /// npm's `save` setting (false: `--no-save`), and whether the command is
+    /// filtered to some workspaces, at the root report.
+    pub save: Option<bool>,
+    pub workspace_filter: Option<bool>,
     /// Why npm's root could not be read (the helper's `no_root`).
     pub no_root: Option<String>,
     /// The hook's state once npm loaded pacote: `on`, `off`, `none`, or
@@ -206,6 +211,9 @@ pub struct Stats {
     /// none, or it could not be read), and whether the root's node_modules
     /// was then absent or empty.
     pub hidden_before: Option<Vec<u8>>,
+    /// When the root was accepted, before npm's command ran: a package
+    /// directory written in this run is newer ("unseen", inject.rs).
+    pub root_at: Option<std::time::SystemTime>,
     pub nm_empty_before: bool,
     first: Option<Instant>,
     last: Option<Instant>,
@@ -247,6 +255,8 @@ impl Stats {
             "root": self.root.as_ref().map(|r| r.display().to_string()),
             "command": self.command,
             "package_lock": self.package_lock,
+            "save": self.save,
+            "workspace_filter": self.workspace_filter,
             "hook": self.hook,
             "hook_reason": self.hook_reason,
             "no_root": self.no_root,
@@ -540,10 +550,10 @@ impl<'a> Server<'a> {
         if self.trial_scope.load(Ordering::Relaxed) {
             crate::trial::in_scope(&root)?;
         }
-        // npm ci replaces a node_modules that is a symlink; every clone into
-        // it would be refused one by one (its real path is outside the root).
+        // npm replaces a node_modules that is a symlink; every clone into it
+        // would be refused one by one (its real path is outside the root).
         if std::fs::symlink_metadata(root.join("node_modules")).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(format!("the install root's node_modules is a symlink ({}); npm ci replaces it, matchapack does not", root.display()));
+            return Err(format!("the install root's node_modules is a symlink ({}); npm replaces it, matchapack does not", root.display()));
         }
         Ok(root)
     }
@@ -1258,6 +1268,8 @@ impl<'a> Server<'a> {
             let mut s = self.stats.lock().unwrap();
             s.command = command;
             s.package_lock = v.get("package_lock").and_then(|b| b.as_bool());
+            s.save = v.get("save").and_then(|b| b.as_bool());
+            s.workspace_filter = v.get("workspace_filter").and_then(|b| b.as_bool());
             return vec![match verdict {
                 Ok(root) => {
                     let _ = self.root.set(root.clone());
@@ -1269,6 +1281,7 @@ impl<'a> Server<'a> {
                         s.nm_empty_before = empty;
                     }
                     s.root = Some(root.clone());
+                    s.root_at = Some(std::time::SystemTime::now());
                     json!({ "id": id, "ok": true, "root": root })
                 }
                 Err(why) => {

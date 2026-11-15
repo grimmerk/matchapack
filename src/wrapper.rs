@@ -114,42 +114,107 @@ fn with_root(mut extra: Value, inject: Option<&Value>) -> Value {
     extra
 }
 
+/// `a` as one shell word.
+fn shell_quote(a: &str) -> String {
+    if !a.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_=.,/:@+%^".contains(&b)) {
+        a.to_string()
+    } else {
+        format!("'{}'", a.replace('\'', "'\\''"))
+    }
+}
+
 /// `head` and then `args`, shell-quoted.
 fn shell_line(head: &str, args: &[String]) -> String {
-    let q = |a: &String| {
-        if !a.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_=.,/:@+%^".contains(&b)) {
-            a.clone()
-        } else {
-            format!("'{}'", a.replace('\'', "'\\''"))
+    std::iter::once(head.to_string()).chain(args.iter().map(|a| shell_quote(a))).collect::<Vec<_>>().join(" ")
+}
+
+/// npm's settings at its root report (the run's `inject` record) that decide
+/// how a broken run can be rebuilt; None: not known.
+#[derive(Debug, Default, Clone, Copy)]
+struct RepairSettings {
+    /// `package-lock`: false, npm wrote no package-lock.json in this run.
+    package_lock: Option<bool>,
+    /// `save`: false (`--no-save`), npm saved neither package.json nor
+    /// package-lock.json.
+    save: Option<bool>,
+    /// The command was filtered to some workspaces (`-w`, `--workspaces`, or
+    /// started inside a member).
+    workspace_filter: Option<bool>,
+}
+
+impl RepairSettings {
+    fn of(inject: &Value) -> RepairSettings {
+        let b = |k: &str| inject[k].as_bool();
+        RepairSettings { package_lock: b("package_lock"), save: b("save"), workspace_filter: b("workspace_filter") }
+    }
+}
+
+/// The command's arguments without the ones that filter it to some
+/// workspaces or name its root (`-w x`, `--workspace=x`, `--workspaces`,
+/// `--ws`, `--include-workspace-root`, `--prefix x`, `-C x`): npm ci run from
+/// the root without them rebuilds the whole project. Exact spellings only
+/// (npm also takes abbreviations).
+fn without_filter(args: &[String]) -> Vec<String> {
+    let mut out = vec![];
+    let mut skip = false;
+    for a in args {
+        if std::mem::take(&mut skip) {
+            continue;
         }
-    };
-    std::iter::once(head.to_string()).chain(args.iter().map(q)).collect::<Vec<_>>().join(" ")
+        let name = a.split('=').next().unwrap_or(a);
+        if ["-w", "--workspace", "--prefix", "-C"].contains(&name) {
+            skip = !a.contains('=');
+            continue;
+        }
+        if ["--workspaces", "--ws", "--include-workspace-root"].contains(&name) {
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
 }
 
 /// What to tell a user after a run of the install family that broke, so
-/// that they can check and rebuild. `npm ci` rebuilds from the lockfile with
-/// the command's own arguments (npm ci takes an install command's flags and
-/// ignores package names; the owner's notes, Q5 §18), but only where there
-/// is a lockfile npm wrote in this run: in `root` (npm's install root),
-/// package-lock.json or npm-shrinkwrap.json, and npm's `package-lock`
-/// setting not false (`package_lock`; None: not known). Otherwise npm ci
-/// would refuse (no lockfile) or rebuild from one this run did not update
-/// (--no-package-lock): remove node_modules and run the same command with
-/// plain npm, which then installs everything again as npm itself does.
-fn repair_advice(args: &[String], root: &std::path::Path, package_lock: Option<bool>) -> String {
+/// that they can check and rebuild (the owner's notes, Q5 §18). By default
+/// `npm ci` with the command's own arguments, which rebuilds from the
+/// lockfile npm wrote (npm ci takes an install command's flags and ignores
+/// package names). Not where that rebuilds something else:
+/// - no package-lock.json or npm-shrinkwrap.json in `root` (npm's install
+///   root), or `package-lock` false: npm ci would refuse, or rebuild from a
+///   lockfile this run did not update;
+/// - `save` false (`--no-save`; `npm update` does not save package.json by
+///   default, so not for it): the lockfile does not have what the run added
+///   (§18.3 s-no-save);
+///   for both: remove node_modules and run the same command with plain npm;
+/// - a command filtered to some workspaces: `npm ci -w x` removes the
+///   packages of the other workspaces (§18.3 w-add-w, w-add-member), so npm
+///   ci from the root, without the filter, rebuilds the whole project.
+fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: RepairSettings) -> String {
     let lockfile = ["package-lock.json", "npm-shrinkwrap.json"].iter().any(|f| root.join(f).is_file());
-    if lockfile && package_lock != Some(false) {
+    let again = |why: &str| {
         format!(
-            "Check `git diff` of package.json and package-lock.json, then rebuild with plain npm: {}",
-            shell_line("MATCHAPACK=0 npm ci", &args[1..])
-        )
-    } else {
-        format!(
-            "There is no package-lock.json from this run for npm ci to rebuild from: check `git diff` of package.json, then remove {} and run the command again with plain npm: {}",
+            "{why}: check `git diff` of package.json, then remove {} and run the command again with plain npm: {}",
             root.join("node_modules").display(),
             shell_line("MATCHAPACK=0 npm", args)
         )
+    };
+    if !lockfile || s.package_lock == Some(false) {
+        return again("There is no package-lock.json from this run for npm ci to rebuild from");
     }
+    if s.save == Some(false) && command != "update" {
+        return again("This run saved neither package.json nor package-lock.json (--no-save), so npm ci would rebuild without what it added");
+    }
+    if s.workspace_filter == Some(true) {
+        return format!(
+            "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check `git diff` of package.json and package-lock.json, then rebuild the whole project with plain npm from its root: cd {} && {}",
+            shell_quote(&root.display().to_string()),
+            shell_line("MATCHAPACK=0 npm ci", &without_filter(&args[1..]))
+        );
+    }
+    format!(
+        "Check `git diff` of package.json and package-lock.json, then rebuild with plain npm: {}",
+        shell_line("MATCHAPACK=0 npm ci", &args[1..])
+    )
 }
 
 /// The command through the inject engine: npm itself runs, with the user's
@@ -187,8 +252,9 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
             .and_then(|i| i["root"].as_str())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let package_lock = inject.and_then(|i| i["package_lock"].as_bool());
-        eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, &root, package_lock));
+        let settings = inject.map(RepairSettings::of).unwrap_or_default();
+        let command = inject.and_then(|i| i["command"].as_str()).unwrap_or(command);
+        eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, &root, settings));
     };
     match outcome {
         Ok(s) => {
@@ -490,24 +556,47 @@ mod tests {
 
     #[test]
     fn the_repair_command_keeps_the_commands_arguments() {
+        use super::{repair_advice, without_filter, RepairSettings};
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let d = crate::store::tests::scratch("wrapper-repair");
         std::fs::create_dir_all(&d).unwrap();
-        let ends = |s: String, tail: &str| assert!(s.ends_with(tail), "{s}");
+        let ends = |s: String, tail: &str| assert!(s.ends_with(tail), "{s}\n  does not end with\n{tail}");
+        let known = RepairSettings { package_lock: Some(true), save: Some(true), workspace_filter: Some(false) };
         // No lockfile in the root: npm ci would refuse; the same command
         // with plain npm on an emptied node_modules.
-        let none = super::repair_advice(&a(&["install", "--no-package-lock", "left-pad"]), &d, Some(true));
+        let none = repair_advice(&a(&["install", "--no-package-lock", "left-pad"]), "install", &d, known);
         assert!(none.starts_with("There is no package-lock.json from this run") && none.contains(&format!("remove {}", d.join("node_modules").display())), "{none}");
         ends(none, "MATCHAPACK=0 npm install --no-package-lock left-pad");
         std::fs::write(d.join("package-lock.json"), "{}").unwrap();
-        ends(super::repair_advice(&a(&["install", "--omit=dev", "left-pad@1.3.0"]), &d, Some(true)), "rebuild with plain npm: MATCHAPACK=0 npm ci --omit=dev left-pad@1.3.0");
-        ends(super::repair_advice(&a(&["i", "a b", "it's", ""]), &d, None), "MATCHAPACK=0 npm ci 'a b' 'it'\\''s' ''");
-        ends(super::repair_advice(&a(&["uninstall"]), &d, Some(true)), "MATCHAPACK=0 npm ci");
+        // The default: npm ci with the command's arguments (quoted).
+        ends(repair_advice(&a(&["install", "--omit=dev", "left-pad@1.3.0"]), "install", &d, known), "rebuild with plain npm: MATCHAPACK=0 npm ci --omit=dev left-pad@1.3.0");
+        ends(repair_advice(&a(&["i", "a b", "it's", ""]), "install", &d, RepairSettings::default()), "MATCHAPACK=0 npm ci 'a b' 'it'\\''s' ''");
+        ends(repair_advice(&a(&["uninstall"]), "uninstall", &d, known), "MATCHAPACK=0 npm ci");
         // A lockfile this run did not write (package-lock=false): not npm ci.
-        ends(super::repair_advice(&a(&["update"]), &d, Some(false)), "run the command again with plain npm: MATCHAPACK=0 npm update");
+        let nolock = RepairSettings { package_lock: Some(false), ..known };
+        ends(repair_advice(&a(&["update"]), "update", &d, nolock), "run the command again with plain npm: MATCHAPACK=0 npm update");
+        // --no-save: the lockfile lacks what the run added; npm update saves
+        // no package.json by default, so npm ci stays right for it.
+        let nosave = RepairSettings { save: Some(false), ..known };
+        let s = repair_advice(&a(&["install", "--no-save", "left-pad"]), "install", &d, nosave);
+        assert!(s.starts_with("This run saved neither package.json nor package-lock.json (--no-save)"), "{s}");
+        ends(s, "MATCHAPACK=0 npm install --no-save left-pad");
+        ends(repair_advice(&a(&["uninstall", "--no-save", "x"]), "uninstall", &d, nosave), "MATCHAPACK=0 npm uninstall --no-save x");
+        ends(repair_advice(&a(&["update", "x"]), "update", &d, nosave), "rebuild with plain npm: MATCHAPACK=0 npm ci x");
+        // Filtered to some workspaces: npm ci of the whole project, from
+        // its root, without the filter (or the root's flags).
+        let ws = RepairSettings { workspace_filter: Some(true), ..known };
+        let s = repair_advice(&a(&["install", "left-pad", "-w", "ws-app", "--omit=dev"]), "install", &d, ws);
+        assert!(s.starts_with("The command was filtered to some workspaces"), "{s}");
+        ends(s, &format!("from its root: cd {} && MATCHAPACK=0 npm ci left-pad --omit=dev", d.display()));
+        ends(repair_advice(&a(&["i", "x"]), "install", &d, ws), "&& MATCHAPACK=0 npm ci x");
+        assert_eq!(
+            without_filter(&a(&["--workspace=a", "-w", "b", "--workspaces", "--ws", "--include-workspace-root", "--prefix", "/p", "-C=/q", "--omit=dev", "x"])),
+            a(&["--omit=dev", "x"])
+        );
         std::fs::remove_file(d.join("package-lock.json")).unwrap();
         std::fs::write(d.join("npm-shrinkwrap.json"), "{}").unwrap();
-        ends(super::repair_advice(&a(&["rm", "x"]), &d, Some(true)), "MATCHAPACK=0 npm ci x");
+        ends(repair_advice(&a(&["rm", "x"]), "uninstall", &d, known), "MATCHAPACK=0 npm ci x");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -214,8 +214,10 @@ adds or changes is replaced by clones. So:
   entries of packages that are still installed stay, entries of removed or
   replaced packages drop out;
 - the "npm placed packages the hook never saw" check compares what the run
-  added or changed in the hidden lockfile with what the hook saw, so it
-  stays silent on an incremental install that is fine;
+  added or changed in the hidden lockfile, and whose directory it wrote,
+  with what the hook saw, so it stays silent on an incremental install,
+  also where npm keeps a package the hidden lockfile did not list (only the
+  root's `node_modules` removed in a workspaces project);
 - if matchapack breaks during one of these commands (npm read something of
   the hook's result that pacote's own result does not have, or matchapack
   itself failed), it does not repair anything by itself: running the

@@ -51,8 +51,10 @@
 # MATCHAPACK_VERIFY_STEPS_CORRUPT=<path> (the harness's self-test): after
 # B's first step, change one byte of B's <path>; the run must fail and name
 # it. MATCHAPACK_VERIFY_STEPS_SELFTEST=checker-dies (the log checker exits
-# before printing anything) or wrong-command (it expects another npm
-# command than the step's): the run must fail.
+# before printing anything), wrong-command (it expects another npm command
+# than the step's), touch-b (after B's step, one file plain npm leaves alone
+# is touched in B) or extra-record (B's step leaves two log records): the
+# run must fail.
 set -uo pipefail
 src=${1:?usage: verify-steps.sh <source> <work> [--start bare|ci|nolock] [--pre cmd] -- <step> [-- <step> ...]}
 work=$2; shift 2
@@ -154,6 +156,7 @@ for ((i = 0; i < nsteps; i++)); do
   label="${envs[*]+${envs[*]} }npm ${args[*]}"
   [ "$sub" != . ] && label="(in $sub) $label"
   record_of > "$work/rec.before"
+  nlog=$( { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl"; } 2>/dev/null | tr -d ' '); nlog=${nlog:-0}
   marker=$work/.step-start; touch "$marker"; sleep 1
   t=$(ns); [ -z "$ta0" ] && ta0=$t
   (cd "$A/$sub" && env ${envs[@]+"${envs[@]}"} npm "${args[@]}" "${common[@]}" > "$work/step$i-A.log" 2>&1); sa=$?
@@ -163,6 +166,12 @@ for ((i = 0; i < nsteps; i++)); do
   if [ $i = 0 ] && [ -n "${MATCHAPACK_VERIFY_STEPS_CORRUPT-}" ]; then
     python3 -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[len(b)//2]^=1; open(p,"wb").write(b)' "$B/$MATCHAPACK_VERIFY_STEPS_CORRUPT"
   fi
+  # The self-tests of the time and log checks: B touched a file plain npm
+  # left alone; B's step logged two records.
+  case ${MATCHAPACK_VERIFY_STEPS_SELFTEST-} in
+    touch-b) f=$(cd "$B" && find node_modules -type f ! -newer "$marker" | LC_ALL=C sort | head -1); [ -n "$f" ] && touch "$B/$f" ;;
+    extra-record) tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" >> "$MATCHAPACK_LOG_DIR/log.jsonl" ;;
+  esac
   echo "step $((i+1)): $label"
   echo "  plain: $(grep -E '^(added|removed|changed|up to date)' "$work/step$i-A.log" | head -1) | B: $(grep '^matchapack' "$work/step$i-B.log" | tr '\n' ' ')"
   [ $sa = $sb ] || say_fail "exit status: plain npm $sa, matchapack $sb"
@@ -192,6 +201,13 @@ for ((i = 0; i < nsteps; i++)); do
   done
   extra=$(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | wc -l | tr -d ' ')
   [ "$extra" = 0 ] || say_fail "$extra paths older than the step in B only: $(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | head -3 | tr '\n' ' ')"
+  # Both ways: plain npm leaves the packages it does not change alone, and
+  # so must B (a path B wrote in this step that plain npm did not touch).
+  extra=$(LC_ALL=C comm -23 "$work/A.stale" "$work/B.stale" | wc -l | tr -d ' ')
+  [ "$extra" = 0 ] || say_fail "$extra paths B wrote in this step that plain npm left alone: $(LC_ALL=C comm -23 "$work/A.stale" "$work/B.stale" | head -3 | tr '\n' ' ')"
+  # One run, one log record.
+  nlog2=$( { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl"; } 2>/dev/null | tr -d ' '); nlog2=${nlog2:-0}
+  [ "$nlog2" = $((nlog + 1)) ] || say_fail "the trial log grew by $((nlog2 - nlog)) records in this step, want 1"
   # B's log record: the last line of the trial log.
   # (Files, not arguments: a record of a large project is over Linux's
   # 128 KiB limit for one argument.)
@@ -199,9 +215,9 @@ for ((i = 0; i < nsteps; i++)); do
   record_of > "$work/rec.after"
   # Fail closed: a checker that could not run, or stopped before printing
   # why, fails the step too.
-  if ! python3 -I - "$work/rec.json" "$sb" "$B" "$clones" "$unseen" "$work/rec.before" "$work/rec.after" "${args[0]}" "$here/src/wrapper.rs" <<'EOF' > "$work/rec.check" 2> "$work/rec.log"; then
+  if ! python3 -I - "$work/rec.json" "$sb" "$B" "$clones" "$unseen" "$work/rec.before" "$work/rec.after" "${args[0]}" "$here/src/wrapper.rs" "$marker" <<'EOF' > "$work/rec.check" 2> "$work/rec.log"; then
 import json, os, re, sys
-recf, status, root, clones, unseen, rbf, raf, word, table = sys.argv[1:10]
+recf, status, root, clones, unseen, rbf, raf, word, table, marker = sys.argv[1:11]
 # The harness's self-test: a checker that dies before saying anything.
 if os.environ.get("MATCHAPACK_VERIFY_STEPS_SELFTEST") == "checker-dies":
     sys.exit(1)
@@ -239,11 +255,14 @@ if status == "0" and str(inj.get("unseen")) != unseen and not (unseen == "0" and
 # The project record (store gc): only packages B has; for the install
 # family, nothing of the earlier record that B still has is dropped.
 tree = set()
+# Entries of the packages whose directory was written in this step.
+written = set()
+t0 = os.stat(marker).st_mtime_ns
 try:
     from base64 import b64decode
     pk = json.load(open(os.path.join(root, "node_modules/.package-lock.json"))).get("packages", {})
     rank = ["sha512", "sha384", "sha256", "sha1"]
-    for p in pk.values():
+    for k, p in pk.items():
         best = None
         for part in (p.get("integrity") or "").split():
             a, _, h = part.partition("-")
@@ -251,6 +270,11 @@ try:
                 best = (a, b64decode(h.split("?")[0]).hex())
         if best:
             tree.add(f"{best[0]}-{best[1]}")
+            try:
+                if k and os.lstat(os.path.join(root, k)).st_mtime_ns >= t0:
+                    written.add(f"{best[0]}-{best[1]}")
+            except OSError:
+                pass
     have_tree = True
 except (OSError, ValueError):
     have_tree = False
@@ -259,6 +283,9 @@ if have_tree and not after <= tree:
     bad.append(f"the gc record holds {len(after - tree)} entries B's hidden lockfile does not have")
 if have_tree and r.get("command") != "ci" and not (before & tree) <= after:
     bad.append(f"the gc record dropped {len((before & tree) - after)} entries B still has")
+# A step that cloned: the record has the entries of what it placed.
+if have_tree and status == "0" and cloned and not (after & written):
+    bad.append(f"cloned {cloned}, but the gc record has none of the {len(written)} entries placed in this step")
 print("\n".join(bad))
 print(f"  log: {r.get('outcome')} {r.get('command')}, cloned {cloned}, unseen {inj.get('unseen')} of {inj.get('installed')}, record {len(before)} -> {len(after)} entries", file=sys.stderr)
 sys.exit(1 if bad else 0)

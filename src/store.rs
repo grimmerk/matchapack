@@ -415,8 +415,16 @@ impl Store {
     /// (`in_tree`: entry keys; None, no hidden lockfile: nothing is
     /// dropped). So `store gc` keeps every entry the project still uses, and
     /// may remove one a removed or replaced package used (the plan's G2).
+    /// A project without a record yet (installed by plain npm, or before
+    /// records existed) starts from every entry of its hidden lockfile,
+    /// which is what gc's fallback through the trial log keeps for it; a
+    /// record of this run alone would make gc skip that fallback and remove
+    /// the rest.
     pub fn merge_project(&self, root: &Path, used: &[Integrity], in_tree: Option<&std::collections::HashSet<String>>) -> Result<()> {
-        let mut keys = self.recorded_entries(root).unwrap_or_default();
+        let mut keys = match self.recorded_entries(root) {
+            Some(k) => k,
+            None => in_tree.map(|t| t.iter().cloned().collect()).unwrap_or_default(),
+        };
         keys.extend(used.iter().map(Integrity::key));
         if let Some(t) = in_tree {
             keys.retain(|k| t.contains(k));
@@ -974,10 +982,17 @@ pub(crate) mod tests {
         // No hidden lockfile after the run: nothing is dropped.
         store.merge_project(&root, std::slice::from_ref(&b), None).unwrap();
         assert_eq!(rec(), [a.key(), b.key(), c.key()]);
-        // No record yet: this run's entries that are in the tree.
+        // No record yet: every entry of the tree (what gc's fallback through
+        // the trial log keeps), with this run's that are in it.
         let other = d.join("other");
-        store.merge_project(&other, &[a.clone(), b.clone()], Some(&keys(&[&a]))).unwrap();
-        assert_eq!(store.recorded_entries(&other).unwrap(), [a.key()]);
+        store.merge_project(&other, &[a.clone(), b.clone()], Some(&keys(&[&a, &c]))).unwrap();
+        let mut got = store.recorded_entries(&other).unwrap();
+        got.sort();
+        assert_eq!(got, [a.key(), c.key()], "c was in the tree before this run, b is not in it");
+        // No record and no hidden lockfile: this run's entries.
+        let third = d.join("third");
+        store.merge_project(&third, std::slice::from_ref(&b), None).unwrap();
+        assert_eq!(store.recorded_entries(&third).unwrap(), [b.key()]);
         drop(store);
         let _ = fs::remove_dir_all(&d);
     }

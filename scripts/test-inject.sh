@@ -742,6 +742,16 @@ wrapped "$p" "npm uninstall left-pad --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && ! grep -q '^matchapack' "$work/out" && [ "$(rec_of "$p")" = "$n_rec" ] && [ ! -e "$p/node_modules/left-pad" ] \
   && [ "$(last_log "r['outcome'], r['command'], r['inject']['unseen']")" = "installed uninstall 0" ] \
   && ok "npm uninstall left-pad: silent, the record is back to the $n_rec entries of npm ci" || bad "family uninstall: rc=$rc, record $(rec_of "$p")"
+# A project npm installed by itself (no gc record yet): after one routed
+# npm install its record holds every entry of its hidden lockfile (what gc's
+# fallback through the trial log keeps for it), not only this run's.
+p=$(project fam-plain small)
+(cd "$p" && npm ci --no-audit --no-fund > "$work/plain.out" 2>&1) || bad "family plain: npm ci"
+[ "$(rec_of "$p")" = - ] || bad "family plain: a record before matchapack ran"
+wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && [ "$(rec_of "$p")" = $((d_small + 1)) ] \
+  && ok "a project without a gc record: after npm install left-pad@1.3.0 its record holds all $((d_small + 1)) entries of its tree" \
+  || bad "family plain: rc=$rc, record $(rec_of "$p") (want $((d_small + 1)))"
 # The hook not installed (what an npm that no longer calls the method looks
 # like): the package npm added is counted as unseen, and said.
 p=$(project fam-nohook small)
@@ -783,6 +793,21 @@ p=$(project fam-trap-nolock small)
 [ $rc = 1 ] && grep -qF "There is no package-lock.json from this run for npm ci to rebuild from: check \`git diff\` of package.json, then remove $p/node_modules and run the command again with plain npm: MATCHAPACK=0 npm install --no-package-lock left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
   && ok "trap during npm install --no-package-lock: the repair is the same command with plain npm on an emptied node_modules, not npm ci" \
   || bad "family trap, no lockfile: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+# --no-save: the lockfile does not have what the run added, so npm ci is
+# not the repair either.
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm install --no-save semver@7.6.0 --no-audit --no-fund"); rc=$?
+[ $rc = 1 ] && grep -qF "This run saved neither package.json nor package-lock.json (--no-save), so npm ci would rebuild without what it added: check \`git diff\` of package.json, then remove $p/node_modules and run the command again with plain npm: MATCHAPACK=0 npm install --no-save semver@7.6.0 --no-audit --no-fund" "$work/out" \
+  && ok "trap during npm install --no-save: the repair is the same command with plain npm, not npm ci" \
+  || bad "family trap, --no-save: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+# A command filtered to one workspace (started inside a member): npm ci
+# with the filter would remove the other workspaces' packages; the repair
+# rebuilds the whole project from its root.
+p=$work/fam-trap-ws; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap, workspace: npm ci"
+(PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p/packages/app" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
+[ $rc = 1 ] && grep -qF "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check \`git diff\` of package.json and package-lock.json, then rebuild the whole project with plain npm from its root: cd $p && MATCHAPACK=0 npm ci left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
+  && ok "trap during npm install inside a workspace member: the repair is npm ci of the whole project, from its root" \
+  || bad "family trap, workspace member: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
 MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
   && grep -q 'failed and stopped 1' "$work/report" \
   && grep -q "in 1 runs npm read an unexpected key of the hook's result, and the run stopped with the repair command" "$work/report" \
