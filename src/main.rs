@@ -187,8 +187,9 @@ enum StoreCmd {
     /// Each tarball is taken from the npm cache and extracted by the pacote of
     /// the npm on PATH, as `npm ci` (and the inject engine) would extract it,
     /// and compared with the entry: the same paths, contents, file and
-    /// directory modes. A match records that pacote/tar version on the
-    /// entry; a difference is reported with who made the entry.
+    /// directory modes. A match records that extraction code (its key:
+    /// pacote's lib/fetcher.js, tar's code, libuv) on the entry; a difference
+    /// is reported with who made the entry.
     #[command(verbatim_doc_comment)]
     Verify {
         /// Replace the entries that differ with npm's extraction (entries
@@ -473,7 +474,7 @@ fn main() -> Result<()> {
                     let st = if fix { Store::exclusive(s, cacache.clone())? } else { Store::new(s, cacache.clone())? };
                     let (r, key) = verify::verify_store(&st, &cacache, fix)?;
                     println!(
-                        "{} entries compared with npm's extraction ({key}) in {:.1}s: {} match, {} differ, {} not directories, {} not checked (tarball no longer in the npm cache), {} pacote could not extract",
+                        "{} entries compared with npm's extraction ({key}) in {:.1}s: {} match, {} differ, {} not directories, {} not checked (tarball no longer in the npm cache), {} not checked (pacote's extraction failed or is not what a clone gives)",
                         r.entries,
                         r.secs,
                         r.matched,
@@ -487,8 +488,8 @@ fn main() -> Result<()> {
                     }
                     let what = |kind: &str| match kind {
                         "extractor" => "made by the classic engine's extractor",
-                        "changed" => "changed after this pacote/tar had made or checked it",
-                        _ => "made under another pacote/tar version",
+                        "changed" => "changed after this extraction code had made or checked it",
+                        _ => "made under other extraction code",
                     };
                     for (i, kind, why, _) in &r.differs {
                         println!("  {}/{}…: {why} ({})", i.algo, &i.hex[..16], what(kind));
@@ -497,7 +498,7 @@ fn main() -> Result<()> {
                         println!("  {}/{}…: the entry is not a directory (a symlink?)", i.algo, &i.hex[..16]);
                     }
                     for (i, e) in &r.failed {
-                        println!("  {}/{}…: pacote could not extract it: {e}", i.algo, &i.hex[..16]);
+                        println!("  {}/{}…: {e}", i.algo, &i.hex[..16]);
                     }
                     let bad = r.differs.len() + r.not_dir.len();
                     if bad > 0 {

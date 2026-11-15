@@ -502,10 +502,22 @@ check('watch read fails: the npm release verified; the watch state unchanged; th
   /Release watch: not polled \(2026-11-15\)/.test(c26) && /libuv of Node 26\.15\.0/.test(c26) && /the poll of 2026-11-15 failed/.test(o26('body.md')) && s26.watchFailed && s26.watchFailed.date === '2026-11-15', `${rr26.stderr} ${JSON.stringify({ g26, wf: s26.watchFailed })}`)
 w = wreport({ ...watchState(steady), watchFailed: { date: '2026-11-14', error: 'x' } }, wplan([uvItem]), { ...linuxOk, 'nodemacos-node26.14.0': ysuites() })
 check('watch report: a watch that polls again clears the failure', w.state.watchFailed === null && !/poll of 2026-11-14 failed/.test(w.body), JSON.stringify(w.state.watchFailed))
+check('watch report: a Node row of the history has "-" in the tar code column (npm rows only have a tar code)', w.state.history.some((h) => /^Node /.test(h.version) && h.tar === '-') && !w.body.split('\n').some((l) => /^\| [^|]+ \| Node /.test(l) && / \| \? \| /.test(l)), JSON.stringify(w.state.history.slice(0, 2)))
 // The npm half's own read failing still fails the poll.
 const r26b = runStatus('poll', f26, '--date', '2026-11-15', '--node-index-json', nodeIndex('ordinary', lines), '--node-uv-dir', path.join(W, 'uv'), '--yarn-registry-json', yarnReg)
 check('the npm registry read fails: the poll fails', r26b.status !== 0 && /CANARY_NO_NETWORK/.test(r26b.stderr), `${r26b.status} ${r26b.stderr}`)
 check('workflow: on a day with nothing to test, the poll job fails the run when the report asks for a person; the plan line survives a failed watch', /record the poll date[\s\S]*?jq -e '\.notify == false' canary\/out\/flags\.json/.test(wf) && /if \.watchError then/.test(wf), '')
+
+// 27. New tar code (Q9 of the C plan): reported in the history, the body and
+//     a comment, and it changes no action: a release otherwise green and
+//     known is verified, nobody is asked.
+const cmpTar = (base, changed) => ({ ...cmpSame(base), tar: { base: 'a'.repeat(64), new: (changed ? 'b' : 'a').repeat(64), changed } })
+r = report({ item: item('11.21.2'), linux: { known: true, tarFingerprint: 'b'.repeat(64), compare: cmpTar('11.21.1', true) } })
+check('new tar code: reported, no action, verified', r.state.history[0].tar === 'new' && r.state.lines[11].verified === '11.21.2' && r.state.lines[11].action === 'none' && r.flags.notify === false, JSON.stringify({ h: r.state.history[0], flags: r.flags }))
+const bodyTar = fs.readFileSync(path.join(tmp, `r${n - 1}`, 'out', 'body.md'), 'utf8')
+check('new tar code: the history table has a tar code column', /\| class \| tar code \| caller \|/.test(bodyTar) && /\| known \| new \| same \| none \|/.test(bodyTar), bodyTar.split('\n').filter((l) => l.includes('11.21.2')).join(' / '))
+r = report({ item: item('11.21.2'), linux: { known: false, tarFingerprint: 'b'.repeat(64), compare: cmpTar('11.21.1', false) } })
+check('tar code the same, shown in the comment of a release that asks', r.state.history[0].tar === 'same' && /tar code \(part of the store key; compared per store entry at run time, no action\): the same \(`bbbbbbbbbbbbbbbb…`\)/.test(r.comment), r.comment.split('\n').filter((l) => l.includes('tar code')).join(' / '))
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`${pass} passed, ${fail} failed`)

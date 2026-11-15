@@ -9,8 +9,10 @@
 //! Also under the store: `sizes/` (cached entry sizes), `projects/` (one
 //! record per installed project, for `matchapack store gc`), `lock` (held
 //! shared by every install, exclusively by commands that remove entries), and
-//! for the inject engine `made-by/` (per entry: the pacote and tar versions
-//! under which it is known to be what pacote extracts; see serve.rs).
+//! for the inject engine `made-by/` (per entry: the keys of the extraction
+//! code under which it is known to be what pacote extracts; see serve.rs)
+//! and `declined/` (one file per extraction code whose extraction the clones
+//! cannot reproduce: installs under it are npm's own).
 //!
 //! Tarballs come from npm's own content-addressed cache (`~/.npm/_cacache`).
 
@@ -252,10 +254,11 @@ impl Store {
         self.root.join("made-by").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
     }
 
-    /// The pacote and tar versions (`pacote@… tar@…`, one per line) under
-    /// which this entry is known to be what pacote extracts: the one that
-    /// made it, and every one that later extracted its tarball to the same
-    /// tree. Empty: made by matchapack's own extractor (the classic engine,
+    /// The keys of the extraction code (serve.rs `code_key`, one per line;
+    /// `pacote@… tar@…` in records written before PR C1 of #39) under which
+    /// this entry is known to be what pacote extracts: the one that made it,
+    /// and every one that later extracted its tarball to the same tree.
+    /// Empty: made by matchapack's own extractor (the classic engine,
     /// removed in PR C2), or before this was recorded.
     pub fn made_by(&self, i: &Integrity) -> Vec<String> {
         fs::read_to_string(self.made_by_file(i))
@@ -312,6 +315,66 @@ impl Store {
         fs::write(&tmp, text)?;
         fs::rename(&tmp, &f)?;
         Ok(())
+    }
+
+    /// The file that declines extraction-code `key`: one per key, named by
+    /// the key's SHA-256, so that two installs declining two keys at once
+    /// never rewrite each other's file (no read-modify-write of a list).
+    pub fn declined_path(&self, key: &str) -> PathBuf {
+        self.root.join("declined").join(hex::encode(sha2::Sha256::digest(key.as_bytes())))
+    }
+
+    /// Why installs under extraction-code `key` are left to npm in this
+    /// store (`decline_key`), or None. Removing the file clears it. A decline
+    /// that another matchapack build recorded (or one with no build, from
+    /// before builds were recorded) is void: None, so this build compares
+    /// and fill-checks again, and declines again if the extraction is still
+    /// not what a clone reproduces (`decline_key` then rewrites the file).
+    pub fn declined(&self, key: &str) -> Option<String> {
+        self.declined_by(key, build_identity)
+    }
+
+    /// `declined`, with this build named by `build` (asked only when a
+    /// decline file for the key exists: computing it may hash the binary).
+    fn declined_by(&self, key: &str, build: impl FnOnce() -> &'static str) -> Option<String> {
+        let d = read_decline(&self.declined_path(key))?;
+        (d.key == key && d.build.as_deref() == Some(build())).then_some(d.why)
+    }
+
+    /// Put `key` on the store's decline list, so that later installs under
+    /// that code let npm extract every package: `<store>/declined/<sha256 of
+    /// the key>`, holding the key, why, and `build: <this build>` on three
+    /// lines. Written whole (tmp, then rename), replacing a void decline.
+    /// Returns the file.
+    pub fn decline_key(&self, key: &str, why: &str) -> Result<PathBuf> {
+        self.decline_key_as(key, why, build_identity())
+    }
+
+    fn decline_key_as(&self, key: &str, why: &str, build: &'static str) -> Result<PathBuf> {
+        let f = self.declined_path(key);
+        if self.declined_by(key, || build).is_some() {
+            return Ok(f);
+        }
+        fs::create_dir_all(f.parent().unwrap())?;
+        let why: String = why.chars().map(|c| if c.is_control() { ' ' } else { c }).take(300).collect();
+        let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
+        fs::write(&tmp, format!("{key}\n{why}\nbuild: {build}\n"))?;
+        fs::rename(&tmp, &f)?;
+        Ok(f)
+    }
+
+    /// Every decline file of the store (`matchapack report`), with whether
+    /// it holds for this build.
+    pub fn declines(&self) -> Vec<Decline> {
+        let Ok(rd) = fs::read_dir(self.root.join("declined")) else { return vec![] };
+        let mut v: Vec<Decline> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit())))
+            .filter_map(|p| read_decline(&p))
+            .collect();
+        v.sort_by(|a, b| a.key.cmp(&b.key));
+        v
     }
 
     /// Sum of the file sizes in a store entry, cached in `<store>/sizes/` (never
@@ -534,16 +597,98 @@ impl Store {
 
 }
 
-/// The first difference between two extracted trees, `want` the reference
-/// (what the tarball extracts to) and `got` the one checked: the same files
-/// (contents, modes), the same directories and nothing else. Directory modes
-/// are compared only with `dir_modes`; the inject engine's checks and
-/// `store verify` compare them (the umask is 022 for both, and a clone
-/// carries them into the project).
-/// None when they are the same.
-pub fn compare_trees(want: &Path, got: &Path, dir_modes: bool) -> Result<Option<String>> {
-    let (want, got) = (tree(want, dir_modes)?, tree(got, dir_modes)?);
-    Ok(match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
+/// One decline file (`Store::declines`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decline {
+    pub key: String,
+    pub why: String,
+    /// The matchapack build that recorded it (None: before builds were
+    /// recorded, which counts as another build).
+    pub build: Option<String>,
+    pub path: PathBuf,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+impl Decline {
+    /// Void for this build: the next install under the key retries.
+    pub fn void(&self) -> bool {
+        self.build.as_deref() != Some(build_identity())
+    }
+}
+
+fn read_decline(p: &Path) -> Option<Decline> {
+    let text = fs::read_to_string(p).ok()?;
+    let mut lines = text.lines();
+    let key = lines.next()?.to_string();
+    let why = lines.next().unwrap_or("").to_string();
+    let build = lines.find_map(|l| l.strip_prefix("build: ")).map(String::from);
+    let modified = fs::metadata(p).and_then(|m| m.modified()).ok();
+    Some(Decline { key, why, build, path: p.to_path_buf(), modified })
+}
+
+/// This matchapack build, as a decline file records it: the version and
+/// the git commit embedded at build time (`--version`). A build from a
+/// checkout with uncommitted changes (`-dirty`) or from outside git
+/// (`unknown`) is not told apart by that, so the SHA-256 of the running
+/// executable is added; it is computed once, and only when a decline file
+/// is read for a matching key or written.
+pub fn build_identity() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let build = env!("MATCHAPACK_BUILD");
+        let mut id = format!("{} ({build})", env!("CARGO_PKG_VERSION"));
+        if build == "unknown" || build.ends_with("-dirty") {
+            let exe = std::env::current_exe().and_then(fs::read).map(|b| hex::encode(&sha2::Sha256::digest(&b)[..8]));
+            id.push_str(&format!(" exe {}", exe.unwrap_or_else(|_| "?".into())));
+        }
+        id
+    })
+}
+
+/// What comparing a store entry with pacote's extraction found
+/// (`compare_extraction`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Compared {
+    Same,
+    /// The first difference.
+    Differs(String),
+    /// pacote's extraction is not what a clone, touched to the install's
+    /// time, reproduces: a file older than the install, or something other
+    /// than files and directories. Nothing was compared.
+    Unexpected(String),
+}
+
+/// How much older than the install's start a file of pacote's extraction
+/// may be before it counts as not written by this install (`Unexpected`):
+/// room for a clock set back during the install, and for filesystems that
+/// keep coarse times. A tar that applied the tarball's times would give
+/// npm's 1985 dates.
+pub const EXTRACTION_TIME_SLACK: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Compare a store entry with pacote's extraction of its tarball,
+/// `extracted`, made by this install (or `store verify`), which began at
+/// `started`: the same files (contents, modes), the same directories (and
+/// their modes: the umask is 022 for both, and a clone carries them into
+/// the project) and nothing else; the first difference, from the
+/// extraction's side (until 2026-11 `compare_trees`). In the same walk (the
+/// metadata is read there anyway), every path of `extracted` must be a file
+/// or a directory, and every file at most EXTRACTION_TIME_SLACK older than
+/// `started`: pacote extracts with `noMtime` and no links, which is what
+/// the placement of a clone (then touched to now) reproduces.
+pub fn compare_extraction(extracted: &Path, entry: &Path, started: std::time::SystemTime) -> Result<Compared> {
+    let (want, odd) = tree(extracted, true, Some(fresh_since(started)))?;
+    if let Some(odd) = odd {
+        return Ok(Compared::Unexpected(odd));
+    }
+    let got = tree(entry, true, None)?.0;
+    Ok(match first_difference(&want, &got) {
+        Some(d) => Compared::Differs(d),
+        None => Compared::Same,
+    })
+}
+
+fn first_difference(want: &[(PathBuf, Node)], got: &[(PathBuf, Node)]) -> Option<String> {
+    match want.iter().zip(got.iter()).find(|(w, g)| w != g) {
         Some((w, g)) => Some(describe(w, g)),
         None if want.len() != got.len() => {
             let (longer, what) = if got.len() > want.len() { (&got, "not in the tarball") } else { (&want, "missing") };
@@ -551,7 +696,7 @@ pub fn compare_trees(want: &Path, got: &Path, dir_modes: bool) -> Result<Option<
             Some(format!("{}: {what}", show_rel(p)))
         }
         None => None,
-    })
+    }
 }
 
 /// One path in a tree: its kind, its mode (a directory's only when compared),
@@ -563,14 +708,65 @@ enum Node {
     Other,
 }
 
-/// Every path under `root` (`root` itself as ""), sorted, symlinks not followed.
-fn tree(root: &Path, dir_modes: bool) -> Result<Vec<(PathBuf, Node)>> {
+/// Why the path `rel` of pacote's extraction (file type `ft`, metadata
+/// `meta`, not followed) is not what a clone, touched to the install's time,
+/// reproduces: neither a file nor a directory, or a file or directory last
+/// modified before `since` (a placed clone's paths are all touched to now).
+/// None when it is. The one rule for the comparison and the
+/// fill (`compare_extraction`, `extraction_odd`).
+fn odd_path(rel: &Path, ft: fs::FileType, meta: &fs::Metadata, since: std::time::SystemTime) -> Result<Option<String>> {
+    if !ft.is_dir() && !ft.is_file() {
+        return Ok(Some(format!("{}: neither a file nor a directory", show_rel(rel))));
+    }
+    {
+        let mtime = meta.modified()?;
+        if mtime < since {
+            let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(-1);
+            return Ok(Some(format!("{}: modified at {} (seconds since 1970), before this install began", show_rel(rel), secs(mtime))));
+        }
+    }
+    Ok(None)
+}
+
+/// The earliest moment a file of pacote's extraction made by an install
+/// that began at `started` may carry (EXTRACTION_TIME_SLACK).
+fn fresh_since(started: std::time::SystemTime) -> std::time::SystemTime {
+    started.checked_sub(EXTRACTION_TIME_SLACK).unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// The check `compare_extraction` makes on pacote's extraction, alone, for
+/// an extraction that becomes a store entry with nothing to compare it
+/// with (a fill): metadata only, nothing read. The first path that is not
+/// what a clone reproduces, or None.
+pub fn extraction_odd(extracted: &Path, started: std::time::SystemTime) -> Result<Option<String>> {
+    let since = fresh_since(started);
+    // Unsorted: any odd path will do, and nothing is compared.
+    for e in walkdir::WalkDir::new(extracted).follow_links(false).follow_root_links(false) {
+        let e = e?;
+        let rel = e.path().strip_prefix(extracted).unwrap();
+        if let Some(odd) = odd_path(rel, e.file_type(), &e.metadata()?, since)? {
+            return Ok(Some(odd));
+        }
+    }
+    Ok(None)
+}
+
+/// Every path under `root` (`root` itself as ""), sorted, symlinks not
+/// followed. With `fresh_since`: the walk stops at the first path
+/// `odd_path` names, and says why (the second value).
+fn tree(root: &Path, dir_modes: bool, fresh_since: Option<std::time::SystemTime>) -> Result<(Vec<(PathBuf, Node)>, Option<String>)> {
     let mut v = vec![];
     for e in walkdir::WalkDir::new(root).follow_links(false).follow_root_links(false).sort_by_file_name() {
         let e = e?;
         let rel = e.path().strip_prefix(root).unwrap().to_path_buf();
         let ft = e.file_type();
-        let mode = e.metadata()?.permissions().mode() & 0o7777;
+        let meta = e.metadata()?;
+        let mode = meta.permissions().mode() & 0o7777;
+        if let Some(since) = fresh_since {
+            if let Some(odd) = odd_path(&rel, ft, &meta, since)? {
+                return Ok((v, Some(odd)));
+            }
+        }
         let n = if ft.is_dir() {
             Node::Dir(dir_modes.then_some(mode))
         } else if ft.is_file() {
@@ -582,7 +778,7 @@ fn tree(root: &Path, dir_modes: bool) -> Result<Vec<(PathBuf, Node)>> {
         };
         v.push((rel, n));
     }
-    Ok(v)
+    Ok((v, None))
 }
 
 fn show_rel(p: &Path) -> String {
@@ -940,6 +1136,76 @@ pub(crate) mod tests {
         drop(install);
         let gc = Store::exclusive(d.join("store"), d.join("cacache")).unwrap();
         drop(gc);
+        let _ = fs::remove_dir_all(&d);
+    }
+    /// A decline holds for the build that recorded it only: another build's
+    /// (or one with no build line) is void, retried, and rewritten when
+    /// declined again. `declines` lists every file, with whether it is void.
+    #[test]
+    fn a_decline_holds_for_the_build_that_recorded_it() {
+        let d = scratch("declines");
+        let store = Store::new(d.join("store"), d.join("cacache")).unwrap();
+        let (k1, k2) = ("fetcher:1 tar:1 uv:1", "fetcher:2 tar:2 uv:2");
+        let f = store.decline_key_as(k1, "odd", "0.1.0 (aaaa)").unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), format!("{k1}\nodd\nbuild: 0.1.0 (aaaa)\n"), "readable: key, why, build");
+        assert_eq!(store.declined_by(k1, || "0.1.0 (aaaa)").as_deref(), Some("odd"), "the same build: declined");
+        assert_eq!(store.declined_by(k1, || "0.1.0 (bbbb)"), None, "another build: void");
+        // Declined again by the other build: the file is now that build's.
+        store.decline_key_as(k1, "odd again", "0.1.0 (bbbb)").unwrap();
+        assert_eq!(store.declined_by(k1, || "0.1.0 (bbbb)").as_deref(), Some("odd again"));
+        assert_eq!(store.declined_by(k1, || "0.1.0 (aaaa)"), None);
+        // A file with no build line (the format before builds were recorded):
+        // another build, whatever this one is.
+        fs::write(store.declined_path(k2), format!("{k2}\nold\n")).unwrap();
+        assert_eq!(store.declined_by(k2, || "0.1.0 (bbbb)"), None);
+        assert_eq!(store.declined(k2), None);
+        // This build's own decline holds for it.
+        store.decline_key(k2, "mine").unwrap();
+        assert_eq!(store.declined(k2).as_deref(), Some("mine"));
+        let all = store.declines();
+        assert_eq!(all.iter().map(|x| (x.key.as_str(), x.void(), x.path == store.declined_path(&x.key))).collect::<Vec<_>>(), vec![(k1, true, true), (k2, false, true)]);
+        assert_eq!(all[1].build.as_deref(), Some(build_identity()));
+        // Deleting the file clears it.
+        fs::remove_file(store.declined_path(k2)).unwrap();
+        assert_eq!(store.declined(k2), None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The rule on pacote's extraction (`odd_path`), on its own and in the
+    /// comparison: every path a file or a directory, none more than
+    /// EXTRACTION_TIME_SLACK (an hour) older than the install's start. No
+    /// clone needed, so this runs everywhere (CI's ext4 included).
+    #[test]
+    fn the_extraction_rule_has_an_hour_of_slack_and_looks_at_every_path() {
+        let d = scratch("extraction-rule");
+        let started = std::time::SystemTime::now();
+        let fresh = |name: &str| {
+            let x = d.join(name);
+            fs::create_dir_all(x.join("lib")).unwrap();
+            fs::write(x.join("lib/a.js"), "a\n").unwrap();
+            fs::write(x.join("package.json"), "{}\n").unwrap();
+            x
+        };
+        let x = fresh("ok");
+        assert_eq!(extraction_odd(&x, started).unwrap(), None);
+        // Half an hour old: within the slack (a clock stepped back).
+        age(&x.join("lib/a.js"), 1800);
+        assert_eq!(extraction_odd(&x, started).unwrap(), None);
+        assert_eq!(compare_extraction(&x, &x, started).unwrap(), Compared::Same);
+        // An hour and a minute: not written by this install.
+        age(&x.join("lib/a.js"), 3660);
+        let odd = extraction_odd(&x, started).unwrap().unwrap();
+        assert!(odd.starts_with("lib/a.js: modified at"), "{odd}");
+        assert!(matches!(compare_extraction(&x, &fresh("other"), started).unwrap(), Compared::Unexpected(o) if o == odd));
+        // A directory counts too (a placed clone's directories are touched).
+        let y = fresh("dir");
+        age(&y.join("lib"), 3660);
+        assert!(extraction_odd(&y, started).unwrap().unwrap().starts_with("lib: modified at"));
+        // A symlink: not reproduced.
+        let z = fresh("link");
+        std::os::unix::fs::symlink("a.js", z.join("lib/b.js")).unwrap();
+        assert_eq!(extraction_odd(&z, started).unwrap().as_deref(), Some("lib/b.js: neither a file nor a directory"));
+        assert!(matches!(compare_extraction(&z, &z, started).unwrap(), Compared::Unexpected(_)));
         let _ = fs::remove_dir_all(&d);
     }
 }

@@ -47,6 +47,12 @@ const HISTORY_MAX = 60
 //     prints the hex sha256 of pacote's lib/fetcher.js (the file of its
 //     FetcherBase class; until 2026-11-15 the class text alone), as the hook
 //     computes it at run time. The reports still call it the "class text";
+//   node src/inject.js --key <npm package dir>
+//     prints the store key of that npm's extraction code and, on the second
+//     line, the full tar fingerprint (the tar files Node loads with pacote,
+//     with tar's dependencies; NOTES "PR C1: the key is the code"). A new
+//     tar fingerprint is only reported: every store entry is compared once
+//     under it at run time, so it decides nothing here;
 //   src/npm-fingerprints.json
 //     {"fingerprints": {"<hex>": {"releases", "verified_on", "added"}}}, the
 //     fingerprints the binary accepts without MATCHAPACK_NPM_FINGERPRINT.
@@ -60,6 +66,15 @@ function fingerprintOf (npmDir) {
     return { value: out }
   }
   return { value: null, error: `inject.js --fingerprint: status ${r.status}, ${(r.stderr || out).trim().split('\n').slice(-1)[0] || 'no output'}` }
+}
+function tarFingerprintOf (npmDir) {
+  const script = process.env.CANARY_INJECT_JS || path.join(REPO, 'src/inject.js')
+  const r = spawnSync(process.execPath, [script, '--key', npmDir], { encoding: 'utf8', timeout: 60000 })
+  const lines = (r.stdout || '').trim().split('\n')
+  if (r.status === 0 && /^[0-9a-f]{64}$/.test(lines[1] || '')) {
+    return { value: lines[1], key: lines[0] }
+  }
+  return { value: null, error: `inject.js --key: status ${r.status}, ${(r.stderr || '').trim().split('\n').slice(-1)[0] || 'no output'}` }
 }
 function knownFingerprint (fp) {
   if (!fp) {
@@ -697,11 +712,14 @@ function inspect (npmDir, out) {
   tracked['npm/lib/commands/ci.js: exec'] = ci.fns.get('exec') || null
   const eol = tracked['arborist/lib/arborist/reify.js: extractOrLink']
   const fp = fingerprintOf(npmDir)
+  const tfp = tarFingerprintOf(npmDir)
   const result = {
     npm: npmVersion,
     deps,
     fingerprint: fp.value,
     fingerprintError: fp.error || null,
+    tarFingerprint: tfp.value,
+    tarFingerprintError: tfp.error || null,
     known: knownFingerprint(fp.value),
     // The first of the review's three questions, answered from the text:
     // every call is a bare `await pacote.extract(...)` statement, so arborist
@@ -711,7 +729,7 @@ function inspect (npmDir, out) {
     tracked,
   }
   writeJson(out, result)
-  console.log(`npm ${npmVersion}: pacote ${deps.pacote}, arborist ${deps['@npmcli/arborist']}, ${Object.keys(tracked).length} tracked functions, fingerprint ${fp.value ? fp.value.slice(0, 12) + (result.known ? ' (known)' : result.known === false ? ' (NEW)' : ' (no list)') : 'unavailable: ' + fp.error}`)
+  console.log(`npm ${npmVersion}: pacote ${deps.pacote}, arborist ${deps['@npmcli/arborist']}, ${Object.keys(tracked).length} tracked functions, fingerprint ${fp.value ? fp.value.slice(0, 12) + (result.known ? ' (known)' : result.known === false ? ' (NEW)' : ' (no list)') : 'unavailable: ' + fp.error}, tar code ${tfp.value ? tfp.value.slice(0, 12) : 'unavailable: ' + tfp.error}`)
 }
 
 // --- compare ---------------------------------------------------------------
@@ -790,10 +808,14 @@ async function compare (baseFile, newFile, outDir) {
   }
   const deps = Object.fromEntries(DEPS.map((d) => [d, { base: A.deps[d], new: B.deps[d] }]))
   const cl = process.env.CANARY_NO_NETWORK ? { lines: null, error: 'not fetched (CANARY_NO_NETWORK)' } : await changelog(A.npm, B.npm)
+  // The tar code (part of the store key): reported, never an action.
+  const tar = { base: A.tarFingerprint || null, new: B.tarFingerprint || null }
+  tar.changed = tar.base && tar.new ? tar.base !== tar.new : null
   const result = {
     base: A.npm,
     new: B.npm,
     deps,
+    tar,
     classChanged: items.some((i) => i.class && i.status !== 'same'),
     callerChanged: items.some((i) => !i.class && i.status !== 'same'),
     items,
@@ -801,7 +823,7 @@ async function compare (baseFile, newFile, outDir) {
   }
   writeJson(path.join(outDir, 'compare.json'), result)
   const changed = items.filter((i) => i.status !== 'same')
-  console.log(`${A.npm} -> ${B.npm}: ${changed.length} of ${items.length} tracked functions differ${changed.length ? ': ' + changed.map((i) => `${i.name} (${i.status}${i.lines ? ', ' + i.lines + ' lines' : ''})`).join('; ') : ''}`)
+  console.log(`${A.npm} -> ${B.npm}: ${changed.length} of ${items.length} tracked functions differ${changed.length ? ': ' + changed.map((i) => `${i.name} (${i.status}${i.lines ? ', ' + i.lines + ' lines' : ''})`).join('; ') : ''}; tar code ${tar.changed === null ? 'unknown' : tar.changed ? 'NEW' : 'the same'}`)
 }
 
 // --- result / decide -------------------------------------------------------
@@ -824,9 +846,10 @@ function result (dir) {
     suitesPass: suites ? Object.values(suites.suites).every((s) => s.status === 0) : false,
     fingerprint: insp ? insp.fingerprint : null,
     fingerprintError: insp ? insp.fingerprintError : 'not inspected',
+    tarFingerprint: insp ? insp.tarFingerprint || null : null,
     known: insp ? insp.known : null,
     bareAwait: insp ? insp.bareAwait : null,
-    compare: cmpr ? { classChanged: cmpr.classChanged, callerChanged: cmpr.callerChanged, deps: cmpr.deps, changed: cmpr.items.filter((i) => i.status !== 'same'), changelog: cmpr.changelog, base: cmpr.base } : null,
+    compare: cmpr ? { classChanged: cmpr.classChanged, callerChanged: cmpr.callerChanged, deps: cmpr.deps, tar: cmpr.tar || null, changed: cmpr.items.filter((i) => i.status !== 'same'), changelog: cmpr.changelog, base: cmpr.base } : null,
   }
   writeJson(path.join(dir, 'result.json'), r)
   return r
@@ -918,6 +941,10 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     }
     const classText = !r ? '?' : r.known === true ? 'known' : r.known === false ? 'new' : 'unknown'
     const caller = !r ? '?' : !r.compare ? (compareMissing ? 'missing' : '?') : r.compare.callerChanged ? 'changed' : 'same'
+    // The tar code against the baseline: reported only (each store entry is
+    // compared once under new tar code at run time; NOTES "PR C1: the key
+    // is the code"), so it changes no action.
+    const tarCode = !r || !r.compare || !r.compare.tar || r.compare.tar.changed === null ? '?' : r.compare.tar.changed ? 'new' : 'same'
     const classChanged = !!(r && r.compare && r.compare.classChanged)
     // The release this line verified last, tested again (the monthly run, a
     // retest by hand): its diff against the release before was reported when
@@ -932,7 +959,7 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     } else if (!reviewed && (caller === 'changed' || classChanged)) {
       action = 'read the diff'
     }
-    const row = { date: plan.date, version: t.version, reason: t.reason, baseline: (r && r.compare && r.compare.base) || t.baseline, suites, linux: r ? (linuxOk ? 'pass' : 'fail') : 'error', macos: macMissing ? 'missing' : macOk === null ? '-' : macOk ? 'pass' : 'fail', classText, fingerprint: r ? r.fingerprint : null, caller, action, head: plan.head, run }
+    const row = { date: plan.date, version: t.version, reason: t.reason, baseline: (r && r.compare && r.compare.base) || t.baseline, suites, linux: r ? (linuxOk ? 'pass' : 'fail') : 'error', macos: macMissing ? 'missing' : macOk === null ? '-' : macOk ? 'pass' : 'fail', classText, fingerprint: r ? r.fingerprint : null, tar: tarCode, caller, action, head: plan.head, run }
     rows.push(row)
     // The line's row: the newest release tested, unless this was an older
     // one (several releases in one day, or a requested version).
@@ -1108,7 +1135,7 @@ function watchReport (state, plan, res, run) {
         state.node.lines[t.line].verified = t.node
       }
     }
-    const row = { date: plan.date, version: `Node ${t.node}`, reason: t.reason, linux: jobCell(lin), macos: jobCell(mac), classText: '-', caller: '-', action, head: plan.head, run }
+    const row = { date: plan.date, version: `Node ${t.node}`, reason: t.reason, linux: jobCell(lin), macos: jobCell(mac), classText: '-', tar: '-', caller: '-', action, head: plan.head, run }
     out.rows.push(row)
     out.red = out.red || suites !== 'pass'
     if (action !== 'none') {
@@ -1132,7 +1159,7 @@ function watchReport (state, plan, res, run) {
     if (suites === 'pass') {
       state.yarn.verified = t.yarn
     }
-    out.rows.push({ date: plan.date, version: `Yarn ${t.yarn}`, reason: t.reason, linux: '-', macos: jobCell(mac), classText: '-', caller: '-', action, head: plan.head, run })
+    out.rows.push({ date: plan.date, version: `Yarn ${t.yarn}`, reason: t.reason, linux: '-', macos: jobCell(mac), classText: '-', tar: '-', caller: '-', action, head: plan.head, run })
     out.red = out.red || suites !== 'pass'
     if (action !== 'none') {
       out.attention = true
@@ -1224,6 +1251,7 @@ function versionSection (t, r, mac, row) {
     }
   }
   out.push(`- pacote class text: ${row.classText}${r.fingerprint ? ` (\`${r.fingerprint.slice(0, 16)}…\`)` : ''}${r.fingerprintError ? `; fingerprint: ${r.fingerprintError}` : ''}`)
+  out.push(`- tar code (part of the store key; compared per store entry at run time, no action): ${row.tar === 'new' ? 'new' : row.tar === 'same' ? 'the same' : 'unknown'}${r.tarFingerprint ? ` (\`${r.tarFingerprint.slice(0, 16)}…\`)` : ''}`)
   if (t.newMajor) {
     out.push(`- npm ${t.major} is a new major: tested with MATCHAPACK_NPM_VERSIONS=any and MATCHAPACK_NPM_FINGERPRINT=any. Enabling it is a pull request by a person.`)
   }
@@ -1289,9 +1317,9 @@ function body (state, plan) {
     const y = state.yarn
     L.push('', `**Yarn 1 release watch**: newest release seen ${y.newest || '-'} (${y.checked || '-'}); last tested ${y.tested ? `${y.tested} on ${y.testedOn || y.checked}: ${y.suites}` : '-'}; last verified ${y.verified || '-'}; action ${y.action || '-'}.`)
   }
-  L.push('', '<details><summary>History (newest first)</summary>', '', '| date | version | reason | Linux | macOS | class | caller | action |', '|---|---|---|---|---|---|---|---|')
+  L.push('', '<details><summary>History (newest first)</summary>', '', '| date | version | reason | Linux | macOS | class | tar code | caller | action |', '|---|---|---|---|---|---|---|---|---|')
   for (const h of state.history || []) {
-    L.push(`| ${h.date} | ${h.run ? `[${h.version}](${h.run})` : h.version} | ${h.reason} | ${h.linux} | ${h.macos} | ${h.classText} | ${h.caller} | ${h.action} |`)
+    L.push(`| ${h.date} | ${h.run ? `[${h.version}](${h.run})` : h.version} | ${h.reason} | ${h.linux} | ${h.macos} | ${h.classText} | ${h.tar || '?'} | ${h.caller} | ${h.action} |`)
   }
   L.push('', '</details>', '', STATE_OPEN, JSON.stringify(state), STATE_CLOSE, '')
   return L.join('\n')

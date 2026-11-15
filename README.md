@@ -142,14 +142,14 @@ In detail:
   project directory's on macOS; the process's, or a setgid directory's, on
   Linux), also when the store is under another group (#41).
 - The store is checked against npm's extraction: every entry is compared with
-  pacote's extraction once under each npm (pacote and tar version) before
-  that npm clones it, entries the classic engine made included (stores filled
-  before PR C2 still hold them), so the first
-  install after an npm upgrade, or the first one under another Node's npm, is
-  slower for the entries it uses; after that one in 50 at random
+  pacote's extraction once under each extraction code before that code
+  clones it, entries the classic engine made included (stores filled before
+  PR C2 still hold them); after that one in 50 at random
   (`MATCHAPACK_INJECT_CHECK=all`, `off` or another number). An entry that
   differs is replaced by pacote's extraction, which is what gets installed,
-  and matchapack says so. Details: `NOTES.md`, "Store fill through pacote".
+  and matchapack says so. The extraction code is named by its content, not by
+  version numbers (see "After an npm or Node upgrade" below). Details:
+  `NOTES.md`, "Store fill through pacote" and "PR C1: the key is the code".
 - `npm ci`'s own output comes back, the `npm audit` summary included (and its
   network request; `--no-audit` turns it off, as with npm).
 - npm's own errors (lockfile out of sync, a failing script) are printed once,
@@ -421,12 +421,38 @@ packages the lockfile does not list (`npm link`) or that are symlinks other
 than workspaces (`yarn link`), and projects a running process has its
 working directory in.
 
-## After an npm upgrade
+## After an npm or Node upgrade
+
+**The first install can be slower.** Each store entry records the
+extraction code it is known to match: pacote's `lib/fetcher.js`, the tar
+files Node loads (with tar's dependencies), and libuv's version (Node's
+file-system library). When an upgrade changes any of them, every entry is
+compared once with npm's own extraction before it is cloned again: about
+twice a plain `npm ci` for the packages that install uses, once per entry
+(a second project using the same packages compares nothing), and the
+summary says so (`this npm's extraction code was new to the store: N
+packages were compared …`). `matchapack store verify` after the upgrade does
+the same work ahead of time for the whole store. An npm release that changes
+none of that code (often only pacote's version number moves) compares
+nothing; switching back and forth between two npm or Node versions compares
+nothing again; Node's own version is not part of it. The first build with
+this rule compares every entry once, since older records name versions
+(`pacote@… tar@…`), not code. If pacote's extraction ever stops being what a
+clone reproduces (a file or directory more than an hour older than the
+install, or something other than files and directories), matchapack stops
+cloning in that install and says so: when something had already been
+cloned, plain `npm ci` rebuilds the install; when nothing had, the install
+is npm's own and stands. Either way the code goes on the store's decline
+list, and later installs under it are npm's own (the message names the file
+to delete). To try that code again, delete its file: `<store>/declined/` holds one
+file per declined code, the key on its first line and the reason on the
+second (`grep -lx '<key>' <store>/declined/*` finds it; deleting the
+directory clears them all). `matchapack report` lists the tar code each run loaded.
 
 matchapack takes every npm 10, 11 and 12 release whose pacote code it was
 tested with: it has no code per npm version, and what keeps it right on a new
 release is checked while it runs (pacote's fingerprint before npm starts and
-its shape when npm loads it, every store entry compared with the new pacote/tar's extraction
+its shape when npm loads it, every store entry compared with the new extraction code's extraction
 before its first use, packages npm placed that the hook never saw, npm reading
 what the hook returns). Most npm releases do not change that pacote code. After
 an upgrade the harness is still worth running:
@@ -475,9 +501,9 @@ NOTES "G-lite").
   way the inject engine has it extracted: files, contents, file and directory
   modes. Exit 1 when one differs; each difference names who made the entry
   (the classic engine's extractor, in stores filled before PR C2; this
-  pacote/tar; or another version).
+  extraction code; or other extraction code).
   `--fix` replaces those with pacote's extraction. A matching entry is
-  recorded as known to that pacote/tar version, so the next install samples
+  recorded as known to that extraction code, so the next install samples
   it instead of comparing it first. About 3 minutes for 8,779 packages on a
   busy machine (the classic engine's Rust extractor took about 1.5): each
   tarball is extracted again, by node.
