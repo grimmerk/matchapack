@@ -309,6 +309,23 @@ fn report_yarn1(runs: &[Value]) {
     }
 }
 
+/// `t` as `YYYY-MM-DD HH:MM UTC` (days to a civil date: H. Hinnant's
+/// algorithm, proleptic Gregorian).
+fn utc(t: std::time::SystemTime) -> String {
+    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, rem % 3600 / 60)
+}
+
 pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     let since = days.map(|d| now() - d * 86400.0).unwrap_or(0.0);
     let (all, bad) = read_jsonl(&log_path(), since);
@@ -406,6 +423,30 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             trapped[0].chars().take(120).collect::<String>()
         );
     }
+    // pacote's extraction held a path older than the install, or something
+    // other than files and directories (serve.rs, inject.rs
+    // `extraction_outcome`): broken runs, which npm ci rebuilt (something
+    // had been cloned), and installed or npm-failed runs that had cloned
+    // nothing (npm's own tree; the run log has `inject.extraction_unexpected`).
+    // Either way the extraction code was declined in that store, when known.
+    let rebuilt: Vec<String> = runs
+        .iter()
+        .filter(|r| r["outcome"] == "broke")
+        .filter_map(|r| r["reason"].as_str())
+        .filter(|w| w.contains("not what matchapack's clones reproduce"))
+        .map(String::from)
+        .collect();
+    let kept: Vec<String> = runs.iter().filter_map(|r| r["inject"]["extraction_unexpected"].as_str()).map(String::from).collect();
+    if !rebuilt.is_empty() || !kept.is_empty() {
+        let first = rebuilt.first().or(kept.first()).unwrap();
+        println!(
+            "inject engine: in {} runs pacote's extraction was not what the clones reproduce ({} rebuilt by npm ci, {} had cloned nothing and kept npm's own tree); that extraction code is left to npm in the store; first: {}",
+            rebuilt.len() + kept.len(),
+            rebuilt.len(),
+            kept.len(),
+            first.chars().take(160).collect::<String>()
+        );
+    }
     // One line per matchapack build, in order of first use, so numbers from
     // different binaries are never read as one series.
     let mut builds: Vec<(String, usize, Vec<f64>)> = vec![];
@@ -459,6 +500,23 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             if list.is_empty() { String::new() } else { format!(" ({})", list.join(", ")) },
             sum("filled"),
         );
+        // The tar code each run loaded (its fingerprint is part of the store
+        // key: a new one means every entry is compared once under it). No
+        // list, no gate: said so that a new tar shows the day it is used.
+        let mut tars: Vec<(String, String, usize)> = vec![];
+        for r in &inj {
+            let Some(fp) = r["inject"]["tar_fingerprint"].as_str() else { continue };
+            let fp: String = fp.chars().take(16).collect();
+            let ver = r["inject"]["tar"].as_str().unwrap_or("?").to_string();
+            match tars.iter_mut().find(|(f, v, _)| *f == fp && *v == ver) {
+                Some(t) => t.2 += 1,
+                None => tars.push((fp, ver, 1)),
+            }
+        }
+        if !tars.is_empty() {
+            let list: Vec<String> = tars.iter().map(|(f, v, n)| format!("{f}… (tar {v}) {n} runs")).collect();
+            println!("inject engine: tar code loaded, by fingerprint: {}", list.join(", "));
+        }
         // Store entries compared with npm's own extraction before use (serve.rs),
         // and the ones that differed, by who had made them.
         let mut differs: std::collections::BTreeMap<String, (u64, String)> = Default::default();
@@ -482,7 +540,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         for (kind, what) in [
             ("extractor", "made by the classic engine's extractor (expected for odd tarballs)"),
             ("changed", "changed after npm's pacote had made them: look at what writes into the store"),
-            ("pacote", "made under another npm's pacote/tar, which extracted differently"),
+            ("pacote", "made under other extraction code (pacote, tar, libuv), which extracted differently"),
         ] {
             if let Some((n, first)) = differs.get(kind) {
                 println!("inject engine: {n} differing entries {what}; first: {first}");
@@ -541,6 +599,25 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     }
     let (n, bytes) = store.totals();
     println!("store: {} in {n} packages ({})", gib(bytes as f64), store.root.display());
+    // Extraction code this store leaves to npm (serve.rs, store.rs
+    // `decline_key`): each with its file, and whether this build still
+    // honours it (a decline another build recorded is retried).
+    let declines = store.declines();
+    if !declines.is_empty() {
+        println!("store: {} declined extraction code (installs under it are npm's own, no clones):", declines.len());
+        for d in &declines {
+            println!(
+                "  {}: declined {} by {}{}; {}; file {}",
+                d.key,
+                d.modified.map(utc).unwrap_or_else(|| "?".into()),
+                d.build.as_deref().unwrap_or("a build that recorded none"),
+                if d.void() { " (void for this build: the next install under it tries again)" } else { "" },
+                d.why,
+                d.path.display()
+            );
+        }
+        println!("  to clear one: delete its file; a new matchapack build tries a declined code again by itself");
+    }
     if let Ok(o) = std::process::Command::new("df").args(["-k", &crate::home().to_string_lossy()]).output() {
         if let Some(free) = String::from_utf8_lossy(&o.stdout).lines().nth(1).and_then(|l| l.split_whitespace().nth(3)).and_then(|f| f.parse::<f64>().ok()) {
             println!("free on the home volume now: {}", gib(free * 1024.0));
@@ -603,6 +680,15 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utc_dates() {
+        let t = |secs: u64| super::utc(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        assert_eq!(t(0), "1970-01-01 00:00 UTC");
+        // npm's tarball time, 1985-10-26 08:15 UTC.
+        assert_eq!(t(499_162_500), "1985-10-26 08:15 UTC");
+        assert_eq!(t(1_709_208_000), "2024-02-29 12:00 UTC");
+    }
+
     use super::*;
     use crate::store::tests::scratch;
 

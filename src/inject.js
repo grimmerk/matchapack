@@ -18,9 +18,11 @@
 //      wrapper reports npm's own install root (npm.prefix, npm.global) and
 //      the command to matchapack, which runs its gates on that root and pins
 //      it (#36). A refusal is exit 90 before the command ran;
-//   4. when npm has loaded the pacote hashed in 1: check its shape and
-//      replace extract; then the watcher removes itself. A pacote of an
-//      unexpected shape gets no hook: npm extracts every package itself.
+//   4. when npm has loaded the pacote hashed in 1 (which loads tar): tell
+//      matchapack the store key of this extraction code (`extractionKey`),
+//      check pacote's shape and replace extract; then the watcher removes
+//      itself. A pacote of an unexpected shape gets no hook: npm extracts
+//      every package itself.
 //
 // For a package the hook can reproduce exactly (see `ineligible`), it asks
 // the matchapack process that started this one to place the package's store
@@ -52,7 +54,8 @@
 //
 // `node inject.js --fingerprint <npm install dir>` prints the fingerprint of
 // that npm's pacote and exits: the one way it is computed, for the list and
-// for CI.
+// for CI. `--key <npm install dir>` prints the store key of that npm's
+// extraction code under this Node, and its tar fingerprint.
 'use strict'
 const path = require('path')
 const fs = require('fs')
@@ -102,6 +105,180 @@ function fingerprintFile (file) {
 
 function fingerprint (npmDir) {
   return fingerprintFile(pacotePaths(npmDir).fetcher)
+}
+
+const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex')
+
+// The directory of the package `name` as Node finds it from `from` (a
+// package directory): the nearest node_modules/<name> upwards. Real path,
+// as require.cache keys the files.
+function packageDir (name, from) {
+  for (let d = from; ; d = path.dirname(d)) {
+    if (path.basename(d) !== 'node_modules') {
+      const dir = path.join(d, 'node_modules', name)
+      if (fs.existsSync(path.join(dir, 'package.json'))) {
+        return fs.realpathSync(dir)
+      }
+    }
+    if (path.dirname(d) === d) {
+      throw new Error(`cannot find ${name} from ${from}`)
+    }
+  }
+}
+
+// The packages tar's code is made of, as directory → { name, version }:
+// tar as pacote (in `pacoteDir`) resolves it, and every package in its
+// `dependencies`, transitively, each resolved from the package that depends
+// on it. Even when tar bundles its code, pacote hands it streams of these
+// packages.
+function tarPackages (pacoteDir) {
+  const found = new Map()
+  const visit = (name, from) => {
+    const dir = packageDir(name, from)
+    if (found.has(dir)) {
+      return
+    }
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+    found.set(dir, { name, version: String(manifest.version) })
+    for (const d of Object.keys(manifest.dependencies || {})) {
+      visit(d, dir)
+    }
+  }
+  visit('tar', pacoteDir)
+  return found
+}
+
+// Whether `file`, in the package at `pkgDir`, is an ES module: `.mjs`, or
+// `.js` whose nearest package.json (up to the package's own) says
+// "type": "module". `types` caches each directory's answer.
+function isEsm (file, pkgDir, types) {
+  if (file.endsWith('.mjs')) {
+    return true
+  }
+  if (!file.endsWith('.js')) {
+    return false
+  }
+  for (let d = path.dirname(file); ; d = path.dirname(d)) {
+    if (!types.has(d)) {
+      let type = null
+      try {
+        type = JSON.parse(fs.readFileSync(path.join(d, 'package.json'), 'utf8')).type || 'commonjs'
+      } catch (e) {
+        type = e && e.code === 'ENOENT' ? null : 'commonjs'
+      }
+      types.set(d, type)
+    }
+    if (types.get(d)) {
+      return types.get(d) === 'module'
+    }
+    if (d === pkgDir || path.dirname(d) === d) {
+      return false
+    }
+  }
+}
+
+// Every ES module file of the package at `dir` (not under a nested
+// node_modules), as paths inside it.
+function esmFiles (dir, types) {
+  const out = []
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name)
+      if (e.isDirectory()) {
+        if (e.name !== 'node_modules') {
+          walk(p)
+        }
+      } else if (e.isFile() && isEsm(p, dir, types)) {
+        out.push(p)
+      }
+    }
+  }
+  walk(dir)
+  return out
+}
+
+// The tar fingerprint (NOTES "PR C1: the key is the code"): the SHA-256 over
+// the sorted, distinct lines of
+//   - `<name>@<version>` of every package of tarPackages (so a package
+//     whose code Node did not load, or loaded where require.cache does not
+//     show it, still changes it when its version does);
+//   - `<package name>/<path in the package>`, NUL, the file's SHA-256, for
+//     every file in `cache` (require.cache) that lies in one of those
+//     directories (a file under a nested node_modules of one belongs to that
+//     nested package, so only when it is in the set too), except each
+//     package's own package.json (code that only reads a version would
+//     otherwise change it; which files its fields make Node load is counted
+//     anyway);
+//   - when any loaded file of those packages is an ES module, the same for
+//     every ES module file of every one of them: an ES module's imports can
+//     reach any package of the closure, and no ES module shows in
+//     require.cache (a CommonJS file an ES module imports does).
+// What counts is what Node loaded: called once pacote is loaded, which
+// loads tar. Throws when no file of tar itself is loaded.
+function tarFingerprint (pacoteDir, cache = require.cache) {
+  const pkgs = [...tarPackages(pacoteDir)]
+  const tarDir = pkgs[0][0]
+  const types = new Map()
+  const lines = new Set(pkgs.map(([, p]) => `${p.name}@${p.version}\n`))
+  const line = (dir, name, file) => `${name}/${path.relative(dir, file).split(path.sep).join('/')}\0${sha256(fs.readFileSync(file))}\n`
+  const esm = new Set()
+  let ofTar = 0
+  for (const file of Object.keys(cache)) {
+    let best = null
+    for (const [dir, p] of pkgs) {
+      if (file.startsWith(dir + path.sep) && (!best || dir.length > best[0].length)) {
+        best = [dir, p.name]
+      }
+    }
+    if (!best) {
+      continue
+    }
+    const rel = path.relative(best[0], file).split(path.sep)
+    if (rel.includes('node_modules') || rel.join('/') === 'package.json') {
+      continue
+    }
+    if (best[0] === tarDir) {
+      ofTar++
+    }
+    lines.add(line(best[0], best[1], file))
+    if (isEsm(file, best[0], types)) {
+      esm.add(best[0])
+    }
+  }
+  if (ofTar === 0) {
+    throw new Error(`no file of tar (${tarDir}) is loaded`)
+  }
+  if (esm.size > 0) {
+    for (const [dir, p] of pkgs) {
+      for (const file of esmFiles(dir, types)) {
+        lines.add(line(dir, p.name, file))
+      }
+    }
+  }
+  return sha256([...lines].sort().join(''))
+}
+
+// The store key (serve.rs `code_key`): the extraction code npm runs, as
+// pacote's lib/fetcher.js (the gate's fingerprint), tar's loaded files, and
+// libuv's version. null when a part is missing: matchapack then compares
+// every entry it uses.
+function extractionKey (fetcherFp, tarFp, uv) {
+  const hex = (s) => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s)
+  if (!hex(fetcherFp) || !hex(tarFp) || typeof uv !== 'string' || !/^[0-9]+(\.[0-9]+)*$/.test(uv)) {
+    return null
+  }
+  return `fetcher:${fetcherFp.slice(0, 32)} tar:${tarFp.slice(0, 32)} uv:${uv}`
+}
+
+// The key and the tar fingerprint for the pacote at `paths` (pacotePaths),
+// once it is loaded; nulls, and why, when they cannot be had.
+function extractionCode (paths, fetcherFp) {
+  try {
+    const tarFp = tarFingerprint(path.dirname(path.dirname(paths.main)))
+    return { key: extractionKey(fetcherFp, tarFp, process.versions.uv), tar_fingerprint: tarFp }
+  } catch (e) {
+    return { key: null, tar_fingerprint: null, error: String((e && e.message) || e) }
+  }
 }
 
 // Why this fetcher must use pacote's own extract, or null when a clone gives
@@ -233,6 +410,25 @@ function printFingerprint (npmDir) {
   process.stdout.write(fp + '\n')
 }
 
+// `--key`: the store key of that npm's extraction code, run on this Node
+// (its libuv), and the full tar fingerprint, on two lines. Loads pacote.
+function printKey (npmDir) {
+  let code
+  try {
+    const paths = pacotePaths(npmDir)
+    const fp = fingerprintFile(paths.fetcher)
+    require(paths.main)
+    code = extractionCode(paths, fp)
+  } catch (e) {
+    code = { key: null, error: e.message }
+  }
+  if (!code.key) {
+    process.stderr.write(`cannot name the extraction code of the npm in ${npmDir}: ${code.error || 'a part of the key is missing'}\n`)
+    process.exit(1)
+  }
+  process.stdout.write(`${code.key}\n${code.tar_fingerprint}\n`)
+}
+
 // A package.json's version, read as JSON: no code of npm runs for it.
 function versionOf (file) {
   return JSON.parse(fs.readFileSync(file, 'utf8')).version
@@ -285,8 +481,8 @@ function main () {
   } catch (e) {
     fail(`cannot find npm's lib/npm.js: ${e.code || e.message}`)
   }
-  // The pacote and tar npm will load: matchapack keys its checks of the
-  // store on them (src/serve.rs).
+  // The pacote and tar versions npm will load, for the log and messages
+  // (the store key is the code itself, sent in step 4).
   let pacoteVersion = null
   let tarVersion = null
   try {
@@ -294,7 +490,7 @@ function main () {
     pacoteVersion = versionOf(path.join(pacoteDir, 'package.json'))
     tarVersion = versionOf(require.resolve('tar/package.json', { paths: [pacoteDir] }))
   } catch {
-    // unknown: every entry is compared, as under a new version
+    // unknown: the log says `?`
   }
   const processUmask = process.umask()
 
@@ -543,6 +739,9 @@ function main () {
       const m = require.cache[paths.main]
       if (m && m.loaded) {
         needPacote = false
+        // Before the hook: matchapack has the key before any request.
+        const code = extractionCode(paths, fp)
+        send({ key: code.key, tar_fingerprint: code.tar_fingerprint, ...(code.error ? { key_error: code.error } : {}) })
         hookPacote(m.exports)
       }
     }
@@ -556,7 +755,7 @@ function main () {
   // From here on npm is running: matchapack reports its exit status as npm's
   // (unless the root is refused in step 3).
   npmStarted = true
-  send({ hello: true, pacote: pacoteVersion, tar: tarVersion, fingerprint: fp, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'pending' })
+  send({ hello: true, pacote: pacoteVersion, tar: tarVersion, uv: process.versions.uv, fingerprint: fp, hook: hookMode === 'none' ? 'none' : hookOff ? 'off' : 'pending' })
   process.argv = [process.argv[0], path.join(npmDir, 'bin', 'npm-cli.js'), ...npmArgs]
   require(path.join(npmDir, 'lib', 'cli.js'))(process)
 }
@@ -564,6 +763,8 @@ function main () {
 let npmStarted = false
 if (require.main === module && process.argv[2] === '--fingerprint') {
   printFingerprint(process.argv[3] || '')
+} else if (require.main === module && process.argv[2] === '--key') {
+  printKey(process.argv[3] || '')
 } else if (require.main === module) {
   try {
     main()
@@ -574,5 +775,5 @@ if (require.main === module && process.argv[2] === '--fingerprint') {
     fail(`before npm started: ${e && e.stack ? e.stack : e}`)
   }
 } else {
-  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, RESULT_KEYS }
+  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, RESULT_KEYS, tarPackages, tarFingerprint, extractionKey, extractionCode }
 }
