@@ -168,11 +168,14 @@ In detail:
   fetchers there carry no integrity): the tree is npm's, nothing is cloned.
   Packages matchapack cannot clone are extracted by npm, the rest are cloned.
   Checked with a `file:` tarball, bundled dependencies and a git dependency
-  (the git dependency on npm 10.5.2, 10.9.10, 11.19.1 and 12.2.2, #74): a git
-  dependency and a `file:` tarball have no registry integrity and so no
-  store key, so npm's own pacote extracts them (a git dependency may run its
-  `prepare` script), and everything else is cloned; the tree is npm's. A
-  shrinkwrap follows the same rule but has not been run yet.
+  (the git dependency on npm 10.5.2, 10.9.10, 11.19.1 and 12.2.2, #74): the
+  hook takes only packages that pacote fetches as registry tarballs (its
+  `RemoteFetcher` and `RegistryFetcher` classes, `src/inject.js`
+  `ineligible`), which a git dependency and a `file:` tarball are not (nor
+  have they a registry integrity, the store key), so npm's own pacote
+  extracts them (a git dependency may run its `prepare` script), and
+  everything else is cloned; the tree is npm's. A shrinkwrap follows the
+  same rule but has not been run yet.
 - A package is cloned only when the result is exactly what npm would extract:
   a registry tarball with an integrity in the lockfile, npm's default file
   modes, umask 022. A package missing from the store is extracted into it by
@@ -491,7 +494,9 @@ it.
   an entry keyed by its sha1, which later installs reuse. Checked: trees
   identical to plain Yarn for a directory, a tarball, both together with
   registry packages, and a workspace that depends on a sibling through
-  `file:../lib` (`fixtures/yarn1-file` is the test). Plain Yarn ignores
+  `file:../lib` (`fixtures/yarn1-file` tests the first two, the directory
+  and the tarball; the other two were checked once, on scratch fixtures,
+  NOTES "Yarn 1 `file:` dependencies"). Plain Yarn ignores
   edits to a `file:` directory while `.yarn-integrity` still matches
   ("Already up-to-date"); so does matchapack.
 - matchapack leaves Yarn's first 128 file copies of each command to Node
@@ -620,46 +625,84 @@ own and complete).
   and counted.
 - `scripts/verify-sample.sh [N]` (npm) and `scripts/verify-sample.sh --yarn
   [N]` (Yarn 1): sampled verification of real runs. For each of the N
-  (default 2) most recent projects in the run log, the newest run that can
-  be replayed is replayed on copies, plain and through matchapack, and the
-  trees are compared; one line per project goes to
+  (default 2) most recent projects in the run log, one logged run is
+  replayed on copies, plain and through matchapack, and the trees are
+  compared: the project's newest replayable run that cloned something
+  (else its newest, which is then skipped). Projects that are skipped do
+  not count: it goes on to older ones until N replays ran (at most 20
+  skips recorded per run). One line per project goes to
   `~/.cache/matchapack/verify.jsonl`, and `matchapack report` shows npm's
   and Yarn's samples side by side, with the command each replayed. Which
   runs:
-  - full installs: `npm ci` (npm ci twice on copies of the whole project,
-    so build noise is told apart, and matchapack once); `yarn` / `yarn
-    install`, with or without `--frozen-lockfile` (with the logged run's
-    Yarn, node, cache folder and flags; plain Yarn three times, one of them
-    to make sure the cache holds every package, and `matchapack yarn`
-    once; compared as `scripts/verify-yarn1.sh --engine yarn1` does);
-  - commands that started with no `node_modules`, as in a fresh clone:
-    `npm install` / `update` / `uninstall`, `yarn add` / `upgrade` /
-    `remove` (and `yarn workspace <name> …`), replayed with the same words
-    from the files before the run. The run log keeps a SHA-256 of the
-    lockfile and of each manifest before and after every run, and whether
-    `node_modules` was there before; the files before come from the
-    project while they still have those hashes, else from its git HEAD
-    when it has them.
+  - full installs: `npm ci` with its logged words (npm ci twice on copies
+    of the whole project, so build noise is told apart, and `matchapack npm
+    ci` once); `yarn` / `yarn install`, with or without `--frozen-lockfile`
+    (with the logged run's Yarn, node, cache folder and flags; plain Yarn
+    three times, one of them to make sure the cache holds every package,
+    and `matchapack yarn` once; compared as `scripts/verify-yarn1.sh
+    --engine yarn1` does; an install that ran over an existing
+    `node_modules` is replayed from scratch and says "replayed fresh");
+  - commands that started with no `node_modules` (the root's and every
+    workspace's), as in a fresh clone: `npm install` / `update` /
+    `uninstall`, `yarn add` / `upgrade` / `remove` (and `yarn workspace
+    <name> …`), replayed with the same words from the files before the
+    run. The run log keeps a SHA-256 of the lockfile and of each manifest
+    before and after every run, and whether `node_modules` was there
+    before; the files before come from the project while they still have
+    those hashes, else from its git HEAD when it has them.
 
-  The copies hold the manifests (`package.json` files, the lockfile,
-  `.npmrc`, `.yarnrc`), not the rest of the project (except for `npm ci`);
-  they are removed after each comparison. A run is recorded as SKIPPED,
-  with the reason, when it cannot be replayed faithfully: its lockfile or
-  manifests changed since (and git does not have the files before), its
-  directory, node, npm or Yarn is gone or another version, an argument was
-  hidden in the log (a secret) or is an absolute path, an `.npmrc` /
-  `.yarnrc` above the project would not be read in the copies,
-  `upgrade-interactive` (its choices are not logged). Results: IDENTICAL,
-  DIFFERENT, ERROR (the replay could not run: often a root script or a
-  `file:` dependency that needs files the copies leave out), and for Yarn
-  RACE-SHAPED (mtimes of non-empty package files only, which plain Yarn's
-  own probe race, #57, can also produce: sample that project again).
-  Cost: each sample installs the project three or four times; the replays
-  use the caches and the store the runs used, which plain npm and Yarn may
-  add to as they would in a real install. Not covered: commands run in a
-  tree that already had `node_modules` (their result depends on that tree:
-  issue grimmerk/matchapack-private#77 part 2). The install family is also verified by
-  `scripts/verify-steps.sh` (below).
+  A full install is replayed from the files as the run left them, a
+  command from the files before it; the set of files must be the run's
+  too (the same workspaces, all of them found). The copies hold the
+  manifests (`package.json` files, the lockfile, `.npmrc`; for Yarn also
+  `.yarnrc` and `.yarnclean`), not the rest of the project (except for
+  `npm ci`); they are removed after each comparison. A root script that
+  needs the project's sources then fails in plain npm or Yarn too: that
+  sample is an ERROR with the reason; when plain runs pass, the comparison
+  stands.
+
+  A sample says IDENTICAL only when the replay's inputs are provably the
+  logged run's, matchapack's run in the replay cloned (as the logged run
+  did), and every check of the comparison passed. The results:
+  - IDENTICAL; for Yarn also when two plain runs differ and matchapack
+    differs only where they do (the paths are kept);
+  - DIFFERENT: the trees differ, a check failed (npm: a stale time, `npm
+    ls`, the bytes of `package.json` or the lockfile), or matchapack failed
+    where plain npm or Yarn installed;
+  - ERROR, with the reason: the replay could not test anything (plain npm
+    or Yarn failed in the copies; matchapack declined; matchapack cloned
+    nothing where the logged run had);
+  - for Yarn, a difference with the shape of plain Yarn's own probe race
+    (#57: mtimes of non-empty package files only) is run once more with one
+    libuv pool thread, where that race cannot happen: still there,
+    DIFFERENT; gone, IDENTICAL, and the record keeps the first verdict;
+  - SKIPPED, with the reason. Both engines: the project or the directory
+    the run started in is gone; its lockfile or a manifest changed since
+    (for a command: and git HEAD does not have the files before), or its
+    workspaces did, or they cannot all be found (a workspace pattern with
+    character classes or extended globs, or a listing budget reached); an
+    argument was hidden in the log (a secret); the logged run cloned
+    nothing; a `file:`, `link:` or `portal:` dependency (the copies do not
+    hold what it names); a record from an older build. npm only: npm on
+    PATH is another version; an argument is an absolute path or holds a
+    line break; the run started inside the project (a workspace member,
+    `--prefix`). Yarn only: node or Yarn is gone or another version; a
+    relative `--use-yarnrc`; an `.npmrc` / `.yarnrc` above the project
+    (Yarn reads them where it runs, not in the copies); Yarn's cache
+    unusable in the run; `upgrade-interactive` (its choices are not
+    logged).
+
+  Cost: each sample installs the project three or four times (a Yarn
+  sample that needs the one-thread run, seven or eight). The replays use
+  the caches and the store the runs used: plain npm and Yarn may add to
+  them as a real install would, and matchapack's runs fill the store with
+  packages it lacks and may replace an entry that differs from npm's
+  extraction, as any install does. Not covered: commands run in a tree
+  that already had `node_modules` (their result depends on that tree:
+  issue grimmerk/matchapack-private#77 part 2); npm samples compare paths, contents, modes and
+  `npm ls`, not file times, owners or extended attributes (Yarn samples
+  do). The install family is also verified by `scripts/verify-steps.sh`
+  (below).
 - Limit the trial to some projects: list path prefixes, one per line, in
   `~/.config/matchapack/paths` (e.g. `~/git/app` also covers `~/git/app-<topic>`
   worktrees). Elsewhere npm runs as usual.
@@ -837,10 +880,10 @@ packages again.
   hidden lockfile to be byte-identical (CI sets it); `MATCHAPACK_VERIFY_META=1`
   also compares file times outside the two runs, owner, group and extended
   attribute names (`diff --meta`). `MATCHAPACK_VERIFY_ARGS_FILE=<file>`
-  replays another npm command (its arguments one per line) instead of `npm
-  ci`, through `matchapack npm` in B, and also requires `package.json` and
-  the lockfile to be byte-identical (what `verify-sample.sh` uses for a
-  command that started with no `node_modules`).
+  runs the npm command in the file (its arguments, each ended by a NUL
+  byte, `ci` included) instead of plain `npm ci`, through `matchapack npm`
+  in B, and also requires `package.json` and the lockfile to be
+  byte-identical (what `verify-sample.sh` uses for every replay).
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
   `test-shells.sh` on Linux; on macOS the safety, routing, store and inject
   tests, the fixture harness and the Yarn 1 harness tests.
