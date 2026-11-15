@@ -629,10 +629,13 @@ own and complete).
   replayed on copies, plain and through matchapack, and the trees are
   compared: the project's newest replayable run that cloned something
   (else its newest, which is then skipped). Projects that are skipped do
-  not count: it goes on to older ones until N replays ran (at most 20
-  skips recorded per run). One line per project goes to
+  not count: it goes on to older ones until N replays ran or every logged
+  project was looked at (at most 20 skips are recorded per run; the search
+  goes on past them). One line per project goes to
   `~/.cache/matchapack/verify.jsonl`, and `matchapack report` shows npm's
-  and Yarn's samples side by side, with the command each replayed. Which
+  and Yarn's samples side by side, with the command each replayed; it
+  counts samples, not distinct runs (a logged run is sampled again on every
+  run of the sampler until a newer one of its project replaces it). Which
   runs:
   - full installs: `npm ci` with its logged words (npm ci twice on copies
     of the whole project, so build noise is told apart, and `matchapack npm
@@ -661,29 +664,41 @@ own and complete).
   sample is an ERROR with the reason; when plain runs pass, the comparison
   stands.
 
-  A sample says IDENTICAL only when the replay's inputs are provably the
-  logged run's, matchapack's run in the replay cloned (as the logged run
-  did), and every check of the comparison passed. The results:
+  A sample says IDENTICAL only when the replay's inputs equal what the
+  logged run recorded (the files it hashed and the words it logged; the
+  environment and the rc files are not logged), matchapack's run in the
+  replay cloned at least as much as the logged run, and every check of the
+  comparison passed. When the sampler cannot be sure the replay repeated
+  the run, it does not say IDENTICAL. The results:
   - IDENTICAL; for Yarn also when two plain runs differ and matchapack
     differs only where they do (the paths are kept);
   - DIFFERENT: the trees differ, a check failed (npm: a stale time, `npm
-    ls`, the bytes of `package.json` or the lockfile), or matchapack failed
-    where plain npm or Yarn installed;
-  - ERROR, with the reason: the replay could not test anything (plain npm
-    or Yarn failed in the copies; matchapack declined; matchapack cloned
-    nothing where the logged run had);
-  - for Yarn, a difference with the shape of plain Yarn's own probe race
-    (#57: mtimes of non-empty package files only) is run once more with one
-    libuv pool thread, where that race cannot happen: still there,
-    DIFFERENT; gone, IDENTICAL, and the record keeps the first verdict;
+    ls`, the bytes of `package.json` or the lockfile), matchapack failed
+    where plain npm or Yarn installed, or (Yarn) the engine's own record
+    breaks its rule of leaving Yarn's first copies to Node;
+  - ERROR, with the reason: the replay could not test anything or did not
+    repeat the run (plain npm or Yarn failed in the copies; matchapack
+    declined; matchapack cloned fewer files or packages than the logged
+    run did);
+  - RACE-SHAPED (Yarn): a difference with the shape of plain Yarn's own
+    probe race (#57: mtimes of non-empty package files only). It is run
+    once more with one libuv pool thread, where that race cannot happen:
+    still there, DIFFERENT; gone, it stays RACE-SHAPED (a faulty engine
+    need not repeat itself either), with the second verdict in the record.
+    Neither a pass nor a fail: sample that project again;
   - SKIPPED, with the reason. Both engines: the project or the directory
     the run started in is gone; its lockfile or a manifest changed since
     (for a command: and git HEAD does not have the files before), or its
     workspaces did, or they cannot all be found (a workspace pattern with
-    character classes or extended globs, or a listing budget reached); an
+    character classes, extended globs or braces other than `{a,b}`, a
+    negated pattern, one outside the project, a workspace that is a
+    symlink, a listing that failed, or the listing budget reached); an
     argument was hidden in the log (a secret); the logged run cloned
-    nothing; a `file:`, `link:` or `portal:` dependency (the copies do not
-    hold what it names); a record from an older build. npm only: npm on
+    nothing; a dependency on a local path (`file:`, `link:`, `portal:`,
+    `./`, `../`, `/`, `~/`: the copies do not hold what it names); a record
+    from an older build. After installing a new build, every older record
+    is skipped this way ("does not say whether its file set is complete"),
+    until the projects are installed again. npm only: npm on
     PATH is another version; an argument is an absolute path or holds a
     line break; the run started inside the project (a workspace member,
     `--prefix`). Yarn only: node or Yarn is gone or another version; a

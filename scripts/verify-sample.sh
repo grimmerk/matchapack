@@ -41,9 +41,10 @@
 # normally): plain npm and Yarn may add to them, as they would in a real
 # install, and matchapack's own runs fill the store with packages it lacks
 # and may replace an entry that differs from npm's extraction, as any
-# install does. A sample says IDENTICAL only when the replay's inputs are
-# the run's, matchapack cloned in it, and every check passed (NOTES
-# "Sampled verification of real runs", review round 1).
+# install does. A sample says IDENTICAL only when the replay's inputs equal
+# what the run recorded (the files it hashed, the words it logged),
+# matchapack cloned at least as much in it as in the run, and every check
+# passed (NOTES "Sampled verification of real runs", review rounds 1 and 2).
 # MATCHAPACK_LOG_DIR_REAL: the log directory (default ~/.cache/matchapack).
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
