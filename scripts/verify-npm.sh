@@ -328,7 +328,7 @@ pg=$(ns_project gitadd optional-upward git)
 ns_npm "$pg" install "$add"
 lr=$(nrec log/log.jsonl '(r["command"], r["node_modules_before"], r["files_before"]["package.json"] != r["files_after"]["package.json"], r["files_before"]["package-lock.json"] != r["files_after"]["package-lock.json"], r["files_after"]["npm-shrinkwrap.json"])')
 ns_sample -- 1
-if [ "$lr" = "('install', 'absent', True, True, None)" ] && [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["args"])')" = "('IDENTICAL', 'started-empty', 'install', ['install', '$add', '--no-audit', '--no-fund'])" ]; then
+if [ "$lr" = "('install', 'absent', True, True, None)" ] && [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["args"], r["replayed_from"])')" = "('IDENTICAL', 'started-empty', 'install', ['install', '$add', '--no-audit', '--no-fund'], 'git HEAD')" ]; then
   ns_ok "an npm install that started with no node_modules, replayed from the files before it (git HEAD): IDENTICAL"
 else ns_bad "started-empty npm install (logged $lr; $(nrec log/verify.jsonl 'r'))"; fi
 ns_sample MATCHAPACK_VERIFY_NPM_DAMAGE='printf x >> node_modules/y1-c/index.js' -- 1
@@ -345,6 +345,17 @@ printf '\n' >> "$pn/package-lock.json"
 ns_sample -- 1
 got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
 case $got in "SKIPPED: package-lock.json changed since the run"*) ns_ok "skipped: the project changed since the run" ;; *) ns_bad "changed since: $got" ;; esac
+# Runs the copies cannot repeat (records made from the last one): an
+# absolute path among the arguments, a start inside the project.
+ns_fake() { python3 -c 'import json,sys; p=sys.argv[1]; r=json.loads(open(p).read().splitlines()[-1]); exec(sys.argv[2]); open(p, "a").write(json.dumps(r) + "\n")' "$ns/log/log.jsonl" "$1"; }
+for t in "abs:r['args'] = ['install', '--prefix', '/elsewhere']:an argument is an absolute path (/elsewhere)" "sub:r['dir'] = r['root'] + '/sub':inside the project: replays start at the root only"; do
+  label=${t%%:*}; rest=${t#*:}; edit=${rest%%:*}; want=${rest#*:}
+  [ $label = sub ] && mkdir -p "$pn/sub"
+  ns_fake "$edit"
+  ns_sample -- 1
+  got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+  case $got in "SKIPPED: "*"$want"*) ns_ok "skipped: $label ($got)" ;; *) ns_bad "$label: $got" ;; esac
+done
 if [ -z "$(ls -d "$ns/tmp"/matchapack-verify-* 2>/dev/null)" ]; then ns_ok "no replay copies left"; else ns_bad "copies left: $(ls -d "$ns/tmp"/matchapack-verify-*)"; fi
 drop "$ns"
 

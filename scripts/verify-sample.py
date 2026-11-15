@@ -136,21 +136,22 @@ def git_blob(root, rel):
 
 
 def files_state(r, root, kind):
-    """(files, None): {relative path: bytes, or None for a file that is not
-    there} to give the copies, the state the replay starts from; or (None,
-    why). A full install starts from the files the run left (its lockfile
-    may have been written by it); a command that started empty from the
-    files before the run."""
+    """(files, source, None): {relative path: bytes, or None for a file that
+    is not there} to give the copies, the state the replay starts from, and
+    where it came from ("project" or "git HEAD"); or (None, None, why). A
+    full install starts from the files the run left (its lockfile may have
+    been written by it); a command that started empty from the files before
+    the run."""
     fb, fa = r.get("files_before"), r.get("files_after")
     if not isinstance(fb, dict) or not isinstance(fa, dict) or not fb:
-        return None, "the log record has no hashes of the files before and after the run (logged by a matchapack build from before replays were recorded)"
+        return None, None, "the log record has no hashes of the files before and after the run (logged by a matchapack build from before replays were recorded)"
     want = fa if kind == "full" else fb
     now = {k: sha256_of(os.path.join(root, k)) for k in want}
     changed_since = sorted(k for k in fa if now.get(k, sha256_of(os.path.join(root, k))) != fa[k])
     if now == want:
-        return {k: (open(os.path.join(root, k), "rb").read() if want[k] else None) for k in want}, None
+        return {k: (open(os.path.join(root, k), "rb").read() if want[k] else None) for k in want}, "project", None
     if kind == "full":
-        return None, "%s changed since the run" % ", ".join(changed_since)
+        return None, None, "%s changed since the run" % ", ".join(changed_since)
     # The files before the run, from git HEAD.
     got = {}
     for k, h in want.items():
@@ -163,10 +164,10 @@ def files_state(r, root, kind):
             break
         got[k] = b
     if got is not None:
-        return got, None
+        return got, "git HEAD", None
     changed_by_run = sorted(k for k in fb if fb[k] != fa.get(k))
     why = "%s changed since the run" % ", ".join(changed_since) if changed_since else "the run changed %s" % ", ".join(changed_by_run)
-    return None, why + ", and the files before it are not in the project's git HEAD"
+    return None, None, why + ", and the files before it are not in the project's git HEAD"
 
 
 def copy_manifests(root, dest, sub, names, files):
@@ -247,7 +248,7 @@ def yarn_plan(r, d):
     sub, why = subdir_of(r, root)
     if why:
         return None, why
-    files, why = files_state(r, root, kind)
+    files, source, why = files_state(r, root, kind)
     if why:
         return None, why
     node, yarn_js = y["node_path"], y["yarn_js"]
@@ -298,8 +299,17 @@ def yarn_plan(r, d):
         if p == "/":
             break
         p = os.path.dirname(p)
-    return {"kind": kind, "root": root, "sub": sub, "files": files, "node": node, "node_version": nv, "yarn_js": yarn_js,
+    return {"kind": kind, "root": root, "sub": sub, "files": files, "source": source, "node": node, "node_version": nv, "yarn_js": yarn_js,
             "yarn": version, "cache_root": os.path.dirname(cache), "args": args, "logged_cloned": y.get("cloned")}, None
+
+
+def started_as_logged(plan, started, result, reason):
+    """A command that started with no node_modules must have started so in
+    the replay too (matchapack's own record of the replay says): otherwise
+    the comparison is of another run."""
+    if plan["kind"] == "started-empty" and result != "ERROR" and started not in STARTED_EMPTY:
+        return "ERROR", "the replay did not start with no node_modules (matchapack logged %s)" % started
+    return result, reason
 
 
 def window_secs(runs_file, name):
@@ -400,12 +410,14 @@ def yarn_one(plan, here, work):
         if l.startswith(("yarn ", "engine: ", "plain vs ", "engine tree damaged", "command: ")):
             print("  " + l)
     result, reason, extra = yarn_result(p.returncode, out, v, here, plan["node_version"])
-    cloned = None
+    cloned, started = None, None
     try:
-        cloned = (json.load(open(os.path.join(v, "engine.json"))).get("yarn1") or {}).get("cloned")
+        e = json.load(open(os.path.join(v, "engine.json")))
+        cloned, started = (e.get("yarn1") or {}).get("cloned"), e.get("node_modules_before")
     except (OSError, ValueError):
         pass
-    rec = dict(result=result, yarn=plan["yarn"], node=plan["node_version"], args=plan["args"], subdir=plan["sub"],
+    result, reason = started_as_logged(plan, started, result, reason)
+    rec = dict(result=result, yarn=plan["yarn"], node=plan["node_version"], args=plan["args"], subdir=plan["sub"], replayed_from=plan["source"],
                manifests_copied=copied, yarn_secs=window_secs(os.path.join(v, "runs"), "plain1"),
                matchapack_secs=window_secs(os.path.join(v, "runs"), "engine"), cloned=cloned, logged_cloned=plan["logged_cloned"])
     if reason:
@@ -468,13 +480,13 @@ def npm_plan(r, d):
     for a in args:
         if a.startswith("/") or "=/" in a or a.startswith("file:/") or a.startswith("~"):
             return None, "an argument is an absolute path (%s): the copies cannot repeat it" % a
-    files, why = files_state(r, root, kind)
+    files, source, why = files_state(r, root, kind)
     if why:
         return None, why
     nv, err = run_version(["npm", "--version"], tempfile.gettempdir())
     if not r.get("npm") or nv != r.get("npm"):
         return None, "the npm on PATH is %s, the run used %s" % (nv or "not runnable (%s)" % err, r.get("npm") or "an unknown version")
-    return {"kind": kind, "root": root, "files": files, "args": args, "npm": nv}, None
+    return {"kind": kind, "root": root, "files": files, "source": source, "args": args, "npm": nv}, None
 
 
 def npm_result(out):
@@ -514,7 +526,12 @@ def npm_one(plan, here, work):
                        capture_output=True, text=True, errors="replace")
     show_npm(p.stdout + p.stderr)
     rec = npm_result(p.stdout + p.stderr)
-    rec.update(npm=plan["npm"], args=plan["args"], manifests_copied=copied)
+    # B's own log record (verify.sh gives it the work directory's log).
+    logged = read_log(os.path.join(work, "logs", "log.jsonl"))
+    rec["result"], reason = started_as_logged(plan, logged[-1].get("node_modules_before") if logged else None, rec["result"], rec.get("reason"))
+    if reason:
+        rec["reason"] = reason
+    rec.update(npm=plan["npm"], args=plan["args"], manifests_copied=copied, replayed_from=plan["source"])
     return rec
 
 

@@ -262,6 +262,13 @@ print(" ".join("%s" % (vs.race_shaped(o, t, n) == want) for o, n, want in cases)
   rm -rf "${kept:?}"
 else bad "sample: no kept work directory for the race rule ($kept)"; fi
 
+# skip <label> <expected reason text> [verify-sample.sh args]: SKIPPED with that reason.
+skip() { # skip <label> <expected reason text> [verify-sample.sh args]
+  local label=$1 want=$2; shift 2
+  sp_sample -- "$@"
+  local got; got=$(vrec 'r["result"] + ": " + r.get("reason", "")')
+  case $got in "SKIPPED: "*"$want"*) ok "sample: skipped, $label ($got)" ;; *) bad "sample: $label: got '$got', exit $rc" ;; esac
+}
 # 3b. A command that started with no node_modules (#77 part 1b): `yarn add`
 # in a fresh copy, which changes package.json and yarn.lock; replayed from
 # the files before it, which are the project's git HEAD.
@@ -272,7 +279,7 @@ sp_install "$pg" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
 lr=$(lrec '(r["command"], r["node_modules_before"], r["replay"], r["files_before"]["package.json"] != r["files_after"]["package.json"])')
 sp_sample -- "$pg"
 if [ "$lr" = "('add', 'absent', {'kind': 'command', 'args': ['add', 'http://127.0.0.1:48321/y1-many-1.0.0.tgz']}, True)" ] \
-  && [ "$(vrec '(r["result"], r["kind"], r["command"])')" = "('IDENTICAL', 'started-empty', 'add')" ] && [ "$(vrec 'r["cloned"] > 0')" = True ]; then
+  && [ "$(vrec '(r["result"], r["kind"], r["command"], r["replayed_from"])')" = "('IDENTICAL', 'started-empty', 'add', 'git HEAD')" ] && [ "$(vrec 'r["cloned"] > 0')" = True ]; then
   ok "sample: a yarn add that started with no node_modules, replayed from the files before it (git HEAD): IDENTICAL, $(vrec 'r["cloned"]') cloned"
 else bad "sample: started-empty yarn add (logged $lr; $(vrec 'r.get("result"), r.get("reason"), r.get("detail")'))"; fi
 sp_sample MATCHAPACK_VERIFY_YARN_DAMAGE='printf x >> node_modules/y1-many/package.json' -- "$pg"
@@ -286,14 +293,16 @@ sp_install "$pn" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
 skip "the run changed the files, no git" "the run changed package.json, yarn.lock, and the files before it are not in the project's git HEAD" "$pn"
 printf '\n' >> "$pn/package.json"
 skip "the project changed since, no git" "package.json changed since the run, and the files before it are not" "$pn"
+# git HEAD is not the state before the run (package.json was edited before
+# it, not committed): its files do not have the logged hashes.
+pd=$(sp_project gitold yarn1-small); pd=$(cd "$pd" && pwd -P)
+git -C "$pd" init -q && git -C "$pd" add package.json yarn.lock \
+  && git -C "$pd" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m fixture
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["description"]="edited"; json.dump(d, open(p,"w"), indent=2)' "$pd/package.json"
+sp_install "$pd" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
+skip "git HEAD older than the run" "the run changed package.json, yarn.lock, and the files before it are not in the project's git HEAD" "$pd"
 
 # 4. Skips, each recorded with its reason.
-skip() { # skip <label> <expected reason text> [verify-sample.sh args]
-  local label=$1 want=$2; shift 2
-  sp_sample -- "$@"
-  local got; got=$(vrec 'r["result"] + ": " + r.get("reason", "")')
-  case $got in "SKIPPED: "*"$want"*) ok "sample: skipped, $label ($got)" ;; *) bad "sample: $label: got '$got', exit $rc" ;; esac
-}
 printf '\n' >> "$pm/yarn.lock"
 skip "yarn.lock changed" "yarn.lock changed since the run" "$pm"
 gone=$sp/gone; sp_fake "r['root'] = r['dir'] = '$gone'"
