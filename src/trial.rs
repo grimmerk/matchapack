@@ -230,27 +230,38 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
     };
     let home = crate::home();
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    // Entries that are not an existing absolute directory (`/tmp/x` where
-    // only `/private/tmp/x` exists, `$HOME/git`, a typo): said when nothing
-    // matched, since the scope then may not be what the user meant.
-    let mut not_dirs = vec![];
+    // Entries that can never match: not absolute (`$HOME/git` typed
+    // literally, a relative path), or under a directory that does not exist.
+    // A prefix that is no directory itself is a good entry (`~/git/app`
+    // covers `~/git/app-<topic>`), and so is a directory removed since; those
+    // decline in silence for the install family like any project outside
+    // the scope. Said when nothing matched, since the scope then may not be
+    // what the user meant.
+    let mut never: Vec<(&str, &str)> = vec![];
     for e in &list {
         let p = e.strip_prefix("~/").map(|r| home.join(r)).unwrap_or_else(|| PathBuf::from(e));
-        let p = std::fs::canonicalize(&p).unwrap_or(p);
+        // Symlinks resolved, of the entry or, when it does not exist, of its
+        // parent: `/tmp/app` matches `/private/tmp/app-topic` on macOS.
+        let resolved = std::fs::canonicalize(&p)
+            .ok()
+            .or_else(|| Some(std::fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?)));
         // A plain string prefix on purpose: `~/git/app` covers the worktrees
         // `~/git/app-<topic>` too.
-        if dir.to_string_lossy().starts_with(&*p.to_string_lossy()) {
+        let prefix = resolved.as_ref().unwrap_or(&p);
+        if dir.to_string_lossy().starts_with(&*prefix.to_string_lossy()) {
             return Ok(());
         }
-        if !(p.is_absolute() && p.is_dir()) {
-            not_dirs.push(e.as_str());
+        if !p.is_absolute() {
+            never.push((e.as_str(), "not an absolute path"));
+        } else if resolved.is_none() {
+            never.push((e.as_str(), "its parent directory does not exist"));
         }
     }
-    if not_dirs.len() == list.len() {
-        return Err(format!("outside the trial scope: {source} lists no existing directory"));
+    if never.len() == list.len() {
+        return Err(format!("outside the trial scope: {source} lists no entry that can match"));
     }
-    if let Some(e) = not_dirs.first() {
-        return Err(format!("outside the trial scope: {source} lists {e:?}, which is not an existing absolute directory"));
+    if let Some((e, why)) = never.first() {
+        return Err(format!("outside the trial scope: {source} lists {e:?}, which can never match ({why})"));
     }
     Err(OUT_OF_SCOPE.into())
 }

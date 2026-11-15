@@ -803,17 +803,34 @@ p=$(project ci-quiet-dry bundled)
 decline_case "npm ci with npm_config_dry_run=true" "$p" "this run installs nothing (--dry-run)" 0 npm_config_dry_run=true -- ci --no-audit --no-fund
 p=$(project ci-quiet-scope bundled)
 decline_case "npm ci outside the trial scope" "$p" "outside the trial scope" 0 MATCHAPACK_PATHS="$work/scope-elsewhere" -- ci --no-audit --no-fund
-# A scope that matches nothing is not the silent case: a scope that lists
-# no existing directory (a path that does not exist; a paths file with
-# comments only), or one entry that is not an existing absolute directory
-# (`$HOME/x` typed literally), has its own reason, printed for the family.
+# A scope that can never match is not the silent case: one whose entries
+# all can never match (under a directory that does not exist; a paths file
+# with comments only), or one entry that can never match (`$HOME/x` typed
+# literally), has its own reason, printed for the family. A prefix that is
+# no directory itself, or a directory removed since, is a good entry: a
+# project outside it declines in silence, and one under it is in scope.
 p=$(project fam-scope-none bundled)
-decline_case "npm install, the scope lists no existing directory" "$p" "outside the trial scope: MATCHAPACK_PATHS lists no existing directory" 0 MATCHAPACK_PATHS="$work/nowhere" -- install --no-audit --no-fund
+decline_case "npm install, the scope has no entry that can match" "$p" "outside the trial scope: MATCHAPACK_PATHS lists no entry that can match" 0 MATCHAPACK_PATHS="$work/no-parent/x" -- install --no-audit --no-fund
+p=$(project fam-scope-stale bundled)
+quiet_case "npm install, one good entry and one removed since" "$p" "outside the trial scope (" MATCHAPACK_PATHS="$work/scope-elsewhere:$work/removed-long-ago" -- install --no-audit --no-fund
+p=$(project fam-scope-prefix bundled)
+quiet_case "npm install, a prefix that is no directory itself, another project" "$p" "outside the trial scope (" MATCHAPACK_PATHS="$work/scope-pre" -- install --no-audit --no-fund
+p=$(project scope-prefix-covered bundled)
+wrapped "$p" "export MATCHAPACK_PATHS='$work/scope-pre'; npm install --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && ! grep -q 'running plain npm' "$work/out" && [ "$(last_log "r['outcome']")" = installed ] \
+  && ok "a prefix that is no directory itself covers a project whose path starts with it (scope-prefix-covered under scope-pre…)" || bad "scope prefix: rc=$rc, $(grep '^matchapack' "$work/out" | head -1)"
+p=$(project fam-scope-tmp bundled)
+tmpw=$(echo "$work" | sed -n 's#^/private/tmp/#/tmp/#p')
+if [ -n "$tmpw" ]; then
+  wrapped "$p" "export MATCHAPACK_PATHS='$tmpw/fam-scope-t'; npm install --no-audit --no-fund"; rc=$?
+  [ $rc = 0 ] && ! grep -q 'running plain npm' "$work/out" && [ "$(last_log "r['outcome']")" = installed ] \
+    && ok "a prefix written with /tmp matches the project under /private/tmp (the parent's symlinks resolved)" || bad "scope /tmp prefix: rc=$rc, $(grep '^matchapack' "$work/out" | head -1)"
+fi
 mkdir -p "$work/scope-cfg"; printf '# nothing yet\n\n' > "$work/scope-cfg/paths"
 p=$(project fam-scope-comments bundled)
-decline_case "npm install, the paths file has comments only" "$p" "outside the trial scope: ~/.config/matchapack/paths lists no existing directory" 0 -u MATCHAPACK_PATHS MATCHAPACK_CONFIG_DIR="$work/scope-cfg" -- install --no-audit --no-fund
+decline_case "npm install, the paths file has comments only" "$p" "outside the trial scope: ~/.config/matchapack/paths lists no entry that can match" 0 -u MATCHAPACK_PATHS MATCHAPACK_CONFIG_DIR="$work/scope-cfg" -- install --no-audit --no-fund
 p=$(project fam-scope-var bundled)
-decline_case "npm install, a scope entry that is not an absolute directory" "$p" "outside the trial scope: MATCHAPACK_PATHS lists \"\$HOME/x\", which is not an existing absolute directory" 0 "MATCHAPACK_PATHS=$work/scope-elsewhere:\$HOME/x" -- install --no-audit --no-fund
+decline_case "npm install, a scope entry that is not an absolute directory" "$p" "outside the trial scope: MATCHAPACK_PATHS lists \"\$HOME/x\", which can never match (not an absolute path)" 0 "MATCHAPACK_PATHS=$work/scope-elsewhere:\$HOME/x" -- install --no-audit --no-fund
 # The family with another reason: the line is printed.
 p=$(project fam-loud bundled); rm -rf "${work:?}/fam-loud-root" "${work:?}/fam-loud-plain"
 want=$(plain_status "$p" -- install --prefix "$work/fam-loud-plain" --no-audit --no-fund)

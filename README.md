@@ -313,11 +313,14 @@ unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
 - the install root's `node_modules` is a symlink (npm's root);
 - the install root is outside the trial scope (`~/.config/matchapack/paths`;
   the start directory is checked before npm starts unless `--prefix` was
-  typed, then npm's root). A scope that lists no existing directory (an
-  empty or commented-out file, a path that does not exist) and one with an
-  entry that is not an existing absolute directory (`$HOME/git` typed
-  literally, `/tmp/x` where the directory is `/private/tmp/x`) say so in
-  the reason;
+  typed, then npm's root). The entries are path prefixes: `~/git/app`
+  covers `~/git/app-feature`, and a prefix that is no directory itself, or
+  a directory removed since, is a good entry (its parent's symlinks are
+  resolved, so `/tmp/app` matches `/private/tmp/app-feature`). A scope
+  with no entry that can match (an empty or commented-out file, entries
+  under directories that do not exist) and one with an entry that can never
+  match (`$HOME/git` typed literally, a relative path) say so in the
+  reason;
 - the install root does not exist (`--prefix` naming a new directory; npm's
   root);
 - the command installs nothing (`--dry-run`, `--package-lock-only`,
@@ -328,8 +331,8 @@ unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
 
 For `npm install`, `update` and `uninstall` (and their first words) three of
 these print nothing: a global install, a project outside the trial scope
-(but not a scope that lists no existing directory, or has an entry that is
-not one: that may not be the scope meant, so it is said), and a command that
+(but not a scope with an entry that can never match: that may not be the
+scope meant, so it is said), and a command that
 installs nothing. These commands are typed often
 (`npm install -g <pkg>` above all), and the line would repeat what the user
 already knows. The run is still logged as declined, with the reason
