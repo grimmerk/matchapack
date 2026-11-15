@@ -126,10 +126,11 @@ function packageDir (name, from) {
   }
 }
 
-// The packages tar's code is made of, as directory → name: tar as pacote
-// (in `pacoteDir`) resolves it, and every package in its `dependencies`,
-// transitively, each resolved from the package that depends on it. Even
-// when tar bundles its code, pacote hands it streams of these packages.
+// The packages tar's code is made of, as directory → { name, version }:
+// tar as pacote (in `pacoteDir`) resolves it, and every package in its
+// `dependencies`, transitively, each resolved from the package that depends
+// on it. Even when tar bundles its code, pacote hands it streams of these
+// packages.
 function tarPackages (pacoteDir) {
   const found = new Map()
   const visit = (name, from) => {
@@ -137,9 +138,9 @@ function tarPackages (pacoteDir) {
     if (found.has(dir)) {
       return
     }
-    found.set(dir, name)
-    const deps = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).dependencies || {}
-    for (const d of Object.keys(deps)) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+    found.set(dir, { name, version: String(manifest.version) })
+    for (const d of Object.keys(manifest.dependencies || {})) {
       visit(d, dir)
     }
   }
@@ -147,25 +148,84 @@ function tarPackages (pacoteDir) {
   return found
 }
 
+// Whether `file`, in the package at `pkgDir`, is an ES module: `.mjs`, or
+// `.js` whose nearest package.json (up to the package's own) says
+// "type": "module". `types` caches each directory's answer.
+function isEsm (file, pkgDir, types) {
+  if (file.endsWith('.mjs')) {
+    return true
+  }
+  if (!file.endsWith('.js')) {
+    return false
+  }
+  for (let d = path.dirname(file); ; d = path.dirname(d)) {
+    if (!types.has(d)) {
+      let type = null
+      try {
+        type = JSON.parse(fs.readFileSync(path.join(d, 'package.json'), 'utf8')).type || 'commonjs'
+      } catch (e) {
+        type = e && e.code === 'ENOENT' ? null : 'commonjs'
+      }
+      types.set(d, type)
+    }
+    if (types.get(d)) {
+      return types.get(d) === 'module'
+    }
+    if (d === pkgDir || path.dirname(d) === d) {
+      return false
+    }
+  }
+}
+
+// Every ES module file of the package at `dir` (not under a nested
+// node_modules), as paths inside it.
+function esmFiles (dir, types) {
+  const out = []
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name)
+      if (e.isDirectory()) {
+        if (e.name !== 'node_modules') {
+          walk(p)
+        }
+      } else if (e.isFile() && isEsm(p, dir, types)) {
+        out.push(p)
+      }
+    }
+  }
+  walk(dir)
+  return out
+}
+
 // The tar fingerprint (NOTES "PR C1: the key is the code"): the SHA-256 over
-// the sorted lines `<package name>/<path in the package>`, NUL, the file's
-// SHA-256, newline, one per file in `cache` (require.cache) that lies in one
-// of tarPackages' directories (a file under a nested node_modules of one
-// belongs to that nested package, so only when it is in the set too),
-// except each package's own package.json (code that only reads a version
-// would otherwise change it; which files its fields make Node load is
-// counted anyway). What counts is what Node loaded: called once pacote is
-// loaded, which loads tar. Throws when no file of tar itself is loaded.
+// the sorted, distinct lines of
+//   - `<name>@<version>` of every package of tarPackages (so a package
+//     whose code Node did not load, or loaded where require.cache does not
+//     show it, still changes it when its version does);
+//   - `<package name>/<path in the package>`, NUL, the file's SHA-256, for
+//     every file in `cache` (require.cache) that lies in one of those
+//     directories (a file under a nested node_modules of one belongs to that
+//     nested package, so only when it is in the set too), except each
+//     package's own package.json (code that only reads a version would
+//     otherwise change it; which files its fields make Node load is counted
+//     anyway);
+//   - the same for every ES module file of a package one of whose loaded
+//     files is an ES module: its own imports do not show in require.cache.
+// What counts is what Node loaded: called once pacote is loaded, which
+// loads tar. Throws when no file of tar itself is loaded.
 function tarFingerprint (pacoteDir, cache = require.cache) {
   const pkgs = [...tarPackages(pacoteDir)]
   const tarDir = pkgs[0][0]
-  const lines = []
+  const types = new Map()
+  const lines = new Set(pkgs.map(([, p]) => `${p.name}@${p.version}\n`))
+  const line = (dir, name, file) => `${name}/${path.relative(dir, file).split(path.sep).join('/')}\0${sha256(fs.readFileSync(file))}\n`
+  const esm = new Set()
   let ofTar = 0
   for (const file of Object.keys(cache)) {
     let best = null
-    for (const [dir, name] of pkgs) {
+    for (const [dir, p] of pkgs) {
       if (file.startsWith(dir + path.sep) && (!best || dir.length > best[0].length)) {
-        best = [dir, name]
+        best = [dir, p.name]
       }
     }
     if (!best) {
@@ -178,12 +238,22 @@ function tarFingerprint (pacoteDir, cache = require.cache) {
     if (best[0] === tarDir) {
       ofTar++
     }
-    lines.push(`${best[1]}/${rel.join('/')}\0${sha256(fs.readFileSync(file))}\n`)
+    lines.add(line(best[0], best[1], file))
+    if (isEsm(file, best[0], types)) {
+      esm.add(best[0])
+    }
   }
   if (ofTar === 0) {
     throw new Error(`no file of tar (${tarDir}) is loaded`)
   }
-  return sha256(lines.sort().join(''))
+  for (const [dir, p] of pkgs) {
+    if (esm.has(dir)) {
+      for (const file of esmFiles(dir, types)) {
+        lines.add(line(dir, p.name, file))
+      }
+    }
+  }
+  return sha256([...lines].sort().join(''))
 }
 
 // The store key (serve.rs `code_key`): the extraction code npm runs, as

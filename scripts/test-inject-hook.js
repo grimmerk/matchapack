@@ -224,27 +224,33 @@ function keyCases () {
       }
     }
   }
+  const versions = []
   const walk = (name, from) => {
     const dir = find(name, from)
     if (!roots.has(dir)) {
       roots.set(dir, name)
-      for (const dep of Object.keys(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).dependencies || {})) {
+      const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+      versions.push(`${name}@${manifest.version}\n`)
+      for (const dep of Object.keys(manifest.dependencies || {})) {
         walk(dep, dir)
       }
     }
   }
   walk('tar', pacoteDir)
   const lines = []
+  let esmLoaded = 0
   for (const f of Object.keys(require.cache)) {
     const owner = [...roots.keys()].filter(r => f.startsWith(r + '/')).sort((a, b) => b.length - a.length)[0]
     if (owner && !path.relative(owner, f).split('/').includes('node_modules') && path.relative(owner, f) !== 'package.json') {
       lines.push(roots.get(owner) + '/' + path.relative(owner, f) + '\0' + sha(fs.readFileSync(f)) + '\n')
+      esmLoaded += f.endsWith('.mjs') ? 1 : 0
     }
   }
-  lines.sort()
   const tarVersion = JSON.parse(fs.readFileSync(path.join([...roots.keys()][0], 'package.json'), 'utf8')).version
-  check(`key: the tar fingerprint is the SHA-256 over the ${lines.length} loaded files of tar ${tarVersion} and its dependencies`,
-    tarFingerprint(pacoteDir), sha(lines.join('')))
+  // npm's tar and its dependencies are loaded as CommonJS (no ES module
+  // file to add): the definition is the versions plus the loaded files.
+  check(`key: the tar fingerprint is the SHA-256 over the ${versions.length} package versions and ${lines.length} loaded files of tar ${tarVersion} and its dependencies`,
+    tarFingerprint(pacoteDir), esmLoaded ? 'an .mjs file is loaded' : sha([...new Set([...versions, ...lines])].sort().join('')))
 
   // A made-up layout: a `tar` that requires a `dep` package, both loaded. A
   // byte changed in the dependency's file changes the fingerprint; a tar
@@ -280,8 +286,45 @@ function keyCases () {
     fs.writeFileSync(path.join(nm, 'dep', 'index.js'), 'module.exports = 4\n')
     const b = tarFingerprint(fakePacote)
     check('key: a byte changed in a dependency of tar changes the tar fingerprint', a !== b && /^[0-9a-f]{64}$/.test(b), true)
+    // A dependency's version counts even when none of its files is loaded.
+    write('dep2/package.json', JSON.stringify({ name: 'dep2', version: '1.0.0' }))
+    write('tar/package.json', JSON.stringify({ name: 'tar', version: '1.0.0', dependencies: { dep: '*', dep2: '*' } }))
+    const c = tarFingerprint(fakePacote)
+    write('dep2/package.json', JSON.stringify({ name: 'dep2', version: '1.0.1' }))
+    check('key: a dependency of tar that Node did not load changes it by its version', tarFingerprint(fakePacote) !== c, true)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
+  }
+
+  // An ES module tar ("type": "module"), loaded through require (Node 22.12
+  // and later load ES modules that way): the files it imports are not in
+  // require.cache, so every ES module file of it counts.
+  const tmpEsm = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'matchapack-tarfp-esm-'))
+  try {
+    const nm = path.join(tmpEsm, 'node_modules')
+    const write = (rel, text) => {
+      fs.mkdirSync(path.dirname(path.join(nm, rel)), { recursive: true })
+      fs.writeFileSync(path.join(nm, rel), text)
+    }
+    write('pacote/package.json', JSON.stringify({ name: 'pacote', version: '1.0.0' }))
+    write('tar/package.json', JSON.stringify({ name: 'tar', version: '1.0.0', type: 'module', main: 'index.js' }))
+    write('tar/index.js', "export { unpack } from './lib/unpack.js'\n")
+    write('tar/lib/unpack.js', 'export const unpack = 1\n')
+    const fakePacote = path.join(nm, 'pacote')
+    let loaded = true
+    try {
+      require(path.join(nm, 'tar', 'index.js'))
+    } catch (e) {
+      loaded = false
+      console.log(`SKIP hook: key: an ES module tar (this Node cannot require one: ${e.code || e.message})`)
+    }
+    if (loaded) {
+      const a = tarFingerprint(fakePacote)
+      fs.writeFileSync(path.join(nm, 'tar', 'lib', 'unpack.js'), 'export const unpack = 2\n')
+      check('key: in an ES module tar, a byte changed in a file it imports changes the tar fingerprint', tarFingerprint(fakePacote) !== a, true)
+    }
+  } finally {
+    fs.rmSync(tmpEsm, { recursive: true, force: true })
   }
 
   // The key: each part named; libuv's version is a part of it.
