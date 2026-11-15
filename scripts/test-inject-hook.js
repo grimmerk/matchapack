@@ -285,7 +285,9 @@ async function helperCases () {
       // gone, abbreviations included (--prefi, --include-workspace-r), the
       // command word and package names gone, other options kept. And the
       // npmrc layer that sets a workspace filter.
-      const r7 = await helperRun({ args: ['install', '--prefi=' + other, '-w', 'a', 'left-pad', '--omit', 'dev', '--include-workspace-r', '--legacy-peer-deps'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
+      // (npm 12 refuses abbreviated options: there the full names.)
+      const abbr = Number(require(path.join(npmDir, 'package.json')).version.split('.')[0]) < 12
+      const r7 = await helperRun({ args: ['install', (abbr ? '--prefi=' : '--prefix=') + other, '-w', 'a', 'left-pad', '--omit', 'dev', abbr ? '--include-workspace-r' : '--include-workspace-root', '--legacy-peer-deps'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
       fs.writeFileSync(path.join(ws, '.npmrc'), 'workspace=a\n')
       const r8 = await helperRun({ args: ['install', '--no-save'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: ws })
       fs.rmSync(path.join(ws, '.npmrc'))

@@ -194,7 +194,7 @@ const FILTERS = new Set(['workspace', 'workspaces', 'include-workspace-root', 'p
 // (`--prefi`) resolved as npm's nopt resolves it; `npmrc`, the npmrc layers
 // (project, user, global, builtin) whose `workspace` or `workspaces` is in
 // effect.
-function repairInfo (config, typed) {
+function repairInfo (config, typed, positional) {
   try {
     const cooked = config.parsedArgv && config.parsedArgv.cooked
     const defs = config.definitions
@@ -242,9 +242,9 @@ function repairInfo (config, typed) {
       }
       args.push(t)
     }
-    // Package names (nopt's `remain` after the command word) are not kept:
-    // a whole-project rebuild installs from package.json.
-    for (const name of (config.parsedArgv.remain || []).slice(1)) {
+    // Package names (the command's positional arguments) are not kept: a
+    // whole-project rebuild installs from package.json.
+    for (const name of Array.isArray(positional) ? positional : []) {
       const i = args.indexOf(String(name))
       if (i >= 0) {
         args.splice(i, 1)
@@ -585,7 +585,10 @@ function main () {
           // to some workspaces or name its root, abbreviations resolved by
           // npm's own rules; and the npmrc files that set such a filter
           // (the command line cannot unset them).
-          repair: repairInfo(this.config, String(cmd)),
+          // The package names are the arguments exec is given (npm 11 and
+          // 12 pass them; npm 10 defaults to npm.argv, its parse's `remain`
+          // with the command word already shifted off).
+          repair: repairInfo(this.config, String(cmd), Array.isArray(arguments[1]) ? arguments[1] : this.argv),
         }
       } catch (e) {
         send({ no_root: `could not read npm's install root: ${e && e.message}` })
