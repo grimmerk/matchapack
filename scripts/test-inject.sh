@@ -752,6 +752,48 @@ wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && [ "$(rec_of "$p")" = $((d_small + 1)) ] \
   && ok "a project without a gc record: after npm install left-pad@1.3.0 its record holds all $((d_small + 1)) entries of its tree" \
   || bad "family plain: rc=$rc, record $(rec_of "$p") (want $((d_small + 1)))"
+# A record behind the tree (matchapack stopped before it wrote one): the next
+# routed command, even one that places nothing, completes it from the
+# hidden lockfile.
+python3 - "$store" "$p" <<'PY' || bad "family behind: could not truncate the record"
+import glob, json, sys
+for f in glob.glob(sys.argv[1] + "/projects/*.json"):
+    r = json.load(open(f))
+    if r.get("path") == sys.argv[2]:
+        r["entries"] = r["entries"][:1]
+        json.dump(r, open(f, "w"))
+PY
+[ "$(rec_of "$p")" = 1 ] || bad "family behind: record not truncated ($(rec_of "$p"))"
+wrapped "$p" "npm install --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && [ "$(rec_of "$p")" = $((d_small + 1)) ] \
+  && ok "a gc record behind the tree (1 entry) is completed by a no-op npm install: $((d_small + 1)) entries" \
+  || bad "family behind: rc=$rc, record $(rec_of "$p") (want $((d_small + 1)))"
+# No package-lock.json (package-lock=false), and a root postinstall that
+# makes node_modules/.cache, so npm stops trusting the hidden lockfile: the
+# packages npm keeps then have neither an integrity nor a resolved in it.
+# The record must not drop their entries.
+p=$work/fam-nolock-cache; rm -rf "${p:?}"; mkdir -p "$p"
+echo '{"name":"nolock-cache","version":"1.0.0","scripts":{"postinstall":"mkdir -p node_modules/.cache"},"dependencies":{"chalk":"2.4.2","ms":"2.1.3","is-number":"7.0.0"}}' > "$p/package.json"
+echo 'package-lock=false' > "$p/.npmrc"
+wrapped "$p" "npm install --no-audit --no-fund" || bad "family nolock-cache: first install"
+r1=$(rec_of "$p")
+wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"; rc=$?
+[ $rc = 0 ] && [ "$r1" -ge 9 ] && [ "$(rec_of "$p")" = $((r1 + 1)) ] \
+  && ok "no lockfile and an untrusted hidden lockfile: the record keeps its $r1 entries and adds left-pad ($(rec_of "$p"))" \
+  || bad "family nolock-cache: rc=$rc, record $r1 -> $(rec_of "$p")"
+# npm ci twice in a workspaces project whose member has its own
+# node_modules (npm before 10.8.1 removes only the root's in npm ci, and
+# keeps the member's packages without extracting them): the record keeps
+# the entries of every installed package.
+p=$work/ws-ci-twice; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
+wrapped "$p" "npm ci --no-audit --no-fund" || bad "ws ci twice: first"
+wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
+want=$(python3 -c "
+import json,sys
+print(len({v['integrity'] for k,v in json.load(open(sys.argv[1]+'/node_modules/.package-lock.json'))['packages'].items() if v.get('integrity')}))" "$p")
+[ $rc = 0 ] && [ "$(rec_of "$p")" = "$want" ] \
+  && ok "npm ci twice in a workspaces project: the record holds every installed package's entry ($want)" \
+  || bad "ws ci twice: rc=$rc, record $(rec_of "$p"), want $want"
 # The hook not installed (what an npm that no longer calls the method looks
 # like): the package npm added is counted as unseen, and said.
 p=$(project fam-nohook small)

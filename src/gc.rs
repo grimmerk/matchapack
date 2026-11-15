@@ -7,7 +7,7 @@
 //! that was installed from it still has its node_modules.
 //!
 //! Which projects: every install records its directory and entries under
-//! `<store>/projects/` (Store::record_project). Projects installed before
+//! `<store>/projects/` (Store::update_record). Projects installed before
 //! records existed are found through the trial log (outcome `installed`; the
 //! run's `root`, or its `dir` in logs from before npm reported its root),
 //! with the entries their hidden lockfile

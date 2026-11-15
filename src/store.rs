@@ -23,6 +23,16 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// What the hidden lockfile npm wrote says about a project's store
+/// entries (`Store::update_record`): the entry keys it names, and whether it
+/// names the source of every package npm extracts.
+#[derive(Debug, Clone, Copy)]
+pub enum Tree<'a> {
+    Complete(&'a std::collections::HashSet<String>),
+    Incomplete(&'a std::collections::HashSet<String>),
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Integrity {
     pub algo: String,
@@ -401,34 +411,41 @@ impl Store {
         self.root.join("projects").join(format!("{}.json", &h.to_hex()[..32]))
     }
 
-    /// Record which entries the project at `root` (canonical) was installed
-    /// from, for `matchapack store gc`. Replaces the project's earlier record:
-    /// `npm ci` emptied node_modules, so the earlier record says nothing.
+    /// Replace the record of the project at `root` (canonical) with `used`
+    /// (tests; installs use `update_record`).
+    #[cfg(test)]
     pub fn record_project(&self, root: &Path, used: &[Integrity]) -> Result<()> {
         self.write_record(root, used.iter().map(Integrity::key).collect(), None)
     }
 
-    /// The record after a command of the install family (`npm install`,
-    /// `update`, `uninstall`), which leaves the packages it does not change
-    /// in place: the earlier record and this run's entries, less the
-    /// entries no package in the hidden lockfile npm wrote has any more
-    /// (`in_tree`: entry keys; None, no hidden lockfile: nothing is
-    /// dropped). So `store gc` keeps every entry the project still uses, and
-    /// may remove one a removed or replaced package used (the plan's G2).
-    /// A project without a record yet (installed by plain npm, or before
-    /// records existed) starts from every entry of its hidden lockfile,
-    /// which is what gc's fallback through the trial log keeps for it; a
-    /// record of this run alone would make gc skip that fallback and remove
-    /// the rest.
-    pub fn merge_project(&self, root: &Path, used: &[Integrity], in_tree: Option<&std::collections::HashSet<String>>) -> Result<()> {
-        let mut keys = match self.recorded_entries(root) {
-            Some(k) => k,
-            None => in_tree.map(|t| t.iter().cloned().collect()).unwrap_or_default(),
+    /// The record after a routed command (`npm ci`, `install`, `update`,
+    /// `uninstall`), one rule for all (NOTES "Review round 3"), from what the
+    /// hidden lockfile npm wrote says (`tree`):
+    /// - `Complete`: it names the source (an integrity or a `resolved`) of
+    ///   every package npm extracts, so its entries are the project's: the
+    ///   record is exactly those (what `store adopt` and gc's fallback through
+    ///   the trial log use). A record behind the tree (matchapack stopped
+    ///   before it wrote one; a project installed by plain npm) is completed,
+    ///   and entries of packages that left the tree drop out;
+    /// - `Incomplete`: some package has neither (npm read it from disk, not
+    ///   from a lockfile: `package-lock=false` with a hidden lockfile npm did
+    ///   not trust), so it cannot say what left: nothing is dropped. The
+    ///   install family: the earlier record, the tree's entries and this
+    ///   run's. `npm ci` (it emptied node_modules, except a workspace's own on
+    ///   npm before 10.8.1): of the earlier record what the tree still names,
+    ///   and this run's;
+    /// - `Unknown` (no hidden lockfile): `npm ci` this run's entries; the
+    ///   family the earlier record and this run's.
+    pub fn update_record(&self, root: &Path, used: &[Integrity], tree: Tree<'_>, ci: bool) -> Result<()> {
+        let old = self.recorded_entries(root).unwrap_or_default();
+        let mine = used.iter().map(Integrity::key);
+        let keys: Vec<String> = match tree {
+            Tree::Complete(t) => t.iter().cloned().collect(),
+            Tree::Incomplete(t) if ci => old.into_iter().filter(|k| t.contains(k)).chain(mine).collect(),
+            Tree::Incomplete(t) => old.into_iter().chain(t.iter().cloned()).chain(mine).collect(),
+            Tree::Unknown if ci => mine.collect(),
+            Tree::Unknown => old.into_iter().chain(mine).collect(),
         };
-        keys.extend(used.iter().map(Integrity::key));
-        if let Some(t) = in_tree {
-            keys.retain(|k| t.contains(k));
-        }
         self.write_record(root, keys, None)
     }
 
@@ -957,42 +974,56 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_install_family_keeps_the_record_and_drops_what_left_the_tree() {
-        let d = scratch("store-merge-record");
+    fn the_record_follows_a_complete_hidden_lockfile_and_drops_nothing_otherwise() {
+        let d = scratch("store-update-record");
         let store = Store::new(d.join("store"), d.join("cacache")).unwrap();
         let root = d.join("project");
         let i = |c: &str| Integrity { algo: "sha512".into(), hex: c.repeat(128) };
-        let (a, b, c) = (i("a"), i("b"), i("c"));
+        let (a, b, c, x) = (i("a"), i("b"), i("c"), i("e"));
         let keys = |v: &[&Integrity]| v.iter().map(|i| i.key()).collect::<std::collections::HashSet<String>>();
-        let rec = || {
-            let mut v = store.recorded_entries(&root).unwrap();
+        let set = |v: &[&Integrity]| {
+            let mut k: Vec<String> = v.iter().map(|i| i.key()).collect();
+            k.sort();
+            k
+        };
+        let rec = |r: &Path| {
+            let mut v = store.recorded_entries(r).unwrap();
             v.sort();
             v
         };
-        // npm ci: replaced.
-        store.record_project(&root, &[a.clone(), b.clone()]).unwrap();
-        assert_eq!(rec(), [a.key(), b.key()]);
-        // npm install c with nothing else changed: the earlier entries stay.
-        store.merge_project(&root, std::slice::from_ref(&c), Some(&keys(&[&a, &b, &c]))).unwrap();
-        assert_eq!(rec(), [a.key(), b.key(), c.key()]);
-        // npm install with nothing to place (or npm uninstall): the record
-        // keeps what the tree still has, and loses what it no longer has.
-        store.merge_project(&root, &[], Some(&keys(&[&a, &c]))).unwrap();
-        assert_eq!(rec(), [a.key(), c.key()]);
-        // No hidden lockfile after the run: nothing is dropped.
-        store.merge_project(&root, std::slice::from_ref(&b), None).unwrap();
-        assert_eq!(rec(), [a.key(), b.key(), c.key()]);
-        // No record yet: every entry of the tree (what gc's fallback through
-        // the trial log keeps), with this run's that are in it.
+        let at = |v: &[&Integrity]| {
+            store.write_record(&root, v.iter().map(|i| i.key()).collect(), None).unwrap();
+        };
+        let (abc, ac) = (keys(&[&a, &b, &c]), keys(&[&a, &c]));
+        // Complete, any command: exactly the tree. A record behind it is
+        // completed; an entry that left the tree, or this run's of a package
+        // npm rolled back, drops out.
+        for ci in [false, true] {
+            at(&[&a]);
+            store.update_record(&root, std::slice::from_ref(&c), Tree::Complete(&abc), ci).unwrap();
+            assert_eq!(rec(&root), set(&[&a, &b, &c]), "behind the tree, ci {ci}");
+            store.update_record(&root, std::slice::from_ref(&x), Tree::Complete(&ac), ci).unwrap();
+            assert_eq!(rec(&root), set(&[&a, &c]), "b left, x rolled back, ci {ci}");
+        }
+        // Incomplete, the install family: nothing is dropped.
+        at(&[&a, &b]);
+        store.update_record(&root, std::slice::from_ref(&x), Tree::Incomplete(&ac), false).unwrap();
+        assert_eq!(rec(&root), set(&[&a, &b, &c, &x]));
+        // Incomplete, npm ci: of the earlier record what the tree names, and
+        // this run's.
+        at(&[&a, &b]);
+        store.update_record(&root, std::slice::from_ref(&x), Tree::Incomplete(&ac), true).unwrap();
+        assert_eq!(rec(&root), set(&[&a, &x]));
+        // No hidden lockfile: npm ci this run's; the family adds them.
+        at(&[&a, &b]);
+        store.update_record(&root, std::slice::from_ref(&c), Tree::Unknown, false).unwrap();
+        assert_eq!(rec(&root), set(&[&a, &b, &c]));
+        store.update_record(&root, std::slice::from_ref(&c), Tree::Unknown, true).unwrap();
+        assert_eq!(rec(&root), set(&[&c]));
+        // No record yet (a project plain npm installed): the tree, if complete.
         let other = d.join("other");
-        store.merge_project(&other, &[a.clone(), b.clone()], Some(&keys(&[&a, &c]))).unwrap();
-        let mut got = store.recorded_entries(&other).unwrap();
-        got.sort();
-        assert_eq!(got, [a.key(), c.key()], "c was in the tree before this run, b is not in it");
-        // No record and no hidden lockfile: this run's entries.
-        let third = d.join("third");
-        store.merge_project(&third, std::slice::from_ref(&b), None).unwrap();
-        assert_eq!(store.recorded_entries(&third).unwrap(), [b.key()]);
+        store.update_record(&other, std::slice::from_ref(&b), Tree::Complete(&ac), false).unwrap();
+        assert_eq!(rec(&other), set(&[&a, &c]));
         drop(store);
         let _ = fs::remove_dir_all(&d);
     }

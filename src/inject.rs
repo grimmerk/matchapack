@@ -137,19 +137,23 @@ fn hidden_packages(text: &[u8]) -> Option<Packages> {
 /// integrity changed. Without a hidden lockfile before: every package when
 /// node_modules was absent or empty, else nothing can be said (None).
 ///
-/// Of those, only the packages whose directory was written in this run
-/// (`since`: when npm reported its root, before its command ran; None: no
-/// filter, tests): an extraction and a clone both make the directory then
-/// (npm renames the old one aside first), so a package npm left in place
-/// is not counted. The hidden lockfile alone cannot tell: a package that
-/// is new in it but already on disk with the version package-lock.json
+/// Of those, only the packages placed in this run: a real directory at the
+/// key whose own package.json was written after `since` (when npm reported
+/// its root, before its command ran; None: no filter, tests). An extraction
+/// and a clone (touched) both write it then; a package npm left in place
+/// is not counted, also when it gets a nested node_modules in this run
+/// (its directory's time changes then, its package.json's does not), and
+/// neither is a key that is a symlink (npm 10 with
+/// --install-strategy=linked: hoisted paths point into node_modules/.store,
+/// which the hook saw). The hidden lockfile alone cannot tell: a package
+/// that is new in it but already on disk with the version package-lock.json
 /// names is kept, not extracted (arborist's Shrinkwrap `add` takes its
 /// integrity from the lockfile), as after removing only the root's
 /// node_modules in a workspaces project, or after an npm that was stopped
-/// before it saved the hidden lockfile (NOTES "Whole-PR review"). A lower
-/// bound: a package the hook missed was extracted by npm, so its directory
-/// is new and it is counted; a directory npm or a script set back in time
-/// is not.
+/// before it saved the hidden lockfile (NOTES "Whole-PR review", "Review
+/// round 3"). A lower bound: a package the hook missed was extracted by
+/// npm, so its package.json is new and it is counted; one npm or a script
+/// set back in time is not.
 fn expected_packages(command: &str, root: &std::path::Path, before: Option<&[u8]>, nm_empty_before: bool, since: Option<std::time::SystemTime>) -> Option<BTreeSet<String>> {
     let after = hidden_packages(&std::fs::read(root.join("node_modules/.package-lock.json")).ok()?)?;
     let keys: BTreeSet<String> = if command == "ci" {
@@ -161,11 +165,42 @@ fn expected_packages(command: &str, root: &std::path::Path, before: Option<&[u8]
             None => return None,
         }
     };
+    // A real directory at the key (npm 10 with --install-strategy=linked
+    // lists hoisted paths that are symlinks into node_modules/.store, whose
+    // targets the hook saw), and its own package.json written in this run:
+    // an extraction and a clone (touched) both write it; a nested
+    // node_modules made inside a package npm left in place does not (the
+    // package directory's own time does change then). Not the birth time: a
+    // directory clone keeps the store entry's.
     let written = |k: &String| match since {
         None => true,
-        Some(t) => std::fs::symlink_metadata(root.join(k)).and_then(|m| m.modified()).is_ok_and(|m| m >= t),
+        Some(t) => {
+            std::fs::symlink_metadata(root.join(k)).is_ok_and(|m| m.file_type().is_dir())
+                && std::fs::symlink_metadata(root.join(k).join("package.json")).and_then(|m| m.modified()).is_ok_and(|m| m >= t)
+        }
     };
     Some(keys.into_iter().filter(written).collect())
+}
+
+/// The store entries the hidden lockfile npm wrote names, and whether it
+/// names the source (an integrity or a `resolved`) of every package npm
+/// extracts: only then can it say which entries left the tree
+/// (`Store::update_record`). None: no hidden lockfile, or not readable.
+fn tree_entries(root: &std::path::Path) -> Option<(std::collections::HashSet<String>, bool)> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("node_modules/.package-lock.json")).ok()?).ok()?;
+    let flag = |p: &serde_json::Value, k: &str| p.get(k).and_then(|x| x.as_bool()) == Some(true);
+    let mut keys = std::collections::HashSet::new();
+    let mut complete = true;
+    for (k, p) in v.get("packages")?.as_object()? {
+        match p.get("integrity").and_then(|x| x.as_str()).and_then(|s| crate::store::Integrity::parse(s).ok()) {
+            Some(i) => {
+                keys.insert(i.key());
+            }
+            None if is_package_key(k) && !flag(p, "link") && !flag(p, "inBundle") && p.get("resolved").and_then(|x| x.as_str()).is_none() => complete = false,
+            None => {}
+        }
+    }
+    Some((keys, complete))
 }
 
 /// The error for reads of unexpected keys of the hook's result, or None.
@@ -321,14 +356,16 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // root (npm stopped before its command, or its root could not be read)
     // nothing was cloned.
     if let Some(root) = &root {
-        let recorded = if stats.command.as_deref().unwrap_or("ci") == "ci" {
-            store.record_project(root, &stats.used)
-        } else {
-            // The packages npm did not touch stay, and so do their entries;
-            // also after a failed run, which npm rolled back.
-            let in_tree = crate::gc::read_hidden_lock(root).ok().map(|v| v.iter().map(|i| i.key()).collect());
-            store.merge_project(root, &stats.used, in_tree.as_ref())
+        // One rule for every command (store.rs `update_record`): also after
+        // a failed run, which npm rolled back.
+        let ci = stats.command.as_deref().unwrap_or("ci") == "ci";
+        let tree = tree_entries(root);
+        let shape = match &tree {
+            Some((t, true)) => crate::store::Tree::Complete(t),
+            Some((t, false)) => crate::store::Tree::Incomplete(t),
+            None => crate::store::Tree::Unknown,
         };
+        let recorded = store.update_record(root, &stats.used, shape, ci);
         if let Err(e) = recorded {
             crate::info!("could not record the project for `matchapack store gc`: {e:#}");
         }
@@ -512,13 +549,52 @@ mod tests {
         // one that does not exist is not counted either.
         let since = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         std::fs::create_dir_all(d.join("node_modules/a")).unwrap();
+        std::fs::write(d.join("node_modules/a/package.json"), "{}").unwrap();
         std::fs::create_dir_all(d.join("packages/w/node_modules/c")).unwrap();
-        let old = std::fs::File::open(d.join("packages/w/node_modules/c")).unwrap();
+        std::fs::write(d.join("packages/w/node_modules/c/package.json"), "{}").unwrap();
+        let old = std::fs::File::options().write(true).open(d.join("packages/w/node_modules/c/package.json")).unwrap();
         old.set_modified(since - std::time::Duration::from_secs(3600)).unwrap();
+        // c is left in place and gets a nested node_modules in this run: its
+        // directory's time is new, its package.json's is not.
+        std::fs::create_dir_all(d.join("packages/w/node_modules/c/node_modules")).unwrap();
         assert_eq!(expected_packages("install", &d, None, true, Some(since)), set(&["node_modules/a"]), "c is in place, untouched");
         assert_eq!(expected_packages("ci", &d, None, true, Some(since)), set(&["node_modules/a"]));
-        std::fs::remove_dir_all(d.join("node_modules/a")).unwrap();
+        // A key that is a symlink (npm 10, --install-strategy=linked: hoisted
+        // paths point into node_modules/.store, which the hook saw) is not
+        // counted, whatever the times.
+        std::fs::rename(d.join("node_modules/a"), d.join("a-target")).unwrap();
+        std::os::unix::fs::symlink(d.join("a-target"), d.join("node_modules/a")).unwrap();
+        assert_eq!(expected_packages("install", &d, None, true, Some(since)), set(&[]), "a symlink key");
+        std::fs::remove_file(d.join("node_modules/a")).unwrap();
         assert_eq!(expected_packages("install", &d, None, true, Some(since)), set(&[]), "a directory that is not there");
+    }
+
+    #[test]
+    fn the_hidden_lockfile_is_complete_when_it_names_every_packages_source() {
+        let d = crate::store::tests::scratch("inject-tree-entries");
+        std::fs::create_dir_all(d.join("node_modules")).unwrap();
+        assert!(tree_entries(&d).is_none(), "no hidden lockfile");
+        let sri = format!("sha512-{}", "A".repeat(86) + "==");
+        let write = |p: serde_json::Value| std::fs::write(d.join("node_modules/.package-lock.json"), serde_json::json!({ "lockfileVersion": 3, "packages": p }).to_string()).unwrap();
+        // Integrities, a git package with only `resolved`, a link, a bundled
+        // package and a workspace directory: complete.
+        write(serde_json::json!({
+            "node_modules/a": { "version": "1.0.0", "integrity": sri },
+            "node_modules/g": { "version": "1.0.0", "resolved": "git+ssh://x/g.git#abc" },
+            "node_modules/w": { "resolved": "packages/w", "link": true },
+            "node_modules/a/node_modules/b": { "version": "1.0.0", "inBundle": true },
+            "packages/w": { "version": "1.0.0" },
+        }));
+        let (keys, complete) = tree_entries(&d).unwrap();
+        assert!(complete);
+        assert_eq!(keys.len(), 1);
+        // A package npm read from disk without a lockfile: neither.
+        write(serde_json::json!({
+            "node_modules/a": { "version": "1.0.0", "integrity": sri },
+            "node_modules/kept": { "version": "1.0.0" },
+        }));
+        assert_eq!(tree_entries(&d).map(|(k, c)| (k.len(), c)), Some((1, false)));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

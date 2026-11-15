@@ -53,8 +53,9 @@
 # it. MATCHAPACK_VERIFY_STEPS_SELFTEST=checker-dies (the log checker exits
 # before printing anything), wrong-command (it expects another npm command
 # than the step's), touch-b (after B's step, one file plain npm leaves alone
-# is touched in B) or extra-record (B's step leaves two log records): the
-# run must fail.
+# is touched in B), extra-record (B's step leaves two log records) or
+# untrust-b (a package directory in B made newer than its hidden lockfile):
+# the run must fail.
 set -uo pipefail
 src=${1:?usage: verify-steps.sh <source> <work> [--start bare|ci|nolock] [--pre cmd] -- <step> [-- <step> ...]}
 work=$2; shift 2
@@ -104,7 +105,8 @@ EOF
 }
 trap forget_copies EXIT
 if [ "$(uname)" = Darwin ]; then cpcow() { cp -c -R -p "$1" "$2"; }; else cpcow() { cp -a --reflink=auto "$1" "$2"; }; fi
-cpcow "$src" "$work/A"; cpcow "$src" "$work/B"
+cpcow "$src" "$work/A" || { echo "could not copy $src to $work/A" >&2; exit 2; }
+cpcow "$src" "$work/B" || { echo "could not copy $src to $work/B" >&2; exit 2; }
 A=$work/A; B=$work/B
 ns() { python3 -c 'import time;print(time.time_ns())'; }
 common=(--no-audit --no-fund)
@@ -156,6 +158,8 @@ for ((i = 0; i < nsteps; i++)); do
   label="${envs[*]+${envs[*]} }npm ${args[*]}"
   [ "$sub" != . ] && label="(in $sub) $label"
   record_of > "$work/rec.before"
+  # B's hidden lockfile before the step: how many packages left or changed.
+  cp "$B/node_modules/.package-lock.json" "$work/hidden.before" 2>/dev/null || : > "$work/hidden.before"
   nlog=$( { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl"; } 2>/dev/null | tr -d ' '); nlog=${nlog:-0}
   marker=$work/.step-start; touch "$marker"; sleep 1
   t=$(ns); [ -z "$ta0" ] && ta0=$t
@@ -170,6 +174,9 @@ for ((i = 0; i < nsteps; i++)); do
   # left alone; B's step logged two records.
   case ${MATCHAPACK_VERIFY_STEPS_SELFTEST-} in
     touch-b) f=$(cd "$B" && find node_modules -type f ! -newer "$marker" | LC_ALL=C sort | head -1); [ -n "$f" ] && touch "$B/$f" ;;
+    # A package directory newer than the hidden lockfile: npm no longer
+    # trusts B's (what the trust check reads).
+    untrust-b) f=$(cd "$B" && find node_modules -mindepth 1 -maxdepth 1 -type d ! -name '.*' | LC_ALL=C sort | head -1); [ -n "$f" ] && { sleep 1; touch "$B/$f"; } ;;
     extra-record) tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" >> "$MATCHAPACK_LOG_DIR/log.jsonl" ;;
   esac
   echo "step $((i+1)): $label"
@@ -215,9 +222,9 @@ for ((i = 0; i < nsteps; i++)); do
   record_of > "$work/rec.after"
   # Fail closed: a checker that could not run, or stopped before printing
   # why, fails the step too.
-  if ! python3 -I - "$work/rec.json" "$sb" "$B" "$clones" "$unseen" "$work/rec.before" "$work/rec.after" "${args[0]}" "$here/src/wrapper.rs" "$marker" <<'EOF' > "$work/rec.check" 2> "$work/rec.log"; then
+  if ! python3 -I - "$work/rec.json" "$sb" "$B" "$clones" "$unseen" "$work/rec.before" "$work/rec.after" "${args[0]}" "$here/src/wrapper.rs" "$marker" "$work/hidden.before" <<'EOF' > "$work/rec.check" 2> "$work/rec.log"; then
 import json, os, re, sys
-recf, status, root, clones, unseen, rbf, raf, word, table, marker = sys.argv[1:11]
+recf, status, root, clones, unseen, rbf, raf, word, table, marker, hbf = sys.argv[1:12]
 # The harness's self-test: a checker that dies before saying anything.
 if os.environ.get("MATCHAPACK_VERIFY_STEPS_SELFTEST") == "checker-dies":
     sys.exit(1)
@@ -253,8 +260,27 @@ elif clones not in ("", "some", "none") and str(cloned) != clones:
 if status == "0" and str(inj.get("unseen")) != unseen and not (unseen == "0" and inj.get("unseen") is None):
     bad.append(f"unseen {inj.get('unseen')}, want {unseen}")
 # The project record (store gc): only packages B has; for the install
-# family, nothing of the earlier record that B still has is dropped.
+# family, nothing of the earlier record that B still has is dropped. Whether
+# B's hidden lockfile names the source of every package (an integrity or a
+# `resolved`): only then do its integrities say what B has (store.rs
+# `update_record`).
+def is_pkg(k):
+    i = k.rfind("node_modules/")
+    if i < 0 or (i > 0 and not k[:i].endswith("/")):
+        return False
+    name = k[i + len("node_modules/"):]
+    if "/" in name:
+        sc, _, rest = name.partition("/")
+        return sc.startswith("@") and rest != "" and "/" not in rest
+    return name != "" and not name.startswith("@")
+def packages(path):
+    try:
+        pk = json.load(open(path)).get("packages", {})
+    except (OSError, ValueError):
+        return {}
+    return {k: p.get("version") for k, p in pk.items() if is_pkg(k) and not p.get("link") and not p.get("inBundle")}
 tree = set()
+complete = True
 # Entries of the packages whose directory was written in this step.
 written = set()
 t0 = os.stat(marker).st_mtime_ns
@@ -268,6 +294,8 @@ try:
             a, _, h = part.partition("-")
             if a in rank and (best is None or rank.index(a) < rank.index(best[0])):
                 best = (a, b64decode(h.split("?")[0]).hex())
+        if not best and is_pkg(k) and not p.get("link") and not p.get("inBundle") and not p.get("resolved"):
+            complete = False
         if best:
             tree.add(f"{best[0]}-{best[1]}")
             try:
@@ -279,10 +307,17 @@ try:
 except (OSError, ValueError):
     have_tree = False
 before, after = set(rb.split()), set(ra.split())
-if have_tree and not after <= tree:
+if have_tree and complete and not after <= tree:
     bad.append(f"the gc record holds {len(after - tree)} entries B's hidden lockfile does not have")
-if have_tree and r.get("command") != "ci" and not (before & tree) <= after:
+if have_tree and complete and r.get("command") != "ci" and not (before & tree) <= after:
     bad.append(f"the gc record dropped {len((before & tree) - after)} entries B still has")
+# A bound that does not use integrities: the record loses at most as many
+# entries as package keys that left B's hidden lockfile or changed version
+# in this step (a package still installed keeps its entry).
+hb, ha = packages(hbf), packages(os.path.join(root, "node_modules/.package-lock.json"))
+moved = sum(1 for k, v in hb.items() if ha.get(k) != v)
+if len(before - after) > moved:
+    bad.append(f"the gc record lost {len(before - after)} entries, but only {moved} packages left or changed")
 # A step that cloned: the record has the entries of what it placed.
 if have_tree and status == "0" and cloned and not (after & written):
     bad.append(f"cloned {cloned}, but the gc record has none of the {len(written)} entries placed in this step")
