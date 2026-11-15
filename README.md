@@ -238,7 +238,9 @@ adds or changes is replaced by clones. So:
   from npm's own settings for that run: a sentence or two, then each command
   on a line of its own. Every form first removes every `node_modules` of the
   project, a workspace member's own too (`npm ci` before npm 10.8.1 removes
-  only the root's, and an install keeps what it finds):
+  only the root's, and an install keeps what it finds), and nothing outside
+  it: a `node_modules` behind a symlink to another directory (a member
+  linked from elsewhere) is left out, and the advice says so:
   - usually: check `git diff` of `package.json` and `package-lock.json`,
     then `MATCHAPACK=0 npm ci <the same arguments>`;
   - no lockfile to rebuild from (no `package-lock.json` or
