@@ -185,7 +185,9 @@ In detail:
   pacote's extraction once under each extraction code before that code
   clones it, entries the classic engine made included (stores filled before
   PR C2 still hold them); after that one in 50 at random
-  (`MATCHAPACK_INJECT_CHECK=all`, `off` or another number). An entry that
+  (`MATCHAPACK_INJECT_CHECK=all`, `off` or another number: what each does
+  and costs is in "How matchapack checks itself while it runs", below; `off`
+  is not just fewer samples). An entry that
   differs is replaced by pacote's extraction, which is what gets installed,
   and matchapack says so. The extraction code is named by its content, not by
   version numbers (see "After an npm or Node upgrade" below). Details:
@@ -404,6 +406,20 @@ zlib, the OS; #72), not a speed-up. To check the whole store at once after
 an upgrade, run `matchapack store verify` ([After an npm or Node
 upgrade](#after-an-npm-or-node-upgrade), [Store
 maintenance](#store-maintenance)).
+
+`MATCHAPACK_INJECT_CHECK` (`should_check` in src/serve.rs): a number N (50
+when unset) compares one in N entries known under the running key (C) and
+always compares an entry not yet known under it (B); `all` compares every
+entry; `off` compares nothing at all, B included, so after an upgrade that
+changed the extraction code nothing is compared before it is cloned. To
+make the sample cheaper, set a larger number (`MATCHAPACK_INJECT_CHECK=200`),
+not `off`. What it costs day to day (a large project, about 3,800
+packages, warm store, NOTES "PR C2: a recorded digest per entry
+(shelved)"): plain `npm ci` 14.6 s; matchapack with no comparison 7.5 s;
+the default one-in-50 sample about 0.4 s (5 %) more per reinstall (7.8 to
+8.0 s). The fingerprint gate and the result trap cost milliseconds; B
+happens once per entry after such an upgrade, and `store verify` can do it
+ahead of time.
 
 The Yarn 1 engine has no such comparison while it runs: it clones from
 Yarn's own cache at Yarn's link step, with no store and no extraction to
