@@ -1150,6 +1150,35 @@ done
 [ $rc = 0 ] && grep -q 'running npm ci to rebuild node_modules' "$work/out" && [ ! -e "$mk" ] && [ -f "$p/packages/app/node_modules/y1-b/package.json" ] \
   && ok "a broken npm ci: the automatic plain npm ci rebuilds a member's own node_modules too" \
   || bad "broke, ci, member node_modules: rc=$rc, marker $([ -e "$mk" ] && echo still there || echo gone)"
+# Nothing outside the project is removed: a workspace member that is a
+# symlink to a directory elsewhere has its node_modules there (npm
+# extracts into it; matchapack never clones there). The advice leaves it
+# out and says so, and following it keeps a marker there; the automatic
+# npm ci rebuild leaves it too (npm ci from 10.8.1 removes a member's
+# node_modules itself, through the link, so the marker is checked before
+# that only).
+p=$work/fam-symws; o=$work/fam-symws-outside; rm -rf "${p:?}" "${o:?}"; mkdir -p "$p/packages" "$o"
+echo '{"name":"symws","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}' > "$p/package.json"
+echo '{"name":"ws-ext","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}' > "$o/package.json"
+ln -s "$o" "$p/packages/ext"
+(cd "$p" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$work/out" 2>&1) || bad "symlinked member: lockfile"
+wrapped "$p" "npm ci --no-audit --no-fund" || bad "symlinked member: npm ci"
+[ -d "$o/node_modules/lc-s" ] && echo outside > "$o/node_modules/MARKER"
+(export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm install --no-save --no-audit --no-fund"); rc=$?
+if [ $rc = 1 ] && grep -q "One node_modules behind a symlink to outside the project is left out: matchapack removes nothing outside the project." "$work/out" \
+  && ! grep '^  rm -rf' "$work/out" | grep -q "packages/ext\|fam-symws-outside" && follow_advice "$p" && [ -f "$o/node_modules/MARKER" ]; then
+  ok "a member symlinked to outside the project: the advice leaves its node_modules out and says so; following it keeps a marker there"
+else
+  bad "symlinked member, advice: rc=$rc, marker $([ -f "$o/node_modules/MARKER" ] && echo kept || echo gone), $(grep '^  rm' "$work/out")"
+fi
+npm_old_ci=$(node -e 'const [a,b]=process.argv[1].split(".").map(Number); console.log(a < 10 || (a === 10 && b < 8) ? 1 : 0)' "$(npm -v)")
+(export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+if [ $rc = 0 ] && grep -q 'running npm ci to rebuild node_modules' "$work/out" && ! grep -q 'could not remove' "$work/out" \
+  && { [ "$npm_old_ci" = 0 ] || [ -f "$o/node_modules/MARKER" ]; }; then
+  ok "a broken npm ci with a member symlinked to outside: the automatic rebuild removes nothing there$([ "$npm_old_ci" = 0 ] && echo " (npm $(npm -v) removes it itself; the marker is checked before 10.8.1)")"
+else
+  bad "symlinked member, automatic npm ci: rc=$rc, marker $([ -f "$o/node_modules/MARKER" ] && echo kept || echo gone)"
+fi
 # npm 11 warns about an abbreviation (`--prod`) once; the repair options'
 # second parse must not say it again.
 p=$(project prod-warn bundled)

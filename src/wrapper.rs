@@ -217,8 +217,28 @@ fn filter_env(names: &[String]) -> Vec<String> {
 /// clones a broken run placed in a member's node_modules would survive a
 /// rebuild that does not remove them first. Keys outside the root (`../x`)
 /// are not followed: matchapack never clones there.
-pub(crate) fn node_modules_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out = vec![root.join("node_modules")];
+///
+/// Only directories inside the project: a candidate is kept when its
+/// parent, symlinks resolved, is inside the root (also resolved) and the
+/// candidate itself is a real directory, not a symlink. A member that is a
+/// symlink to a directory elsewhere (`packages/ext` → `/other`) would
+/// otherwise make `/other/node_modules` a candidate; npm extracts there,
+/// matchapack never clones there. The second number: the candidates left
+/// out that way (the advice says so).
+pub(crate) fn node_modules_dirs(root: &std::path::Path) -> (Vec<std::path::PathBuf>, usize) {
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let inside = |d: &std::path::Path| {
+        let parent_inside = d.parent().and_then(|p| std::fs::canonicalize(p).ok()).is_some_and(|p| p.starts_with(&canonical_root));
+        parent_inside && std::fs::symlink_metadata(d).map_or(true, |m| m.is_dir() && !m.file_type().is_symlink())
+    };
+    let mut out = vec![];
+    let mut skipped: Vec<std::path::PathBuf> = vec![];
+    let nm = root.join("node_modules");
+    if inside(&nm) {
+        out.push(nm);
+    } else {
+        skipped.push(nm);
+    }
     for f in ["node_modules/.package-lock.json", "package-lock.json", "npm-shrinkwrap.json"] {
         let Some(v) = std::fs::read_to_string(root.join(f)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
             continue;
@@ -231,12 +251,17 @@ pub(crate) fn node_modules_dirs(root: &std::path::Path) -> Vec<std::path::PathBu
             }
             let Some(i) = parts.iter().position(|p| *p == "node_modules") else { continue };
             let d = root.join(parts[..=i].join("/"));
-            if i > 0 && !out.contains(&d) && d.is_dir() {
+            if i == 0 || out.contains(&d) || skipped.contains(&d) || !d.is_dir() {
+                continue;
+            }
+            if inside(&d) {
                 out.push(d);
+            } else {
+                skipped.push(d);
             }
         }
     }
-    out
+    (out, skipped.len())
 }
 
 /// Before the automatic plain `npm ci` after a broken `npm ci`: remove every
@@ -248,11 +273,11 @@ fn remove_node_modules(inject: Option<&Value>) {
     let Some(root) = inject.and_then(|i| i["root"].as_str()).map(std::path::PathBuf::from) else {
         return;
     };
-    for d in node_modules_dirs(&root) {
+    for d in node_modules_dirs(&root).0 {
+        // Only real directories (`node_modules_dirs` keeps no symlink).
         let r = match std::fs::symlink_metadata(&d) {
-            Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&d),
-            Ok(_) => std::fs::remove_dir_all(&d),
-            Err(_) => continue,
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => std::fs::remove_dir_all(&d),
+            _ => continue,
         };
         if let Err(e) = r {
             eprintln!("matchapack: could not remove {}: {e}", d.display());
@@ -292,11 +317,18 @@ fn remove_node_modules(inject: Option<&Value>) {
 /// nothing: the same command again with plain npm, nothing removed.
 /// Credentials in the arguments are shown as `***` (the run log's
 /// redaction), and the advice says so.
-fn repair_advice(args: &[String], command: &str, root: Option<&std::path::Path>, s: &RepairSettings, env: &[String], dirs: &[std::path::PathBuf]) -> String {
+fn repair_advice(args: &[String], command: &str, root: Option<&std::path::Path>, s: &RepairSettings, env: &[String], dirs: &[std::path::PathBuf], skipped: usize) -> String {
     let shown_args = trial::redact_args(args);
     let again = shell_line("MATCHAPACK=0 npm", &shown_args);
+    // `skipped`: node_modules directories behind a symlink to outside the
+    // project, left out of the removal (`node_modules_dirs`).
+    let skip_note = match skipped {
+        0 => String::new(),
+        1 => " One node_modules behind a symlink to outside the project is left out: matchapack removes nothing outside the project.".to_string(),
+        n => format!(" {n} node_modules directories behind a symlink to outside the project are left out: matchapack removes nothing outside the project."),
+    };
     let lines = |text: String, commands: Vec<String>| {
-        std::iter::once(text).chain(commands.into_iter().map(|c| format!("  {c}"))).collect::<Vec<_>>().join("\n")
+        std::iter::once(format!("{text}{skip_note}")).chain(commands.into_iter().map(|c| format!("  {c}"))).collect::<Vec<_>>().join("\n")
     };
     let Some(root) = root else {
         let advice = lines(
@@ -410,8 +442,8 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
         let settings = inject.map(RepairSettings::of).unwrap_or_default();
         let command = inject.and_then(|i| i["command"].as_str()).unwrap_or(command);
         let env: Vec<String> = std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect();
-        let dirs = root.as_deref().map(node_modules_dirs).unwrap_or_default();
-        eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, root.as_deref(), &settings, &env, &dirs));
+        let (dirs, skipped) = root.as_deref().map(node_modules_dirs).unwrap_or_default();
+        eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, root.as_deref(), &settings, &env, &dirs, skipped));
     };
     match outcome {
         Ok(s) => {
@@ -759,7 +791,7 @@ mod tests {
         let dirs = vec![d.join("node_modules")];
         let ends = |s: String, tail: &str| assert!(s.ends_with(tail), "{s}\n  does not end with\n{tail}");
         let known = RepairSettings { package_lock: Some(true), save: Some(true), workspace_filter: Some(false), flags: Some(vec![]), npmrc: vec![], unsure: false, missing: vec![] };
-        let adv = |args: &[&str], cmd: &str, s: &RepairSettings| repair_advice(&a(args), cmd, Some(d.as_path()), s, &[], &dirs);
+        let adv = |args: &[&str], cmd: &str, s: &RepairSettings| repair_advice(&a(args), cmd, Some(d.as_path()), s, &[], &dirs, 0);
         // No lockfile in the root: npm ci would refuse; node_modules removed,
         // then the same command with plain npm; each command on its own line.
         let s = adv(&["install", "--no-package-lock", "left-pad"], "install", &known);
@@ -802,7 +834,7 @@ mod tests {
         // before the commands.
         let env = a(&["PATH", "NPM_CONFIG_workspace", "npm_config_include_workspace_root", "npm_config_workspaces_update", "npm_config_omit"]);
         assert_eq!(filter_env(&env), a(&["NPM_CONFIG_workspace", "npm_config_include_workspace_root"]));
-        let s = repair_advice(&a(&["i", "x"]), "install", Some(d.as_path()), &parsed, &env, &dirs);
+        let s = repair_advice(&a(&["i", "x"]), "install", Some(d.as_path()), &parsed, &env, &dirs, 0);
         ends(s, &format!("\n  env -u NPM_CONFIG_workspace -u npm_config_include_workspace_root MATCHAPACK=0 npm ci --prefix {root} --omit=dev"));
         let rc = RepairSettings { npmrc: vec!["project".into()], ..parsed.clone() };
         let s = adv(&["i", "x"], "install", &rc);
@@ -824,7 +856,7 @@ mod tests {
         ] {
             let s = of(r.clone());
             assert!(s.unsure && s.flags.is_none(), "{r}: {s:?}");
-            ends(repair_advice(&a(&["install", "-w", "a", "--omit=dev"]), "install", Some(d.as_path()), &s, &[], &dirs), &format!("\n  MATCHAPACK=0 npm ci --prefix {root}"));
+            ends(repair_advice(&a(&["install", "-w", "a", "--omit=dev"]), "install", Some(d.as_path()), &s, &[], &dirs, 0), &format!("\n  MATCHAPACK=0 npm ci --prefix {root}"));
         }
         let s = of(serde_json::json!({ "args": ["--omit=dev"], "checked": true }));
         assert!(!s.unsure && s.flags == Some(a(&["--omit=dev"])), "{s:?}");
@@ -846,7 +878,7 @@ mod tests {
         assert!(!s.contains("SECRET") && s.contains("credentials in the command line"), "{s}");
         // Without npm's root report matchapack had placed nothing: the same
         // command again, no npm ci, nothing removed (`-w a` stays as typed).
-        let s = repair_advice(&a(&["install", "left-pad@1.3.0", "-w", "a"]), "install", None, &RepairSettings::default(), &[], &[]);
+        let s = repair_advice(&a(&["install", "left-pad@1.3.0", "-w", "a"]), "install", None, &RepairSettings::default(), &[], &[], 0);
         assert_eq!(s, "npm had not reported its install root, so matchapack had placed nothing: run the same command again with plain npm:\n  MATCHAPACK=0 npm install left-pad@1.3.0 -w a");
         std::fs::remove_file(d.join("package-lock.json")).unwrap();
         std::fs::write(d.join("npm-shrinkwrap.json"), "{}").unwrap();
@@ -863,7 +895,29 @@ mod tests {
         }
         std::fs::write(d.join("node_modules/.package-lock.json"), r#"{"packages":{"node_modules/a":{},"node_modules/a/node_modules/x":{},"packages/b/node_modules/ms":{},"../out/node_modules/y":{}}}"#).unwrap();
         std::fs::write(d.join("package-lock.json"), r#"{"packages":{"":{},"packages/b/node_modules/ms":{},"packages/c/node_modules/z":{},"packages/b":{}}}"#).unwrap();
-        assert_eq!(node_modules_dirs(&d), vec![d.join("node_modules"), d.join("packages/b/node_modules")]);
+        assert_eq!(node_modules_dirs(&d), (vec![d.join("node_modules"), d.join("packages/b/node_modules")], 0));
+        // Nothing outside the project: a member that is a symlink to a
+        // directory elsewhere (a symlinked ancestor), and a member's
+        // node_modules that is itself a symlink, are left out and counted;
+        // the advice says so before the commands.
+        let other = crate::store::tests::scratch("wrapper-repair-other");
+        std::fs::create_dir_all(other.join("ext/node_modules/y")).unwrap();
+        std::fs::create_dir_all(other.join("nm/z")).unwrap();
+        std::os::unix::fs::symlink(other.join("ext"), d.join("packages/ext")).unwrap();
+        std::fs::create_dir_all(d.join("packages/l")).unwrap();
+        std::os::unix::fs::symlink(other.join("nm"), d.join("packages/l/node_modules")).unwrap();
+        std::fs::write(d.join("package-lock.json"), r#"{"packages":{"packages/b/node_modules/ms":{},"packages/ext/node_modules/y":{},"packages/l/node_modules/z":{}}}"#).unwrap();
+        let (dirs2, skipped) = node_modules_dirs(&d);
+        assert_eq!((dirs2.clone(), skipped), (vec![d.join("node_modules"), d.join("packages/b/node_modules")], 2));
+        let s = repair_advice(&a(&["install", "x"]), "install", Some(d.as_path()), &known, &[], &dirs2, skipped);
+        assert!(s.contains("rebuild with plain npm: 2 node_modules directories behind a symlink to outside the project are left out: matchapack removes nothing outside the project.\n  rm -rf "), "{s}");
+        assert!(!s.contains(&other.display().to_string()) && !s.contains("packages/ext") && !s.contains("packages/l/"), "{s}");
+        // The root's own node_modules behind a symlink: left out too.
+        std::fs::remove_dir_all(d.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(other.join("nm"), d.join("node_modules")).unwrap();
+        assert_eq!(node_modules_dirs(&d).0, vec![d.join("packages/b/node_modules")]);
+        assert!(other.join("ext/node_modules/y").is_dir() && other.join("nm/z").is_dir());
+        let _ = std::fs::remove_dir_all(&other);
         let _ = std::fs::remove_dir_all(&d);
     }
 
