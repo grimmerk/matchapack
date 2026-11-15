@@ -116,9 +116,10 @@ NPM="npm"; export NPM
 fail=0
 say_fail() { fail=1; echo "  FAIL $*"; }
 
-# B's project record for store gc (entry keys, one per line; nothing if none).
+# The project record for store gc of the install root $1 in B (entry keys,
+# one per line; nothing if none).
 record_of() {
-  python3 -I - "$store/projects" "$B" <<'EOF'
+  python3 -I - "$store/projects" "$1" <<'EOF'
 import json, os, sys
 d, want = sys.argv[1], sys.argv[2]
 for n in (os.listdir(d) if os.path.isdir(d) else []):
@@ -158,6 +159,26 @@ for ((i = 0; i < nsteps; i++)); do
     elif [ ${#args[@]} = 0 ] && [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then envs+=("$w")
     else args+=("$w"); fi
   done
+  # npm's install root for this step in each copy: the `--prefix` / `-C`
+  # typed, relative to the start directory, else the copy itself (npm walks
+  # up from the start directory to the project or workspace root, which is
+  # the copy). Every root-specific check uses it; the whole-project diff
+  # stays at A and B.
+  rel=$(python3 -I - "$sub" ${args[@]+"${args[@]}"} <<'EOF'
+import os, sys
+sub, args = sys.argv[1], sys.argv[2:]
+p = None
+for i, a in enumerate(args):
+    for name in ("--prefix", "-C"):
+        if a == name and i + 1 < len(args):
+            p = args[i + 1]
+        elif a.startswith(name + "="):
+            p = a[len(name) + 1:]
+r = os.path.normpath(os.path.join(sub, p)) if p is not None and not os.path.isabs(p) else "."
+print("." if r.startswith("..") else r)
+EOF
+)
+  if [ "$rel" = . ]; then RA=$A; RB=$B; else RA=$A/$rel; RB=$B/$rel; fi
   label="${envs[*]+${envs[*]} }npm ${args[*]}"
   [ "$sub" != . ] && label="(in $sub) $label"
   if [ -n "$run" ]; then
@@ -165,9 +186,9 @@ for ((i = 0; i < nsteps; i++)); do
     (cd "$B" && eval "$run") > "$work/run$i-B.log" 2>&1 || { echo "RUN failed in B: $run"; exit 1; }
     label="(after: $run) $label"
   fi
-  record_of > "$work/rec.before"
+  record_of "$RB" > "$work/rec.before"
   # B's hidden lockfile before the step: how many packages left or changed.
-  cp "$B/node_modules/.package-lock.json" "$work/hidden.before" 2>/dev/null || : > "$work/hidden.before"
+  cp "$RB/node_modules/.package-lock.json" "$work/hidden.before" 2>/dev/null || : > "$work/hidden.before"
   nlog=$( { wc -l < "$MATCHAPACK_LOG_DIR/log.jsonl"; } 2>/dev/null | tr -d ' '); nlog=${nlog:-0}
   marker=$work/.step-start; touch "$marker"; sleep 1
   t=$(ns); [ -z "$ta0" ] && ta0=$t
@@ -200,19 +221,20 @@ for ((i = 0; i < nsteps; i++)); do
   # The files npm writes, by name.
   while IFS= read -r f; do
     if [ -e "$A/$f" ] || [ -e "$B/$f" ]; then cmp -s "$A/$f" "$B/$f" || say_fail "cmp: $f differs"; fi
-  done < <( (cd "$A" && find . -name node_modules -prune -o -name package.json -print; cd "$B" && find . -name node_modules -prune -o -name package.json -print; echo ./package-lock.json; echo ./npm-shrinkwrap.json) | sed 's#^\./##' | LC_ALL=C sort -u)
-  if [ -d "$A/node_modules" ] || [ -d "$B/node_modules" ]; then
-    trust=$(node "$here/scripts/hidden-lockfile-trusted.js" "$npm_dir" "$A" "$B" 2>&1) || say_fail "hidden-lockfile-trusted.js: $trust"
+  done < <( (cd "$A" && find . -name node_modules -prune -o -name package.json -print; cd "$B" && find . -name node_modules -prune -o -name package.json -print; echo ./package-lock.json; echo ./npm-shrinkwrap.json; echo "./$rel/package-lock.json") | sed 's#^\./##' | LC_ALL=C sort -u)
+  if [ -d "$RA/node_modules" ] || [ -d "$RB/node_modules" ]; then
+    trust=$(node "$here/scripts/hidden-lockfile-trusted.js" "$npm_dir" "$RA" "$RB" 2>&1) || say_fail "hidden-lockfile-trusted.js: $trust"
     ta=$(echo "$trust" | sed -n 1p | cut -f1 | cut -d' ' -f1); tb=$(echo "$trust" | sed -n 2p | cut -f1 | cut -d' ' -f1)
     [ "$ta" = "$tb" ] || say_fail "npm trusts the hidden lockfile: plain $ta, matchapack $tb"
   fi
-  ea=0; (cd "$A" && npm ls --all > "$work/A.ls" 2>&1) || ea=$?
-  eb=0; (cd "$B" && npm ls --all > "$work/B.ls" 2>&1) || eb=$?
+  ea=0; (cd "$RA" && npm ls --all > "$work/A.ls" 2>&1) || ea=$?
+  eb=0; (cd "$RB" && npm ls --all > "$work/B.ls" 2>&1) || eb=$?
   sed -e "s#$A#<root>#g" -e 's#/[^ ]*_logs/[^ ]*#<log>#' -e '1s#^A@#<name>@#' "$work/A.ls" > "$work/A.ls.n"
   sed -e "s#$B#<root>#g" -e 's#/[^ ]*_logs/[^ ]*#<log>#' -e '1s#^B@#<name>@#' "$work/B.ls" > "$work/B.ls.n"
   { [ $ea = $eb ] && cmp -s "$work/A.ls.n" "$work/B.ls.n"; } || { say_fail "npm ls differs (status $ea / $eb)"; diff "$work/A.ls.n" "$work/B.ls.n" | head -6 | sed 's/^/      /'; }
   for side in A B; do
-    if [ -d "$work/$side/node_modules" ]; then (cd "$work/$side" && find node_modules ! -type l ! -newer "$marker" | LC_ALL=C sort) > "$work/$side.stale"; else : > "$work/$side.stale"; fi
+    r=$RA; [ $side = B ] && r=$RB
+    if [ -d "$r/node_modules" ]; then (cd "$r" && find node_modules ! -type l ! -newer "$marker" | LC_ALL=C sort) > "$work/$side.stale"; else : > "$work/$side.stale"; fi
   done
   extra=$(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | wc -l | tr -d ' ')
   [ "$extra" = 0 ] || say_fail "$extra paths older than the step in B only: $(LC_ALL=C comm -13 "$work/A.stale" "$work/B.stale" | head -3 | tr '\n' ' ')"
@@ -227,10 +249,10 @@ for ((i = 0; i < nsteps; i++)); do
   # (Files, not arguments: a record of a large project is over Linux's
   # 128 KiB limit for one argument.)
   tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" > "$work/rec.json" 2>/dev/null
-  record_of > "$work/rec.after"
+  record_of "$RB" > "$work/rec.after"
   # Fail closed: a checker that could not run, or stopped before printing
   # why, fails the step too.
-  if ! python3 -I - "$work/rec.json" "$sb" "$B" "$clones" "$unseen" "$work/rec.before" "$work/rec.after" "${args[0]}" "$here/src/wrapper.rs" "$marker" "$work/hidden.before" <<'EOF' > "$work/rec.check" 2> "$work/rec.log"; then
+  if ! python3 -I - "$work/rec.json" "$sb" "$RB" "$clones" "$unseen" "$work/rec.before" "$work/rec.after" "${args[0]}" "$here/src/wrapper.rs" "$marker" "$work/hidden.before" <<'EOF' > "$work/rec.check" 2> "$work/rec.log"; then
 import json, os, re, sys
 recf, status, root, clones, unseen, rbf, raf, word, table, marker, hbf = sys.argv[1:12]
 # The harness's self-test: a checker that dies before saying anything.

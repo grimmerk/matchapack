@@ -232,6 +232,12 @@ echo 'module.exports = 2' > "$fx/t/package/index.js"; (cd "$fx/t" && tar czf ../
 echo '{"name":"intchange","version":"1.0.0","dependencies":{"dep":"file:dep-1.0.0.tgz"}}' > "$fx/package.json"
 (cd "$fx" && npm install --package-lock-only --no-audit --no-fund > /dev/null 2>&1)
 steps_ integrity-change      "$fx" --start ci -- 'RUN=cp dep-b.tgz dep-1.0.0.tgz' install ./dep-1.0.0.tgz
+# `--prefix packages/a`: npm's install root is that directory, not the
+# project; the harness's root checks (the log's root, the hidden lockfile,
+# the gc record, npm ls, file times) follow it.
+fx=$(mkfx prefixsub '{"name":"prefixsub","version":"1.0.0","dependencies":{"ms":"2.1.3"}}')
+mkdir -p "$fx/packages/a"; echo '{"name":"a","version":"1.0.0","dependencies":{"is-number":"7.0.0"}}' > "$fx/packages/a/package.json"
+steps_ prefix-subdir         "$fx" --start ci -- npm_config_before=$day CLONES=some install --prefix packages/a -- npm_config_before=$day install --prefix packages/a ms@2.1.2
 # --install-strategy=linked (npm 10 lists hoisted paths as symlinks into
 # node_modules/.store): npm ci and npm install, no "unseen" alarm.
 steps_ ci-linked             "$small" -- ci --install-strategy=linked --ignore-scripts
