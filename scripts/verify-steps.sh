@@ -331,7 +331,10 @@ if have_tree and complete and r.get("command") != "ci" and not (before & tree) <
 # changed `resolved` counts as a change (a registry package replaced by the
 # same version from git).
 (hb, hb_complete), (ha, _) = packages(hbf), packages(os.path.join(root, "node_modules/.package-lock.json"))
-moved = sum(1 for k, v in hb.items() if ha.get(k) != v)
+# A field counts as changed only when both sides have it and the values
+# differ: after an untrusted hidden lockfile every kept package loses its
+# `resolved`, which is no change.
+moved = sum(1 for k, v in hb.items() if k not in ha or ha[k][0] != v[0] or (v[1] and ha[k][1] and ha[k][1] != v[1]))
 if hb_complete and len(before - after) > moved:
     bad.append(f"the gc record lost {len(before - after)} entries, but only {moved} packages left or changed")
 # A step that cloned: the record has the entries of what it placed.

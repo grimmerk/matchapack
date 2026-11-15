@@ -217,6 +217,11 @@ steps_ nolock-untrusted       "$fx" -- npm_config_before=$day CLONES=some instal
 # lockfile cannot account for), then update. The harness's bound applies
 # only after a complete hidden lockfile.
 steps_ nolock-uninstall-update "$fx" -- npm_config_before=$day install -- 'RUN=sleep 1; mkdir node_modules/.cache' uninstall ms -- npm_config_before=$day update
+# A root postinstall that rewrites a dependency npm keeps (a fix-up script,
+# patch-package): its package.json is new, its directory is not; a no-op
+# install must not count it as unseen.
+fx=$(mkfx fixup '{"name":"fixup","version":"1.0.0","scripts":{"postinstall":"node -e \"const fs=require(\\\"fs\\\");const f=\\\"node_modules/ms/package.json\\\";fs.writeFileSync(f,fs.readFileSync(f))\""},"dependencies":{"ms":"2.1.3"}}')
+steps_ postinstall-rewrites  "$fx" --start ci -- CLONES=none UNSEEN=0 install
 # --install-strategy=linked (npm 10 lists hoisted paths as symlinks into
 # node_modules/.store): npm ci and npm install, no "unseen" alarm.
 steps_ ci-linked             "$small" -- ci --install-strategy=linked --ignore-scripts

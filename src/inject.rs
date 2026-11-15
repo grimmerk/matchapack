@@ -464,7 +464,20 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // When the hook was knowingly not installed, the line above said so.
     let hook_absent = stats.hook.as_deref() == Some("not-installed");
     let command = stats.command.as_deref().unwrap_or("ci");
-    let expected = root.as_deref().and_then(|r| expected_packages(r, stats.root_at));
+    // A package the hook did not see counts only when npm made its directory
+    // in this run (the directory's birth time, where the filesystem gives
+    // one): npm's own extraction always goes into a directory it made in the
+    // run, while a package npm left in place whose package.json a lifecycle
+    // script rewrote (a fix-up script, patch-package) keeps its old
+    // directory. A package the hook placed is counted as before (a directory
+    // clone carries the store entry's birth time).
+    let made_in_this_run = |r: &std::path::Path, k: &String| match (stats.root_at, std::fs::symlink_metadata(r.join(k)).and_then(|m| m.created())) {
+        (Some(t), Ok(b)) => b >= t,
+        _ => true,
+    };
+    let expected = root
+        .as_deref()
+        .and_then(|r| expected_packages(r, stats.root_at).map(|e| e.into_iter().filter(|k| stats.seen.contains(k) || made_in_this_run(r, k)).collect::<BTreeSet<String>>()));
     if let Some(expected) = expected {
         // Compared by destination, not by count: pacote's temporary
         // extractions and npm's extra ones cannot hide a package the hook
