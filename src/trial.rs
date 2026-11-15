@@ -223,12 +223,22 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
         Err(_) => {
             let f = crate::util::config_dir().join("paths");
             match std::fs::read_to_string(&f) {
-                Ok(t) => t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect(),
+                Ok(t) => paths_file_entries(&t),
                 Err(_) => return Ok(()),
             }
         }
     };
-    let home = crate::home();
+    in_scope_of(dir, &list, source, &crate::home())
+}
+
+/// The entries of a paths file: its lines, trimmed, without empty lines and
+/// comments.
+fn paths_file_entries(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect()
+}
+
+/// `in_scope` for the entries `list` (from `source`, for the message).
+fn in_scope_of(dir: &Path, list: &[String], source: &str, home: &Path) -> std::result::Result<(), String> {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     // Entries that can never match: not absolute (`$HOME/git` typed
     // literally, a relative path), or under a directory that does not exist.
@@ -238,8 +248,14 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
     // the scope. Said when nothing matched, since the scope then may not be
     // what the user meant.
     let mut never: Vec<(&str, &str)> = vec![];
-    for e in &list {
+    for e in list {
         let p = e.strip_prefix("~/").map(|r| home.join(r)).unwrap_or_else(|| PathBuf::from(e));
+        // Not absolute: never matches, and is never resolved (against the
+        // current directory, `.` would cover every directory).
+        if !p.is_absolute() {
+            never.push((e.as_str(), "not an absolute path"));
+            continue;
+        }
         // Symlinks resolved, of the entry or, when it does not exist, of its
         // parent: `/tmp/app` matches `/private/tmp/app-topic` on macOS.
         let resolved = std::fs::canonicalize(&p)
@@ -251,9 +267,7 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
         if dir.to_string_lossy().starts_with(&*prefix.to_string_lossy()) {
             return Ok(());
         }
-        if !p.is_absolute() {
-            never.push((e.as_str(), "not an absolute path"));
-        } else if resolved.is_none() {
+        if resolved.is_none() {
             never.push((e.as_str(), "its parent directory does not exist"));
         }
     }
@@ -909,6 +923,35 @@ mod tests {
         let end = r["load_end"][0].as_f64().unwrap();
         assert_eq!(load_note(r), Some(format!("load 3.1→{end:.1}")));
         assert_eq!(load_note(&json!({ "outcome": "installed" })), None, "an older record: no load note");
+    }
+
+    #[test]
+    fn a_relative_scope_entry_never_matches() {
+        let d = crate::store::tests::scratch("trial-scope");
+        let app = d.join("app/x");
+        std::fs::create_dir_all(&app).unwrap();
+        let home = d.join("home");
+        let v = |e: &[&str]| e.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // From the environment and from a paths file alike: `.` and a
+        // relative path are rejected, also where the current directory or a
+        // directory of that name would cover `dir`.
+        let file = paths_file_entries("# scope\n.\n  app/x  \n");
+        assert_eq!(file, v(&[".", "app/x"]));
+        let cwd = std::env::current_dir().unwrap();
+        for (list, source) in [(v(&["."]), "MATCHAPACK_PATHS"), (v(&["app/x"]), "MATCHAPACK_PATHS"), (file.clone(), "~/.config/matchapack/paths")] {
+            for dir in [&app, &cwd] {
+                assert_eq!(in_scope_of(dir, &list, source, &home), Err(format!("outside the trial scope: {source} lists no entry that can match")), "{list:?} {}", dir.display());
+            }
+        }
+        // Next to a good entry: said by name, never matched.
+        let good = d.join("elsewhere").display().to_string();
+        let e = in_scope_of(&app, &v(&[&good, "."]), "MATCHAPACK_PATHS", &home).unwrap_err();
+        assert_eq!(e, "outside the trial scope: MATCHAPACK_PATHS lists \".\", which can never match (not an absolute path)");
+        // An absolute entry still matches, and `~/` is the home directory.
+        assert_eq!(in_scope_of(&app, &v(&[&d.join("app").display().to_string()]), "MATCHAPACK_PATHS", &home), Ok(()));
+        std::fs::create_dir_all(home.join("w")).unwrap();
+        assert_eq!(in_scope_of(&home.join("w"), &v(&["~/w"]), "MATCHAPACK_PATHS", &home), Ok(()));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

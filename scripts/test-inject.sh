@@ -811,6 +811,14 @@ decline_case "npm ci outside the trial scope" "$p" "outside the trial scope" 0 M
 # project outside it declines in silence, and one under it is in scope.
 p=$(project fam-scope-none bundled)
 decline_case "npm install, the scope has no entry that can match" "$p" "outside the trial scope: MATCHAPACK_PATHS lists no entry that can match" 0 MATCHAPACK_PATHS="$work/no-parent/x" -- install --no-audit --no-fund
+# A relative entry never matches, also `.` (resolved against the current
+# directory it would cover every project; `../fam-scope-rel` would cover
+# that project, started in it): from the environment and from a paths file.
+p=$(project fam-scope-dot bundled)
+decline_case "npm install, MATCHAPACK_PATHS=." "$p" "outside the trial scope: MATCHAPACK_PATHS lists no entry that can match" 0 MATCHAPACK_PATHS=. -- install --no-audit --no-fund
+mkdir -p "$work/scope-cfg-rel"; printf '../fam-scope-rel\n' > "$work/scope-cfg-rel/paths"
+p=$(project fam-scope-rel bundled)
+decline_case "npm install, a relative entry in the paths file" "$p" "outside the trial scope: ~/.config/matchapack/paths lists no entry that can match" 0 -u MATCHAPACK_PATHS MATCHAPACK_CONFIG_DIR="$work/scope-cfg-rel" -- install --no-audit --no-fund
 p=$(project fam-scope-stale bundled)
 quiet_case "npm install, one good entry and one removed since" "$p" "outside the trial scope (" MATCHAPACK_PATHS="$work/scope-elsewhere:$work/removed-long-ago" -- install --no-audit --no-fund
 p=$(project fam-scope-prefix bundled)
