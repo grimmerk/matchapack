@@ -282,14 +282,15 @@ def is_pkg(k):
         return sc.startswith("@") and rest != "" and "/" not in rest
     return name != "" and not name.startswith("@")
 def packages(path):
-    """(version, resolved) by package key, and whether every package has an
-    integrity or a resolved (the record's rule, store.rs update_record)."""
+    """(version, resolved, integrity) by package key, and whether every
+    package has an integrity or a resolved (the record's rule, store.rs
+    update_record)."""
     try:
         pk = json.load(open(path)).get("packages", {})
     except (OSError, ValueError):
         return {}, False
     ps = {k: p for k, p in pk.items() if is_pkg(k) and not p.get("link") and not p.get("inBundle")}
-    return {k: (p.get("version"), p.get("resolved")) for k, p in ps.items()}, all(p.get("integrity") or p.get("resolved") for p in ps.values())
+    return {k: (p.get("version"), p.get("resolved"), p.get("integrity")) for k, p in ps.items()}, all(p.get("integrity") or p.get("resolved") for p in ps.values())
 tree = set()
 complete = True
 # Entries of the packages whose directory was written in this step.
@@ -329,12 +330,15 @@ if have_tree and complete and r.get("command") != "ci" and not (before & tree) <
 # source: a record kept as a superset (store.rs, an incomplete tree) may
 # lose entries later that no package change of this step explains. A
 # changed `resolved` counts as a change (a registry package replaced by the
-# same version from git).
+# same version from git), and so does a changed integrity (the same version
+# and `resolved`, other bytes: the record must drop the old entry).
 (hb, hb_complete), (ha, _) = packages(hbf), packages(os.path.join(root, "node_modules/.package-lock.json"))
 # A field counts as changed only when both sides have it and the values
 # differ: after an untrusted hidden lockfile every kept package loses its
-# `resolved`, which is no change.
-moved = sum(1 for k, v in hb.items() if k not in ha or ha[k][0] != v[0] or (v[1] and ha[k][1] and ha[k][1] != v[1]))
+# `resolved` and integrity, which is no change.
+def changed(a, b):
+    return bool(a) and bool(b) and a != b
+moved = sum(1 for k, v in hb.items() if k not in ha or ha[k][0] != v[0] or changed(v[1], ha[k][1]) or changed(v[2], ha[k][2]))
 if hb_complete and len(before - after) > moved:
     bad.append(f"the gc record lost {len(before - after)} entries, but only {moved} packages left or changed")
 # A step that cloned: the record has the entries of what it placed.

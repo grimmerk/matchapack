@@ -222,6 +222,16 @@ steps_ nolock-uninstall-update "$fx" -- npm_config_before=$day install -- 'RUN=s
 # install must not count it as unseen.
 fx=$(mkfx fixup '{"name":"fixup","version":"1.0.0","scripts":{"postinstall":"node -e \"const fs=require(\\\"fs\\\");const f=\\\"node_modules/ms/package.json\\\";fs.writeFileSync(f,fs.readFileSync(f))\""},"dependencies":{"ms":"2.1.3"}}')
 steps_ postinstall-rewrites  "$fx" --start ci -- CLONES=none UNSEEN=0 install
+# The same version and `resolved` with other bytes: a file: tarball rebuilt
+# and added again. npm writes the new integrity; the gc record drops the
+# old entry, and the harness's record bound counts the integrity change.
+fx=$work/fx-intchange; rm -rf "${fx:?}"; mkdir -p "$fx/t/package"
+echo '{"name":"dep","version":"1.0.0"}' > "$fx/t/package/package.json"
+echo 'module.exports = 1' > "$fx/t/package/index.js"; (cd "$fx/t" && tar czf ../dep-1.0.0.tgz package)
+echo 'module.exports = 2' > "$fx/t/package/index.js"; (cd "$fx/t" && tar czf ../dep-b.tgz package); rm -rf "${fx:?}/t"
+echo '{"name":"intchange","version":"1.0.0","dependencies":{"dep":"file:dep-1.0.0.tgz"}}' > "$fx/package.json"
+(cd "$fx" && npm install --package-lock-only --no-audit --no-fund > /dev/null 2>&1)
+steps_ integrity-change      "$fx" --start ci -- 'RUN=cp dep-b.tgz dep-1.0.0.tgz' install ./dep-1.0.0.tgz
 # --install-strategy=linked (npm 10 lists hoisted paths as symlinks into
 # node_modules/.store): npm ci and npm install, no "unseen" alarm.
 steps_ ci-linked             "$small" -- ci --install-strategy=linked --ignore-scripts
