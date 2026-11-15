@@ -253,6 +253,11 @@ pub struct Stats {
     /// node_modules, relative to the root (`packages/b/node_modules/ms`):
     /// what the repair after a broken run removes (wrapper.rs).
     pub placed_outside: Vec<String>,
+    /// (device, inode) of each of them when it was placed: the repair
+    /// removes a directory only while it is still that one (npm's rollback
+    /// after a failed install script puts its own directory back at the
+    /// same path).
+    pub placed_outside_ids: BTreeMap<String, (u64, u64)>,
     first: Option<Instant>,
     last: Option<Instant>,
 }
@@ -312,6 +317,7 @@ impl Stats {
             "result_unexpected": self.result_unexpected,
             "asides": self.asides,
             "placed_outside": self.placed_outside,
+            "placed_outside_ids": self.placed_outside_ids.iter().map(|(k, (d, i))| (k.clone(), json!([d, i]))).collect::<serde_json::Map<String, Value>>(),
         })
     }
 }
@@ -1300,10 +1306,18 @@ impl<'a> Server<'a> {
                 // nested under a `file:` dependency): what a repair after a
                 // broken run removes (wrapper.rs `placed_outside`).
                 if let Some(k) = self.rel_key(dest).filter(|k| !k.starts_with("node_modules/")) {
+                    // Before the answer is written: npm has not touched it yet.
+                    let id = std::fs::symlink_metadata(dest).ok().map(|m| {
+                        use std::os::unix::fs::MetadataExt;
+                        (m.dev(), m.ino())
+                    });
+                    if let Some(id) = id {
+                        s.placed_outside_ids.insert(k.clone(), id);
+                    }
                     if !s.placed_outside.contains(&k) {
                         s.placed_outside.push(k.clone());
-                        crate::inject::note_placed_outside(k);
                     }
+                    crate::inject::note_placed_outside(k, id);
                 }
                 if *checked {
                     s.checked += 1;

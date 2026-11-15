@@ -248,12 +248,14 @@ static ROOT_REPORT: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mut
 /// The package directories cloned so far outside the root's node_modules
 /// (serve.rs `Stats::placed_outside`), kept apart too: a panic loses the
 /// stats, and the repair must still remove them.
-static PLACED_OUTSIDE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static PLACED_OUTSIDE: std::sync::Mutex<Vec<(String, Option<(u64, u64)>)>> = std::sync::Mutex::new(Vec::new());
 
-pub(crate) fn note_placed_outside(k: String) {
+/// `id`: the placed directory's (device, inode), when it could be read.
+pub(crate) fn note_placed_outside(k: String, id: Option<(u64, u64)>) {
     let mut v = PLACED_OUTSIDE.lock().unwrap_or_else(|e| e.into_inner());
-    if !v.contains(&k) {
-        v.push(k);
+    match v.iter_mut().find(|(key, _)| *key == k) {
+        Some(e) => e.1 = id,
+        None => v.push((k, id)),
     }
 }
 
@@ -266,7 +268,13 @@ pub(crate) fn set_root_report(v: serde_json::Value) {
 pub(crate) fn root_report() -> Option<serde_json::Value> {
     let mut r = ROOT_REPORT.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
     // Taken before anything was placed: the list as it is now.
-    r["placed_outside"] = serde_json::json!(*PLACED_OUTSIDE.lock().unwrap_or_else(|e| e.into_inner()));
+    let v = PLACED_OUTSIDE.lock().unwrap_or_else(|e| e.into_inner());
+    r["placed_outside"] = serde_json::json!(v.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>());
+    r["placed_outside_ids"] = v
+        .iter()
+        .filter_map(|(k, id)| id.map(|(d, i)| (k.clone(), serde_json::json!([d, i]))))
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into();
     Some(r)
 }
 

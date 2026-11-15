@@ -232,6 +232,7 @@ fn placed_outside(root: &std::path::Path, inject: Option<&Value>) -> Placed {
         return Placed { dirs: vec![], skipped: 0, known: false };
     };
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let ids = inject.and_then(|i| i["placed_outside_ids"].as_object());
     let (mut dirs, mut skipped) = (vec![], 0);
     for key in list.iter().filter_map(|k| k.as_str()) {
         let parts: Vec<&str> = key.split('/').collect();
@@ -243,7 +244,13 @@ fn placed_outside(root: &std::path::Path, inject: Option<&Value>) -> Placed {
         let inside = parent.as_ref().is_some_and(|p| p.starts_with(&canonical_root) && !p.starts_with(canonical_root.join("node_modules")));
         match std::fs::symlink_metadata(&d) {
             Ok(m) if inside && m.is_dir() && !m.file_type().is_symlink() => {
-                if !dirs.contains(&d) {
+                // Still the directory matchapack placed (its device and
+                // inode then): npm's rollback after a failed install script
+                // removes the clone and puts its own directory back there.
+                // A record without the id (older) is taken as it is.
+                use std::os::unix::fs::MetadataExt;
+                let placed = ids.and_then(|o| o.get(key)).and_then(|v| Some((v.get(0)?.as_u64()?, v.get(1)?.as_u64()?)));
+                if placed.is_none_or(|id| id == (m.dev(), m.ino())) && !dirs.contains(&d) {
                     dirs.push(d);
                 }
             }
@@ -260,19 +267,50 @@ fn placed_outside(root: &std::path::Path, inject: Option<&Value>) -> Placed {
 /// node_modules (`placed_outside`). npm ci before 10.8.1 keeps what it finds
 /// in a member's own node_modules, clones of the broken run included; it
 /// empties the root's itself. Nothing without npm's root report or the list.
-/// How many were removed.
+/// How many package directories were cleared.
 fn remove_placed_outside(inject: Option<&Value>) -> usize {
     let Some(root) = inject.and_then(|i| i["root"].as_str()).map(std::path::PathBuf::from) else {
         return 0;
     };
+    // The deepest first: a package nested in another placed one is cleared
+    // before the one it is in.
+    let mut dirs = placed_outside(&root, inject).dirs;
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
     let mut n = 0;
-    for d in placed_outside(&root, inject).dirs {
-        match std::fs::remove_dir_all(&d) {
-            Ok(()) => n += 1,
+    for d in dirs {
+        let r = removal_targets(&d).iter().try_for_each(|t| match std::fs::symlink_metadata(t) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(t),
+            Ok(_) => std::fs::remove_file(t),
+            Err(_) => Ok(()),
+        });
+        match r {
+            Ok(()) => {
+                // Gone when nothing is left in it.
+                let _ = std::fs::remove_dir(d.join("node_modules"));
+                let _ = std::fs::remove_dir(&d);
+                n += 1;
+            }
             Err(e) => eprintln!("matchapack: could not remove {}: {e}", d.display()),
         }
     }
     n
+}
+
+/// What to remove of a package directory matchapack placed: the
+/// directory, or, when it has a `node_modules` (npm moves the nested
+/// packages it keeps back under a package it replaced; they are not the
+/// clone's), every other entry of it, as pacote does when it extracts over a
+/// directory. Each path is inside `d`.
+fn removal_targets(d: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let nm = d.join("node_modules");
+    if !std::fs::symlink_metadata(&nm).is_ok_and(|m| m.is_dir()) {
+        return vec![d.to_path_buf()];
+    }
+    let mut out: Vec<std::path::PathBuf> = std::fs::read_dir(d)
+        .map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.file_name() != Some(std::ffi::OsStr::new("node_modules"))).collect())
+        .unwrap_or_default();
+    out.sort();
+    out
 }
 
 /// The line before the automatic plain `npm ci` after a broken one.
@@ -289,19 +327,35 @@ fn rebuild_line(error: &anyhow::Error, removed: usize) -> String {
 /// file instead of one line each.
 const LIST_IN_FILE: usize = 20;
 
-/// The file listing `dirs` (NUL-separated, for `xargs -0`), in the run
+/// The file listing `paths` (NUL-separated, for `xargs -0`), in the run
 /// log's directory; None if it could not be written.
-fn write_removal_list(dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+fn write_removal_list(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    write_removal_list_in(trial::log_path().parent()?, paths)
+}
+
+/// `write_removal_list` into `dir`: readable by the user only, named
+/// `repair-<pid>-<secs>.list`; such lists older than a day are removed.
+fn write_removal_list_in(dir: &std::path::Path, paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
-    let dir = trial::log_path().parent()?.to_path_buf();
-    std::fs::create_dir_all(&dir).ok()?;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(dir).ok()?;
+    let day = std::time::Duration::from_secs(86_400);
+    for e in std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()) {
+        let n = e.file_name().to_string_lossy().to_string();
+        let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|a| a > day);
+        if n.starts_with("repair-") && n.ends_with(".list") && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     let f = dir.join(format!("repair-{}-{}.list", std::process::id(), trial::now() as u64));
     let mut bytes = vec![];
-    for d in dirs {
-        bytes.extend_from_slice(d.as_os_str().as_bytes());
+    for p in paths {
+        bytes.extend_from_slice(p.as_os_str().as_bytes());
         bytes.push(0);
     }
-    std::fs::write(&f, bytes).ok()?;
+    let mut out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&f).ok()?;
+    out.write_all(&bytes).ok()?;
     Some(f)
 }
 
@@ -366,7 +420,8 @@ fn repair_advice(args: &[String], command: &str, root: Option<&std::path::Path>,
     // node_modules: one `rm -rf` each, or all from a file.
     let mut commands: Vec<String> = match list_file {
         Some(f) if placed.dirs.len() > LIST_IN_FILE => vec![format!("xargs -0 rm -rf -- < {}", shell_quote(&f.display().to_string()))],
-        _ => placed.dirs.iter().map(|d| shell_line("rm -rf", &[d.display().to_string()])).collect(),
+        // A directory with a `node_modules` npm kept: its other entries.
+        _ => placed.dirs.iter().map(|d| shell_line("rm -rf", &removal_targets(d).iter().map(|t| t.display().to_string()).collect::<Vec<_>>())).collect(),
     };
     let remove_root = shell_line("rm -rf", &[root.join("node_modules").display().to_string()]);
     let whole = |verb: &str| {
@@ -395,7 +450,7 @@ fn repair_advice(args: &[String], command: &str, root: Option<&std::path::Path>,
     let first = if commands.is_empty() {
         String::new()
     } else if commands.len() == 1 && placed.dirs.len() > LIST_IN_FILE {
-        format!("remove the {} package directories matchapack placed outside node_modules (listed in that file), then ", placed.dirs.len())
+        format!("remove what matchapack placed in {} package directories outside node_modules (the file in the first command lists it), then ", placed.dirs.len())
     } else {
         "remove what matchapack placed outside node_modules, then ".to_string()
     };
@@ -490,7 +545,7 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
         // What matchapack placed outside the root's node_modules in this
         // run (the server's list); in a file when the list is long.
         let placed = root.as_deref().map(|r| placed_outside(r, inject)).unwrap_or(Placed { dirs: vec![], skipped: 0, known: true });
-        let list = (placed.dirs.len() > LIST_IN_FILE).then(|| write_removal_list(&placed.dirs)).flatten();
+        let list = (placed.dirs.len() > LIST_IN_FILE).then(|| write_removal_list(&placed.dirs.iter().flat_map(|d| removal_targets(d)).collect::<Vec<_>>())).flatten();
         eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, root.as_deref(), &settings, &env, &placed, list.as_deref()));
     };
     match outcome {
@@ -977,7 +1032,45 @@ mod tests {
         let many = Placed { dirs: (0..21).map(|i| d.join(format!("packages/m{i}/node_modules/x"))).collect(), skipped: 0, known: true };
         let list = d.join("repair.list");
         let s = repair_advice(&a(&["install", "x"]), "install", Some(d.as_path()), &known, &[], &many, Some(list.as_path()));
-        ends(s, &format!("then remove the 21 package directories matchapack placed outside node_modules (listed in that file), then rebuild with plain npm:\n  xargs -0 rm -rf -- < {}\n  MATCHAPACK=0 npm ci x", shell_quote(&list.display().to_string())));
+        ends(s, &format!("then remove what matchapack placed in 21 package directories outside node_modules (the file in the first command lists it), then rebuild with plain npm:\n  xargs -0 rm -rf -- < {}\n  MATCHAPACK=0 npm ci x", shell_quote(&list.display().to_string())));
+        // The file itself: written for the user only, followed with the
+        // printed command (sh), it removes what it lists; an old list goes.
+        let ld = d.join("lists");
+        std::fs::create_dir_all(&ld).unwrap();
+        let old = ld.join("repair-1-1.list");
+        std::fs::write(&old, "x").unwrap();
+        let two_days = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(two_days).unwrap();
+        let targets: Vec<_> = (0..25).map(|i| d.join(format!("t/p{i} x/node_modules/y"))).collect();
+        targets.iter().for_each(|t| std::fs::create_dir_all(t).unwrap());
+        let f = super::write_removal_list_in(&ld, &targets).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(!old.exists());
+        let ok = std::process::Command::new("sh").arg("-c").arg(format!("xargs -0 rm -rf -- < {}", shell_quote(&f.display().to_string()))).status().unwrap();
+        assert!(ok.success() && targets.iter().all(|t| !t.exists()) && d.join("t/p0 x/node_modules").is_dir());
+        // A placed directory with a node_modules npm kept (a nested package
+        // moved back under a package it replaced): only its other entries
+        // are removed, by the advice and by the automatic path.
+        let kept = d.join("packages/k/node_modules/is-odd");
+        std::fs::create_dir_all(kept.join("node_modules/is-number")).unwrap();
+        std::fs::write(kept.join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(kept.join("lib")).unwrap();
+        assert_eq!(super::removal_targets(&kept), vec![kept.join("lib"), kept.join("package.json")]);
+        let p = Placed { dirs: vec![kept.clone()], skipped: 0, known: true };
+        let s = repair_advice(&a(&["install", "x"]), "install", Some(d.as_path()), &known, &[], &p, None);
+        assert!(s.contains(&format!("\n  rm -rf {} {}\n", shell_quote(&kept.join("lib").display().to_string()), shell_quote(&kept.join("package.json").display().to_string()))), "{s}");
+        let inject = serde_json::json!({ "root": d.display().to_string(), "placed_outside": ["packages/k/node_modules/is-odd"] });
+        assert_eq!(super::remove_placed_outside(Some(&inject)), 1);
+        assert!(kept.join("node_modules/is-number").is_dir() && !kept.join("lib").exists() && !kept.join("package.json").exists());
+        // A path that holds another directory than the one placed (npm's
+        // rollback put its own back): not listed.
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(&kept).unwrap();
+        let same = serde_json::json!({ "placed_outside": ["packages/k/node_modules/is-odd"], "placed_outside_ids": { "packages/k/node_modules/is-odd": [m.dev(), m.ino()] } });
+        let moved = serde_json::json!({ "placed_outside": ["packages/k/node_modules/is-odd"], "placed_outside_ids": { "packages/k/node_modules/is-odd": [m.dev(), m.ino() + 1] } });
+        assert_eq!(placed_outside(&d, Some(&same)).dirs, vec![kept.clone()]);
+        assert!(placed_outside(&d, Some(&moved)).dirs.is_empty());
         // No list in the run's record: nothing outside the root's
         // node_modules is removed, and the advice says so.
         let p = placed_outside(&d, Some(&serde_json::json!({})));

@@ -1225,8 +1225,18 @@ cl_ino() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_ino)' "$1"; 
 # The attribute: `xattr` on macOS; Python's os.setxattr (user.*) on Linux.
 cl_xset() { if command -v xattr > /dev/null; then xattr -w "$xa" keep "$1"; else python3 -c 'import os,sys; os.setxattr(sys.argv[1], "user.matchapack-keep", b"keep")' "$1" 2>/dev/null; fi; }
 cl_xget() { if command -v xattr > /dev/null; then xattr -p "$xa" "$1" 2>/dev/null || echo no-xattr; else python3 -c 'import os,sys; print(os.getxattr(sys.argv[1], "user.matchapack-keep").decode())' "$1" 2>/dev/null || echo no-xattr; fi; }
-cl_state() { # base -> listing, then one line per node_modules
+cl_state() { # base -> listing with each file's content hash, then one line per node_modules
   (cd "$1" && find . -print | LC_ALL=C sort)
+  python3 -I - "$1" <<'PY'
+import hashlib, os, sys
+base = sys.argv[1]
+for root, dirs, files in sorted(os.walk(base)):
+    dirs.sort()
+    for n in sorted(files):
+        p = os.path.join(root, n)
+        if n != ".ino" and not os.path.islink(p):
+            print(hashlib.sha1(open(p, "rb").read()).hexdigest(), os.path.relpath(p, base))
+PY
   while IFS= read -r d; do
     printf '%s %s %s\n' "${d#$1/}" "$([ "$(cl_ino "$d")" = "$(cat "$d/.ino" 2>/dev/null)" ] && echo same || echo new)" "$(cl_xget "$d")"
   done < <(cl_nm "$1")
@@ -1285,6 +1295,38 @@ cl_case member-placed cl_member cl_fresh_after -- --no-audit --no-fund
 cl_case link-dep cl_linkdep - -- --no-audit --no-fund
 cl_case stale-key cl_stale cl_stale_after -- --no-audit --no-fund
 cl_case out-of-sync cl_sync cl_sync_after -- --no-audit --no-fund
+# A member package npm must replace (another version on disk) holding a
+# nested package npm keeps and moves back under it: matchapack removes what
+# its clone brought, never the nested package (a marker in it stays, as
+# with plain npm ci). Registry packages, as in the independent review.
+cl_nested() {
+  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"is-number":"7.0.0","is-odd":"2.0.0"}}'
+  cl_pj "$1/proj/packages/b/package.json" '{"name":"ws-b","version":"1.0.0","dependencies":{"is-number":"5.0.0","is-odd":"3.0.1"}}'
+}
+cl_nested_after() {
+  local d=$1/proj/packages/b/node_modules/is-odd
+  python3 -c 'import json,sys; p=sys.argv[1]; j=json.load(open(p)); j["version"] += "-older"; json.dump(j, open(p, "w"), indent=2)' "$d/package.json"
+  [ -f "$d/node_modules/is-number/index.js" ] && echo '// marker' >> "$d/node_modules/is-number/index.js"
+}
+cl_case nested-kept cl_nested cl_nested_after -- --no-audit --no-fund
+# npm rolls back after a failed install script and puts its own directory
+# back where matchapack had placed a clone: matchapack removes only a
+# directory that is still the one it placed (its device and inode).
+cl_flag=$work/cl-fail-now
+cl_rollback() {
+  rm -f "$cl_flag"; cl_ws "$1"
+  cl_pj "$1/failing-src/package.json" '{"name":"failing","version":"1.0.0","scripts":{"install":"node check.js"}}'
+  cl_pj "$1/failing-src/check.js" "process.exit(require('fs').existsSync('$cl_flag') ? 1 : 0)"
+  (cd "$1/failing-src" && MATCHAPACK=0 npm pack --pack-destination "$1" > /dev/null 2>&1)
+  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz","failing":"file:../failing-1.0.0.tgz"},"allowScripts":{"failing":true}}'
+}
+cl_rollback_after() {
+  local d=$1/proj/packages/b/node_modules/lc-s
+  python3 -c 'import json,sys; p=sys.argv[1]; j=json.load(open(p)); j["version"] += "-older"; json.dump(j, open(p, "w"), indent=2)' "$d/package.json"
+  echo marker > "$d/MARKER"; : > "$cl_flag"
+}
+cl_case rollback cl_rollback cl_rollback_after -- --no-audit --no-fund
+rm -f "$cl_flag"
 # And the clones matchapack placed outside the root's node_modules are what
 # it removes: in the member-placed case (the member's node_modules removed
 # first, so the broken run places its package), its log record lists
