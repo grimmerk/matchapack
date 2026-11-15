@@ -85,12 +85,12 @@ fn hashes(root: &Path, lockfiles: &[&str], dirs: &[String]) -> Value {
 /// and whether every pattern could be expanded in full.
 pub fn workspaces(root: &Path) -> (Vec<String>, bool) {
     let (dirs, walk) = walk_workspaces(root);
-    (dirs, walk.complete)
+    (dirs, walk.why.is_none())
 }
 
 /// `workspaces`, with the walk (how many directories it listed).
 fn walk_workspaces(root: &Path) -> (Vec<String>, Walk) {
-    let mut walk = Walk { listed: 0, complete: true };
+    let mut walk = Walk { listed: 0, why: None };
     let Ok(text) = std::fs::read_to_string(root.join("package.json")) else { return (vec![], walk) };
     let Ok(pj) = serde_json::from_str::<Value>(&text) else { return (vec![], walk) };
     let list = match &pj["workspaces"] {
@@ -98,7 +98,7 @@ fn walk_workspaces(root: &Path) -> (Vec<String>, Walk) {
         Value::Object(o) => o.get("packages").and_then(|p| p.as_array()).cloned().unwrap_or_default(),
         Value::Null => vec![],
         _ => {
-            walk.complete = false;
+            walk.miss("`workspaces` is neither a list nor Yarn's {\"packages\": [...]}");
             return (vec![], walk);
         }
     };
@@ -108,17 +108,17 @@ fn walk_workspaces(root: &Path) -> (Vec<String>, Walk) {
     // cost per run).
     for p in list.iter() {
         let Some(p) = p.as_str() else {
-            walk.complete = false;
+            walk.miss("a workspace pattern that is not a string");
             continue;
         };
         // A negated pattern: npm drops its matches, Yarn 1 still treats them
         // as workspaces; which one runs is not known here.
         if p.starts_with('!') {
-            walk.complete = false;
+            walk.miss(&format!("a negated workspace pattern ({p}): npm drops its matches, Yarn 1 keeps them"));
             continue;
         }
         let Some(alternatives) = expand_braces(p) else {
-            walk.complete = false;
+            walk.miss(&format!("a brace form matchapack does not expand ({p}; only {{a,b}})"));
             continue;
         };
         for pat in alternatives {
@@ -130,11 +130,15 @@ fn walk_workspaces(root: &Path) -> (Vec<String>, Walk) {
             // Outside the project (`../shared`, `/abs`): a copy of the
             // project cannot hold it.
             if pat.starts_with('/') || segs.contains(&"..") || pat.starts_with('~') {
-                walk.complete = false;
+                walk.miss(&format!("a workspace pattern outside the project ({pat})"));
                 continue;
             }
-            if segs.iter().any(|s| s.contains(['[', ']', '(', ')', '{', '}', '!', '+', '@'])) {
-                walk.complete = false;
+            // Character classes and extended globs (`@(a|b)`, `+(…)`, `!(…)`,
+            // `*(…)`, `?(…)`) are not expanded; `@`, `+` and `!` elsewhere in
+            // a name are literal (`packages/@scope/*`, `packages/c++`).
+            let extglob = |s: &str| ["@(", "+(", "!(", "*(", "?("].iter().any(|o| s.contains(o));
+            if segs.iter().any(|s| s.contains(['[', ']', '{', '}']) || extglob(s)) {
+                walk.miss(&format!("a workspace pattern matchapack does not expand ({pat}: a character class or an extended glob)"));
                 continue;
             }
             let mut found = vec![];
@@ -149,7 +153,7 @@ fn walk_workspaces(root: &Path) -> (Vec<String>, Walk) {
         }
     }
     if walk.listed >= MAX_LISTED {
-        walk.complete = false;
+        walk.miss(&format!("the workspace listing budget ({MAX_LISTED} directories) was reached"));
     }
     (keep.into_iter().filter(|d| !d.is_empty()).collect(), walk)
 }
@@ -184,15 +188,20 @@ fn expand_braces(p: &str) -> Option<Vec<String>> {
 }
 
 /// The walk over the workspace patterns: how many directories it listed
-/// (one budget for all of them), and whether what it found is complete (a
-/// listing that failed, or a symlink to a directory on the way, makes it
-/// incomplete: npm and Yarn may follow it, a copy holds no such link).
+/// (one budget for all of them), and why what it found is incomplete, if it
+/// is (the first reason): a listing that failed, or a symlink to a directory
+/// on the way (npm and Yarn may follow it, a copy holds no such link), or
+/// one of the patterns' reasons above.
 struct Walk {
     listed: usize,
-    complete: bool,
+    why: Option<String>,
 }
 
 impl Walk {
+    fn miss(&mut self, why: &str) {
+        self.why.get_or_insert_with(|| why.to_string());
+    }
+
     fn expand(&mut self, dir: &Path, segs: &[&str], out: &mut Vec<PathBuf>) {
         let Some((seg, rest)) = segs.split_first() else {
             out.push(dir.to_path_buf());
@@ -203,13 +212,13 @@ impl Walk {
             match std::fs::symlink_metadata(&d) {
                 Ok(m) if m.file_type().is_symlink() => {
                     if d.is_dir() {
-                        self.complete = false;
+                        self.miss(&format!("a workspace that is a symlink ({})", d.display()));
                     }
                 }
                 Ok(m) if m.is_dir() => self.expand(&d, rest, out),
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => self.complete = false,
+                Err(e) => self.miss(&format!("{} could not be read ({e})", d.display())),
             }
             return;
         }
@@ -222,19 +231,19 @@ impl Walk {
         self.listed += 1;
         let rd = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
-            Err(_) => {
-                self.complete = false;
+            Err(e) => {
+                self.miss(&format!("{} could not be listed ({e})", dir.display()));
                 return;
             }
         };
         let mut subs: Vec<(String, PathBuf)> = vec![];
         for e in rd {
             let Ok(e) = e else {
-                self.complete = false;
+                self.miss(&format!("an entry of {} could not be read", dir.display()));
                 continue;
             };
             let Ok(name) = e.file_name().into_string() else {
-                self.complete = false;
+                self.miss(&format!("a name in {} is not UTF-8", dir.display()));
                 continue;
             };
             if name == "node_modules" || name.starts_with('.') {
@@ -244,11 +253,11 @@ impl Walk {
                 Ok(t) if t.is_dir() => subs.push((name, e.path())),
                 Ok(t) if t.is_symlink() => {
                     if e.path().is_dir() && (*seg == "**" || matches(seg.as_bytes(), name.as_bytes())) {
-                        self.complete = false;
+                        self.miss(&format!("a workspace that is a symlink ({})", e.path().display()));
                     }
                 }
                 Ok(_) => {}
-                Err(_) => self.complete = false,
+                Err(e2) => self.miss(&format!("the type of {} could not be read ({e2})", e.path().display())),
             }
         }
         subs.sort();
@@ -276,20 +285,24 @@ fn matches(pat: &[u8], name: &[u8]) -> bool {
 /// The state at `root` now: `{"node_modules": …, "files": …, "complete": …}`
 /// (before a run; `matchapack replay-state` prints it for the sampler).
 pub fn state(root: &Path, lockfiles: &[&str]) -> Value {
-    let (dirs, complete) = workspaces(root);
-    json!({ "node_modules": node_modules_state(root, &dirs), "files": hashes(root, lockfiles, &dirs), "complete": complete })
+    let (dirs, walk) = walk_workspaces(root);
+    json!({ "node_modules": node_modules_state(root, &dirs), "files": hashes(root, lockfiles, &dirs), "complete": walk.why.is_none(), "incomplete": walk.why })
 }
 
 /// The record's fields for a run whose state before it was `before`
 /// (`state`): `node_modules_before`, `files_before`, `files_after` (now) and
-/// `files_complete` (both sets complete).
+/// `files_complete` (both sets complete) with, when not, `files_incomplete`
+/// (why).
 pub fn record_fields(root: &Path, lockfiles: &[&str], before: &Value) -> serde_json::Map<String, Value> {
-    let (after, complete_after) = files_state(root, lockfiles);
+    let (dirs, walk) = walk_workspaces(root);
     let mut m = serde_json::Map::new();
     m.insert("node_modules_before".into(), before["node_modules"].clone());
     m.insert("files_before".into(), before["files"].clone());
-    m.insert("files_after".into(), after);
-    m.insert("files_complete".into(), json!(before["complete"] == true && complete_after));
+    m.insert("files_after".into(), hashes(root, lockfiles, &dirs));
+    m.insert("files_complete".into(), json!(before["complete"] == true && walk.why.is_none()));
+    if let Some(why) = before["incomplete"].as_str().map(String::from).or(walk.why) {
+        m.insert("files_incomplete".into(), json!(why));
+    }
     m
 }
 
@@ -399,13 +412,30 @@ mod tests {
             std::fs::write(d.join(a).join("package.json"), "{}").unwrap();
         }
         let (dirs, walk) = walk_workspaces(&d);
-        assert!(!walk.complete, "the big pattern ran out of the budget");
+        assert!(walk.why.as_deref().is_some_and(|w| w.contains("budget")), "the big pattern ran out of the budget: {:?}", walk.why);
         assert!(walk.listed <= MAX_LISTED, "listed {} directories, the budget is {MAX_LISTED}", walk.listed);
         assert!(dirs.is_empty(), "nothing listed after the budget: {dirs:?}");
         // The same patterns the other way round: apps/* is found, and the
         // set is still incomplete.
         std::fs::write(d.join("package.json"), r#"{"workspaces": ["apps/*", "big/**"]}"#).unwrap();
         assert_eq!(workspaces(&d), (vec!["apps/one".to_string(), "apps/two".into()], false));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn scoped_and_plus_names_are_literal() {
+        let d = scratch("scoped");
+        for w in ["packages/@scope/a", "packages/@scope/b", "packages/c++", "packages/x!y"] {
+            std::fs::create_dir_all(d.join(w)).unwrap();
+            std::fs::write(d.join(w).join("package.json"), "{}").unwrap();
+        }
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/@scope/*", "packages/c++", "packages/x!y"]}"#).unwrap();
+        assert_eq!(workspaces(&d), (vec!["packages/@scope/a".to_string(), "packages/@scope/b".into(), "packages/c++".into(), "packages/x!y".into()], true));
+        // Extended globs stay unsupported, with the reason in the state.
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/@(a|b)"]}"#).unwrap();
+        let st = state(&d, YARN_LOCKFILES);
+        assert_eq!(st["complete"], false);
+        assert!(st["incomplete"].as_str().is_some_and(|w| w.contains("extended glob")), "{st}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -421,9 +451,10 @@ mod tests {
         // A workspace that is a symlink to a directory, under a glob.
         std::os::unix::fs::symlink(d.join("elsewhere/b"), d.join("packages/b")).unwrap();
         assert!(!workspaces(&d).1, "a symlinked workspace under a glob");
-        // Named directly.
+        // Named directly; the state says why.
         std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/a", "packages/b"]}"#).unwrap();
         assert!(!workspaces(&d).1, "a symlinked workspace named directly");
+        assert!(state(&d, YARN_LOCKFILES)["incomplete"].as_str().is_some_and(|w| w.contains("a workspace that is a symlink")));
         // A symlink to a file under a glob is no workspace: still complete.
         std::fs::remove_file(d.join("packages/b")).unwrap();
         std::os::unix::fs::symlink(d.join("package.json"), d.join("packages/c")).unwrap();
