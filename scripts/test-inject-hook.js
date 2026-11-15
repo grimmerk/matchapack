@@ -305,6 +305,15 @@ async function helperCases () {
         // A value that starts with `-`, typed with `=`: one token (the log's
         // redaction then sees the pair).
         [['install', '-w', 'a', '--_password=-abcSECRET'], ['--_password=-abcSECRET']],
+        // An option that is not text takes a separate value starting with
+        // `-` (nopt refuses one only for text): kept with it, so the next
+        // option is not swallowed when the command is repeated.
+        [['install', '--fetch-retries', '-1', '--ignore-scripts', '-w', 'a'], ['--fetch-retries=-1', '--ignore-scripts']],
+        [['install', '--depth', '-1', '--no-audit', '-w', 'a'], ['--depth=-1', '--no-audit']],
+        [['install', '--otp', '-abc123', '-w', 'a'], ['--otp=-abc123']],
+        // A flag goes out as the value npm gave it.
+        [['install', '--no-ignore-scripts=false', '-w', 'a'], ['--ignore-scripts']],
+        [['install', '--ignore-scripts', 'false', 'x', '-w', 'a'], ['--no-ignore-scripts']],
       ]
       const got = []
       for (const [args] of cases) {
@@ -317,7 +326,22 @@ async function helperCases () {
       const n2 = await repairOf(['install', '-w', 'a'], ws)
       fs.rmSync(path.join(ws, '.npmrc'))
       check('helper: an npmrc that sets a workspace filter is named, also behind a typed -w',
-        JSON.stringify([n1, n2]), JSON.stringify([{ args: ['--no-save'], npmrc: ['project'] }, { args: [], npmrc: ['project'] }]))
+        JSON.stringify([n1, n2]), JSON.stringify([{ args: ['--no-save'], npmrc: ['project'], checked: true }, { args: [], npmrc: ['project'], checked: true }]))
+      // Started inside a member: npm sets `workspace` on its default layer,
+      // which every npmrc layer's data inherits; no npmrc sets it.
+      const m1 = await repairOf(['install'], path.join(ws, 'packages', 'a'))
+      // The user npmrc.
+      fs.writeFileSync(path.join(tmp, 'npmrc'), 'workspace=a\n')
+      const m2 = await repairOf(['install'], ws)
+      fs.writeFileSync(path.join(tmp, 'npmrc'), '')
+      check('helper: inside a member no npmrc is named; a user npmrc filter is',
+        JSON.stringify([m1 && m1.npmrc, m2 && m2.npmrc]), JSON.stringify([[], ['user']]))
+      // The self-check: a line npm reads in an odd way (a negated option
+      // that is not a flag, with a value) is not repeated; the advice then
+      // gives no options.
+      const u1 = await repairOf(['install', '--no-tag', 'false', '-w', 'a'], d)
+      check('helper: options npm\'s parser does not read back the same are not given (unsure)',
+        JSON.stringify(u1 && [u1.args, u1.unsure, u1.checked]), JSON.stringify([null, true, false]))
     }
     // The probe of the tarball server gives up on a listener that accepts
     // and never answers.
@@ -366,6 +390,97 @@ function reachable (url) {
     const t = setTimeout(() => { req.destroy(); resolve(false) }, 1000)
     req.on('error', () => { clearTimeout(t); resolve(false) })
   })
+}
+
+// The repair options against npm's whole option table (a property test):
+// for every option npm defines, plain and negated, followed by a few kinds of
+// word, the command line `install --<option> <word> --no-audit pkg` is parsed
+// by npm's own Config; the helper's tokens (src/inject.js repairInfo) are
+// parsed again as `install <tokens>`. The two command-line layers must be
+// equal (the filter options gone) with no positional word left, or the
+// helper must have said it is unsure (its own check against npm's parser).
+// Unsure is allowed only where npm's reading of the line is itself odd: a
+// negated option followed by a word that is not true or false, and a flag
+// followed by the word `null`; never for an everyday line.
+async function sweepRepair () {
+  const { repairInfo } = require(injectJs)
+  const Config = require(path.join(npmDir, 'node_modules', '@npmcli', 'config'))
+  const defs = require(path.join(npmDir, 'node_modules', '@npmcli', 'config', 'lib', 'definitions'))
+  const REMOVED = new Set(['workspace', 'workspaces', 'include-workspace-root', 'prefix'])
+  const cwd = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'matchapack-sweep-'))
+  const parse = async (args) => {
+    const config = new Config({ npmPath: npmDir, definitions: defs.definitions, flatten: defs.flatten, nerfDarts: defs.nerfDarts, shorthands: defs.shorthands, argv: [process.execPath, path.join(npmDir, 'bin', 'npm-cli.js'), ...args], cwd, env: { npm_config_userconfig: path.join(cwd, 'npmrc') }, warn: false })
+    await config.load()
+    const cli = config.data.get('cli').data
+    const own = {}
+    for (const k of Object.keys(cli)) {
+      own[k] = cli[k]
+    }
+    return { config, cli: own, remain: (config.parsedArgv.remain || []).map(String) }
+  }
+  fs.writeFileSync(path.join(cwd, 'npmrc'), '')
+  const words = ['foo', '5', '-1', '-x', 'null', 'false', 'true', 'always', '--ignore-scripts']
+  let n = 0
+  const wrong = []
+  const oddUnsure = []
+  let unsure = 0
+  try {
+    for (const key of Object.keys(defs.definitions)) {
+      for (const neg of [false, true]) {
+        for (const w of words) {
+          const a = ['install', `--${neg ? 'no-' : ''}${key}`, w, '--no-audit', 'pkg']
+          let A
+          try {
+            A = await parse(a)
+          } catch {
+            continue // npm itself refuses the line
+          }
+          n++
+          const info = repairInfo(A.config) || {}
+          if (info.unsure) {
+            unsure++
+            const t = defs.definitions[key].type
+            const flag = t === Boolean || (Array.isArray(t) && t.includes(Boolean))
+            // (A flag that is also text, such as `browser`, reads `false` as text.)
+            const text = Array.isArray(t) && t.includes(String)
+            if (!((neg && (!flag || (w !== 'true' && w !== 'false'))) || (flag && text) || w === 'null' || w === 'always' || w === 'foo' || w === '5')) {
+              oddUnsure.push(a.join(' '))
+            }
+            continue
+          }
+          let B
+          try {
+            B = await parse(['install', ...(info.args || [])])
+          } catch (e) {
+            wrong.push(`${a.join(' ')} -> ${JSON.stringify(info.args)}: npm refuses it`)
+            continue
+          }
+          const diffs = []
+          for (const k of new Set([...Object.keys(A.cli), ...Object.keys(B.cli)])) {
+            if (REMOVED.has(k)) {
+              if (k in B.cli) {
+                diffs.push(`${k} still there`)
+              }
+              continue
+            }
+            if (!util.isDeepStrictEqual(A.cli[k], B.cli[k])) {
+              diffs.push(`${k}: ${util.inspect(A.cli[k])} vs ${util.inspect(B.cli[k])}`)
+            }
+          }
+          if (B.remain.length !== 1) {
+            diffs.push(`positional ${JSON.stringify(B.remain)}`)
+          }
+          if (diffs.length) {
+            wrong.push(`${a.join(' ')} -> ${JSON.stringify(info.args)}: ${diffs.join('; ')}`)
+          }
+        }
+      }
+    }
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
+  check(`repair sweep over npm's option table (${n} command lines, ${unsure} unsure): no wrong token list`, wrong.slice(0, 3).join(' | '), '')
+  check('repair sweep: unsure only where npm\'s reading is itself odd (a negated option that is not a flag, or followed by a word; a flag followed by a word; a flag that is also text)', oddUnsure.slice(0, 3).join(' | '), '')
 }
 
 ;(async () => {
@@ -422,6 +537,7 @@ function reachable (url) {
   // The helper itself, started as matchapack starts it (a socket as fd 3),
   // with a stand-in for matchapack that answers its messages.
   await helperCases()
+  await sweepRepair()
 
   process.exit(failed ? 1 : 0)
 })()

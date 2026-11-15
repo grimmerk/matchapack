@@ -246,7 +246,15 @@ adds or changes is replaced by clones. So:
     (the options as npm parsed them, one word each, so abbreviations such as
     `--prefi` are gone too), with `env -u` for a filter set in the
     environment (in any case: `NPM_CONFIG_workspace` too); a filter set in an
-    npmrc file is named, since a command line cannot unset it;
+    npmrc file is named, since a command line cannot unset it. `--prefix
+    <root>` run from where you are is close to, not the same as, running at
+    the root: install scripts see `INIT_CWD` as the directory you ran it in
+    and `npm_config_prefix=<root>` (which matters only to a script that runs
+    a global npm command), and a relative path in an npmrc value resolves
+    against the directory you ran it in. When npm's own parser does not read
+    the options back as it read your command line (a line npm reads oddly,
+    such as a negated text option with a value), the command is given
+    without any of them, and the advice says so;
   - both: remove `node_modules`, reinstall the whole project the same way
     (`npm install` instead of `npm ci`), then run the command again.
 

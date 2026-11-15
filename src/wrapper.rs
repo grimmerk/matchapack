@@ -121,7 +121,19 @@ fn shell_quote(a: &str) -> String {
     if !a.is_empty() && !a.starts_with('=') && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_=.,/:@+%".contains(&b)) {
         a.to_string()
     } else {
-        format!("'{}'", a.replace('\'', "'\\''"))
+        // A backslash and a quote go outside the quotes, escaped (`'\\'`,
+        // `'\''`): inside single quotes fish reads `\\` and `\'` as
+        // escapes, bash and zsh do not.
+        let mut q = String::from("'");
+        for c in a.chars() {
+            match c {
+                '\\' => q.push_str("'\\\\'"),
+                '\'' => q.push_str("'\\''"),
+                c => q.push(c),
+            }
+        }
+        q.push('\'');
+        q
     }
 }
 
@@ -151,6 +163,9 @@ struct RepairSettings {
     /// The npmrc layers (project, user, global, builtin) that set a
     /// workspace filter: a command line cannot unset them.
     npmrc: Vec<String>,
+    /// npm's own parser did not read `flags` back as it read the typed
+    /// command line (src/inject.js `sameParse`): no options are given.
+    unsure: bool,
 }
 
 impl RepairSettings {
@@ -163,6 +178,7 @@ impl RepairSettings {
             workspace_filter: b("workspace_filter"),
             flags: strs(&inject["repair"]["args"]),
             npmrc: strs(&inject["repair"]["npmrc"]).unwrap_or_default(),
+            unsure: inject["repair"]["unsure"] == true,
         }
     }
 }
@@ -239,7 +255,8 @@ fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: &Rep
     let filtered = s.workspace_filter == Some(true);
     let nm = root.join("node_modules").display().to_string();
     let shown_args = trial::redact_args(args);
-    let flags = s.flags.clone().unwrap_or_else(|| without_filter(&args[1..]));
+    // Unsure: no options at all, not the typed words either.
+    let flags = if s.unsure { vec![] } else { s.flags.clone().unwrap_or_else(|| without_filter(&args[1..])) };
     let shown_flags = trial::redact_args(&flags);
     let redacted = shown_args != args || shown_flags != flags;
     let whole = |verb: &str| {
@@ -249,7 +266,7 @@ fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: &Rep
         words.extend(shown_flags.iter().cloned());
         shell_line(&format!("{env}MATCHAPACK=0 npm {verb}"), &words)
     };
-    let npmrc = if filtered && !s.npmrc.is_empty() {
+    let mut npmrc = if filtered && !s.npmrc.is_empty() {
         format!(
             " Your {} npmrc sets a workspace filter, which a command line cannot unset: take it out for that command, or npm rebuilds only those workspaces.",
             s.npmrc.join(" and ")
@@ -257,6 +274,9 @@ fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: &Rep
     } else {
         String::new()
     };
+    if filtered && s.unsure {
+        npmrc.push_str(" That command has none of your options: matchapack could not repeat them safely, so add the ones you need.");
+    }
     let why = if no_lock {
         Some("There is no package-lock.json from this run for npm ci to rebuild from")
     } else if no_save {
@@ -642,7 +662,7 @@ mod tests {
         let d = crate::store::tests::scratch("wrapper-repair");
         std::fs::create_dir_all(&d).unwrap();
         let ends = |s: String, tail: &str| assert!(s.ends_with(tail), "{s}\n  does not end with\n{tail}");
-        let known = RepairSettings { package_lock: Some(true), save: Some(true), workspace_filter: Some(false), flags: None, npmrc: vec![] };
+        let known = RepairSettings { package_lock: Some(true), save: Some(true), workspace_filter: Some(false), flags: None, npmrc: vec![], unsure: false };
         let adv = |args: &[&str], cmd: &str, s: &RepairSettings| repair_advice(&a(args), cmd, &d, s, &[]);
         // No lockfile in the root: npm ci would refuse; the same command
         // with plain npm on an emptied node_modules.
@@ -655,6 +675,8 @@ mod tests {
         ends(adv(&["install", "--omit=dev", "left-pad@1.3.0"], "install", &known), "rebuild with plain npm: MATCHAPACK=0 npm ci --omit=dev left-pad@1.3.0");
         ends(adv(&["i", "a b", "it's", "", "left-pad@^1.3.0", "=x"], "install", &RepairSettings::default()), "MATCHAPACK=0 npm ci 'a b' 'it'\\''s' '' 'left-pad@^1.3.0' '=x'");
         assert_eq!(shell_quote("--omit=dev"), "--omit=dev");
+        // A backslash outside the quotes (fish reads `\\` inside them).
+        assert_eq!(shell_quote("--cache=C:\\x\\'y"), "'--cache=C:'\\\\'x'\\\\''\\''y'");
         ends(adv(&["uninstall"], "uninstall", &known), "MATCHAPACK=0 npm ci");
         // A lockfile this run did not write (package-lock=false): not npm ci.
         let nolock = RepairSettings { package_lock: Some(false), ..known.clone() };
@@ -684,6 +706,12 @@ mod tests {
         assert_eq!(filter_env(&env), a(&["NPM_CONFIG_workspace", "npm_config_include_workspace_root"]));
         let s = repair_advice(&a(&["i", "x"]), "install", &d, &parsed, &env);
         ends(s, &format!("env -u NPM_CONFIG_workspace -u npm_config_include_workspace_root MATCHAPACK=0 npm ci --prefix {root} --omit=dev"));
+        // npm's own parser did not read the options back the same (unsure):
+        // the whole-project command has none, not the typed words either,
+        // and the advice says so.
+        let unsure = RepairSettings { flags: None, unsure: true, ..ws.clone() };
+        let s = adv(&["install", "--no-tag", "false", "-w", "a", "x"], "install", &unsure);
+        assert!(s.contains(&format!("MATCHAPACK=0 npm ci --prefix {root} That command has none of your options: matchapack could not repeat them safely, so add the ones you need.")), "{s}");
         let rc = RepairSettings { npmrc: vec!["project".into()], ..parsed.clone() };
         let s = adv(&["i", "x"], "install", &rc);
         assert!(s.ends_with("Your project npmrc sets a workspace filter, which a command line cannot unset: take it out for that command, or npm rebuilds only those workspaces."), "{s}");

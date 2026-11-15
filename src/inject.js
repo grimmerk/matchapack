@@ -187,20 +187,24 @@ function resultTrap (value, report) {
 // The options that filter a command to some workspaces or name its root.
 const FILTERS = new Set(['workspace', 'workspaces', 'include-workspace-root', 'prefix'])
 
-// `{ args, npmrc }` for the repair advice of a broken run (wrapper.rs), or
-// null.
+// `{ args, npmrc, checked }` for the repair advice of a broken run
+// (wrapper.rs), or null.
 // `args`: the command's options as npm parsed them, each as ONE token
 // (`--name=value`, `--flag`, `--no-flag`), without the options in FILTERS
 // (an abbreviation such as `--prefi` resolved as npm's nopt resolves it).
 // nopt's `cooked` list splits `--name=value`; repeated split, an option
-// npm's definitions do not know (`--//host/:_authToken=…`,
-// `--@scope:registry=…`) would be a flag and its value a package name, so
-// a value goes out joined to its option whenever npm's parse took it as
-// that option's value. Every other token (the command word, package names,
+// npm's definitions do not know (`--//host/:_authToken=…`) would be a flag
+// and its value a package name, so a value goes out joined to its option
+// whenever npm's parse took it as that option's value. A flag goes out as
+// the value npm gave it (`--no-ignore-scripts=false` is
+// `--ignore-scripts`). Every other token (the command word, package names,
 // whatever follows `--`) is dropped by its position, never by its value.
-// `npmrc`: the npmrc layers (project, user, global, builtin) whose own data
-// sets `workspace` or `workspaces` (each layer, since `config.find` names the
-// highest one only, and a typed `-w` would hide one in an npmrc).
+// `npmrc`: the npmrc layers (project, user, global, builtin) that set
+// `workspace` or `workspaces` themselves.
+// `checked`: whether npm's own parser reads `args` exactly as it read the
+// typed command line (`sameParse`). false: the options are not given
+// (`args` null, `unsure` true) and the advice says so; null: it could not
+// be asked, the tokens stand as built.
 function repairInfo (config) {
   try {
     const cooked = config.parsedArgv && config.parsedArgv.cooked
@@ -221,6 +225,10 @@ function repairInfo (config) {
       const t = defs[key] && defs[key].type
       return t === Boolean || (Array.isArray(t) && t.includes(Boolean))
     }
+    // nopt leaves a word that looks like an option alone only after an
+    // option whose type is text; every other kind (number, path, date,
+    // list) takes whatever follows, except a bare `--`.
+    const isText = (t) => t === String || (Array.isArray(t) && t.length === 1 && t[0] === String)
     const original = new Set((Array.isArray(config.parsedArgv.original) ? config.parsedArgv.original : []).map(String))
     const args = []
     for (let i = 0; i < cooked.length; i++) {
@@ -229,6 +237,11 @@ function repairInfo (config) {
         break
       }
       if (!(t.startsWith('--') && t.length > 2)) {
+        // A short flag npm does not know (`-x`) is repeated as typed; a
+        // positional word is dropped.
+        if (t.length > 1 && t.startsWith('-')) {
+          args.push(t)
+        }
         continue
       }
       let name = t.slice(2)
@@ -242,30 +255,84 @@ function repairInfo (config) {
       const type = key ? defs[key].type : undefined
       // Typed as `--name=value`: the value is this option's, whatever it is.
       const withEq = next !== undefined && original.has(`${t}=${next}`)
-      // Else as nopt decides: a flag takes `true` / `false` (or one of its
-      // listed words); another known option takes a token that does not
-      // look like an option; an unknown option takes nothing.
-      const takes = next !== undefined && !neg && (withEq || (key
-        ? (isBool(key) ? (next === 'true' || next === 'false' || (Array.isArray(type) && type.includes(next))) : !next.startsWith('-'))
-        : false))
-      if (takes) {
+      let token = t
+      let take = false
+      if (neg || (key && isBool(key))) {
+        // As nopt: a flag, or any option negated, takes `true` / `false`
+        // (a negated one inverts it); a flag of a listed type also takes
+        // one of its words.
+        if (next === 'true' || next === 'false') {
+          take = true
+          token = `--${(next === 'true') !== neg ? '' : 'no-'}${name}`
+        } else if (!neg && (withEq || (Array.isArray(type) && type.includes(next)))) {
+          take = true
+          token = `${t}=${next}`
+        }
+      } else if (key) {
+        take = next !== undefined && (withEq || (isText(type) ? !/^-{1,2}[^-]+/.test(next) : !/^-{2,}$/.test(next)))
+      } else {
+        // An option npm does not know takes a value only with `=`.
+        take = withEq
+      }
+      if (take && token === t) {
+        token = `${t}=${next}`
+      }
+      if (take) {
         i++
       }
       if (key && FILTERS.has(key)) {
         continue
       }
-      args.push(takes ? `${t}=${next}` : t)
+      args.push(token)
     }
     const npmrc = []
     for (const where of ['project', 'user', 'global', 'builtin']) {
       const layer = config.data && typeof config.data.get === 'function' ? config.data.get(where) : null
       const d = layer && layer.data
-      const ws = d && d.workspace
-      if (d && ((Array.isArray(ws) ? ws.length > 0 : (ws !== undefined && ws !== null && ws !== '')) || d.workspaces === true)) {
+      // The layer's OWN keys only: each layer's data inherits from the
+      // layer below, and npm sets `workspace` on the lowest one (default)
+      // when it is started inside a member.
+      const own = (k) => !!d && Object.prototype.hasOwnProperty.call(d, k)
+      const ws = own('workspace') ? d.workspace : undefined
+      if (d && ((Array.isArray(ws) ? ws.length > 0 : (ws !== undefined && ws !== null && ws !== '')) || (own('workspaces') && d.workspaces === true))) {
         npmrc.push(where)
       }
     }
-    return { args, npmrc }
+    const checked = sameParse(config, args)
+    if (checked === false) {
+      return { args: null, npmrc, checked, unsure: true }
+    }
+    return { args, npmrc, checked }
+  } catch {
+    return null
+  }
+}
+
+// Whether npm's own option parser (the nopt npm loaded) reads `tokens` as
+// `install <tokens>` exactly as it read the typed command line (the `cli`
+// config layer keeps what it read, `raw`), apart from the options in
+// FILTERS, which must be gone, and with no positional word left: true or
+// false; null when that cannot be asked.
+function sameParse (config, tokens) {
+  try {
+    const cli = config.data && typeof config.data.get === 'function' ? config.data.get('cli') : null
+    const raw = cli && cli.raw
+    if (!raw || typeof raw !== 'object' || !config.npmPath || !config.types) {
+      return null
+    }
+    const nopt = require(path.join(config.npmPath, 'node_modules', 'nopt'))
+    const again = nopt(config.types, config.shorthands || {}, ['install', ...tokens], 0)
+    const words = again.argv && again.argv.remain
+    delete again.argv
+    const typed = { ...raw }
+    delete typed.argv
+    for (const k of FILTERS) {
+      delete typed[k]
+      if (k in again) {
+        return false
+      }
+    }
+    return Array.isArray(words) && words.length === 1 && require('util').isDeepStrictEqual(again, typed)
   } catch {
     return null
   }
