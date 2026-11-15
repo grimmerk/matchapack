@@ -45,9 +45,10 @@ enum Cmd {
         #[arg(last = true)]
         npm_args: Vec<String>,
     },
-    /// Stand in for `npm <args>`: handle a bare `npm ci` from the store when it
-    /// is safe to, otherwise run the real npm with the same arguments. Meant to
-    /// be called by the shell wrapper (shell/matchapack.sh).
+    /// Stand in for `npm <args>`: run `npm ci`, `npm install`, `npm update` or
+    /// `npm uninstall` (or an alias) with clones from the store when it is
+    /// safe to, otherwise the real npm with the same arguments. Meant to be
+    /// called by the shell wrapper (shell/matchapack.sh).
     Npm {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -62,7 +63,7 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Print the shell integration for an rc file (routes a bare `npm ci`, and on macOS Yarn 1's installs and `yarn add` / `upgrade` / `remove`, through matchapack)
+    /// Print the shell integration for an rc file (routes `npm ci`, `npm install`, `npm update` and `npm uninstall`, and on macOS Yarn 1's installs and `yarn add` / `upgrade` / `remove`, through matchapack)
     ///
     /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts matchapack on
     /// PATH (otherwise the guard skips it silently):
@@ -237,8 +238,14 @@ pub struct Summary {
 pub enum InstallError {
     /// Refused before anything in the project changed: npm can take over as is.
     Declined(anyhow::Error),
-    /// matchapack itself failed after node_modules was changed.
-    Broke(anyhow::Error),
+    /// matchapack itself failed after node_modules was changed (a panic, a
+    /// lost child status); the run's counts and npm's settings when known.
+    Broke { error: anyhow::Error, inject: Option<serde_json::Value> },
+    /// npm read a key of what the hook returned that pacote's own result
+    /// does not have (src/inject.js `resultTrap`): npm's files may differ
+    /// from what npm alone would have written. npm's exit status, and the
+    /// run's counts.
+    Trap { error: anyhow::Error, code: i32, inject: serde_json::Value },
     /// npm ran and exited with this status, having reported the failure
     /// itself; `npm ci` would have failed the same way.
     Npm { code: i32, inject: serde_json::Value },
@@ -247,7 +254,7 @@ pub enum InstallError {
 impl InstallError {
     pub fn into_inner(self) -> anyhow::Error {
         match self {
-            InstallError::Declined(e) | InstallError::Broke(e) => e,
+            InstallError::Declined(e) | InstallError::Broke { error: e, .. } | InstallError::Trap { error: e, .. } => e,
             InstallError::Npm { code, .. } => anyhow::anyhow!("npm exited with status {code}"),
         }
     }

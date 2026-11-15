@@ -361,6 +361,123 @@ function resultTrap (value, report) {
   })
 }
 
+// The options that filter a command to some workspaces or name its root.
+const FILTERS = new Set(['workspace', 'workspaces', 'include-workspace-root', 'prefix'])
+
+// One token per value of a parsed option: `--name`, `--name=false`,
+// `--name=<value>` (a date as ISO text). npm's own parser reads them back
+// (`sameParse` checks it).
+function optionTokens (key, value) {
+  return (Array.isArray(value) ? value : [value]).map((x) => {
+    if (x === true) {
+      return `--${key}`
+    }
+    if (x instanceof Date) {
+      return `--${key}=${x.toISOString()}`
+    }
+    return `--${key}=${x === null ? 'null' : x}`
+  })
+}
+
+// `{ args, npmrc, checked }` for the repair advice of a broken run
+// (wrapper.rs), or null.
+// `args`: the options of the command line as npm parsed them (the `cli`
+// config layer's `raw`), serialised one token per value (`optionTokens`),
+// without the options in FILTERS; the command word and package names are
+// not options, so they are not there. Normalised as npm holds them: full
+// option names, absolute paths, ISO dates.
+// `checked`: whether npm's own parser reads `args` exactly as it read the
+// typed command line (`sameParse`). Anything but true: `args` is null,
+// `unsure` true, and `missing` lists every token it could not repeat, for
+// the advice to name.
+// `npmrc`: the npmrc layers (project, user, global, builtin) that set
+// `workspace` or `workspaces` themselves.
+function repairInfo (config) {
+  try {
+    const npmrc = []
+    for (const where of ['project', 'user', 'global', 'builtin']) {
+      const layer = config.data && typeof config.data.get === 'function' ? config.data.get(where) : null
+      const d = layer && layer.data
+      // The layer's OWN keys only: each layer's data inherits from the
+      // layer below, and npm sets `workspace` on the lowest one (default)
+      // when it is started inside a member.
+      const own = (k) => !!d && Object.prototype.hasOwnProperty.call(d, k)
+      const ws = own('workspace') ? d.workspace : undefined
+      if (d && ((Array.isArray(ws) ? ws.length > 0 : (ws !== undefined && ws !== null && ws !== '')) || (own('workspaces') && d.workspaces === true))) {
+        npmrc.push(where)
+      }
+    }
+    const cli = config.data && typeof config.data.get === 'function' ? config.data.get('cli') : null
+    const raw = cli && cli.raw
+    if (!raw || typeof raw !== 'object') {
+      return { args: null, npmrc, checked: null, unsure: true, missing: [] }
+    }
+    const tokens = []
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === 'argv' || FILTERS.has(key)) {
+        continue
+      }
+      tokens.push(...optionTokens(key, value))
+    }
+    const checked = sameParse(config, tokens)
+    if (checked !== true) {
+      return { args: null, npmrc, checked, unsure: true, missing: tokens }
+    }
+    return { args: tokens, npmrc, checked }
+  } catch {
+    return null
+  }
+}
+
+// Whether npm's own option parser (the nopt npm loaded) reads `tokens` as
+// `install <tokens>` exactly as it read the typed command line (the `cli`
+// config layer keeps what it read, `raw`), apart from the options in
+// FILTERS, which must be gone, and with no positional word left: true or
+// false; null when that cannot be asked. nopt's handlers (npm 11's config
+// leaves its warnings for abbreviations, unknown and invalid options on
+// the module) are off for this second parse: npm already said what it had
+// to about the typed line.
+function sameParse (config, tokens) {
+  try {
+    const cli = config.data && typeof config.data.get === 'function' ? config.data.get('cli') : null
+    const raw = cli && cli.raw
+    if (!raw || typeof raw !== 'object' || !config.npmPath || !config.types) {
+      return null
+    }
+    const nopt = require(path.join(config.npmPath, 'node_modules', 'nopt'))
+    const HANDLERS = ['invalidHandler', 'unknownHandler', 'abbrevHandler']
+    const saved = HANDLERS.map(h => [h, Object.prototype.hasOwnProperty.call(nopt, h), nopt[h]])
+    let again
+    try {
+      for (const h of HANDLERS) {
+        nopt[h] = false
+      }
+      again = nopt(config.types, config.shorthands || {}, ['install', ...tokens], 0)
+    } finally {
+      for (const [h, had, v] of saved) {
+        if (had) {
+          nopt[h] = v
+        } else {
+          delete nopt[h]
+        }
+      }
+    }
+    const words = again.argv && again.argv.remain
+    delete again.argv
+    const typed = { ...raw }
+    delete typed.argv
+    for (const k of FILTERS) {
+      delete typed[k]
+      if (k in again) {
+        return false
+      }
+    }
+    return Array.isArray(words) && words.length === 1 && require('util').isDeepStrictEqual(again, typed)
+  } catch {
+    return null
+  }
+}
+
 // The socket's fd, while this process still owns it as a plain blocking fd
 // (until net.Socket takes it over): fail() then tells matchapack why.
 let rawFd = null
@@ -565,7 +682,24 @@ function main () {
   // Set in step 4, when npm has loaded pacote.
   let pacote = null
   let origExtract = null
+  // Set in step 3 when matchapack accepted npm's install root: the root as
+  // npm reported it and as matchapack pinned it (canonical).
+  let roots = null
+  const insideRoot = (d) => roots.some(r => d === r || d.startsWith(r.endsWith(path.sep) ? r : r + path.sep))
   const matchapackExtract = async function (dest) {
+    const to = path.resolve(dest)
+    // Not an install into the project: pacote extracts a package given as
+    // a URL, a local tarball or a git repository into a temporary directory
+    // in npm's cache to read its manifest, through this same method.
+    // pacote's own extract, counted apart (not a package npm extracted into
+    // the project; src/serve.rs). Compared as npm names the path: a
+    // workspace symlinked to a directory outside the project is under the
+    // root by name, and its packages go to matchapack, whose destination
+    // check refuses them (resolved, they are outside).
+    if (roots && !insideRoot(to)) {
+      send({ aside: 'outside-root' })
+      return origExtract.call(this, dest)
+    }
     let why
     try {
       why = down || ineligible(pacote, this, processUmask)
@@ -573,7 +707,9 @@ function main () {
       why = 'hook-error'
     }
     if (why) {
-      send({ note: why })
+      // The destination: matchapack compares the packages npm placed with
+      // the destinations the hook saw ("unseen", src/inject.rs).
+      send({ note: why, dest: to })
       return origExtract.call(this, dest)
     }
     // npm's own project root, as it passes it to pacote (ci.js builds the
@@ -582,7 +718,7 @@ function main () {
     // reported in step 3 (`npm-root-elsewhere`); the destination check uses
     // the pinned root.
     const npmRoot = this.opts && typeof this.opts.path === 'string' && path.isAbsolute(this.opts.path) ? this.opts.path : undefined
-    const req = { integrity: String(this.integrity), dest: path.resolve(dest), npm_root: npmRoot }
+    const req = { integrity: String(this.integrity), dest: to, npm_root: npmRoot }
     let answer
     try {
       answer = await request(req)
@@ -612,8 +748,9 @@ function main () {
       return origExtract.call(this, dest)
     }
     // What pacote's extract resolves to. arborist does not read it today; a
-    // read of any other key is reported, and matchapack then rebuilds the
-    // tree with plain npm (wrapper.rs, the "broke" path).
+    // read of any other key is reported, and matchapack treats the run as
+    // broken (wrapper.rs: npm ci is rebuilt with plain npm ci; the install
+    // family stops with the repair command).
     return resultTrap(
       { resolved: this.resolved, integrity: this.integrity && String(this.integrity), from: this.from },
       (key, expected) => send({ result_read: key, expected }))
@@ -656,7 +793,31 @@ function main () {
           typed: String(cmd),
           dry_run: flag('dry-run'),
           package_lock_only: flag('package-lock-only'),
+          // Whether npm writes package-lock.json in this run (false with
+          // --no-package-lock or package-lock=false): what a repair after
+          // a broken run can rebuild from (wrapper.rs).
+          package_lock: flag('package-lock'),
+          // Whether npm saves package.json and package-lock.json (false
+          // with --no-save), and whether the command is filtered to some
+          // workspaces (-w, --workspaces, or started inside a member, where
+          // npm sets `workspace` itself): the repair must then rebuild the
+          // whole project.
+          save: flag('save'),
+          workspace_filter: (() => {
+            try {
+              const w = this.config.get('workspace')
+              return (Array.isArray(w) && w.length > 0) || this.config.get('workspaces') === true
+            } catch {
+              return false
+            }
+          })(),
           usage: flag('usage'),
+          // For the repair after a broken run (wrapper.rs): the command's
+          // arguments as npm parsed them, without the ones that filter it
+          // to some workspaces or name its root, abbreviations resolved by
+          // npm's own rules; and the npmrc files that set such a filter
+          // (the command line cannot unset them).
+          repair: repairInfo(this.config),
         }
       } catch (e) {
         send({ no_root: `could not read npm's install root: ${e && e.message}` })
@@ -667,6 +828,9 @@ function main () {
         answer = await request(report)
       } catch {
         // matchapack is gone: every later request falls back to pacote
+      }
+      if (answer && answer.ok === true) {
+        roots = [report.root, answer.root].filter(r => typeof r === 'string' && path.isAbsolute(r))
       }
       if (answer && answer.ok === false) {
         // Refused (the reason is recorded): npm has loaded its config and
@@ -775,5 +939,5 @@ if (require.main === module && process.argv[2] === '--fingerprint') {
     fail(`before npm started: ${e && e.stack ? e.stack : e}`)
   }
 } else {
-  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, RESULT_KEYS, tarPackages, tarFingerprint, extractionKey, extractionCode }
+  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, repairInfo, sameParse, RESULT_KEYS, tarPackages, tarFingerprint, extractionKey, extractionCode }
 }

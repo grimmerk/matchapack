@@ -27,22 +27,28 @@ pub fn now() -> f64 {
 }
 
 /// Options whose value is a secret, by a word in their name (npm's `--otp`,
-/// `--_auth`, `--//host/:_authToken=…`, `--password`; Yarn's `--otp`).
+/// `--_auth`, `--//host/:_authToken=…`, `--password`; Yarn's `--otp`), and
+/// npm's client key (`--key=<PEM>`, also per registry; `--cert` is public).
 fn secret_option(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    ["auth", "token", "password", "otp", "secret"].iter().any(|w| n.contains(w))
+    let n = name.trim_start_matches('-').to_ascii_lowercase();
+    ["auth", "token", "password", "otp", "secret"].iter().any(|w| n.contains(w)) || n == "key" || n.ends_with(":key") || n.ends_with("_key")
 }
 
 /// `scheme://user:pass@host…` → `scheme://***@host…` (proxy and registry
-/// URLs carry credentials that way).
+/// URLs carry credentials that way), and the value of a query parameter
+/// named like a secret (`?private_token=…`) → `***`. The user name of an
+/// ssh URL without a password (`git+ssh://git@github.com/…`) is not a
+/// secret and stays.
 fn redact_userinfo(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find("://") {
         let (head, tail) = rest.split_at(i + 3);
         out.push_str(head);
+        let scheme: String = head[..i].chars().rev().take_while(|c| c.is_ascii_alphanumeric() || "+.-".contains(*c)).collect::<String>().chars().rev().collect();
         let end = tail.find(|c: char| c == '/' || c.is_whitespace()).unwrap_or(tail.len());
         match tail[..end].rfind('@') {
+            Some(at) if scheme.to_ascii_lowercase().contains("ssh") && !tail[..at].contains(':') => out.push_str(&tail[..end]),
             Some(at) => {
                 out.push_str("***");
                 out.push_str(&tail[at..end]);
@@ -50,6 +56,28 @@ fn redact_userinfo(s: &str) -> String {
             None => out.push_str(&tail[..end]),
         }
         rest = &tail[end..];
+    }
+    out.push_str(rest);
+    redact_query(&out)
+}
+
+/// The value of each `?name=value` / `&name=value` whose name is a secret's
+/// (`secret_option`) → `***`.
+fn redact_query(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find(['?', '&']) {
+        out.push_str(&rest[..=i]);
+        rest = &rest[i + 1..];
+        let end = rest.find(|c: char| c == '&' || c == '#' || c.is_whitespace()).unwrap_or(rest.len());
+        match rest[..end].split_once('=') {
+            Some((k, _)) if secret_option(k) => {
+                out.push_str(k);
+                out.push_str("=***");
+            }
+            _ => out.push_str(&rest[..end]),
+        }
+        rest = &rest[end..];
     }
     out.push_str(rest);
     out
@@ -62,6 +90,17 @@ pub fn redact_args(args: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut hide_next = false;
     for a in args {
+        // A PEM private key in any word (`--key '-----BEGIN PRIVATE KEY-----…'`
+        // starts with `-`, so the rule below would not hide it).
+        if a.contains("PRIVATE KEY-----") || (a.contains("-----BEGIN") && a.contains("KEY-----")) {
+            hide_next = false;
+            // `--key=<PEM>` keeps its name; a key that is a word of its own
+            // starts with `-----BEGIN` and may hold `=` (base64 padding):
+            // then the whole word goes.
+            let name = a.split('=').next().unwrap_or("");
+            out.push(if a.starts_with("--") && a.contains('=') && !name.contains("-----BEGIN") { format!("{name}=***") } else { "***".to_string() });
+            continue;
+        }
         if std::mem::take(&mut hide_next) && !a.starts_with('-') {
             out.push("***".to_string());
             continue;
@@ -91,20 +130,24 @@ pub fn redact_args(args: &[String]) -> Vec<String> {
 /// `redact_args`, every other string through `redact_userinfo` (a reason
 /// can quote an argument).
 fn redact(v: &mut Value) {
+    redact_in(v, false)
+}
+
+/// `argv`: inside `repair` (src/inject.js `repairInfo`), where every list of
+/// strings is command-line words (`args`, `missing`, any later one).
+fn redact_in(v: &mut Value, argv: bool) {
     match v {
         Value::String(s) => *s = redact_userinfo(s),
-        Value::Array(a) => a.iter_mut().for_each(redact),
+        Value::Array(a) => a.iter_mut().for_each(|x| redact_in(x, argv)),
         Value::Object(m) => {
             for (k, x) in m.iter_mut() {
+                let words = argv || k == "args";
                 match x {
-                    Value::Array(a) if k == "args" => {
-                        let strs: Option<Vec<String>> = a.iter().map(|y| y.as_str().map(String::from)).collect();
-                        match strs {
-                            Some(v) => *x = json!(redact_args(&v)),
-                            None => redact(x),
-                        }
+                    Value::Array(a) if words && a.iter().all(|y| y.is_string()) => {
+                        let strs: Vec<String> = a.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+                        *x = json!(redact_args(&strs));
                     }
-                    _ => redact(x),
+                    _ => redact_in(x, argv || k == "repair"),
                 }
             }
         }
@@ -174,29 +217,71 @@ fn append_line(p: &Path, line: &[u8]) {
 /// Trial scope: if ~/.config/matchapack/paths (or MATCHAPACK_PATHS, `:`-separated)
 /// lists path prefixes, matchapack only handles projects under one of them.
 pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
+    let source = if std::env::var_os("MATCHAPACK_PATHS").is_some() { "MATCHAPACK_PATHS" } else { "~/.config/matchapack/paths" };
     let list: Vec<String> = match std::env::var("MATCHAPACK_PATHS") {
         Ok(v) => v.split(':').map(String::from).collect(),
         Err(_) => {
             let f = crate::util::config_dir().join("paths");
             match std::fs::read_to_string(&f) {
-                Ok(t) => t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect(),
+                Ok(t) => paths_file_entries(&t),
                 Err(_) => return Ok(()),
             }
         }
     };
-    let home = crate::home();
+    in_scope_of(dir, &list, source, &crate::home())
+}
+
+/// The entries of a paths file: its lines, trimmed, without empty lines and
+/// comments.
+fn paths_file_entries(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect()
+}
+
+/// `in_scope` for the entries `list` (from `source`, for the message).
+fn in_scope_of(dir: &Path, list: &[String], source: &str, home: &Path) -> std::result::Result<(), String> {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    for p in &list {
-        let p = p.strip_prefix("~/").map(|r| home.join(r)).unwrap_or_else(|| PathBuf::from(p));
-        let p = std::fs::canonicalize(&p).unwrap_or(p);
+    // Entries that can never match: not absolute (`$HOME/git` typed
+    // literally, a relative path), or under a directory that does not exist.
+    // A prefix that is no directory itself is a good entry (`~/git/app`
+    // covers `~/git/app-<topic>`), and so is a directory removed since; those
+    // decline in silence for the install family like any project outside
+    // the scope. Said when nothing matched, since the scope then may not be
+    // what the user meant.
+    let mut never: Vec<(&str, &str)> = vec![];
+    for e in list {
+        let p = e.strip_prefix("~/").map(|r| home.join(r)).unwrap_or_else(|| PathBuf::from(e));
+        // Not absolute: never matches, and is never resolved (against the
+        // current directory, `.` would cover every directory).
+        if !p.is_absolute() {
+            never.push((e.as_str(), "not an absolute path"));
+            continue;
+        }
+        // Symlinks resolved, of the entry or, when it does not exist, of its
+        // parent: `/tmp/app` matches `/private/tmp/app-topic` on macOS.
+        let resolved = std::fs::canonicalize(&p)
+            .ok()
+            .or_else(|| Some(std::fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?)));
         // A plain string prefix on purpose: `~/git/app` covers the worktrees
         // `~/git/app-<topic>` too.
-        if dir.to_string_lossy().starts_with(&*p.to_string_lossy()) {
+        let prefix = resolved.as_ref().unwrap_or(&p);
+        if dir.to_string_lossy().starts_with(&*prefix.to_string_lossy()) {
             return Ok(());
         }
+        if resolved.is_none() {
+            never.push((e.as_str(), "its parent directory does not exist"));
+        }
     }
-    Err("outside the trial scope (~/.config/matchapack/paths or MATCHAPACK_PATHS)".into())
+    if never.len() == list.len() {
+        return Err(format!("outside the trial scope: {source} lists no entry that can match"));
+    }
+    if let Some((e, why)) = never.first() {
+        return Err(format!("outside the trial scope: {source} lists {e:?}, which can never match ({why})"));
+    }
+    Err(OUT_OF_SCOPE.into())
 }
+
+/// The reason `in_scope` gives (wrapper.rs `quiet_decline` compares it).
+pub const OUT_OF_SCOPE: &str = "outside the trial scope (~/.config/matchapack/paths or MATCHAPACK_PATHS)";
 
 /// The records from `since` on, and how many lines (of any date) were not
 /// readable JSON: a line cut short or two interleaved lines are skipped,
@@ -319,6 +404,18 @@ fn report_yarn1(runs: &[Value]) {
     }
 }
 
+/// The times of the installed runs of `npm ci` (`ci`; also records without a
+/// command, from before the install family was routed) or of the install
+/// family (not `ci`), sorted.
+fn install_secs<'a>(runs: impl Iterator<Item = &'a Value>, ci: bool) -> Vec<f64> {
+    let mut secs: Vec<f64> = runs
+        .filter(|r| r["outcome"] == "installed" && (r["command"].as_str().unwrap_or("ci") == "ci") == ci)
+        .filter_map(|r| r["secs"].as_f64())
+        .collect();
+    secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    secs
+}
+
 /// `t` as `YYYY-MM-DD HH:MM UTC` (days to a civil date: H. Hinnant's
 /// algorithm, proleptic Gregorian).
 fn utc(t: std::time::SystemTime) -> String {
@@ -349,12 +446,16 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         report_yarn1(&yruns);
     }
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
+    // A run of the install family that broke stops with the repair command
+    // (`repair: stopped`); `npm ci` is rebuilt by plain npm ci.
+    let stopped = runs.iter().filter(|r| r["outcome"] == "broke" && r["repair"] == "stopped").count();
     println!(
-        "runs {}: installed {}, plain npm {}, failed then npm {}{}{}",
+        "runs {}: installed {}, plain npm {}, failed then npm {}{}{}{}",
         runs.len(),
         count("installed"),
         count("declined"),
-        count("broke"),
+        count("broke") - stopped,
+        if stopped > 0 { format!(", failed and stopped {stopped}") } else { String::new() },
         // npm itself ran and exited non-zero (the inject engine).
         if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() },
         // A root or dependency script failed in the classic engine's own
@@ -367,6 +468,16 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     if !runs.is_empty() {
         let n_inject = runs.iter().filter(|r| r["engine"] == "inject").count();
         println!("engines: inject {n_inject}, classic (removed in PR C2; older runs) {}", runs.len() - n_inject);
+        // npm's command; records without one are npm ci's (before the
+        // install family was routed).
+        let mut by_cmd: std::collections::BTreeMap<&str, usize> = Default::default();
+        for r in &runs {
+            *by_cmd.entry(r["command"].as_str().unwrap_or("ci")).or_default() += 1;
+        }
+        if by_cmd.keys().any(|c| *c != "ci") {
+            let list: Vec<String> = by_cmd.iter().map(|(c, n)| format!("{c} {n}")).collect();
+            println!("commands: {}", list.join(", "));
+        }
     }
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     for r in runs.iter().filter(|r| r["outcome"] != "installed") {
@@ -418,41 +529,52 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         );
     }
     // The trap on the hook's result (src/inject.js `resultTrap`): npm read a
-    // key of it other than resolved / integrity / from, and npm ci rebuilt
-    // node_modules (inject.rs `trap_fired`).
-    let trapped: Vec<&str> = runs
-        .iter()
-        .filter(|r| r["outcome"] == "broke")
-        .filter_map(|r| r["reason"].as_str())
-        .filter(|w| w.contains("of what matchapack's hook returned"))
-        .collect();
-    if !trapped.is_empty() {
-        println!(
-            "inject engine: in {} runs npm read an unexpected key of the hook's result, and npm ci rebuilt node_modules; first: {}",
-            trapped.len(),
-            trapped[0].chars().take(120).collect::<String>()
-        );
+    // key of it other than resolved / integrity / from (inject.rs
+    // `trap_fired`). npm ci: plain npm ci rebuilt node_modules; the install
+    // family: the run stopped and said how to rebuild.
+    for (stop, what) in [(false, "npm ci rebuilt node_modules"), (true, "the run stopped with the repair command (install, update, uninstall)")] {
+        let trapped: Vec<&str> = runs
+            .iter()
+            .filter(|r| r["outcome"] == "broke" && (r["repair"] == "stopped") == stop)
+            .filter_map(|r| r["reason"].as_str())
+            .filter(|w| w.contains("of what matchapack's hook returned"))
+            .collect();
+        if !trapped.is_empty() {
+            println!(
+                "inject engine: in {} runs npm read an unexpected key of the hook's result, and {what}; first: {}",
+                trapped.len(),
+                trapped[0].chars().take(120).collect::<String>()
+            );
+        }
     }
     // pacote's extraction held a path older than the install, or something
     // other than files and directories (serve.rs, inject.rs
-    // `extraction_outcome`): broken runs, which npm ci rebuilt (something
-    // had been cloned), and installed or npm-failed runs that had cloned
-    // nothing (npm's own tree; the run log has `inject.extraction_unexpected`).
-    // Either way the extraction code was declined in that store, when known.
-    let rebuilt: Vec<String> = runs
+    // `extraction_outcome`): broken runs, which npm ci rebuilt or the
+    // install family stopped (`repair`; something had been cloned), and
+    // installed or npm-failed runs that had cloned nothing (npm's own tree;
+    // the run log has `inject.extraction_unexpected`). Either way the
+    // extraction code was declined in that store, when known.
+    let broke: Vec<&Value> = runs
         .iter()
         .filter(|r| r["outcome"] == "broke")
-        .filter_map(|r| r["reason"].as_str())
-        .filter(|w| w.contains("not what matchapack's clones reproduce"))
+        .filter(|r| r["reason"].as_str().is_some_and(|w| w.contains("not what matchapack's clones reproduce")))
+        .collect();
+    let stopped = broke.iter().filter(|r| r["repair"] == "stopped").count();
+    // A broken run's record carries `inject` too (npm's settings for the
+    // repair advice): counted once, above.
+    let kept: Vec<String> = runs
+        .iter()
+        .filter(|r| r["outcome"] != "broke")
+        .filter_map(|r| r["inject"]["extraction_unexpected"].as_str())
         .map(String::from)
         .collect();
-    let kept: Vec<String> = runs.iter().filter_map(|r| r["inject"]["extraction_unexpected"].as_str()).map(String::from).collect();
-    if !rebuilt.is_empty() || !kept.is_empty() {
-        let first = rebuilt.first().or(kept.first()).unwrap();
+    if !broke.is_empty() || !kept.is_empty() {
+        let first = broke.first().and_then(|r| r["reason"].as_str()).map(String::from).or(kept.first().cloned()).unwrap();
         println!(
-            "inject engine: in {} runs pacote's extraction was not what the clones reproduce ({} rebuilt by npm ci, {} had cloned nothing and kept npm's own tree); that extraction code is left to npm in the store; first: {}",
-            rebuilt.len() + kept.len(),
-            rebuilt.len(),
+            "inject engine: in {} runs pacote's extraction was not what the clones reproduce ({} rebuilt by npm ci, {} stopped with the repair advice, {} had cloned nothing and kept npm's own tree); that extraction code is left to npm in the store; first: {}",
+            broke.len() + kept.len(),
+            broke.len() - stopped,
+            stopped,
             kept.len(),
             first.chars().take(160).collect::<String>()
         );
@@ -470,10 +592,9 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             }
         };
         builds[i].1 += 1;
-        if r["outcome"] == "installed" {
-            if let Some(s) = r["secs"].as_f64() {
-                builds[i].2.push(s);
-            }
+        // npm ci runs only: a no-op `npm install` would pull the median down.
+        if let Some(s) = install_secs(std::iter::once(r), true).first() {
+            builds[i].2.push(*s);
         }
     }
     if builds.len() > 1 || builds.first().is_some_and(|(k, _, _)| k.starts_with('(')) {
@@ -481,7 +602,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         for (b, n, mut secs) in builds {
             secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let med = if secs.is_empty() { "-".to_string() } else { format!("{:.1} s", secs[secs.len() / 2]) };
-            println!("  {b:<22} runs {n:>4}, installed {:>4}, median install {med}", secs.len());
+            println!("  {b:<22} runs {n:>4}, npm ci installed {:>4}, median npm ci {med}", secs.len());
         }
     }
     // The inject engine: how much of what npm installed came from the store,
@@ -589,16 +710,22 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     }
     let inst: Vec<&Value> = runs.iter().filter(|r| r["outcome"] == "installed").collect();
     if !inst.is_empty() {
-        let mut secs: Vec<f64> = inst.iter().filter_map(|r| r["secs"].as_f64()).collect();
-        secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let logical: f64 = inst.iter().filter_map(|r| r["bytes_logical"].as_f64()).sum();
         let new: f64 = inst.iter().filter_map(|r| r["bytes_store_new"].as_f64()).sum();
-        println!(
-            "installs: median {:.1} s, max {:.1} s, total {:.0} s",
-            secs[secs.len() / 2],
-            secs.last().copied().unwrap_or(0.0),
-            secs.iter().sum::<f64>()
-        );
+        // Apart: an `npm install` with nothing to do takes a fraction of an
+        // `npm ci`, so one median of both would describe neither.
+        for (ci, what) in [(true, "npm ci installs"), (false, "npm install / update / uninstall")] {
+            let secs = install_secs(inst.iter().copied(), ci);
+            if !secs.is_empty() {
+                println!(
+                    "{what}: {} runs, median {:.1} s, max {:.1} s, total {:.0} s",
+                    secs.len(),
+                    secs[secs.len() / 2],
+                    secs.last().copied().unwrap_or(0.0),
+                    secs.iter().sum::<f64>()
+                );
+            }
+        }
         println!(
             "space: {} placed as clones, {} of it new to the store → about {} not written \
              (file contents only; per-file metadata, roughly 0.1–0.3 GiB per large install, is not counted)",
@@ -772,6 +899,19 @@ mod tests {
     }
 
     #[test]
+    fn install_medians_keep_npm_ci_apart_from_the_install_family() {
+        let runs = [
+            json!({ "outcome": "installed", "secs": 30.0 }),
+            json!({ "outcome": "installed", "command": "ci", "secs": 20.0 }),
+            json!({ "outcome": "installed", "command": "install", "secs": 0.5 }),
+            json!({ "outcome": "installed", "command": "uninstall", "secs": 0.4 }),
+            json!({ "outcome": "declined", "command": "ci", "secs": 1.0 }),
+        ];
+        assert_eq!(super::install_secs(runs.iter(), true), [20.0, 30.0], "npm ci, and records from before the family was routed");
+        assert_eq!(super::install_secs(runs.iter(), false), [0.4, 0.5]);
+    }
+
+    #[test]
     fn records_carry_the_load_average() {
         let l = loadavg().expect("getloadavg answers on macOS and Linux");
         assert!(l.iter().all(|x| *x >= 0.0 && ((x * 100.0).round() - x * 100.0).abs() < 1e-6), "two decimals: {l:?}");
@@ -786,6 +926,35 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_scope_entry_never_matches() {
+        let d = crate::store::tests::scratch("trial-scope");
+        let app = d.join("app/x");
+        std::fs::create_dir_all(&app).unwrap();
+        let home = d.join("home");
+        let v = |e: &[&str]| e.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // From the environment and from a paths file alike: `.` and a
+        // relative path are rejected, also where the current directory or a
+        // directory of that name would cover `dir`.
+        let file = paths_file_entries("# scope\n.\n  app/x  \n");
+        assert_eq!(file, v(&[".", "app/x"]));
+        let cwd = std::env::current_dir().unwrap();
+        for (list, source) in [(v(&["."]), "MATCHAPACK_PATHS"), (v(&["app/x"]), "MATCHAPACK_PATHS"), (file.clone(), "~/.config/matchapack/paths")] {
+            for dir in [&app, &cwd] {
+                assert_eq!(in_scope_of(dir, &list, source, &home), Err(format!("outside the trial scope: {source} lists no entry that can match")), "{list:?} {}", dir.display());
+            }
+        }
+        // Next to a good entry: said by name, never matched.
+        let good = d.join("elsewhere").display().to_string();
+        let e = in_scope_of(&app, &v(&[&good, "."]), "MATCHAPACK_PATHS", &home).unwrap_err();
+        assert_eq!(e, "outside the trial scope: MATCHAPACK_PATHS lists \".\", which can never match (not an absolute path)");
+        // An absolute entry still matches, and `~/` is the home directory.
+        assert_eq!(in_scope_of(&app, &v(&[&d.join("app").display().to_string()]), "MATCHAPACK_PATHS", &home), Ok(()));
+        std::fs::create_dir_all(home.join("w")).unwrap();
+        assert_eq!(in_scope_of(&home.join("w"), &v(&["~/w"]), "MATCHAPACK_PATHS", &home), Ok(()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn credentials_never_reach_the_log() {
         assert_eq!(
             redact_args(&v(&["install", "--proxy", "http://u:p@proxy:8080", "--https-proxy=https://u%40x:p@h/", "--otp", "123456", "--cache-folder", "/c"])),
@@ -796,8 +965,54 @@ mod tests {
         assert_eq!(redact_args(&v(&["--otp", "--frozen-lockfile"])), v(&["--otp", "--frozen-lockfile"]));
         assert_eq!(redact_userinfo("option --registry=https://me:pw@r.example/x is not handled"), "option --registry=https://***@r.example/x is not handled");
         assert_eq!(redact_userinfo("http://host:80/a@b"), "http://host:80/a@b", "an @ after the host is not userinfo");
+        // npm's client key; a secret in a query; an ssh user name is not one.
+        assert_eq!(
+            redact_args(&v(&["install", "--key=-----BEGIN PRIVATE KEY-----x", "--cert=-----BEGIN CERTIFICATE-----y", "--//r.example/:key=z", "--keyfile=/k"])),
+            v(&["install", "--key=***", "--cert=-----BEGIN CERTIFICATE-----y", "--//r.example/:key=***", "--keyfile=/k"])
+        );
+        assert_eq!(
+            redact_args(&v(&["install", "https://gitlab.example/api/x.tgz?private_token=abc&ref=main", "--registry=https://r.example/?access_token=t#f"])),
+            v(&["install", "https://gitlab.example/api/x.tgz?private_token=***&ref=main", "--registry=https://r.example/?access_token=***#f"])
+        );
+        assert_eq!(redact_args(&v(&["install", "git+ssh://git@github.com/o/r.git", "ssh://u:pw@h/r"])), v(&["install", "git+ssh://git@github.com/o/r.git", "ssh://***@h/r"]));
+        // A PEM key as a word of its own (it starts with `-`).
+        assert_eq!(
+            redact_args(&v(&["install", "--key", "-----BEGIN PRIVATE KEY-----\nMIIx\n-----END PRIVATE KEY-----", "--cert", "-----BEGIN CERTIFICATE-----y", "x", "--x=-----BEGIN EC KEY-----z"])),
+            v(&["install", "--key", "***", "--cert", "-----BEGIN CERTIFICATE-----y", "x", "--x=***"])
+        );
+        // With base64 padding (`=`), on several lines and on one, as a word
+        // of its own and after `--key=`; a certificate stays.
+        assert_eq!(
+            redact_args(&v(&[
+                "install",
+                "--key",
+                "-----BEGIN PRIVATE KEY-----\nFAKEBODYFAKEBODYFA==\n-----END PRIVATE KEY-----",
+                "--key",
+                "-----BEGIN RSA PRIVATE KEY-----FAKE=-----END RSA PRIVATE KEY-----",
+                "--key=-----BEGIN PRIVATE KEY-----\nFAKE==\n-----END PRIVATE KEY-----",
+                "--cert=-----BEGIN CERTIFICATE-----\nFAKE==\n-----END CERTIFICATE-----"
+            ])),
+            v(&["install", "--key", "***", "--key", "***", "--key=***", "--cert=-----BEGIN CERTIFICATE-----\nFAKE==\n-----END CERTIFICATE-----"])
+        );
+        // Every field with command-line words: the record's `args`, and
+        // every list under `inject.repair` (`args`, `missing`, a later one).
+        let secrets = ["--otp=123456", "--//r.example/:_authToken=FAKETOKEN123", "--_password=hunter2", "--audit=false"];
+        let hidden = json!(["--otp=***", "--//r.example/:_authToken=***", "--_password=***", "--audit=false"]);
+        let mut rec = json!({ "args": secrets, "inject": { "repair": { "args": secrets, "missing": secrets, "later": secrets, "npmrc": ["project"], "checked": false } } });
+        redact(&mut rec);
+        assert_eq!(rec["args"], hidden);
+        for k in ["args", "missing", "later"] {
+            assert_eq!(rec["inject"]["repair"][k], hidden, "{k}");
+        }
+        assert_eq!(rec["inject"]["repair"]["npmrc"], json!(["project"]));
+        assert!(!rec.to_string().contains("123456") && !rec.to_string().contains("FAKETOKEN") && !rec.to_string().contains("hunter2"), "{rec}");
         let mut rec = json!({ "args": ["--proxy", "http://u:p@h"], "reason": "x http://a:b@h y", "yarn1": { "errors": ["https://c:d@e"] } });
         redact(&mut rec);
         assert_eq!(rec, json!({ "args": ["--proxy", "http://***@h"], "reason": "x http://***@h y", "yarn1": { "errors": ["https://***@e"] } }));
+        // The options the repair advice keeps (src/inject.js repairInfo, one
+        // token each), in the log's inject record: redacted as args are.
+        let mut rec = json!({ "inject": { "repair": { "args": ["--_password=-abcSECRET", "--//r.example/:_authToken=t0k", "--omit=dev"], "npmrc": [] } } });
+        redact(&mut rec);
+        assert_eq!(rec["inject"]["repair"]["args"], json!(["--_password=***", "--//r.example/:_authToken=***", "--omit=dev"]));
     }
 }

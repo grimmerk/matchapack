@@ -65,6 +65,9 @@ printf 'YARN'; for a in "$@"; do printf ' [%s]' "$a"; done; echo
 STUB
 chmod +x "$tc/matchapack" "$np/npm" "$np/yarn"
 
+# The routed first words, from the one table (src/wrapper.rs ROUTED).
+routed=$(grep -Eo '^    \("[^"]+", "' /src/src/wrapper.rs | cut -d'"' -f2)
+[ "$(echo "$routed" | wc -w)" -ge 28 ] || { echo "setup failed: could not read ROUTED from src/wrapper.rs" >&2; exit 2; }
 for sh in bash zsh fish; do
   case $sh in
     fish) setup='type -q matchapack; and matchapack init fish | source'; run=(fish --no-config -c); st='$status' ;;
@@ -86,7 +89,30 @@ MATCHAPACK [isntall-clean]" "npm clean-install; npm ic; npm install-clean; npm i
   # Arguments arrive unchanged: spaces, an empty one, a glob character.
   check args      "MATCHAPACK [ci] [--loglevel] [a b] [] [*]" "npm ci --loglevel 'a b' '' '*'"
   check args-npm  "NPM [run] [x y] [] [*]" "npm run 'x y' '' '*'"
-  check other     "NPM [install] [lodash]"  "npm install lodash"
+  check install   "MATCHAPACK [install] [lodash]" "npm install lodash"
+  # Every first word of src/wrapper.rs's ROUTED table goes to matchapack
+  # (wrapper.rs's unit test keeps the table and both shell files equal;
+  # this runs the functions themselves).
+  for w in $routed; do
+    check "routed-$w" "MATCHAPACK [$w] [x]" "npm $w x"
+  done
+  # Commands that are not routed (npm runs them itself; NOTES "The install
+  # family"), and a flag first: npm directly.
+  check not-routed "NPM [run] [build]
+NPM [test]
+NPM [--version]
+NPM [exec] [x]
+NPM [link]
+NPM [dedupe]
+NPM [prune]
+NPM [audit] [fix]
+NPM [install-test]
+NPM [it]
+NPM [cit]
+NPM [upd]
+NPM [--prefix] [x] [install]" "npm run build; npm test; npm --version; npm exec x; npm link; npm dedupe; npm prune; npm audit fix; npm install-test; npm it; npm cit; npm upd; npm --prefix x install"
+  check opt-out-install "NPM [install]"      "MATCHAPACK=0 npm install"
+  check command-install "NPM [uninstall] [x]" "command npm uninstall x"
   check run       "NPM [run] [ci]"          "npm run ci"
   check bare      "NPM"                     "npm"
   check opt-out   "NPM [ci]"                "MATCHAPACK=0 npm ci"
@@ -212,6 +238,15 @@ no-yarn-function" ]; rcheck "init: npm is a function, no yarn function on Linux"
   [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"], r["args"]')" = "('installed', ['ci', '--no-audit', '--no-fund'])" ] \
     && printf '%s\n' "$out" | grep -q '^matchapack: npm ci with clones' && [ -d "$d/node_modules/lc-r" ]
   rcheck "npm ci → matchapack npm (logged, arguments unchanged), installed, status 0" $? "log $n0 → $(logn)"
+
+  # The install family: `npm i` after the npm ci above goes through
+  # matchapack (logged as npm's install), and with nothing to place it
+  # prints nothing of matchapack's.
+  n0=$(logn)
+  rfish "$d" 'npm i --no-audit --no-fund; echo "status $status"'
+  [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"], r["command"], r["args"]')" = "('installed', 'install', ['i', '--no-audit', '--no-fund'])" ] \
+    && ! printf '%s\n' "$out" | grep -q '^matchapack'
+  rcheck "npm i → matchapack npm (logged as install), silent with nothing to place, status 0" $? "log $n0 → $(logn)"
 
   d=$(rproj cmd npm); n0=$(logn)
   rfish "$d" 'command npm ci --no-audit --no-fund; echo "status $status"'

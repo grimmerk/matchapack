@@ -20,7 +20,8 @@
 //!                                                    has loaded pacote, before the hook
 //!                                                    (null, with `key_error`: unknown)
 //!     {"id":0,"root":"/abs/dir","global":false,"command":"ci","typed":"ic",
-//!      "dry_run":false,"package_lock_only":false,"usage":false}
+//!      "dry_run":false,"package_lock_only":false,"usage":false,"package_lock":true,
+//!      "save":true,"workspace_filter":false}
 //!                                                    npm's install root and command,
 //!                                                    once, before the command runs
 //!     {"no_root":"…"}                                npm's root could not be read: no
@@ -31,7 +32,10 @@
 //!                                                    every package itself)
 //!     {"id":7,"integrity":"sha512-…","dest":"/abs/dir"}
 //!     {"id":8,"integrity":"sha512-…","dest":"/abs/dir","extracted":"/…/tmp/…/x3"}
-//!     {"note":"type-FileFetcher"}                    a package the hook left to npm, and why
+//!     {"note":"type-FileFetcher","dest":"/abs/dir"} a package the hook left to npm, and why
+//!     {"aside":"outside-root"}                       an extraction outside the root left to
+//!                                                    pacote (pacote reading a manifest in
+//!                                                    a temporary directory)
 //!     {"result_read":"foo","expected":false}         npm read this key of what the hook's
 //!                                                    extract resolved to (`expected`:
 //!                                                    resolved, integrity or from)
@@ -110,7 +114,7 @@ use crate::clone::{self, Mode};
 use crate::store::{Integrity, Store, TmpDir};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
@@ -148,6 +152,8 @@ pub enum Outcome {
         /// (#41: a placement moved in from the store's tmp/ keeps the
         /// store's group).
         regrouped: usize,
+        /// The package directory placed (the request's destination).
+        dest: PathBuf,
     },
     /// The hook is to run pacote's extract into `to`, then ask again.
     Extract { to: PathBuf, why: &'static str },
@@ -167,6 +173,16 @@ pub struct Stats {
     pub root: Option<PathBuf>,
     /// npm's name of the command (`ci`), with the root.
     pub command: Option<String>,
+    /// npm's `package-lock` setting at the root report (false: npm writes
+    /// no package-lock.json in this run).
+    pub package_lock: Option<bool>,
+    /// npm's `save` setting (false: `--no-save`), and whether the command is
+    /// filtered to some workspaces, at the root report.
+    pub save: Option<bool>,
+    pub workspace_filter: Option<bool>,
+    /// What the repair advice of a broken run needs of npm's parse of the
+    /// command (src/inject.js `repairInfo`): `{args, npmrc}`.
+    pub repair: Option<Value>,
     /// Why npm's root could not be read (the helper's `no_root`).
     pub no_root: Option<String>,
     /// The hook's state once npm loaded pacote: `on`, `off`, `none`, or
@@ -220,6 +236,28 @@ pub struct Stats {
     /// the hook may not give, so the tree may not be npm's (inject.rs then
     /// reports the install as broken).
     pub result_unexpected: BTreeMap<String, usize>,
+    /// Every destination the hook saw inside the root (a request or a
+    /// `note`), relative to the root as npm's hidden lockfile keys its
+    /// packages (`node_modules/a`): compared with what npm placed
+    /// ("unseen", inject.rs).
+    pub seen: HashSet<String>,
+    /// Extractions the hook left to pacote because their destination is
+    /// outside the root (`aside`), by reason: not installs into the project
+    /// (pacote reading a URL, file or git package's manifest in a temporary
+    /// directory in npm's cache).
+    pub asides: BTreeMap<String, usize>,
+    /// When the root was accepted, before npm's command ran: a package
+    /// directory written in this run is newer ("unseen", inject.rs).
+    pub root_at: Option<std::time::SystemTime>,
+    /// The package directories cloned in this run outside the root's own
+    /// node_modules, relative to the root (`packages/b/node_modules/ms`):
+    /// what the repair after a broken run removes (wrapper.rs).
+    pub placed_outside: Vec<String>,
+    /// (device, inode) of each of them when it was placed: the repair
+    /// removes a directory only while it is still that one (npm's rollback
+    /// after a failed install script puts its own directory back at the
+    /// same path).
+    pub placed_outside_ids: BTreeMap<String, (u64, u64)>,
     first: Option<Instant>,
     last: Option<Instant>,
 }
@@ -268,11 +306,18 @@ impl Stats {
             "key_declined": self.key_declined,
             "root": self.root.as_ref().map(|r| r.display().to_string()),
             "command": self.command,
+            "package_lock": self.package_lock,
+            "save": self.save,
+            "workspace_filter": self.workspace_filter,
+            "repair": self.repair,
             "hook": self.hook,
             "hook_reason": self.hook_reason,
             "no_root": self.no_root,
             "result_reads": self.result_reads,
             "result_unexpected": self.result_unexpected,
+            "asides": self.asides,
+            "placed_outside": self.placed_outside,
+            "placed_outside_ids": self.placed_outside_ids.iter().map(|(k, (d, i))| (k.clone(), json!([d, i]))).collect::<serde_json::Map<String, Value>>(),
         })
     }
 }
@@ -342,14 +387,19 @@ pub fn code_key(v: &Value) -> String {
 }
 
 /// The commands whose install root the server accepts (npm's names, after
-/// its alias resolution): what the shell function routes.
-const ROOT_COMMANDS: &[&str] = &["ci"];
+/// its alias resolution): what the shell function routes (wrapper.rs
+/// `ROUTED`). Any other command npm maps a routed word to (`npm u` is no
+/// command on npm 10) is declined before it runs.
+pub(crate) const ROOT_COMMANDS: &[&str] = &["ci", "install", "update", "uninstall"];
 
 pub struct Server<'a> {
     store: &'a Store,
     /// The install root npm reported (canonical), set once by the `root`
     /// message (or given to `new`, tests); requests are refused until then.
     root: std::sync::OnceLock<PathBuf>,
+    /// The root as npm reported it (`npm.prefix`, not canonical): the hook's
+    /// destinations are under it.
+    reported: std::sync::OnceLock<PathBuf>,
     /// Whether the root must be inside the trial scope (trial::in_scope):
     /// the shell function's runs, not `matchapack install`.
     trial_scope: AtomicBool,
@@ -483,6 +533,7 @@ impl<'a> Server<'a> {
         Ok(Server {
             store,
             root: root_cell,
+            reported: std::sync::OnceLock::new(),
             trial_scope: AtomicBool::new(false),
             mode,
             tmp,
@@ -529,6 +580,26 @@ impl<'a> Server<'a> {
         p == root || (p.is_absolute() && std::fs::canonicalize(p).is_ok_and(|c| &c == root))
     }
 
+    /// `dest` relative to the pinned root, as npm's hidden lockfile names a
+    /// package's directory (`node_modules/a`); None outside the root (or
+    /// before a root). Lexically under the root as npm reported it or as
+    /// pinned, else with its parent's symlinks resolved.
+    fn rel_key(&self, dest: &Path) -> Option<String> {
+        let root = self.root.get()?;
+        let rel = self
+            .reported
+            .get()
+            .and_then(|r| dest.strip_prefix(r).ok())
+            .or_else(|| dest.strip_prefix(root).ok())
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let real = std::fs::canonicalize(dest.parent()?).ok()?.join(dest.file_name()?);
+                real.strip_prefix(root).ok().map(Path::to_path_buf)
+            })?;
+        let s = rel.to_str()?;
+        (!s.is_empty()).then(|| s.to_string())
+    }
+
     /// The gates on the install root npm reported (the `root` message), and
     /// the root, canonical, when they pass. Everything that depends on where
     /// npm installs is decided here, on npm's own values (its abbreviations,
@@ -562,10 +633,10 @@ impl<'a> Server<'a> {
         if self.trial_scope.load(Ordering::Relaxed) {
             crate::trial::in_scope(&root)?;
         }
-        // npm ci replaces a node_modules that is a symlink; every clone into
-        // it would be refused one by one (its real path is outside the root).
+        // npm replaces a node_modules that is a symlink; every clone into it
+        // would be refused one by one (its real path is outside the root).
         if std::fs::symlink_metadata(root.join("node_modules")).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(format!("the install root's node_modules is a symlink ({}); npm ci replaces it, matchapack does not", root.display()));
+            return Err(format!("the install root's node_modules is a symlink ({}); npm replaces it, matchapack does not", root.display()));
         }
         Ok(root)
     }
@@ -998,6 +1069,7 @@ impl<'a> Server<'a> {
                     touch_secs: t1.elapsed().as_secs_f64(),
                     paths: settled.paths,
                     regrouped: settled.regrouped,
+                    dest: dst.to_path_buf(),
                 };
             };
             drop_cand();
@@ -1211,6 +1283,7 @@ impl<'a> Server<'a> {
             touch_secs: t1.elapsed().as_secs_f64(),
             paths: settled.paths,
             regrouped: settled.regrouped,
+            dest: dst.to_path_buf(),
         }
     }
 
@@ -1227,8 +1300,25 @@ impl<'a> Server<'a> {
         let mut s = self.stats.lock().unwrap();
         s.last = Some(Instant::now());
         match o {
-            Outcome::Placed { kind, entry, place_secs, touch_secs, paths, regrouped, checked, differs, .. } => {
+            Outcome::Placed { kind, entry, place_secs, touch_secs, paths, regrouped, checked, differs, dest, .. } => {
                 s.cloned += 1;
+                // Outside the root's own node_modules (a member's, a package
+                // nested under a `file:` dependency): what a repair after a
+                // broken run removes (wrapper.rs `placed_outside`).
+                if let Some(k) = self.rel_key(dest).filter(|k| !k.starts_with("node_modules/")) {
+                    // Before the answer is written: npm has not touched it yet.
+                    let id = std::fs::symlink_metadata(dest).ok().map(|m| {
+                        use std::os::unix::fs::MetadataExt;
+                        (m.dev(), m.ino())
+                    });
+                    if let Some(id) = id {
+                        s.placed_outside_ids.insert(k.clone(), id);
+                    }
+                    if !s.placed_outside.contains(&k) {
+                        s.placed_outside.push(k.clone());
+                    }
+                    crate::inject::note_placed_outside(k, id);
+                }
                 if *checked {
                     s.checked += 1;
                 }
@@ -1305,7 +1395,17 @@ impl<'a> Server<'a> {
             // A reason is a short word chosen by the hook; keep the log sane
             // whatever arrives.
             let key: String = note.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
-            *self.stats.lock().unwrap().fallbacks.entry(key).or_default() += 1;
+            let seen = v.get("dest").and_then(|d| d.as_str()).map(Path::new).filter(|d| d.is_absolute()).and_then(|d| self.rel_key(d));
+            let mut s = self.stats.lock().unwrap();
+            *s.fallbacks.entry(key).or_default() += 1;
+            if let Some(k) = seen {
+                s.seen.insert(k);
+            }
+            return true;
+        }
+        if let Some(why) = v.get("aside").and_then(|n| n.as_str()) {
+            let key: String = why.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
+            *self.stats.lock().unwrap().asides.entry(key).or_default() += 1;
             return true;
         }
         if let Some(key) = v.get("result_read").and_then(|k| k.as_str()) {
@@ -1344,10 +1444,19 @@ impl<'a> Server<'a> {
             };
             let mut s = self.stats.lock().unwrap();
             s.command = command;
+            s.package_lock = v.get("package_lock").and_then(|b| b.as_bool());
+            s.save = v.get("save").and_then(|b| b.as_bool());
+            s.workspace_filter = v.get("workspace_filter").and_then(|b| b.as_bool());
+            s.repair = v.get("repair").filter(|r| r.is_object()).cloned();
             return vec![match verdict {
                 Ok(root) => {
                     let _ = self.root.set(root.clone());
+                    if let Some(r) = v.get("root").and_then(|r| r.as_str()) {
+                        let _ = self.reported.set(PathBuf::from(r));
+                    }
                     s.root = Some(root.clone());
+                    s.root_at = Some(std::time::SystemTime::now());
+                    crate::inject::set_root_report(s.to_json());
                     json!({ "id": id, "ok": true, "root": root })
                 }
                 Err(why) => {
@@ -1362,6 +1471,9 @@ impl<'a> Server<'a> {
             s.first.get_or_insert_with(Instant::now);
         }
         let str_of = |k: &str| v.get(k).and_then(|x| x.as_str());
+        if let (Some(_), Some(k)) = (str_of("integrity"), str_of("dest").map(Path::new).filter(|d| d.is_absolute()).and_then(|d| self.rel_key(d))) {
+            self.stats.lock().unwrap().seen.insert(k);
+        }
         let answers: Vec<(Value, Outcome)> = match (str_of("integrity"), str_of("dest")) {
             // No root reported yet (npm's could not be read): nothing is placed.
             (Some(_), Some(_)) if self.root.get().is_none() => {
@@ -2482,25 +2594,29 @@ mod tests {
         drop(s);
 
         // Refusals: recorded as the decline reason, the root stays unset.
+        // `quiet`: the install family logs it without a line (wrapper.rs
+        // `quiet_decline`); npm ci always prints it.
         let other = fx.dir.join("not-there");
         let nm_link = fx.dir.join("nm-link");
         fs::create_dir_all(&nm_link).unwrap();
         std::os::unix::fs::symlink(fx.dir.join("elsewhere"), nm_link.join("node_modules")).unwrap();
-        for (msg, want) in [
-            (root_msg(&fx.root, json!({ "global": true })), "npm installs globally"),
-            (root_msg(&fx.root, json!({ "command": "install", "typed": "i" })), "npm runs `install` for `i`"),
-            (root_msg(&fx.root, json!({ "command": null, "typed": "u" })), "npm has no command `u`"),
-            (root_msg(&fx.root, json!({ "dry_run": true })), "this run installs nothing (--dry-run)"),
-            (root_msg(&fx.root, json!({ "package_lock_only": true })), "this run installs nothing (--package-lock-only)"),
-            (root_msg(&fx.root, json!({ "usage": true })), "this run installs nothing (--usage)"),
-            (root_msg(&other, json!({})), "does not exist yet"),
-            (root_msg(Path::new("relative"), json!({})), "no absolute install root"),
-            (root_msg(&nm_link, json!({})), "node_modules is a symlink"),
+        for (msg, want, quiet) in [
+            (root_msg(&fx.root, json!({ "global": true })), "npm installs globally", true),
+            (root_msg(&fx.root, json!({ "command": "install-test", "typed": "it" })), "npm runs `install-test` for `it`", false),
+            (root_msg(&fx.root, json!({ "command": null, "typed": "u" })), "npm has no command `u`", false),
+            (root_msg(&fx.root, json!({ "dry_run": true })), "this run installs nothing (--dry-run)", true),
+            (root_msg(&fx.root, json!({ "package_lock_only": true })), "this run installs nothing (--package-lock-only)", true),
+            (root_msg(&fx.root, json!({ "usage": true })), "this run installs nothing (--usage)", true),
+            (root_msg(&other, json!({})), "does not exist yet", false),
+            (root_msg(Path::new("relative"), json!({})), "no absolute install root", false),
+            (root_msg(&nm_link, json!({})), "node_modules is a symlink", false),
         ] {
             let s = new();
             let a = line(&s, msg.clone());
             assert_eq!(a["ok"], false, "{msg}");
             assert!(a["reason"].as_str().unwrap().contains(want), "{a} {want}");
+            let why = a["reason"].as_str().unwrap();
+            assert_eq!((crate::wrapper::quiet_decline("install", why), crate::wrapper::quiet_decline("ci", why)), (quiet, false), "{why}");
             let st = s.stats.lock().unwrap();
             assert!(st.declined.as_deref().is_some_and(|d| d.contains(want)) && st.root.is_none(), "{msg}");
             drop(st);
@@ -2532,6 +2648,53 @@ mod tests {
         assert_eq!((j["hook"].as_str(), j["hook_reason"].as_str(), j["command"].as_str()), (Some("not-installed"), Some("no FetcherBase"), Some("ci")));
         assert_eq!(j["root"].as_str(), fx.root.to_str());
         assert!(j["no_root"].as_str().unwrap().contains("no Npm.prototype.exec"));
+    }
+
+    #[test]
+    fn destinations_the_hook_saw_are_kept_relative_to_the_root() {
+        let fx = Fx::new("serve-seen");
+        let new = || Server::new(&fx.store, None, clone::Mode::File, Some("pacote@1.0.0 tar@2.0.0".into()), CheckPolicy::OneIn(50)).unwrap();
+        let root_msg = |root: &Path, command: &str| json!({ "id": 0, "root": root, "global": false, "command": command, "typed": command, "dry_run": false, "package_lock_only": false, "usage": false });
+        let seen = |s: &Server| {
+            let mut v: Vec<String> = s.stats.lock().unwrap().seen.iter().cloned().collect();
+            v.sort();
+            v
+        };
+        // Before a root, nothing can be placed relative to it.
+        let s = new();
+        assert!(s.record_message(&json!({ "note": "hook-off", "dest": fx.root.join("node_modules/a") })));
+        assert!(seen(&s).is_empty());
+        drop(s);
+
+        // The root reported through a symlink (npm's prefix as typed),
+        // pinned canonical. Destinations under either form (as npm names
+        // them: lexically), or whose parent resolves into the root, are
+        // keyed as npm's hidden lockfile keys packages.
+        fs::create_dir_all(fx.root.join("packages/w/node_modules")).unwrap();
+        std::os::unix::fs::symlink(fx.root.join("packages/w/node_modules"), fx.dir.join("wlink")).unwrap();
+        let link = fx.dir.join("root-link-seen");
+        std::os::unix::fs::symlink(&fx.root, &link).unwrap();
+        let hidden = r#"{"name":"p","lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}}"#;
+        fs::write(fx.root.join("node_modules/.package-lock.json"), hidden).unwrap();
+        let s = new();
+        assert_eq!(serde_json::from_str::<Value>(&s.handle_line(&root_msg(&link, "install").to_string())[0]).unwrap()["ok"], true);
+        assert!(s.record_message(&json!({ "note": "hook-off", "dest": link.join("node_modules/a") })));
+        assert!(s.record_message(&json!({ "note": "type-git", "dest": fx.root.join("node_modules/@s/b") })));
+        assert!(s.record_message(&json!({ "note": "no-integrity", "dest": fx.dir.join("wlink/c") })));
+        assert!(s.record_message(&json!({ "note": "no-integrity", "dest": fx.dir.join("elsewhere/node_modules/d") })));
+        assert!(s.record_message(&json!({ "note": "no-integrity" })));
+        s.handle_line(&json!({ "id": 1, "integrity": "sha512-x", "dest": link.join("node_modules/e") }).to_string());
+        s.handle_line(&json!({ "id": 2, "integrity": "sha512-x", "dest": "relative/node_modules/f" }).to_string());
+        assert_eq!(seen(&s), ["node_modules/@s/b", "node_modules/a", "node_modules/e", "packages/w/node_modules/c"]);
+        assert!(s.record_message(&json!({ "aside": "outside-root" })));
+        assert!(s.record_message(&json!({ "aside": "outside-root" })));
+        let st = s.stats.lock().unwrap();
+        assert_eq!(st.asides.get("outside-root"), Some(&2));
+        assert_eq!(st.fallbacks.get("no-integrity"), Some(&3), "notes are still packages left to npm");
+        assert_eq!(st.to_json()["asides"]["outside-root"], 2);
+        assert!(st.root_at.is_some(), "the moment the root was accepted ('unseen', inject.rs)");
+        drop(st);
+        drop(s);
     }
 
     /// Answer lines from `handle_line`, by id.
