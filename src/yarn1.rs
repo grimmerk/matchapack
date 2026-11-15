@@ -115,13 +115,18 @@ fn replay_args(args: &[String]) -> Vec<String> {
 }
 
 /// `args` without `--cache-folder` / `--preferred-cache-folder` and their
-/// values, and without the word at `at`.
+/// values, and without the word at `at`. From a `--` on, every word is kept
+/// as it is (the separator too): there they are not options.
 fn without_cache_folder(args: &[String], at: Option<usize>) -> Vec<String> {
     let mut out = vec![];
     let mut skip_value = false;
     for (i, a) in args.iter().enumerate() {
         if std::mem::take(&mut skip_value) || Some(i) == at {
             continue;
+        }
+        if a == "--" {
+            out.extend(args[i..].iter().cloned());
+            break;
         }
         let name = option_name(a);
         if name == "--cache-folder" || name == "--preferred-cache-folder" {
@@ -1539,7 +1544,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     util::set_quiet(true);
     // Before Yarn starts: what a later sample needs to replay this run
     // (src/replay.rs).
-    let before = replay::before(&root, replay::YARN_LOCKFILES);
+    let before = replay::state(&root, replay::YARN_LOCKFILES);
     eprintln!("matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&cwd, &root, &yarn, &args)));
     util::remove_run_dir();
@@ -1551,7 +1556,7 @@ pub fn cli(args: Vec<String>) -> i32 {
             // a cache note that follows from it.
             if let Some(why) = s.stats["declined"].as_str() {
                 eprintln!("matchapack: the workspace's Yarn ran as plain Yarn, without clones ({why})");
-                log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats, "root": root.display().to_string(), "node_modules_before": before["node_modules"], "files_before": before["files"], "files_after": replay::files_state(&root, replay::YARN_LOCKFILES), "replay": replay(&args) }), chosen(&s.stats)));
+                log("installed", with(with(json!({ "secs": s.secs, "yarn1": s.stats, "root": root.display().to_string(), "replay": replay(&args) }), Value::Object(replay::record_fields(&root, replay::YARN_LOCKFILES, &before))), chosen(&s.stats)));
                 return 0;
             }
             if let Some(why) = s.stats["child_facts_differ"].as_str() {
@@ -1575,7 +1580,7 @@ pub fn cli(args: Vec<String>) -> i32 {
                      this Yarn may run another way (the install is Yarn's own and complete; nothing was cloned)"
                 );
             }
-            log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats, "root": root.display().to_string(), "node_modules_before": before["node_modules"], "files_before": before["files"], "files_after": replay::files_state(&root, replay::YARN_LOCKFILES), "replay": replay(&args) }), chosen(&s.stats)));
+            log("installed", with(with(json!({ "secs": s.secs, "yarn1": s.stats, "root": root.display().to_string(), "replay": replay(&args) }), Value::Object(replay::record_fields(&root, replay::YARN_LOCKFILES, &before))), chosen(&s.stats)));
             0
         }
         Ok(Err(RunError::Declined(reason))) => {
@@ -1892,6 +1897,9 @@ mod tests {
         assert_eq!(replay_args(&s(&["--cache-folder=/c", "--preferred-cache-folder", "/p", "--production", "install", "--check-files"])), s(&["--production", "install", "--check-files"]), "`install` after --production is that option's value, as Yarn reads it");
         assert_eq!(replay_args(&s(&["--mutex", "file:/tmp/m", "install"])), s(&["--mutex", "file:/tmp/m"]));
         assert_eq!(replay_args(&s(&[])), s(&[]));
+        // After `--` nothing is an option.
+        assert_eq!(replay_args(&s(&["install", "--frozen-lockfile", "--", "--cache-folder", "/c"])), s(&["--frozen-lockfile", "--", "--cache-folder", "/c"]));
+        assert_eq!(replay(&s(&["add", "x", "--", "--cache-folder=/c"])), json!({ "kind": "command", "args": ["add", "x", "--", "--cache-folder=/c"] }));
         assert_eq!(replay(&s(&["install", "--frozen-lockfile"])), json!({ "kind": "install", "args": ["--frozen-lockfile"] }));
         assert_eq!(replay(&s(&["--frozen-lockfile"])), json!({ "kind": "install", "args": ["--frozen-lockfile"] }));
         // Another command: its whole command line, less the cache folder.

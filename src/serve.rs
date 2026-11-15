@@ -1461,7 +1461,7 @@ impl<'a> Server<'a> {
                     }
                     // Before npm's command runs (it waits for this answer):
                     // what a later sample needs to replay the run.
-                    s.before = Some(crate::replay::before(&root, crate::replay::NPM_LOCKFILES));
+                    s.before = Some(crate::replay::state(&root, crate::replay::NPM_LOCKFILES));
                     s.root = Some(root.clone());
                     s.root_at = Some(std::time::SystemTime::now());
                     crate::inject::set_root_report(s.to_json());
@@ -2703,8 +2703,10 @@ mod tests {
         assert!(st.root_at.is_some(), "the moment the root was accepted ('unseen', inject.rs)");
         // What a later sample needs (src/replay.rs), taken when the root was accepted.
         let b = st.to_json()["before"].clone();
-        assert!(b["node_modules"].is_string() && b["files"]["package-lock.json"].is_string() || b["files"]["package-lock.json"].is_null(), "{b}");
+        assert!(b["node_modules"].is_string(), "{b}");
+        assert!(b["files"]["package-lock.json"].is_string() || b["files"]["package-lock.json"].is_null(), "{b}");
         assert!(b["files"].as_object().is_some_and(|f| f.contains_key("package.json") && f.contains_key("npm-shrinkwrap.json")), "{b}");
+        assert_eq!(b["complete"], true, "{b}");
         drop(st);
         drop(s);
     }
