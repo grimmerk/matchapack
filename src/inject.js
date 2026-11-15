@@ -364,10 +364,6 @@ function resultTrap (value, report) {
 // The options that filter a command to some workspaces or name its root.
 const FILTERS = new Set(['workspace', 'workspaces', 'include-workspace-root', 'prefix'])
 
-// Options that change what an install does or runs: when the repair advice
-// cannot repeat the options, it names these if the user typed them.
-const SAFETY = new Set(['ignore-scripts', 'omit', 'include', 'production', 'dev', 'only', 'also', 'legacy-peer-deps', 'force', 'strict-peer-deps', 'install-strategy', 'install-links'])
-
 // One token per value of a parsed option: `--name`, `--name=false`,
 // `--name=<value>` (a date as ISO text). npm's own parser reads them back
 // (`sameParse` checks it).
@@ -392,8 +388,8 @@ function optionTokens (key, value) {
 // option names, absolute paths, ISO dates.
 // `checked`: whether npm's own parser reads `args` exactly as it read the
 // typed command line (`sameParse`). Anything but true: `args` is null,
-// `unsure` true, and `missing` lists the tokens of the options in SAFETY,
-// for the advice to name.
+// `unsure` true, and `missing` lists every token it could not repeat, for
+// the advice to name.
 // `npmrc`: the npmrc layers (project, user, global, builtin) that set
 // `workspace` or `workspaces` themselves.
 function repairInfo (config) {
@@ -417,20 +413,15 @@ function repairInfo (config) {
       return { args: null, npmrc, checked: null, unsure: true, missing: [] }
     }
     const tokens = []
-    const missing = []
     for (const [key, value] of Object.entries(raw)) {
       if (key === 'argv' || FILTERS.has(key)) {
         continue
       }
-      const t = optionTokens(key, value)
-      tokens.push(...t)
-      if (SAFETY.has(key)) {
-        missing.push(...t)
-      }
+      tokens.push(...optionTokens(key, value))
     }
     const checked = sameParse(config, tokens)
     if (checked !== true) {
-      return { args: null, npmrc, checked, unsure: true, missing }
+      return { args: null, npmrc, checked, unsure: true, missing: tokens }
     }
     return { args: tokens, npmrc, checked }
   } catch {

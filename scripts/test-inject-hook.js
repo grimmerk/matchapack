@@ -515,9 +515,9 @@ async function helperCases () {
         JSON.stringify([m1 && m1.npmrc, m2 && m2.npmrc]), JSON.stringify([[], ['user']]))
       // The self-check: a line whose parse does not read back the same
       // (a list option given `false`) is not repeated; the advice then gives
-      // no options, and names the ones that change what an install does.
+      // no options, and names every option token it could not repeat.
       const u1 = await repairOf(['install', '--include', 'false', '-w', 'a', '--ignore-scripts', '--omit=dev'], d)
-      check('helper: options npm\'s parser does not read back the same are not given (unsure), the safety ones named',
+      check('helper: options npm\'s parser does not read back the same are not given (unsure), each one named',
         JSON.stringify(u1 && [u1.args, u1.unsure, u1.checked, u1.missing]), JSON.stringify([null, true, false, ['--ignore-scripts', '--omit=dev']]))
     }
     // The probe of the tarball server gives up on a listener that accepts
