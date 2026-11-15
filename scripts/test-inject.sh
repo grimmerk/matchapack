@@ -1210,7 +1210,11 @@ if [ $rc = 1 ] && ! grep '^  rm -rf' "$work/out" | grep -q "packages/ext\|fam-sy
 else
   bad "symlinked member, advice: rc=$rc, marker $([ -f "$o/node_modules/MARKER" ] && echo kept || echo gone), $(grep '^  rm' "$work/out")"
 fi
-npm_old_ci=$(node -e 'const [a,b]=process.argv[1].split(".").map(Number); console.log(a < 10 || (a === 10 && b < 8) ? 1 : 0)' "$(npm -v)")
+# version_lt <a> <b>: whether version a is before b (major, minor, patch).
+version_lt() { node -e 'const p = (v) => v.split("-")[0].split(".").map(Number); const [a, b] = [p(process.argv[1]), p(process.argv[2])]; for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) process.exit((a[i] || 0) < (b[i] || 0) ? 0 : 1) } process.exit(1)' "$1" "$2"; }
+version_lt 10.8.0 10.8.1 && version_lt 10.5.2 10.8.1 && ! version_lt 10.8.1 10.8.1 && ! version_lt 10.9.0 10.8.1 && ! version_lt 11.0.0 10.8.1 \
+  && ok "version_lt: 10.8.0 and 10.5.2 are before 10.8.1; 10.8.1, 10.9.0 and 11.0.0 are not" || bad "version_lt compares wrongly"
+npm_old_ci=0; version_lt "$(npm -v)" 10.8.1 && npm_old_ci=1
 (export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
 if [ $rc = 0 ] && grep -q 'running npm ci to rebuild node_modules' "$work/out" && ! grep -q 'could not remove' "$work/out" \
   && { [ "$npm_old_ci" = 0 ] || [ -f "$o/node_modules/MARKER" ]; }; then
