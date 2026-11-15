@@ -837,10 +837,16 @@ fn verify_lines(ver: &[Value], yarn_runs: bool, at: &dyn Fn(f64) -> String) -> V
             let result = v["result"].as_str().unwrap_or("?");
             // npm records from before samples named their command are npm ci's.
             let command = v["command"].as_str().unwrap_or(if name == "npm" { "ci" } else { "install" });
-            let what = match v["kind"].as_str() {
+            let mut what = match v["kind"].as_str() {
                 Some("started-empty") => format!("{name} {command}, started empty"),
                 _ => format!("{name} {command}"),
             };
+            if v["replayed_fresh"] == true {
+                what += ", replayed fresh";
+            }
+            if let Some(first) = v["first_result"].as_str() {
+                what += &format!(", {first} at first, then with one pool thread");
+            }
             let detail = if result == "SKIPPED" {
                 v["reason"].as_str().unwrap_or("?").chars().take(110).collect::<String>()
             } else {
@@ -883,7 +889,7 @@ mod tests {
             // An npm sample from before samples named their engine and command.
             json!({ "ts": 1.0, "result": "IDENTICAL", "dir": "/p/npm", "npm_ci_secs": 2.5, "matchapack_secs": 1.5, "build": "b1" }),
             json!({ "ts": 1.5, "engine": "npm", "kind": "started-empty", "command": "install", "result": "DIFFERENT", "dir": "/p/n2", "npm_ci_secs": 3.0, "matchapack_secs": 2.0, "build": "b2", "differing": ["bytes package-lock.json"] }),
-            json!({ "ts": 2.0, "engine": "yarn1", "kind": "full", "command": "install", "result": "IDENTICAL", "dir": "/p/y", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": 3.1, "matchapack_secs": 3.0, "cloned": 190, "build": "b2" }),
+            json!({ "ts": 2.0, "engine": "yarn1", "kind": "full", "command": "install", "result": "IDENTICAL", "dir": "/p/y", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": 3.1, "matchapack_secs": 3.0, "cloned": 190, "build": "b2", "replayed_fresh": true, "first_result": "RACE-SHAPED" }),
             json!({ "ts": 3.0, "engine": "yarn1", "kind": "full", "command": "install", "result": "SKIPPED", "dir": "/p/gone", "reason": "the project directory is gone" }),
             json!({ "ts": 4.0, "engine": "yarn1", "kind": "started-empty", "command": "add", "result": "DIFFERENT", "dir": "/p/y", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": 3.1, "matchapack_secs": 3.0, "cloned": 190, "build": "b2", "differing": ["content node_modules/y1-a/index.js"], "differing_count": 1 }),
             json!({ "ts": 5.0, "engine": "yarn1", "result": "ERROR", "dir": "/p/e", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": null, "matchapack_secs": null, "cloned": null, "build": "b2", "reason": "plain Yarn failed in its copy" }),
@@ -896,7 +902,7 @@ mod tests {
         assert_eq!(l[4], "  t5  ERROR             /p/e  (yarn install; yarn 1.22.22, node v24.22.1, yarn null s, matchapack null s, null cloned, build b2; plain Yarn failed in its copy)");
         assert_eq!(l[5], "  t4  DIFFERENT         /p/y  (yarn add, started empty; yarn 1.22.22, node v24.22.1, yarn 3.1 s, matchapack 3.0 s, 190 cloned, build b2; 1 differ, first: content node_modules/y1-a/index.js)");
         assert_eq!(l[6], "  t3  SKIPPED           /p/gone  (yarn install; the project directory is gone)");
-        assert_eq!(l[7], "  t2  IDENTICAL         /p/y  (yarn install; yarn 1.22.22, node v24.22.1, yarn 3.1 s, matchapack 3.0 s, 190 cloned, build b2)");
+        assert_eq!(l[7], "  t2  IDENTICAL         /p/y  (yarn install, replayed fresh, RACE-SHAPED at first, then with one pool thread; yarn 1.22.22, node v24.22.1, yarn 3.1 s, matchapack 3.0 s, 190 cloned, build b2)");
         assert_eq!(l.len(), 8);
     }
 

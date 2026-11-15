@@ -283,11 +283,14 @@ fi
 
 # Sampled verification of real runs (scripts/verify-sample.sh, #77): a
 # scratch run log filled by `matchapack npm` on a copy of a small fixture
-# (the logged runs), then the sampler on it. npm ci replayed as a full
-# install; an `npm install <pkg>` that started with no node_modules (part
-# 1b), replayed from the files before it (the project's git HEAD): identical,
-# and DIFFERENT with B damaged; without git, skipped with the reason. Every
-# sample removes its copies; the sampler's TMPDIR is checked empty at the end.
+# (the logged runs), then the sampler on it. npm ci replayed with its logged
+# words as a full install; an `npm install <pkg>` that started with no
+# node_modules (part 1b), replayed from the files before it (the project's
+# git HEAD). IDENTICAL only when matchapack cloned in the replay and every
+# check of verify.sh passed: a damaged B (a content byte, a stale mtime) is
+# DIFFERENT, matchapack failing is DIFFERENT, a replay that cloned nothing
+# (the hook not installed) is ERROR; skips with their reasons. Every sample
+# removes its copies; the sampler's TMPDIR is checked empty at the end.
 ns=$work/sample; drop "$ns"; mkdir -p "$ns/log" "$ns/tmp"
 ns_ok() { echo "ok    sample: $1"; }
 ns_bad() { fail=1; echo "FAIL  sample: $1"; sed 's/^/      /' "$ns/out" | tail -15; }
@@ -308,52 +311,90 @@ ns_npm() {
   (cd "$d" && env -u MATCHAPACK_ENGINE MATCHAPACK_LOG_DIR="$ns/log" MATCHAPACK_PATHS="$ns" MATCHAPACK_CONFIG_DIR="$ns/config" \
     MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_NPM_FINGERPRINT=any "$bin" npm "$@" --no-audit --no-fund) > "$ns/out" 2>&1
 }
-# ns_sample [env...] -- [verify-sample.sh args]
+# ns_sample [env...] -- [verify-sample.sh args]: on the run log ($ns/log).
 ns_sample() {
   local e=()
   while [ $# -gt 0 ] && [ "$1" != -- ]; do e+=("$1"); shift; done
   shift
-  env ${e[@]+"${e[@]}"} MATCHAPACK_LOG_DIR_REAL="$ns/log" TMPDIR="$ns/tmp" MATCHAPACK_PATHS="$ns" "$here/scripts/verify-sample.sh" "$@" > "$ns/out" 2>&1
+  env ${e[@]+"${e[@]}"} MATCHAPACK_LOG_DIR_REAL="${ns_logdir:-$ns/log}" TMPDIR="$ns/tmp" MATCHAPACK_PATHS="$ns" "$here/scripts/verify-sample.sh" "$@" > "$ns/out" 2>&1
 }
 nrec() { python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); print(eval(sys.argv[2]))' "$ns/$1" "$2" 2>/dev/null; }
+# ns_alone <python statements changing r, a copy of the last logged run>:
+# sample that one record in a log of its own; "result: reason" in $got.
+ns_alone() {
+  rm -rf "${ns:?}/alone"; mkdir -p "$ns/alone"
+  python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); exec(sys.argv[2]); open(sys.argv[3], "w").write(json.dumps(r) + "\n")' "$ns/log/log.jsonl" "$1" "$ns/alone/log.jsonl"
+  ns_logdir=$ns/alone ns_sample -- 1
+  got=$(nrec alone/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+}
 add=http://127.0.0.1:48321/y1-c-1.0.0.tgz
-# npm ci, the full install, as the sampler always replayed it.
+# npm ci, the full install, replayed with its logged words.
 pc=$(ns_project ci optional-upward)
-ns_npm "$pc" ci
+ns_npm "$pc" ci --ignore-scripts
 ns_sample -- 1
-if [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["dir"])')" = "('IDENTICAL', 'full', 'ci', '$pc')" ]; then ns_ok "npm ci replayed: IDENTICAL"
+if [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["dir"], r["args"])')" = "('IDENTICAL', 'full', 'ci', '$pc', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'])" ]; then
+  ns_ok "npm ci --ignore-scripts replayed with its words: IDENTICAL"
 else ns_bad "npm ci replay: $(nrec log/verify.jsonl 'r')"; fi
+ns_sample MATCHAPACK_INJECT_HOOK=none -- 1
+case "$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')" in
+  "ERROR: the replay cloned 0, the logged run "*) ns_ok "npm ci replayed with the hook not installed (nothing cloned): ERROR, not IDENTICAL" ;;
+  *) ns_bad "npm ci, no hook: $(nrec log/verify.jsonl 'r')" ;;
+esac
 # An npm install of one more package in a fresh clone.
 pg=$(ns_project gitadd optional-upward git)
 ns_npm "$pg" install "$add"
-lr=$(nrec log/log.jsonl '(r["command"], r["node_modules_before"], r["files_before"]["package.json"] != r["files_after"]["package.json"], r["files_before"]["package-lock.json"] != r["files_after"]["package-lock.json"], r["files_after"]["npm-shrinkwrap.json"])')
+lr=$(nrec log/log.jsonl '(r["command"], r["node_modules_before"], r["files_before"]["package.json"] != r["files_after"]["package.json"], r["files_before"]["package-lock.json"] != r["files_after"]["package-lock.json"], r["files_after"]["npm-shrinkwrap.json"], r["files_complete"], "before" in r["inject"])')
 ns_sample -- 1
-if [ "$lr" = "('install', 'absent', True, True, None)" ] && [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["args"], r["replayed_from"])')" = "('IDENTICAL', 'started-empty', 'install', ['install', '$add', '--no-audit', '--no-fund'], 'git HEAD')" ]; then
+if [ "$lr" = "('install', 'absent', True, True, None, True, False)" ] && [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["args"], r["replayed_from"])')" = "('IDENTICAL', 'started-empty', 'install', ['install', '$add', '--no-audit', '--no-fund'], 'git HEAD')" ]; then
   ns_ok "an npm install that started with no node_modules, replayed from the files before it (git HEAD): IDENTICAL"
 else ns_bad "started-empty npm install (logged $lr; $(nrec log/verify.jsonl 'r'))"; fi
-ns_sample MATCHAPACK_VERIFY_NPM_DAMAGE='printf x >> node_modules/y1-c/index.js' -- 1
-if [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], "node_modules/y1-c/index.js" in r["differing"])')" = "('DIFFERENT', 'started-empty', True)" ]; then
-  ns_ok "the started-empty npm install with B damaged: DIFFERENT"
-else ns_bad "damaged started-empty npm install: $(nrec log/verify.jsonl 'r')"; fi
-# Without git the files before the run are gone.
+for t in "content:printf x >> node_modules/y1-c/index.js:DIFFERENT: the trees differ" \
+         "stale:touch -t 200001010000 node_modules/y1-c/index.js:DIFFERENT: the trees are identical, but stale in B only: 1"; do
+  label=${t%%:*}; rest=${t#*:}; dmg=${rest%%:*}; want=${rest#*:}
+  ns_sample MATCHAPACK_VERIFY_NPM_DAMAGE="$dmg" -- 1
+  got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+  case $got in "$want"*) ns_ok "the started-empty npm install with B damaged ($label): $got" ;; *) ns_bad "damaged ($label): $got" ;; esac
+done
+ns_sample MATCHAPACK_INJECT_HOOK=none -- 1
+case "$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')" in
+  "ERROR: the replay cloned 0, the logged run "*) ns_ok "the started-empty npm install with the hook not installed: ERROR, not IDENTICAL" ;;
+  *) ns_bad "started-empty, no hook: $(nrec log/verify.jsonl 'r')" ;;
+esac
+ns_sample MATCHAPACK_TEST_BROKE=1 -- 1
+case "$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')" in
+  "DIFFERENT: matchapack failed where plain npm did not"*|"DIFFERENT: matchapack failed (broke) in the replay"*) ns_ok "matchapack broken in the replay where plain npm installed: DIFFERENT" ;;
+  *) ns_bad "matchapack broken: $(nrec log/verify.jsonl 'r')" ;;
+esac
+# Without git the files before the run are gone; skips, each sampled alone.
 pn=$(ns_project nogit optional-upward)
 ns_npm "$pn" install "$add"
-ns_sample -- 1
-got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+ns_alone ""
 case $got in "SKIPPED: the run changed package-lock.json, package.json, and the files before it are not in the project's git HEAD") ns_ok "skipped: the run changed the files, no git" ;; *) ns_bad "no git: $got" ;; esac
 printf '\n' >> "$pn/package-lock.json"
-ns_sample -- 1
-got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+ns_alone ""
 case $got in "SKIPPED: package-lock.json changed since the run"*) ns_ok "skipped: the project changed since the run" ;; *) ns_bad "changed since: $got" ;; esac
-# Runs the copies cannot repeat (records made from the last one): an
-# absolute path among the arguments, a start inside the project.
-ns_fake() { python3 -c 'import json,sys; p=sys.argv[1]; r=json.loads(open(p).read().splitlines()[-1]); exec(sys.argv[2]); open(p, "a").write(json.dumps(r) + "\n")' "$ns/log/log.jsonl" "$1"; }
-for t in "abs:r['args'] = ['install', '--prefix', '/elsewhere']:an argument is an absolute path (/elsewhere)" "sub:r['dir'] = r['root'] + '/sub':inside the project: replays start at the root only"; do
+# An npm ci picked from the log is replayed only while its files are what
+# the run left.
+printf '\n' >> "$pc/package-lock.json"
+ns_alone "r.update(json.loads([l for l in open(sys.argv[1]).read().splitlines() if json.loads(l).get('command') == 'ci'][0]))"
+case $got in "SKIPPED: package-lock.json changed since the run") ns_ok "skipped: an npm ci whose lockfile changed since" ;; *) ns_bad "npm ci changed since: $got" ;; esac
+for t in "abs:r['args'] = ['install', '--prefix', '/elsewhere']:an argument is an absolute path (/elsewhere)" \
+         "sub:r['dir'] = r['root'] + '/sub':inside the project: replays start at the root only" \
+         "newline:r['args'] = ['install', 'a\nb']:a line break" \
+         "nothing-cloned:r['packages'] = 0:nothing was cloned in the logged run" \
+         "incomplete:r['files_complete'] = False:the logged file set may be incomplete" \
+         "file-dep:r['command'] = 'install':a file:/link: dependency"; do
   label=${t%%:*}; rest=${t#*:}; edit=${rest%%:*}; want=${rest#*:}
   [ $label = sub ] && mkdir -p "$pn/sub"
-  ns_fake "$edit"
-  ns_sample -- 1
-  got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+  if [ $label = file-dep ]; then
+    # A project whose package.json names a local directory.
+    pl=$(ns_project local optional-upward git)
+    python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["dependencies"]["loc"]="file:./loc"; json.dump(d, open(p,"w"), indent=2)' "$pl/package.json"
+    mkdir -p "$pl/loc"; echo '{"name":"loc","version":"1.0.0"}' > "$pl/loc/package.json"
+    git -C "$pl" add package.json loc/package.json && git -C "$pl" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m local
+    ns_npm "$pl" install "$add"
+  fi
+  ns_alone "$edit"
   case $got in "SKIPPED: "*"$want"*) ns_ok "skipped: $label ($got)" ;; *) ns_bad "$label: $got" ;; esac
 done
 if [ -z "$(ls -d "$ns/tmp"/matchapack-verify-* 2>/dev/null)" ]; then ns_ok "no replay copies left"; else ns_bad "copies left: $(ls -d "$ns/tmp"/matchapack-verify-*)"; fi

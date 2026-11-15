@@ -15,8 +15,9 @@
 # MATCHAPACK_VERIFY_META=1 also compares mtimes outside the two runs, uid,
 # gid and xattr names (diff --meta).
 # MATCHAPACK_VERIFY_ARGS_FILE=<file> (scripts/verify-sample.sh, #77 part
-# 1b): another npm command than npm ci, its arguments one per line in the
-# file (`install`, `left-pad@1.3.0`, …): A (and A2) run plain `npm <args>`,
+# 1b): the npm command to run instead of npm ci, its arguments in the file,
+# each ended by a NUL byte (`ci`, `install`, `left-pad@1.3.0`, …; NUL, so an
+# argument may hold a line break): A (and A2) run plain `npm <args>`,
 # B `matchapack npm <args>` (the shell function's path), both with
 # --no-audit --no-fund; package.json, package-lock.json and
 # npm-shrinkwrap.json must then also be byte-identical between A and B.
@@ -86,7 +87,7 @@ export MATCHAPACK_PATHS=${MATCHAPACK_PATHS:-$(cd "$work" && pwd -P)}
 npm_args=("$base")
 if [ -n "${MATCHAPACK_VERIFY_ARGS_FILE:-}" ]; then
   npm_args=()
-  while IFS= read -r a || [ -n "$a" ]; do npm_args+=("$a"); done < "$MATCHAPACK_VERIFY_ARGS_FILE"
+  while IFS= read -r -d '' a; do npm_args+=("$a"); done < "$MATCHAPACK_VERIFY_ARGS_FILE"
   [ ${#npm_args[@]} -gt 0 ] || { echo "MATCHAPACK_VERIFY_ARGS_FILE holds no arguments" >&2; exit 2; }
 fi
 echo "== npm ${npm_args[*]} (A)"

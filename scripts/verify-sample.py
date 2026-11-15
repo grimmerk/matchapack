@@ -10,21 +10,26 @@ sample replays one logged run of one project, plain and through matchapack,
 on copies, and compares the trees (NOTES "Sampled verification of real
 runs"). Two kinds of run are replayed (issue grimmerk/matchapack-private#77):
 
-- full installs: `npm ci` (on copy-on-write copies of the whole project, by
-  scripts/verify.sh, as before); `yarn` / `yarn install` with or without
-  --frozen-lockfile (on copies of the manifests, by scripts/verify-yarn1.sh
-  --engine yarn1), when the project's lockfile and manifests are still what
-  the run left;
+- full installs: `npm ci` (with the logged words, on copy-on-write copies of
+  the whole project, by scripts/verify.sh); `yarn` / `yarn install` with or
+  without --frozen-lockfile (on copies of the manifests, by
+  scripts/verify-yarn1.sh --engine yarn1), from the files as the run left
+  them;
 - commands that started with no node_modules (part 1b): npm `install`,
   `update`, `uninstall`; Yarn `add`, `upgrade`, `remove` and their `yarn
-  workspace <name> …` forms. They are replayed from the state before the
-  run (the manifests and the lockfile, no node_modules): the files as they
-  are now when they still have the hashes the run logged before it ran (or
-  after it, when the run did not change them), else the versions in the
-  project's git HEAD when those have the hashes. Otherwise the run is
-  skipped, and the reason recorded.
+  workspace <name> …` forms, from the files before the run: the project's
+  while they still have the hashes the run logged, else its git HEAD's
+  when those have them.
+
+The rule (review round 1): a sample says IDENTICAL only when (a) the
+replay's inputs provably equal the logged run's (the set of files, their
+bytes, the arguments), (b) matchapack's run in the replay went through
+matchapack and cloned, as the logged run did, and (c) every check of the
+comparison passed (its exit status, not only the line it printed).
+Whatever cannot be proven is SKIPPED or ERROR, with the reason; matchapack
+failing where plain npm or Yarn succeeded is DIFFERENT.
 """
-import fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
+import fcntl, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time, traceback
 
 NPM_INCREMENTAL = ("install", "update", "uninstall")
 YARN_INCREMENTAL = ("add", "upgrade", "remove", "upgrade-interactive")
@@ -32,8 +37,12 @@ STARTED_EMPTY = ("absent", "empty")
 # The files a copy holds (every one outside node_modules and .git): the
 # manifests the package manager reads to install, and the rc files it reads
 # in the project.
-COPIED = {"yarn1": ("package.json", "yarn.lock", ".yarnrc", ".npmrc"),
+COPIED = {"yarn1": ("package.json", "yarn.lock", ".yarnrc", ".npmrc", ".yarnclean"),
           "npm": ("package.json", "package-lock.json", "npm-shrinkwrap.json", ".npmrc")}
+DEP_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "resolutions", "overrides")
+# At most this many projects are recorded as SKIPPED in one run while it
+# looks for N it can replay.
+MAX_SKIPS = 20
 
 
 def read_log(path):
@@ -85,32 +94,40 @@ def kind_of(r):
     return "started-empty" if c in NPM_INCREMENTAL and r.get("node_modules_before") in STARTED_EMPTY else None
 
 
-def pick(path, n, engine):
-    """[(record, project)]: the newest replayable run of each of the N most
-    recent distinct projects of `engine` ("npm" or "yarn1")."""
-    seen, out = set(), []
+def logged_clones(r):
+    """How many files (Yarn) or packages (npm) the logged run cloned, or None."""
+    if r.get("engine") == "yarn1":
+        return (r.get("yarn1") or {}).get("cloned")
+    return r.get("packages")
+
+
+def candidates(path, engine):
+    """[(record, project)], newest project first: for each project, its
+    newest replayable run that cloned something, else its newest replayable
+    run (which is then skipped: nothing to compare a clone with)."""
+    best, order = {}, []
     for r in reversed(read_log(path)):
         if (r.get("engine") == "yarn1") != (engine == "yarn1") or not kind_of(r):
             continue
         d = project_of(r)
-        if not d or d in seen:
+        if not d:
             continue
-        seen.add(d)
-        out.append((r, d))
-        if len(out) >= n:
-            break
-    return out
+        if d not in best:
+            best[d] = r
+            order.append(d)
+        elif not (logged_clones(best[d]) or 0) and (logged_clones(r) or 0) > 0:
+            best[d] = r
+    return [(best[d], d) for d in order]
 
 
 def pick_dirs(path, dirs, engine):
-    """The newest replayable run of each directory given (its project or the
-    directory it ran in), or (None, dir)."""
-    runs = [r for r in read_log(path) if (r.get("engine") == "yarn1") == (engine == "yarn1") and kind_of(r) and project_of(r)]
-    runs.reverse()
+    """The run to replay for each directory given (its project or the
+    directory it ran in), as `candidates` picks it, or (None, dir)."""
+    cands = candidates(path, engine)
     out = []
     for d in dirs:
         real = os.path.realpath(d)
-        hit = next((r for r in runs if real in (os.path.realpath(project_of(r)), os.path.realpath(r.get("dir") or ""))), None)
+        hit = next((r for r, p in cands if real in (os.path.realpath(p), os.path.realpath(r.get("dir") or ""))), None)
         out.append((hit, project_of(hit) if hit else real))
     return out
 
@@ -135,21 +152,49 @@ def git_blob(root, rel):
     return p.stdout if p.returncode == 0 else None
 
 
-def files_state(r, root, kind):
+def state_now(here, engine, root):
+    """The project's state now with the logger's own rules (`matchapack
+    replay-state`, src/replay.rs): {"node_modules", "files", "complete"}."""
+    p = subprocess.run([os.path.join(here, "target/release/matchapack"), "replay-state", engine, root], capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError("matchapack replay-state failed: %s" % p.stderr.strip()[-200:])
+    return json.loads(p.stdout)
+
+
+def files_state(r, root, kind, now_state):
     """(files, source, None): {relative path: bytes, or None for a file that
     is not there} to give the copies, the state the replay starts from, and
     where it came from ("project" or "git HEAD"); or (None, None, why). A
     full install starts from the files the run left (its lockfile may have
     been written by it); a command that started empty from the files before
-    the run."""
+    the run. The set of files must be the run's too: no workspace added or
+    removed since, and none the logger could not enumerate."""
     fb, fa = r.get("files_before"), r.get("files_after")
     if not isinstance(fb, dict) or not isinstance(fa, dict) or not fb:
         return None, None, "the log record has no hashes of the files before and after the run (logged by a matchapack build from before replays were recorded)"
+    if r.get("files_complete") is not True:
+        return None, None, "the logged file set may be incomplete (a workspace pattern matchapack does not expand, or its listing budget ran out)" \
+            if r.get("files_complete") is False else "the log record does not say whether its file set is complete (logged by an older matchapack build)"
+    if now_state.get("complete") is not True:
+        return None, None, "the project's workspaces cannot all be found now (a pattern matchapack does not expand, or its listing budget ran out)"
+    now = now_state.get("files") or {}
+    if set(now) != set(fa) or set(fb) != set(fa):
+        added = sorted(set(now) - set(fa))
+        gone = sorted(set(fa) - set(now))
+        return None, None, "the workspaces changed since the run (%s)" % ", ".join(["+" + k for k in added] + ["-" + k for k in gone] + (["the run itself changed them"] if set(fb) != set(fa) else []))
     want = fa if kind == "full" else fb
-    now = {k: sha256_of(os.path.join(root, k)) for k in want}
-    changed_since = sorted(k for k in fa if now.get(k, sha256_of(os.path.join(root, k))) != fa[k])
-    if now == want:
-        return {k: (open(os.path.join(root, k), "rb").read() if want[k] else None) for k in want}, "project", None
+    changed_since = sorted(k for k in fa if now.get(k) != fa[k])
+    if all(now.get(k) == want[k] for k in want):
+        files = {}
+        for k in want:
+            if want[k] is None:
+                files[k] = None
+                continue
+            b = open(os.path.join(root, k), "rb").read()
+            if hashlib.sha256(b).hexdigest() != want[k]:
+                return None, None, "%s changed while it was read" % k
+            files[k] = b
+        return files, "project", None
     if kind == "full":
         return None, None, "%s changed since the run" % ", ".join(changed_since)
     # The files before the run, from git HEAD.
@@ -168,6 +213,29 @@ def files_state(r, root, kind):
     changed_by_run = sorted(k for k in fb if fb[k] != fa.get(k))
     why = "%s changed since the run" % ", ".join(changed_since) if changed_since else "the run changed %s" % ", ".join(changed_by_run)
     return None, None, why + ", and the files before it are not in the project's git HEAD"
+
+
+def local_dependency(files):
+    """A `file:` / `link:` / `portal:` dependency named by one of the
+    manifests the replay reads, or None. The copies hold manifests only: the
+    directory or tarball it names is not in them, so the replay would not be
+    the run's (measured: a `file:` directory replayed IDENTICAL with nothing
+    cloned)."""
+    for k, b in sorted(files.items()):
+        if b is None or not k.endswith("package.json"):
+            continue
+        try:
+            pj = json.loads(b)
+        except ValueError:
+            continue
+        for field in DEP_FIELDS:
+            deps = pj.get(field) if isinstance(pj, dict) else None
+            if not isinstance(deps, dict):
+                continue
+            for name, spec in deps.items():
+                if isinstance(spec, str) and re.match(r"(file|link|portal):", spec):
+                    return "%s: %s %s" % (k, name, spec)
+    return None
 
 
 def copy_manifests(root, dest, sub, names, files):
@@ -228,9 +296,48 @@ def hidden(args):
     return any("***" in a for a in args)
 
 
+def clones_needed(r):
+    """None when the logged run cloned something, else why it is skipped."""
+    n = logged_clones(r)
+    if not isinstance(n, int):
+        return "the log record does not say how much the run cloned"
+    if n == 0:
+        return "nothing was cloned in the logged run, so there is no clone to check"
+    return None
+
+
+def started_as_logged(plan, started, result, reason):
+    """A command that started with no node_modules must have started so in
+    the replay too (matchapack's own record of the replay says): otherwise
+    the comparison is of another run."""
+    if plan["kind"] == "started-empty" and result not in ("ERROR", "DIFFERENT") and started not in STARTED_EMPTY:
+        return "ERROR", "the replay did not start with no node_modules (matchapack logged %s)" % started
+    return result, reason
+
+
+def cloned_as_logged(plan, cloned, result, reason):
+    """The replay's matchapack run must have cloned when the logged run did."""
+    if result in ("ERROR", "DIFFERENT"):
+        return result, reason
+    if not isinstance(cloned, int):
+        return "ERROR", "matchapack's run in the replay left no record of what it cloned"
+    if cloned == 0 and (plan.get("logged_cloned") or 0) > 0:
+        return "ERROR", "the replay cloned 0, the logged run %s: the comparison would not test matchapack" % plan["logged_cloned"]
+    if cloned == 0 and plan.get("logged_cloned") is None:
+        return "ERROR", "the replay cloned nothing: the comparison would not test matchapack"
+    return result, reason
+
+
+def first_error(lines):
+    for l in lines:
+        if re.search(r"error|ERR!|failed|panicked|not handled", l, re.I) and not l.startswith(("engine yarn failed", "== ")):
+            return l.strip()
+    return lines[0].strip() if lines else "no output"
+
+
 # --- Yarn 1 ------------------------------------------------------------------
 
-def yarn_plan(r, d):
+def yarn_plan(r, d, here):
     """(plan, None) when the logged run can be replayed, else (None, why)."""
     if r is None:
         return None, "no replayable `matchapack yarn` run of this directory in the log"
@@ -243,14 +350,20 @@ def yarn_plan(r, d):
         return None, "the log record has no %s (logged by a matchapack build from before replays were recorded)" % ", ".join(missing)
     if r.get("command") == "upgrade-interactive" or r.get("command", "").endswith(" upgrade-interactive"):
         return None, "upgrade-interactive: the choices made in its prompt are not logged"
+    why = clones_needed(r)
+    if why:
+        return None, why
     if not os.path.isdir(root):
         return None, "the project directory is gone"
     sub, why = subdir_of(r, root)
     if why:
         return None, why
-    files, source, why = files_state(r, root, kind)
+    files, source, why = files_state(r, root, kind, state_now(here, "yarn1", root))
     if why:
         return None, why
+    why = local_dependency(files)
+    if why:
+        return None, "a file:/link: dependency (%s); the copies hold manifests only" % why
     node, yarn_js = y["node_path"], y["yarn_js"]
     version = r.get("yarn") or y.get("yarn")
     if not os.access(node, os.X_OK):
@@ -300,16 +413,8 @@ def yarn_plan(r, d):
             break
         p = os.path.dirname(p)
     return {"kind": kind, "root": root, "sub": sub, "files": files, "source": source, "node": node, "node_version": nv, "yarn_js": yarn_js,
-            "yarn": version, "cache_root": os.path.dirname(cache), "args": args, "logged_cloned": y.get("cloned")}, None
-
-
-def started_as_logged(plan, started, result, reason):
-    """A command that started with no node_modules must have started so in
-    the replay too (matchapack's own record of the replay says): otherwise
-    the comparison is of another run."""
-    if plan["kind"] == "started-empty" and result != "ERROR" and started not in STARTED_EMPTY:
-        return "ERROR", "the replay did not start with no node_modules (matchapack logged %s)" % started
-    return result, reason
+            "yarn": version, "cache_root": os.path.dirname(cache), "args": args, "logged_cloned": y.get("cloned"),
+            "fresh": kind == "full" and r.get("node_modules_before") not in STARTED_EMPTY}, None
 
 
 def window_secs(runs_file, name):
@@ -342,8 +447,7 @@ def race_shaped(own, tree, node_version):
     sets the times before the data), in a tree with an empty package file
     (the race needs empty and non-empty files among Yarn's first copies):
     mtime differences only, each on a non-empty regular file under a
-    node_modules, never .yarn-integrity. Not a pass: kept apart from both
-    IDENTICAL and DIFFERENT, to be sampled again."""
+    node_modules, never .yarn-integrity."""
     if not own or not node_at_least(node_version, 22, 12) or not has_empty_package_file(tree):
         return False
     for cls, path in own:
@@ -355,9 +459,10 @@ def race_shaped(own, tree, node_version):
     return True
 
 
-def yarn_result(rc, out, v, here, node_version):
+def yarn_result(rc, out, v, here, node_version, race_possible=True):
     """(result, reason, extra) from verify-yarn1.sh's exit status, output
-    and work directory."""
+    and work directory. `race_possible`: false for a run with one pool
+    thread, where plain Yarn's race cannot happen."""
     extra = {}
     if rc == 0 and "plain vs engine: IDENTICAL" in out:
         return "IDENTICAL", None, extra
@@ -369,7 +474,7 @@ def yarn_result(rc, out, v, here, node_version):
         except OSError:
             plain = []
         extra["plain_varies"] = plain[:20]
-        return "IDENTICAL", "plain Yarn varies between two runs; the engine differs only there", extra
+        return "PLAIN-VARIES", "plain Yarn varies between two runs; the engine differs only there", extra
     if rc == 1 and "plain vs engine: ENGINE DIFFERS" in out:
         p = subprocess.run([os.path.join(here, "scripts/yarn1-own-diffs.sh"), os.path.join(v, "classes-plain.txt"), os.path.join(v, "classes-engine.txt")],
                            capture_output=True, text=True)
@@ -378,22 +483,26 @@ def yarn_result(rc, out, v, here, node_version):
         own = [tuple(l.split("\t", 1)) for l in p.stdout.splitlines() if "\t" in l]
         extra["differing"] = ["%s %s" % c for c in own[:20]]
         extra["differing_count"] = len(own)
-        if race_shaped(own, os.path.join(v, "engine"), node_version):
-            return "RACE-SHAPED", "mtimes of non-empty package files only, as plain Yarn's own probe race (#57) can leave them: sample it again", extra
+        if race_possible and race_shaped(own, os.path.join(v, "engine"), node_version):
+            return "RACE-SHAPED", "mtimes of non-empty package files only, as plain Yarn's own probe race (#57) can leave them", extra
         return "DIFFERENT", "the engine's tree differs from plain Yarn's where two plain runs do not", extra
     lines = [l for l in out.strip().splitlines() if l.strip()]
     extra["detail"] = lines[-12:]
-    failed = next((l for l in lines if l.startswith("plain yarn failed in ")), None)
-    if failed:
-        return "ERROR", "plain Yarn failed in its copy (%s; the copies hold the manifests only: a script or a `file:` dependency may need other files of the project)" % failed.rstrip(":"), extra
-    why = next((l for l in reversed(lines) if l.startswith(("engine yarn failed", "engine: ", "command: "))), lines[-1] if lines else "no output")
+    failed = next((i for i, l in enumerate(lines) if l.startswith("plain yarn failed in ")), None)
+    if failed is not None:
+        return "ERROR", "plain Yarn failed in its copy (%s: %s)" % (lines[failed].rstrip(":"), first_error(lines[failed + 1:])), extra
+    eng = next((i for i, l in enumerate(lines) if l.startswith("engine yarn failed in ")), None)
+    if eng is not None:
+        tail = lines[eng + 1:]
+        if any("not handled, left unchanged" in l for l in tail):
+            return "ERROR", "matchapack declined in the replay: %s" % next(l.strip() for l in tail if "not handled, left unchanged" in l), extra
+        # Plain Yarn installed in three copies; matchapack failed in the fourth.
+        return "DIFFERENT", "matchapack failed where plain Yarn did not: %s" % first_error(tail), extra
+    why = next((l for l in reversed(lines) if l.startswith(("engine: ", "command: "))), lines[-1] if lines else "no output")
     return "ERROR", "verify-yarn1.sh exit %d: %s" % (rc, why.rstrip(":")), extra
 
 
-def yarn_one(plan, here, work):
-    src = os.path.join(work, "src")
-    copied = copy_manifests(plan["root"], src, plan["sub"], COPIED["yarn1"], plan["files"])
-    v = os.path.join(work, "v")
+def yarn_run(plan, here, src, v, one_thread):
     argv = [os.path.join(here, "scripts/verify-yarn1.sh"), "--work", v, "--cache-dir", plan["cache_root"], "--engine", "yarn1",
             "--engine-min-clones", "any", "--args-as-given"]
     if plan["sub"] != ".":
@@ -403,13 +512,14 @@ def yarn_one(plan, here, work):
     else:
         argv += ["--command", " ".join(plan["args"]), "--command-fresh", src]
     env = dict(os.environ, MATCHAPACK_YARN_NODE=plan["node"], MATCHAPACK_YARN_JS=plan["yarn_js"])
+    if one_thread:
+        env["UV_THREADPOOL_SIZE"] = "1"
     p = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     out = p.stdout + p.stderr
-    open(os.path.join(work, "out.txt"), "w").write(out)
     for l in out.splitlines():
         if l.startswith(("yarn ", "engine: ", "plain vs ", "engine tree damaged", "command: ")):
             print("  " + l)
-    result, reason, extra = yarn_result(p.returncode, out, v, here, plan["node_version"])
+    result, reason, extra = yarn_result(p.returncode, out, v, here, plan["node_version"], race_possible=not one_thread)
     cloned, started = None, None
     try:
         e = json.load(open(os.path.join(v, "engine.json")))
@@ -417,9 +527,39 @@ def yarn_one(plan, here, work):
     except (OSError, ValueError):
         pass
     result, reason = started_as_logged(plan, started, result, reason)
-    rec = dict(result=result, yarn=plan["yarn"], node=plan["node_version"], args=plan["args"], subdir=plan["sub"], replayed_from=plan["source"],
+    result, reason = cloned_as_logged(plan, cloned, result, reason)
+    return result, reason, extra, cloned
+
+
+def yarn_one(plan, here, work):
+    src = os.path.join(work, "src")
+    copied = copy_manifests(plan["root"], src, plan["sub"], COPIED["yarn1"], plan["files"])
+    v = os.path.join(work, "v")
+    result, reason, extra, cloned = yarn_run(plan, here, src, v, False)
+    rec = dict(yarn=plan["yarn"], node=plan["node_version"], args=plan["args"], subdir=plan["sub"], replayed_from=plan["source"],
                manifests_copied=copied, yarn_secs=window_secs(os.path.join(v, "runs"), "plain1"),
-               matchapack_secs=window_secs(os.path.join(v, "runs"), "engine"), cloned=cloned, logged_cloned=plan["logged_cloned"])
+               matchapack_secs=window_secs(os.path.join(v, "runs"), "engine"), logged_cloned=plan["logged_cloned"])
+    if plan["fresh"]:
+        # The logged install ran over an existing node_modules; the replay
+        # installs from scratch.
+        rec["replayed_fresh"] = True
+    if result in ("RACE-SHAPED", "PLAIN-VARIES"):
+        # Once more with one pool thread, where plain Yarn's probe race
+        # cannot happen: a difference that stays is the engine's.
+        print("  %s: once more with one pool thread (UV_THREADPOOL_SIZE=1)" % result)
+        rec["first_result"], rec["first_reason"] = result, reason
+        rec["first_differing"] = extra.get("differing") or extra.get("plain_varies")
+        shutil.rmtree(v, ignore_errors=True)
+        result, reason, extra, cloned = yarn_run(plan, here, src, v, True)
+        rec["rerun"] = "one pool thread"
+        if result == "PLAIN-VARIES":
+            # Not the race (one thread): output that varies from run to run,
+            # in which the engine differs only where plain Yarn does.
+            result = "IDENTICAL"
+            reason = "plain Yarn varies between two runs with one pool thread too (not the race); the engine differs only there"
+    if result == "PLAIN-VARIES":
+        result = "IDENTICAL"
+    rec.update(result=result, cloned=cloned)
     if reason:
         rec["reason"] = reason
     rec.update(extra)
@@ -432,6 +572,9 @@ def yarn_one(plan, here, work):
 # caller's settings that loosen or reroute verify.sh do not apply.
 VERIFY_KNOBS = ("MATCHAPACK_VERIFY_IGNORE", "MATCHAPACK_VERIFY_BASELINE", "MATCHAPACK_VERIFY_MTIME", "MATCHAPACK_VERIFY_VIA",
                 "MATCHAPACK_VERIFY_BYTES", "MATCHAPACK_VERIFY_CLONES", "MATCHAPACK_VERIFY_META", "MATCHAPACK_VERIFY_ARGS_FILE")
+# verify.sh's lines that say a check failed (it exits 1 for each).
+FAILED_CHECKS = (r"^stale in B only: [1-9]", r"^npm ls: DIFFERS", r"^hidden lockfile is not byte-identical", r"^meta: DIFFERENT",
+                 r"byte-identical \(A, B\): false")
 
 
 def verify_env(**kw):
@@ -440,31 +583,25 @@ def verify_env(**kw):
     return env
 
 
-def npm_ci_one(d, here, work):
-    """npm ci on copy-on-write copies of the whole project (verify.sh), as
-    the sampler always did."""
-    v = os.path.join(work, "v")
-    env = verify_env(MATCHAPACK_VERIFY_NOISE="1", MATCHAPACK_LOG_DIR=os.path.join(work, "logs"))
-    p = subprocess.run([os.path.join(here, "scripts/verify.sh"), d, v], env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
-    show_npm(p.stdout + p.stderr)
-    return npm_result(p.stdout + p.stderr)
-
-
 def show_npm(out):
     shown = [l for l in out.splitlines() if re.search(r"RESULT|npm [\w-]+: [\d.]+s|noise|npm ls:|stale in B|byte-identical \(A, B\)|damaged|^  ", l)]
     for l in shown[:20]:
         print(l)
 
 
-def npm_plan(r, d):
+def npm_plan(r, d, here, explicit):
     if r is None:
         return None, "no replayable `matchapack npm` run of this directory in the log"
     kind = kind_of(r)
     root = r.get("root") or r.get("dir")
     if not root or not os.path.isdir(root):
         return None, "the project directory is gone"
-    if kind == "full":
-        return {"kind": kind, "root": root}, None
+    if explicit:
+        # A directory given: npm ci on the project as it is now.
+        return {"kind": "full", "root": root, "args": ["ci"], "explicit": True, "logged_cloned": None, "source": "project"}, None
+    why = clones_needed(r)
+    if why:
+        return None, why
     sub, why = subdir_of(r, root)
     if why:
         return None, why
@@ -480,71 +617,123 @@ def npm_plan(r, d):
     for a in args:
         if a.startswith("/") or "=/" in a or a.startswith("file:/") or a.startswith("~"):
             return None, "an argument is an absolute path (%s): the copies cannot repeat it" % a
-    files, source, why = files_state(r, root, kind)
+        if "\n" in a or "\0" in a:
+            return None, "an argument holds a line break or a NUL: it cannot be given back as one word"
+    files, source, why = files_state(r, root, kind, state_now(here, "npm", root))
     if why:
         return None, why
+    if kind != "full":
+        why = local_dependency(files)
+        if why:
+            return None, "a file:/link: dependency (%s); the copies hold manifests only" % why
     nv, err = run_version(["npm", "--version"], tempfile.gettempdir())
     if not r.get("npm") or nv != r.get("npm"):
         return None, "the npm on PATH is %s, the run used %s" % (nv or "not runnable (%s)" % err, r.get("npm") or "an unknown version")
-    return {"kind": kind, "root": root, "files": files, "source": source, "args": args, "npm": nv}, None
+    return {"kind": kind, "root": root, "files": files, "source": source, "args": args, "npm": nv, "logged_cloned": logged_clones(r)}, None
 
 
-def npm_result(out):
-    """(record fields) from verify.sh's output."""
+def npm_result(rc, out):
+    """(record fields) from verify.sh's exit status and output. IDENTICAL
+    only on exit 0; a failing check (a stale mtime, npm ls, the bytes of
+    package.json or the lockfile) is DIFFERENT, named; npm failing in A is
+    ERROR; matchapack failing in B, where npm passed in A, is DIFFERENT."""
+    lines = out.splitlines()
     m = re.search(r"RESULT: (\w+)", out)
     t = re.search(r"npm [\w-]+: ([\d.]+)s\s+matchapack: ([\d.]+)s", out)
     n = re.search(r"noise .*?: (\d+) paths", out)
     ls = re.search(r"npm ls: (.*)", out)
-    result = m.group(1) if m else "ERROR"
-    # Differences only OUTSIDE node_modules come from the project's own build
-    # scripts (e.g. tsdown output that varies run to run, which two npm ci runs may
-    # happen to agree on): reported, but kept apart from a node_modules mismatch.
     paths = re.findall(r"^  ([^ :]+)(?::|$)", out.split("== diff A B")[-1].split("== mtime")[0], re.M)
     bytes_differ = re.findall(r"^(\S+) byte-identical \(A, B\): false", out, re.M)
-    if result == "DIFFERENT" and paths and not bytes_differ and all(not (p.startswith("node_modules/") or "/node_modules/" in p) for p in paths):
-        result = "BUILD-OUTPUT-ONLY"
-    # Another command's package.json or lockfile bytes (verify.sh compares
-    # them outside the noise rule).
-    if bytes_differ and result in ("IDENTICAL", "ERROR") and m:
-        result = "DIFFERENT"
-    rec = {"result": result, "differing": (["bytes " + b for b in bytes_differ] + paths)[:20],
+    failed = [l for l in lines if any(re.search(f, l) for f in FAILED_CHECKS)]
+    rec = {"differing": (["bytes " + b for b in bytes_differ] + paths)[:20],
            "npm_ci_secs": float(t.group(1)) if t else None, "matchapack_secs": float(t.group(2)) if t else None,
            "noise_paths": int(n.group(1)) if n else None, "npm_ls": ls.group(1).strip() if ls else None}
-    if result == "ERROR":
-        rec["detail"] = out.strip().splitlines()[-15:]
+    if m:
+        result = m.group(1)
+        if result == "DIFFERENT" and paths and not failed and all(not (p.startswith("node_modules/") or "/node_modules/" in p) for p in paths):
+            # Differences only OUTSIDE node_modules come from the project's
+            # own build scripts: reported, kept apart from a node_modules mismatch.
+            result = "BUILD-OUTPUT-ONLY"
+        elif result == "IDENTICAL" and (failed or rc != 0):
+            result = "DIFFERENT"
+            rec["reason"] = "the trees are identical, but %s" % (failed[0] if failed else "verify.sh exited %d" % rc)
+        elif result == "DIFFERENT":
+            rec["reason"] = "the trees differ" + ("; also %s" % failed[0] if failed else "")
+        rec["result"] = result
+        return rec
+    # No comparison: which run failed.
+    rec["detail"] = lines[-15:]
+    b_started = any(l.startswith("== matchapack install (B)") for l in lines)
+    b_done = t is not None
+    if b_started and not b_done:
+        at = next(i for i, l in enumerate(lines) if l.startswith("== matchapack install (B)"))
+        rec["result"], rec["reason"] = "DIFFERENT", "matchapack failed where plain npm did not: %s" % first_error(lines[at + 1:])
+    elif not b_started:
+        rec["result"], rec["reason"] = "ERROR", "plain npm failed in its copy: %s" % first_error(lines)
+    else:
+        rec["result"], rec["reason"] = "ERROR", "verify.sh exit %d after both installs: %s" % (rc, first_error(lines[-15:]))
     return rec
 
 
 def npm_one(plan, here, work):
-    src = os.path.join(work, "src")
-    copied = copy_manifests(plan["root"], src, ".", COPIED["npm"], plan["files"])
+    """One npm replay through verify.sh with the logged words
+    (MATCHAPACK_VERIFY_ARGS_FILE, NUL-separated): npm ci on copy-on-write
+    copies of the whole project, a command that started empty on copies of
+    its manifests."""
+    if plan["kind"] == "full":
+        src, copied = plan["root"], None
+    else:
+        src = os.path.join(work, "src")
+        copied = copy_manifests(plan["root"], src, ".", COPIED["npm"], plan["files"])
     argsfile = os.path.join(work, "args")
-    with open(argsfile, "w") as f:
-        f.write("".join(a + "\n" for a in plan["args"]))
+    with open(argsfile, "wb") as f:
+        f.write(b"".join(a.encode() + b"\0" for a in plan["args"]))
+    # The clone count is checked from B's own record (cloned_as_logged), not
+    # with verify.sh's MATCHAPACK_VERIFY_CLONES: that one would make "cloned
+    # nothing" a failed comparison (DIFFERENT) instead of a replay that
+    # tested nothing (ERROR).
     env = verify_env(MATCHAPACK_VERIFY_NOISE="1", MATCHAPACK_LOG_DIR=os.path.join(work, "logs"), MATCHAPACK_VERIFY_ARGS_FILE=argsfile)
     p = subprocess.run([os.path.join(here, "scripts/verify.sh"), src, os.path.join(work, "v")], env=env, stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, errors="replace")
     show_npm(p.stdout + p.stderr)
-    rec = npm_result(p.stdout + p.stderr)
+    rec = npm_result(p.returncode, p.stdout + p.stderr)
     # B's own log record (verify.sh gives it the work directory's log).
-    logged = read_log(os.path.join(work, "logs", "log.jsonl"))
-    rec["result"], reason = started_as_logged(plan, logged[-1].get("node_modules_before") if logged else None, rec["result"], rec.get("reason"))
+    logged = [x for x in read_log(os.path.join(work, "logs", "log.jsonl")) if x.get("engine") != "yarn1"]
+    last = logged[-1] if logged else {}
+    if rec["result"] != "ERROR" and last.get("outcome") in ("broke", "npm_failed", "declined"):
+        # B finished (npm ci rebuilt a broken run with plain npm, or npm ran
+        # plain), but matchapack's own run failed or declined.
+        what = "declined" if last["outcome"] == "declined" else "failed (%s)" % last["outcome"]
+        rec["result"] = "ERROR" if last["outcome"] == "declined" else "DIFFERENT"
+        rec["reason"] = "matchapack %s in the replay where plain npm did not: %s" % (what, last.get("reason") or "?")
+    rec["result"], reason = started_as_logged(plan, last.get("node_modules_before"), rec["result"], rec.get("reason"))
+    rec["result"], reason = cloned_as_logged(plan, last.get("packages") if last.get("outcome") == "installed" else (0 if last else None), rec["result"], reason)
     if reason:
         rec["reason"] = reason
-    rec.update(npm=plan["npm"], args=plan["args"], manifests_copied=copied, replayed_from=plan["source"])
+    rec.update(npm=plan.get("npm"), args=plan["args"], manifests_copied=copied, replayed_from=plan["source"], cloned=last.get("packages"),
+               logged_cloned=plan.get("logged_cloned"))
     return rec
 
 
 # --- both ---------------------------------------------------------------------
 
+class Stop(Exception):
+    pass
+
+
+def on_signal(signum, frame):
+    raise Stop("signal %d" % signum)
+
+
 def main_engine(engine, logdir, n, here, dirs):
     log = os.path.join(logdir, "log.jsonl")
     vlog = os.path.join(logdir, "verify.jsonl")
-    if engine == "npm" and dirs:
-        # Directories given: replayed as npm ci, as the sampler always did.
+    explicit = engine == "npm" and bool(dirs)
+    if explicit:
+        # Directories given: npm ci on each, as the sampler always did.
         picked = [({"command": "ci", "outcome": "installed", "root": os.path.realpath(d)}, os.path.realpath(d)) for d in dirs]
     else:
-        picked = pick_dirs(log, dirs, engine) if dirs else pick(log, n, engine)
+        picked = pick_dirs(log, dirs, engine) if dirs else candidates(log, engine)
     if not picked:
         what = "`matchapack yarn` runs" if engine == "yarn1" else "matchapack installs"
         print("nothing to verify: no replayable %s in %s yet" % (what, log))
@@ -552,31 +741,47 @@ def main_engine(engine, logdir, n, here, dirs):
     m = re.search(r"\((.*)\)", subprocess.run([os.path.join(here, "target/release/matchapack"), "--version"], capture_output=True, text=True).stdout)
     build = m.group(1) if m else "unknown"
     keep = os.environ.get("MATCHAPACK_VERIFY_KEEP") == "1"
+    # A replay's copies go even when the sampler is stopped (SIGTERM, SIGHUP).
+    for s in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, on_signal)
+    replayed = skipped = 0
     for r, d in picked:
+        # Without directories: until N replays ran (a skip does not use up
+        # one), recording at most MAX_SKIPS skips.
+        if not dirs and (replayed >= n or skipped >= MAX_SKIPS):
+            break
         kind = kind_of(r) if r else None
         command = (r.get("command") or ("install" if engine == "yarn1" else "ci")) if r else None
         print("######## %s %s %s" % ("yarn" if engine == "yarn1" else "npm", command or "", d))
         base = {"build": build, "engine": engine, "kind": kind, "command": command, "dir": d, "logged_ts": r.get("ts") if r else None}
-        plan, why = (yarn_plan if engine == "yarn1" else npm_plan)(r, d)
-        if why:
-            append(vlog, dict(base, result="SKIPPED", reason=why))
-            print("recorded: SKIPPED (%s)" % why)
-            continue
-        work = tempfile.mkdtemp(prefix="matchapack-verify-%s." % ("yarn" if engine == "yarn1" else "npm"), dir=os.environ.get("TMPDIR") or None)
+        work = None
         try:
-            if engine == "yarn1":
-                rec = yarn_one(plan, here, work)
-            elif plan["kind"] == "full":
-                rec = npm_ci_one(d, here, work)
-            else:
-                rec = npm_one(plan, here, work)
+            plan, why = yarn_plan(r, d, here) if engine == "yarn1" else npm_plan(r, d, here, explicit)
+            if why:
+                append(vlog, dict(base, result="SKIPPED", reason=why))
+                print("recorded: SKIPPED (%s)" % why)
+                skipped += 1
+                continue
+            replayed += 1
+            work = tempfile.mkdtemp(prefix="matchapack-verify-%s." % ("yarn" if engine == "yarn1" else "npm"), dir=os.environ.get("TMPDIR") or None)
+            rec = yarn_one(plan, here, work) if engine == "yarn1" else npm_one(plan, here, work)
+        except Stop as e:
+            append(vlog, dict(base, result="ERROR", reason="the sampler was stopped (%s)" % e))
+            print("stopped (%s)" % e)
+            return 1
+        except Exception as e:
+            # One sample's failure is recorded and the next goes on.
+            rec = {"result": "ERROR", "reason": "the sampler failed: %s: %s" % (type(e).__name__, e), "detail": traceback.format_exc().splitlines()[-6:]}
         finally:
-            if keep:
-                print("  kept: %s" % work)
-            else:
-                # The copies go; the comparison is in the record.
-                shutil.rmtree(work, ignore_errors=True)
+            if work:
+                if keep:
+                    print("  kept: %s" % work)
+                else:
+                    # The copies go; the comparison is in the record.
+                    shutil.rmtree(work, ignore_errors=True)
         rec = dict(base, **rec)
+        if rec["result"] == "ERROR" and not rec.get("reason"):
+            rec["reason"] = "no reason was found (see detail)"
         append(vlog, rec)
         print("recorded: %s%s" % (rec["result"], " (%s)" % rec["reason"] if rec.get("reason") else ""))
         for l in rec.get("differing", [])[:10]:
