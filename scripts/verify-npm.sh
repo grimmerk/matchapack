@@ -6,7 +6,8 @@
 # legacy-peer with legacy-peer-deps, then each extra project (a real
 # repository is worth adding: the fixtures are small). Every case must have
 # cloned something (a run in which the hook never fired would pass without
-# testing it). Nothing is recorded: the version gate is by npm major
+# testing it). Then the sampled verification of real runs
+# (scripts/verify-sample.sh, #77) on a scratch run log. Nothing is recorded: the version gate is by npm major
 # (INJECT_NPM_MAJORS in src/wrapper.rs), and inside a major by the pacote
 # fingerprint (src/npm-fingerprints.json; the cases run on any, and the
 # first line says whether this npm's is listed). --no-record is accepted and ignored
@@ -279,6 +280,73 @@ if [ "${npm_version%%.*}" -ge 12 ]; then
   # re-extracts and re-patches; the store entry stays pacote's.
   steps_ npm12-patch "$here/fixtures/npm12-patch" --start ci --pre "sed -i.bak 's/patched by gl-patch-fixture/patched again by gl-patch-fixture/' patches/is-number@7.0.0.patch && rm patches/is-number@7.0.0.patch.bak" -- install
 fi
+
+# Sampled verification of real runs (scripts/verify-sample.sh, #77): a
+# scratch run log filled by `matchapack npm` on a copy of a small fixture
+# (the logged runs), then the sampler on it. npm ci replayed as a full
+# install; an `npm install <pkg>` that started with no node_modules (part
+# 1b), replayed from the files before it (the project's git HEAD): identical,
+# and DIFFERENT with B damaged; without git, skipped with the reason. Every
+# sample removes its copies; the sampler's TMPDIR is checked empty at the end.
+ns=$work/sample; drop "$ns"; mkdir -p "$ns/log" "$ns/tmp"
+ns_ok() { echo "ok    sample: $1"; }
+ns_bad() { fail=1; echo "FAIL  sample: $1"; sed 's/^/      /' "$ns/out" | tail -15; }
+# ns_project <name> <fixture> [git]: a copy of the fixture's package.json and
+# package-lock.json in $ns/<name> (a git repository with them committed).
+ns_project() {
+  local d=$ns/$1; mkdir -p "$d"; cp -p "$here/fixtures/$2/package.json" "$here/fixtures/$2/package-lock.json" "$d/"
+  if [ "${3-}" = git ]; then
+    git -C "$d" init -q && git -C "$d" add package.json package-lock.json \
+      && git -C "$d" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m fixture
+  fi
+  (cd "$d" && pwd -P)
+}
+# ns_npm <dir> <npm args...>: the logged run, `matchapack npm` in <dir>.
+# Any npm version and pacote fingerprint, as verify.sh's B.
+ns_npm() {
+  local d=$1; shift
+  (cd "$d" && env -u MATCHAPACK_ENGINE MATCHAPACK_LOG_DIR="$ns/log" MATCHAPACK_PATHS="$ns" MATCHAPACK_CONFIG_DIR="$ns/config" \
+    MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_NPM_FINGERPRINT=any "$bin" npm "$@" --no-audit --no-fund) > "$ns/out" 2>&1
+}
+# ns_sample [env...] -- [verify-sample.sh args]
+ns_sample() {
+  local e=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do e+=("$1"); shift; done
+  shift
+  env ${e[@]+"${e[@]}"} MATCHAPACK_LOG_DIR_REAL="$ns/log" TMPDIR="$ns/tmp" MATCHAPACK_PATHS="$ns" "$here/scripts/verify-sample.sh" "$@" > "$ns/out" 2>&1
+}
+nrec() { python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); print(eval(sys.argv[2]))' "$ns/$1" "$2" 2>/dev/null; }
+add=http://127.0.0.1:48321/y1-c-1.0.0.tgz
+# npm ci, the full install, as the sampler always replayed it.
+pc=$(ns_project ci optional-upward)
+ns_npm "$pc" ci
+ns_sample -- 1
+if [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["dir"])')" = "('IDENTICAL', 'full', 'ci', '$pc')" ]; then ns_ok "npm ci replayed: IDENTICAL"
+else ns_bad "npm ci replay: $(nrec log/verify.jsonl 'r')"; fi
+# An npm install of one more package in a fresh clone.
+pg=$(ns_project gitadd optional-upward git)
+ns_npm "$pg" install "$add"
+lr=$(nrec log/log.jsonl '(r["command"], r["node_modules_before"], r["files_before"]["package.json"] != r["files_after"]["package.json"], r["files_before"]["package-lock.json"] != r["files_after"]["package-lock.json"], r["files_after"]["npm-shrinkwrap.json"])')
+ns_sample -- 1
+if [ "$lr" = "('install', 'absent', True, True, None)" ] && [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], r["command"], r["args"])')" = "('IDENTICAL', 'started-empty', 'install', ['install', '$add', '--no-audit', '--no-fund'])" ]; then
+  ns_ok "an npm install that started with no node_modules, replayed from the files before it (git HEAD): IDENTICAL"
+else ns_bad "started-empty npm install (logged $lr; $(nrec log/verify.jsonl 'r'))"; fi
+ns_sample MATCHAPACK_VERIFY_NPM_DAMAGE='printf x >> node_modules/y1-c/index.js' -- 1
+if [ "$(nrec log/verify.jsonl '(r["result"], r["kind"], "node_modules/y1-c/index.js" in r["differing"])')" = "('DIFFERENT', 'started-empty', True)" ]; then
+  ns_ok "the started-empty npm install with B damaged: DIFFERENT"
+else ns_bad "damaged started-empty npm install: $(nrec log/verify.jsonl 'r')"; fi
+# Without git the files before the run are gone.
+pn=$(ns_project nogit optional-upward)
+ns_npm "$pn" install "$add"
+ns_sample -- 1
+got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+case $got in "SKIPPED: the run changed package-lock.json, package.json, and the files before it are not in the project's git HEAD") ns_ok "skipped: the run changed the files, no git" ;; *) ns_bad "no git: $got" ;; esac
+printf '\n' >> "$pn/package-lock.json"
+ns_sample -- 1
+got=$(nrec log/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
+case $got in "SKIPPED: package-lock.json changed since the run"*) ns_ok "skipped: the project changed since the run" ;; *) ns_bad "changed since: $got" ;; esac
+if [ -z "$(ls -d "$ns/tmp"/matchapack-verify-* 2>/dev/null)" ]; then ns_ok "no replay copies left"; else ns_bad "copies left: $(ls -d "$ns/tmp"/matchapack-verify-*)"; fi
+drop "$ns"
 
 # No case's trees are left behind (the space they took is back).
 left=$(for d in ${ran[@]+"${ran[@]}"}; do [ -e "$d" ] && echo "$d"; done | head -3)

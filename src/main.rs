@@ -2,6 +2,7 @@ mod clone;
 mod diff;
 mod gc;
 mod inject;
+mod replay;
 mod serve;
 mod store;
 mod trial;

@@ -137,11 +137,14 @@ groups_other() { # a group the user is in, other than the one of $1
 # verify-sample.sh --yarn on it: a replay identical to plain Yarn (a root
 # with --frozen-lockfile, a workspace directory without it); a damaged engine
 # tree reported as DIFFERENT, or RACE-SHAPED where plain Yarn's own probe race
-# (#57) could have made it; the skips (directory gone, yarn.lock changed, a
-# hidden argument, an older record, another Yarn, an rc file above the
-# project, a relative --use-yarnrc, an unusable cache); the npm sampler
-# leaving `matchapack yarn` records alone; the report. Every run of it has
-# its own log and cache folder under the work directory, and TMPDIR there.
+# (#57) could have made it; a `yarn add` that started with no node_modules
+# (part 1b), replayed from the files before it (git HEAD), and damaged; the
+# skips (directory gone, yarn.lock changed, the run changed the files and
+# they are not in git, a hidden argument, an older record, another Yarn, an
+# rc file above the project, a relative --use-yarnrc, an unusable cache,
+# upgrade-interactive); the npm sampler leaving `matchapack yarn` records
+# alone; the report. Every run of it has its own log and cache folder under
+# the work directory, and TMPDIR there.
 if [ "${TEST_YARN1_PART:-all}" = sample ] || [ "${TEST_YARN1_PART:-all}" = all ]; then
 sp=$work/sp; rm -rf "${sp:?}"; mkdir -p "$sp/log" "$sp/cache" "$sp/tmp"
 spenv() {
@@ -183,8 +186,10 @@ sp_install "$pm" install --frozen-lockfile
 pm_real=$(cd "$pm" && pwd -P)
 if [ $rc = 0 ] && [ "$(lrec 'r["root"]')" = "$pm_real" ] && [ "$(lrec 'r["replay"]["args"]')" = "['--frozen-lockfile']" ] \
   && [ "$(lrec 'r["yarn1"]["yarn_js"]')" = "$yarnjs" ] && [ "$(lrec 'r["yarn1"]["node"]')" = "$("$node" -v)" ] \
-  && [ "$(lrec 'r["manifests"]["yarn.lock"][0]')" = "$(wc -c < "$pm/yarn.lock" | tr -d ' ')" ] && [ -x "$(lrec 'r["yarn1"]["node_path"]')" ]; then
-  ok "sample: the log record carries the root, the replay's arguments, Yarn's and node's paths and the manifests' state"
+  && [ "$(lrec 'r["files_after"]["yarn.lock"]')" = "$(shasum -a 256 "$pm/yarn.lock" | cut -d' ' -f1)" ] && [ "$(lrec 'r["files_before"] == r["files_after"]')" = True ] \
+  && [ "$(lrec 'sorted(r["files_before"])')" = "['package.json', 'yarn.lock']" ] && [ "$(lrec 'r["node_modules_before"]')" = absent ] \
+  && [ "$(lrec 'r["replay"]["kind"]')" = install ] && [ -x "$(lrec 'r["yarn1"]["node_path"]')" ]; then
+  ok "sample: the log record carries the root, the replay's arguments, Yarn's and node's paths, node_modules and the files' hashes before and after"
 else bad "sample: the logged run's record (exit $rc): $(tail -1 "$sp/log/log.jsonl" | head -c 600)"; fi
 
 # 1. Replayed: identical, and nothing written to the run log it read.
@@ -257,6 +262,31 @@ print(" ".join("%s" % (vs.race_shaped(o, t, n) == want) for o, n, want in cases)
   rm -rf "${kept:?}"
 else bad "sample: no kept work directory for the race rule ($kept)"; fi
 
+# 3b. A command that started with no node_modules (#77 part 1b): `yarn add`
+# in a fresh copy, which changes package.json and yarn.lock; replayed from
+# the files before it, which are the project's git HEAD.
+pg=$(sp_project gitadd yarn1-small); pg=$(cd "$pg" && pwd -P)
+git -C "$pg" init -q && git -C "$pg" add package.json yarn.lock \
+  && git -C "$pg" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m fixture
+sp_install "$pg" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
+lr=$(lrec '(r["command"], r["node_modules_before"], r["replay"], r["files_before"]["package.json"] != r["files_after"]["package.json"])')
+sp_sample -- "$pg"
+if [ "$lr" = "('add', 'absent', {'kind': 'command', 'args': ['add', 'http://127.0.0.1:48321/y1-many-1.0.0.tgz']}, True)" ] \
+  && [ "$(vrec '(r["result"], r["kind"], r["command"])')" = "('IDENTICAL', 'started-empty', 'add')" ] && [ "$(vrec 'r["cloned"] > 0')" = True ]; then
+  ok "sample: a yarn add that started with no node_modules, replayed from the files before it (git HEAD): IDENTICAL, $(vrec 'r["cloned"]') cloned"
+else bad "sample: started-empty yarn add (logged $lr; $(vrec 'r.get("result"), r.get("reason"), r.get("detail")'))"; fi
+sp_sample MATCHAPACK_VERIFY_YARN_DAMAGE='printf x >> node_modules/y1-many/package.json' -- "$pg"
+if [ "$(vrec '(r["result"], "content node_modules/y1-many/package.json" in r["differing"])')" = "('DIFFERENT', True)" ]; then
+  ok "sample: the started-empty yarn add with a damaged engine tree: DIFFERENT"
+else bad "sample: damaged started-empty yarn add ($(vrec 'r.get("result"), r.get("differing"), r.get("reason")'))"; fi
+# Without git the files before the run are gone: skipped; and a file changed
+# after the run is named as such.
+pn=$(sp_project nogitadd yarn1-small); pn=$(cd "$pn" && pwd -P)
+sp_install "$pn" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
+skip "the run changed the files, no git" "the run changed package.json, yarn.lock, and the files before it are not in the project's git HEAD" "$pn"
+printf '\n' >> "$pn/package.json"
+skip "the project changed since, no git" "package.json changed since the run, and the files before it are not" "$pn"
+
 # 4. Skips, each recorded with its reason.
 skip() { # skip <label> <expected reason text> [verify-sample.sh args]
   local label=$1 want=$2; shift 2
@@ -264,15 +294,15 @@ skip() { # skip <label> <expected reason text> [verify-sample.sh args]
   local got; got=$(vrec 'r["result"] + ": " + r.get("reason", "")')
   case $got in "SKIPPED: "*"$want"*) ok "sample: skipped, $label ($got)" ;; *) bad "sample: $label: got '$got', exit $rc" ;; esac
 }
-touch "$pm/yarn.lock"
-skip "yarn.lock changed" "yarn.lock changed since the logged run" "$pm"
+printf '\n' >> "$pm/yarn.lock"
+skip "yarn.lock changed" "yarn.lock changed since the run" "$pm"
 gone=$sp/gone; sp_fake "r['root'] = r['dir'] = '$gone'"
 skip "directory gone" "the project directory is gone" "$gone"
 pk=$(sp_project secret yarn1-many); pk=$(cd "$pk" && pwd -P)
-fake_at() { # fake_at <dir> <python statements>: a record for <dir>, its manifests' state as they are now
-  sp_fake "import os
+fake_at() { # fake_at <dir> <python statements>: a record for <dir>, its files' hashes as they are now
+  sp_fake "import hashlib
 r['root'] = r['dir'] = '$1'
-r['manifests'] = {n: [os.stat('$1/' + n).st_size, os.stat('$1/' + n).st_mtime_ns] for n in ('yarn.lock', 'package.json')}
+r['files_before'] = r['files_after'] = {n: hashlib.sha256(open('$1/' + n, 'rb').read()).hexdigest() for n in ('yarn.lock', 'package.json')}
 $2"
 }
 fake_at "$pk" "r['replay']['args'] = ['--otp', '***']"
@@ -290,15 +320,17 @@ skip "an unusable cache" "not usable in the run (on another volume)" "$pk"
 mkdir -p "$sp/above"; pa=$sp/above/p; cp -p -R "$here/fixtures/yarn1-many" "$pa"; pa=$(cd "$pa" && pwd -P); echo 'registry=http://127.0.0.1:1/' > "$sp/above/.npmrc"
 fake_at "$pa" ""
 skip "an .npmrc above the project" "$sp/above/.npmrc, above the project" "$pa"
-skip "a directory with no logged install" "no \`matchapack yarn\` full install of this directory" "$here/fixtures/yarn1-small"
+skip "a directory with no logged install" "no replayable \`matchapack yarn\` run of this directory" "$here/fixtures/yarn1-small"
+fake_at "$pk" "r['command'] = 'upgrade-interactive'; r['replay'] = {'kind': 'command', 'args': ['upgrade-interactive']}"
+skip "upgrade-interactive" "the choices made in its prompt are not logged" "$pk"
 
-# 5. Picking: N distinct projects, newest first; an incremental command is
-# not a full install.
-sp_fake "r['command'] = 'add'; r['root'] = r['dir'] = '$sp/added'"
+# 5. Picking: N distinct projects, newest first; a command that started
+# with node_modules there is not replayed.
+sp_fake "r['command'] = 'add'; r['node_modules_before'] = 'present'; r['root'] = r['dir'] = '$sp/added'"
 n0=$(wc -l < "$sp/log/verify.jsonl")
 sp_sample -- 2
 picked=$(tail -n +$((n0 + 1)) "$sp/log/verify.jsonl" | python3 -c 'import json,sys; print(" ".join(json.loads(l)["dir"].rsplit("/", 1)[-1] for l in sys.stdin))')
-if [ "$picked" = "p secret" ]; then ok "sample: N=2 picks the two most recent distinct projects with a full install ($picked)"
+if [ "$picked" = "secret p" ]; then ok "sample: N=2 picks the two most recent distinct projects with a replayable run, not a command over node_modules ($picked)"
 else bad "sample: picked '$picked'"; fi
 
 # 6. The npm sampler leaves `matchapack yarn` records alone (one without a
@@ -310,8 +342,9 @@ else bad "sample: npm sampler on a yarn record (exit $rc)"; fi
 
 # 7. The report shows the Yarn samples beside the npm ones.
 MATCHAPACK_LOG_DIR="$sp/log" "$bin" report > "$work/out" 2>&1
-if grep -q '^verification samples (npm ci): none yet' "$work/out" && grep -Eq '^verification samples \(yarn install\): [0-9]+ run: identical [1-9]' "$work/out" \
-  && grep -Eq '^verification samples \(yarn install\): .*skipped [1-9]' "$work/out" && grep -Eq '^  .* SKIPPED +/' "$work/out"; then ok "sample: matchapack report shows the Yarn samples"
+if grep -q '^verification samples (npm): none yet' "$work/out" && grep -Eq '^verification samples \(yarn\): [0-9]+ run: identical [1-9]' "$work/out" \
+  && grep -Eq '^verification samples \(yarn\): .*skipped [1-9]' "$work/out" && grep -Eq '^  .* SKIPPED +/' "$work/out" \
+  && grep -Eq '^  .* SKIPPED +/.*\(yarn upgrade-interactive, started empty; ' "$work/out"; then ok "sample: matchapack report shows the Yarn samples"
 else bad "sample: report"; fi
 fi # TEST_YARN1_PART sample
 if [ "${TEST_YARN1_PART:-all}" = sample ]; then

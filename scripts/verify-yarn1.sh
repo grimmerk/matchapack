@@ -79,6 +79,10 @@
 #                      after the install and before the command (a tree an
 #                      earlier command left, which a fresh install from its
 #                      lockfile would lay out otherwise)
+#   --command-fresh    with --command: no install before the command; it
+#                      runs on the copy as it is, with no node_modules (a
+#                      command that started in a fresh clone, replayed by
+#                      scripts/verify-sample.sh --yarn)
 #   --command-tty      with --command: run it in a pseudo-terminal that
 #                      takes every update `yarn upgrade-interactive` offers
 #                      (scripts/yarn1-tty.py), without --non-interactive
@@ -105,7 +109,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 bin=$here/target/release/matchapack
 work= cache_mode=warm cache_group= cache_xattr=0 engine= prime_node= then= min_clones=1 cache_dir= before_then= subdir=.
-command= command_setup=plain command_tty=0 command_before= frozen=(--frozen-lockfile)
+command= command_setup=plain command_tty=0 command_before= frozen=(--frozen-lockfile) command_fresh=0
 while [ $# -gt 0 ]; do
   case $1 in
     --work) work=${2:?--work needs a directory}; shift 2 ;;
@@ -122,6 +126,7 @@ while [ $# -gt 0 ]; do
     --command-setup) command_setup=${2:?--command-setup needs plain or engine}; shift 2
       case $command_setup in plain|engine) ;; *) echo "--command-setup $command_setup: plain or engine" >&2; exit 2 ;; esac ;;
     --command-tty) command_tty=1; shift ;;
+    --command-fresh) command_fresh=1; shift ;;
     --command-before) command_before=${2:?--command-before needs the words of a yarn command}; shift 2 ;;
     --engine-min-clones) min_clones=${2:?--engine-min-clones needs a number}; shift 2
       case $min_clones in any) ;; ''|*[!0-9]*) echo "--engine-min-clones $min_clones: a number or any" >&2; exit 2 ;; esac ;;
@@ -146,8 +151,10 @@ esac
 [ -z "$then" ] || { [ -f "$then/package.json" ] && [ -f "$then/yarn.lock" ]; } || { echo "--then $then: needs package.json and yarn.lock" >&2; exit 2; }
 [ -z "$before_then" ] || [ -n "$then" ] || { echo "--before-then needs --then" >&2; exit 2; }
 [ -z "$command" ] || [ -z "$then" ] || { echo "--command is not with --then" >&2; exit 2; }
-{ [ "$command_setup" = plain ] && [ $command_tty = 0 ] && [ -z "$command_before" ]; } || [ -n "$command" ] \
-  || { echo "--command-setup / --command-tty / --command-before need --command" >&2; exit 2; }
+{ [ "$command_setup" = plain ] && [ $command_tty = 0 ] && [ -z "$command_before" ] && [ $command_fresh = 0 ]; } || [ -n "$command" ] \
+  || { echo "--command-setup / --command-tty / --command-before / --command-fresh need --command" >&2; exit 2; }
+[ $command_fresh = 0 ] || { [ "$command_setup" = plain ] && [ -z "$command_before" ]; } \
+  || { echo "--command-fresh: no install before the command, so no --command-setup engine or --command-before" >&2; exit 2; }
 read -ra cmd_words <<< "$command"
 read -ra before_words <<< "$command_before"
 [ -z "$command" ] || [ ${#cmd_words[@]} -gt 0 ] || { echo "--command: no words" >&2; exit 2; }
@@ -270,7 +277,7 @@ yarn_run() {
   s=$(now_ns)
   local ihow=$how
   [ -n "$command" ] && [ "$command_setup" = plain ] && ihow=plain
-  install "$name" "$cache" "$n" "$ihow" "$@"; rc=$?
+  if [ $command_fresh = 1 ]; then rc=0; else install "$name" "$cache" "$n" "$ihow" "$@"; rc=$?; fi
   if [ $rc = 0 ] && [ -n "$command_before" ]; then
     run_command "$name" "$cache" "$n" plain 0 "${before_words[@]}"; rc=$?
   fi
