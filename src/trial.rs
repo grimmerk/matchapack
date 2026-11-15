@@ -309,6 +309,18 @@ fn report_yarn1(runs: &[Value]) {
     }
 }
 
+/// The times of the installed runs of `npm ci` (`ci`; also records without a
+/// command, from before the install family was routed) or of the install
+/// family (not `ci`), sorted.
+fn install_secs<'a>(runs: impl Iterator<Item = &'a Value>, ci: bool) -> Vec<f64> {
+    let mut secs: Vec<f64> = runs
+        .filter(|r| r["outcome"] == "installed" && (r["command"].as_str().unwrap_or("ci") == "ci") == ci)
+        .filter_map(|r| r["secs"].as_f64())
+        .collect();
+    secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    secs
+}
+
 pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     let since = days.map(|d| now() - d * 86400.0).unwrap_or(0.0);
     let (all, bad) = read_jsonl(&log_path(), since);
@@ -436,10 +448,9 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             }
         };
         builds[i].1 += 1;
-        if r["outcome"] == "installed" {
-            if let Some(s) = r["secs"].as_f64() {
-                builds[i].2.push(s);
-            }
+        // npm ci runs only: a no-op `npm install` would pull the median down.
+        if let Some(s) = install_secs(std::iter::once(r), true).first() {
+            builds[i].2.push(*s);
         }
     }
     if builds.len() > 1 || builds.first().is_some_and(|(k, _, _)| k.starts_with('(')) {
@@ -447,7 +458,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         for (b, n, mut secs) in builds {
             secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let med = if secs.is_empty() { "-".to_string() } else { format!("{:.1} s", secs[secs.len() / 2]) };
-            println!("  {b:<22} runs {n:>4}, installed {:>4}, median install {med}", secs.len());
+            println!("  {b:<22} runs {n:>4}, npm ci installed {:>4}, median npm ci {med}", secs.len());
         }
     }
     // The inject engine: how much of what npm installed came from the store,
@@ -538,16 +549,22 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     }
     let inst: Vec<&Value> = runs.iter().filter(|r| r["outcome"] == "installed").collect();
     if !inst.is_empty() {
-        let mut secs: Vec<f64> = inst.iter().filter_map(|r| r["secs"].as_f64()).collect();
-        secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let logical: f64 = inst.iter().filter_map(|r| r["bytes_logical"].as_f64()).sum();
         let new: f64 = inst.iter().filter_map(|r| r["bytes_store_new"].as_f64()).sum();
-        println!(
-            "installs: median {:.1} s, max {:.1} s, total {:.0} s",
-            secs[secs.len() / 2],
-            secs.last().copied().unwrap_or(0.0),
-            secs.iter().sum::<f64>()
-        );
+        // Apart: an `npm install` with nothing to do takes a fraction of an
+        // `npm ci`, so one median of both would describe neither.
+        for (ci, what) in [(true, "npm ci installs"), (false, "npm install / update / uninstall")] {
+            let secs = install_secs(inst.iter().copied(), ci);
+            if !secs.is_empty() {
+                println!(
+                    "{what}: {} runs, median {:.1} s, max {:.1} s, total {:.0} s",
+                    secs.len(),
+                    secs[secs.len() / 2],
+                    secs.last().copied().unwrap_or(0.0),
+                    secs.iter().sum::<f64>()
+                );
+            }
+        }
         println!(
             "space: {} placed as clones, {} of it new to the store → about {} not written \
              (file contents only; per-file metadata, roughly 0.1–0.3 GiB per large install, is not counted)",
@@ -690,6 +707,19 @@ mod tests {
         let (recs, bad) = read_jsonl(&log, 0.0);
         assert_eq!((recs.len(), bad), (2, 1));
         assert_eq!(read_jsonl(&log, 6.0).0.len(), 1, "the window still applies");
+    }
+
+    #[test]
+    fn install_medians_keep_npm_ci_apart_from_the_install_family() {
+        let runs = [
+            json!({ "outcome": "installed", "secs": 30.0 }),
+            json!({ "outcome": "installed", "command": "ci", "secs": 20.0 }),
+            json!({ "outcome": "installed", "command": "install", "secs": 0.5 }),
+            json!({ "outcome": "installed", "command": "uninstall", "secs": 0.4 }),
+            json!({ "outcome": "declined", "command": "ci", "secs": 1.0 }),
+        ];
+        assert_eq!(super::install_secs(runs.iter(), true), [20.0, 30.0], "npm ci, and records from before the family was routed");
+        assert_eq!(super::install_secs(runs.iter(), false), [0.4, 0.5]);
     }
 
     #[test]
