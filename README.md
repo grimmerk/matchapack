@@ -667,30 +667,41 @@ own and complete).
   A sample says IDENTICAL only when the replay's inputs equal what the
   logged run recorded (the files it hashed and the words it logged; the
   environment and the rc files are not logged), matchapack's run in the
-  replay cloned at least as much as the logged run, and every check of the
-  comparison passed. When the sampler cannot be sure the replay repeated
-  the run, it does not say IDENTICAL. The results:
-  - IDENTICAL; for Yarn also when two plain runs differ and matchapack
-    differs only where they do (the paths are kept);
+  replay cloned as many files (Yarn) or packages (npm) as the logged run,
+  and every check of the comparison passed. When the sampler cannot be
+  sure the replay repeated the run, it does not say IDENTICAL. Environment
+  variables such as `NODE_ENV=production` are not logged; the equal clone
+  count is what catches a replay under other settings (it installs, and
+  clones, more or fewer packages). Only a Yarn install that ran over an
+  existing `node_modules` ("replayed fresh") may clone more. The results:
+  - IDENTICAL; for Yarn also when two plain runs differ and matchapack's
+    tree is the first plain run's, or when, run again with one libuv pool
+    thread, plain Yarn still varies and matchapack differs only where it
+    does (the paths are kept);
   - DIFFERENT: the trees differ, a check failed (npm: a stale time, `npm
     ls`, the bytes of `package.json` or the lockfile), matchapack failed
     where plain npm or Yarn installed, or (Yarn) the engine's own record
     breaks its rule of leaving Yarn's first copies to Node;
   - ERROR, with the reason: the replay could not test anything or did not
     repeat the run (plain npm or Yarn failed in the copies; matchapack
-    declined; matchapack cloned fewer files or packages than the logged
-    run did);
+    declined; matchapack cloned another number of files or packages than
+    the logged run did);
   - RACE-SHAPED (Yarn): a difference with the shape of plain Yarn's own
     probe race (#57: mtimes of non-empty package files only). It is run
     once more with one libuv pool thread, where that race cannot happen:
     still there, DIFFERENT; gone, it stays RACE-SHAPED (a faulty engine
     need not repeat itself either), with the second verdict in the record.
+    So does a first run in which matchapack differed only where plain Yarn
+    varied, when with one thread plain Yarn does not vary and matchapack is
+    identical (a difference of matchapack's own could have hidden there).
     Neither a pass nor a fail: sample that project again;
   - SKIPPED, with the reason. Both engines: the project or the directory
     the run started in is gone; its lockfile or a manifest changed since
     (for a command: and git HEAD does not have the files before), or its
-    workspaces did, or they cannot all be found (a workspace pattern with
-    character classes, extended globs or braces other than `{a,b}`, a
+    workspaces did, or they cannot all be found, with the reason (a
+    workspace pattern with character classes, extended globs (`@(a|b)`;
+    a plain `@`, `+` or `!` in a name, as in `packages/@scope/*`, is
+    fine) or braces other than `{a,b}`, a
     negated pattern, one outside the project, a workspace that is a
     symlink, a listing that failed, or the listing budget reached); an
     argument was hidden in the log (a secret); the logged run cloned
