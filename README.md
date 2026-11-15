@@ -236,11 +236,14 @@ adds or changes is replaced by clones. So:
   rebuild from the lockfile, not what plain `npm install` would have left
   (NOTES). It stops with a non-zero status and prints the repair that fits,
   from npm's own settings for that run: a sentence or two, then each command
-  on a line of its own. Every form first removes every `node_modules` of the
-  project, a workspace member's own too (`npm ci` before npm 10.8.1 removes
-  only the root's, and an install keeps what it finds), and nothing outside
-  it: a `node_modules` behind a symlink to another directory (a member
-  linked from elsewhere) is left out, and the advice says so:
+  on a line of its own. Every form first removes the package directories
+  matchapack itself placed in that run outside the root's `node_modules` (a
+  workspace member's own packages, a package under a `file:` dependency):
+  `npm ci` before npm 10.8.1, and an install, keep what they find there.
+  Nothing else: not what another tool or an earlier install put there, and
+  nothing behind a symlink to outside the project. Each such directory is
+  on a line of its own; more than 20 are listed in a file in the run log's
+  directory, removed by one command:
   - usually: check `git diff` of `package.json` and `package-lock.json`,
     then `MATCHAPACK=0 npm ci <the same arguments>`;
   - no lockfile to rebuild from (no `package-lock.json` or
@@ -282,7 +285,9 @@ adds or changes is replaced by clones. So:
   a secret in a URL's query such as `?private_token=…`; not the user name
   of an ssh URL) are shown as `***`, as in the run log, and the advice says to add them back or put them in `.npmrc`.
   (`npm ci` itself is rebuilt with plain `npm ci` automatically, as
-  before, after matchapack removes every `node_modules` of the project.) For tests, `MATCHAPACK_TEST_BROKE=1` makes a run of the family
+  before, after matchapack removes the package directories it placed in
+  that run outside the root's `node_modules`; the root's own is left to
+  `npm ci`, which empties it after checking the lockfile.) For tests, `MATCHAPACK_TEST_BROKE=1` makes a run of the family
   end as if its child status was lost, and `MATCHAPACK_TEST_BROKE=panic`
   as if matchapack panicked, after npm ran.
 
@@ -308,7 +313,11 @@ unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
 - the install root's `node_modules` is a symlink (npm's root);
 - the install root is outside the trial scope (`~/.config/matchapack/paths`;
   the start directory is checked before npm starts unless `--prefix` was
-  typed, then npm's root);
+  typed, then npm's root). A scope that lists no existing directory (an
+  empty or commented-out file, a path that does not exist) and one with an
+  entry that is not an existing absolute directory (`$HOME/git` typed
+  literally, `/tmp/x` where the directory is `/private/tmp/x`) say so in
+  the reason;
 - the install root does not exist (`--prefix` naming a new directory; npm's
   root);
 - the command installs nothing (`--dry-run`, `--package-lock-only`,
@@ -318,8 +327,10 @@ unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
 - `MATCHAPACK_ENGINE` names another engine (`classic` was removed in PR C2).
 
 For `npm install`, `update` and `uninstall` (and their first words) three of
-these print nothing: a global install, a project outside the trial scope,
-and a command that installs nothing. These commands are typed often
+these print nothing: a global install, a project outside the trial scope
+(but not a scope that lists no existing directory, or has an entry that is
+not one: that may not be the scope meant, so it is said), and a command that
+installs nothing. These commands are typed often
 (`npm install -g <pkg>` above all), and the line would repeat what the user
 already knows. The run is still logged as declined, with the reason
 (`matchapack report` counts it). `npm ci` prints the line for every reason,

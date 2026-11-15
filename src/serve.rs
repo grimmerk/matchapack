@@ -152,6 +152,8 @@ pub enum Outcome {
         /// (#41: a placement moved in from the store's tmp/ keeps the
         /// store's group).
         regrouped: usize,
+        /// The package directory placed (the request's destination).
+        dest: PathBuf,
     },
     /// The hook is to run pacote's extract into `to`, then ask again.
     Extract { to: PathBuf, why: &'static str },
@@ -247,6 +249,10 @@ pub struct Stats {
     /// When the root was accepted, before npm's command ran: a package
     /// directory written in this run is newer ("unseen", inject.rs).
     pub root_at: Option<std::time::SystemTime>,
+    /// The package directories cloned in this run outside the root's own
+    /// node_modules, relative to the root (`packages/b/node_modules/ms`):
+    /// what the repair after a broken run removes (wrapper.rs).
+    pub placed_outside: Vec<String>,
     first: Option<Instant>,
     last: Option<Instant>,
 }
@@ -305,6 +311,7 @@ impl Stats {
             "result_reads": self.result_reads,
             "result_unexpected": self.result_unexpected,
             "asides": self.asides,
+            "placed_outside": self.placed_outside,
         })
     }
 }
@@ -1056,6 +1063,7 @@ impl<'a> Server<'a> {
                     touch_secs: t1.elapsed().as_secs_f64(),
                     paths: settled.paths,
                     regrouped: settled.regrouped,
+                    dest: dst.to_path_buf(),
                 };
             };
             drop_cand();
@@ -1269,6 +1277,7 @@ impl<'a> Server<'a> {
             touch_secs: t1.elapsed().as_secs_f64(),
             paths: settled.paths,
             regrouped: settled.regrouped,
+            dest: dst.to_path_buf(),
         }
     }
 
@@ -1285,8 +1294,17 @@ impl<'a> Server<'a> {
         let mut s = self.stats.lock().unwrap();
         s.last = Some(Instant::now());
         match o {
-            Outcome::Placed { kind, entry, place_secs, touch_secs, paths, regrouped, checked, differs, .. } => {
+            Outcome::Placed { kind, entry, place_secs, touch_secs, paths, regrouped, checked, differs, dest, .. } => {
                 s.cloned += 1;
+                // Outside the root's own node_modules (a member's, a package
+                // nested under a `file:` dependency): what a repair after a
+                // broken run removes (wrapper.rs `placed_outside`).
+                if let Some(k) = self.rel_key(dest).filter(|k| !k.starts_with("node_modules/")) {
+                    if !s.placed_outside.contains(&k) {
+                        s.placed_outside.push(k.clone());
+                        crate::inject::note_placed_outside(k);
+                    }
+                }
                 if *checked {
                     s.checked += 1;
                 }

@@ -90,6 +90,13 @@ pub fn redact_args(args: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut hide_next = false;
     for a in args {
+        // A PEM private key in any word (`--key '-----BEGIN PRIVATE KEY-----…'`
+        // starts with `-`, so the rule below would not hide it).
+        if a.contains("PRIVATE KEY-----") || (a.contains("-----BEGIN") && a.contains("KEY-----")) {
+            hide_next = false;
+            out.push(if a.starts_with("--") && a.contains('=') { format!("{}=***", a.split('=').next().unwrap_or("")) } else { "***".to_string() });
+            continue;
+        }
         if std::mem::take(&mut hide_next) && !a.starts_with('-') {
             out.push("***".to_string());
             continue;
@@ -202,6 +209,7 @@ fn append_line(p: &Path, line: &[u8]) {
 /// Trial scope: if ~/.config/matchapack/paths (or MATCHAPACK_PATHS, `:`-separated)
 /// lists path prefixes, matchapack only handles projects under one of them.
 pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
+    let source = if std::env::var_os("MATCHAPACK_PATHS").is_some() { "MATCHAPACK_PATHS" } else { "~/.config/matchapack/paths" };
     let list: Vec<String> = match std::env::var("MATCHAPACK_PATHS") {
         Ok(v) => v.split(':').map(String::from).collect(),
         Err(_) => {
@@ -214,14 +222,27 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
     };
     let home = crate::home();
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    for p in &list {
-        let p = p.strip_prefix("~/").map(|r| home.join(r)).unwrap_or_else(|| PathBuf::from(p));
+    // Entries that are not an existing absolute directory (`/tmp/x` where
+    // only `/private/tmp/x` exists, `$HOME/git`, a typo): said when nothing
+    // matched, since the scope then may not be what the user meant.
+    let mut not_dirs = vec![];
+    for e in &list {
+        let p = e.strip_prefix("~/").map(|r| home.join(r)).unwrap_or_else(|| PathBuf::from(e));
         let p = std::fs::canonicalize(&p).unwrap_or(p);
         // A plain string prefix on purpose: `~/git/app` covers the worktrees
         // `~/git/app-<topic>` too.
         if dir.to_string_lossy().starts_with(&*p.to_string_lossy()) {
             return Ok(());
         }
+        if !(p.is_absolute() && p.is_dir()) {
+            not_dirs.push(e.as_str());
+        }
+    }
+    if not_dirs.len() == list.len() {
+        return Err(format!("outside the trial scope: {source} lists no existing directory"));
+    }
+    if let Some(e) = not_dirs.first() {
+        return Err(format!("outside the trial scope: {source} lists {e:?}, which is not an existing absolute directory"));
     }
     Err(OUT_OF_SCOPE.into())
 }
@@ -892,6 +913,11 @@ mod tests {
             v(&["install", "https://gitlab.example/api/x.tgz?private_token=***&ref=main", "--registry=https://r.example/?access_token=***#f"])
         );
         assert_eq!(redact_args(&v(&["install", "git+ssh://git@github.com/o/r.git", "ssh://u:pw@h/r"])), v(&["install", "git+ssh://git@github.com/o/r.git", "ssh://***@h/r"]));
+        // A PEM key as a word of its own (it starts with `-`).
+        assert_eq!(
+            redact_args(&v(&["install", "--key", "-----BEGIN PRIVATE KEY-----\nMIIx\n-----END PRIVATE KEY-----", "--cert", "-----BEGIN CERTIFICATE-----y", "x", "--x=-----BEGIN EC KEY-----z"])),
+            v(&["install", "--key", "***", "--cert", "-----BEGIN CERTIFICATE-----y", "x", "--x=***"])
+        );
         let mut rec = json!({ "args": ["--proxy", "http://u:p@h"], "reason": "x http://a:b@h y", "yarn1": { "errors": ["https://c:d@e"] } });
         redact(&mut rec);
         assert_eq!(rec, json!({ "args": ["--proxy", "http://***@h"], "reason": "x http://***@h y", "yarn1": { "errors": ["https://***@e"] } }));

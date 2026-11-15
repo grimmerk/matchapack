@@ -245,6 +245,18 @@ fn trap_fired(unexpected: &std::collections::BTreeMap<String, usize>) -> Option<
 /// needs the root, `save` and the workspace filter.
 static ROOT_REPORT: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
 
+/// The package directories cloned so far outside the root's node_modules
+/// (serve.rs `Stats::placed_outside`), kept apart too: a panic loses the
+/// stats, and the repair must still remove them.
+static PLACED_OUTSIDE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn note_placed_outside(k: String) {
+    let mut v = PLACED_OUTSIDE.lock().unwrap_or_else(|e| e.into_inner());
+    if !v.contains(&k) {
+        v.push(k);
+    }
+}
+
 pub(crate) fn set_root_report(v: serde_json::Value) {
     *ROOT_REPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
 }
@@ -252,7 +264,10 @@ pub(crate) fn set_root_report(v: serde_json::Value) {
 /// The root report of this process's run, if npm reported one (for the
 /// advice after a panic).
 pub(crate) fn root_report() -> Option<serde_json::Value> {
-    ROOT_REPORT.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    let mut r = ROOT_REPORT.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    // Taken before anything was placed: the list as it is now.
+    r["placed_outside"] = serde_json::json!(*PLACED_OUTSIDE.lock().unwrap_or_else(|e| e.into_inner()));
+    Some(r)
 }
 
 pub(crate) fn threads() -> usize {
@@ -464,7 +479,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         );
     }
     if let Some(why) = &stats.key_declined {
-        eprintln!("matchapack: no clones from the store, npm extracted the packages itself (this npm's extraction code is on the store's decline list: {why})");
+        eprintln!("matchapack: no clones from the store (this npm's extraction code is on the store's decline list: {why})");
     }
     // pacote's extraction was not what a clone gives (a path older than this
     // install, or not a file or directory). Clones placed before it was
