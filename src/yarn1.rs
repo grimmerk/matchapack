@@ -24,6 +24,8 @@
 //!     {"id":0,"probe":["/…/nonempty","/…/nonempty.copy"]}  before Yarn starts
 //!     {"declined":"why"}                     the hook stops; plain Yarn runs
 //!     {"hello":true,"yarn":"1.22.22","first":128,"facts":{…},"hook":"on"}
+//!       (a workspace command's Yarn adds "child":true and "cwd"; its facts
+//!       must be the parent's, or its requests are answered "copy", fatal)
 //!     {"link_step":"start"} / {"link_step":"end","counts":{"first-copies":128}}
 //!     {"id":7,"src":"/cache/…/f.js","dest":"/project/node_modules/…/f.js"}
 //!   matchapack → node
@@ -105,24 +107,72 @@ const CACHE_WAIT: Duration = Duration::from_secs(10);
 /// The name of the command Yarn will run (empty: Yarn's default, install),
 /// found the way Yarn finds it.
 pub fn command(args: &[String]) -> &str {
+    command_at(args).map_or("", |i| args[i].as_str())
+}
+
+/// Where in `args` the command name is (`command`): the first word that is
+/// neither an option nor the value of the option before it.
+fn command_at(args: &[String]) -> Option<usize> {
     let mut prev_binds = false;
-    for a in args {
+    for (i, a) in args.iter().enumerate() {
         let is_option = a.starts_with('-');
         if !is_option && !prev_binds {
-            return a;
+            return Some(i);
         }
         prev_binds = is_option && VALUE_OPTIONS.contains(&a.as_str());
     }
-    ""
+    None
 }
 
-/// Whether `matchapack yarn <args>` is an install the engine handles: `yarn`
-/// or `yarn install`, not `yarn --version` / `--help`.
-pub fn is_install(args: &[String]) -> bool {
+/// The Yarn commands the engine runs (NOTES "Yarn 1 commands"), as Yarn
+/// names them (`src/cli/aliases.js`: `upgrade-interactive` is
+/// `upgradeInteractive`). Each runs Yarn's link step (`Install.init`) in
+/// the process the hook is in: `add` and `upgrade` (an `Add`), `remove` (an
+/// `Install` after it edits package.json; removing a package can move
+/// others, which Yarn copies), `upgrade-interactive` (one `Add` per
+/// dependency type and workspace, after its prompt). `yarn global …` installs
+/// outside the project and stays plain Yarn.
+const ENGINE_COMMANDS: &[&str] = &["", "install", "add", "upgrade", "remove", "upgrade-interactive", "upgradeInteractive"];
+
+/// `yarn workspace <name> <command> …`: Yarn starts a second Yarn, `node
+/// <Yarn's bundle> <command> …` in the workspace's directory; the hook
+/// starts that one with itself too (src/yarn1-hook.js, `wrapWorkspaceChild`). Not
+/// `install`: from a workspace Yarn installs at the root, as `yarn install`
+/// there does (routed).
+const WORKSPACE_COMMANDS: &[&str] = &["add", "remove", "upgrade", "upgrade-interactive", "upgradeInteractive"];
+
+/// The command the engine runs for `matchapack yarn <args>`, as logged
+/// (`install`, `add`, `upgrade`, `remove`, `upgrade-interactive`,
+/// `workspace add`, …), or None: plain Yarn (`--version`, `--help`, every
+/// other command). Found as Yarn finds it (`command`); for `workspace`, the
+/// two words after it must be the workspace's name and one of
+/// WORKSPACE_COMMANDS, as Yarn splits them (`src/cli/index.js`,
+/// PROXY_COMMANDS: the first two words after `workspace` are its own).
+pub fn engine_command(args: &[String]) -> Option<String> {
     if args.first().is_some_and(|a| a == "-v") || args.iter().any(|a| a == "--version" || a == "--help" || a == "-h") {
-        return false;
+        return None;
     }
-    matches!(command(args), "" | "install")
+    let c = command(args);
+    if ENGINE_COMMANDS.contains(&c) {
+        return Some(match c {
+            "" => "install".into(),
+            "upgradeInteractive" => "upgrade-interactive".into(),
+            c => c.into(),
+        });
+    }
+    let sub = workspace_args(args)?;
+    let c = if sub[1] == "upgradeInteractive" { "upgrade-interactive" } else { sub[1].as_str() };
+    WORKSPACE_COMMANDS.contains(&c).then(|| format!("workspace {c}"))
+}
+
+/// For `yarn [flags] workspace <name> <words…>`: `[<name>, <words…>]`, the
+/// name and the arguments of the Yarn the workspace command starts. None
+/// when the command is not `workspace`, or the name or the command is
+/// missing or an option.
+fn workspace_args(args: &[String]) -> Option<&[String]> {
+    let at = command_at(args).filter(|&i| args[i] == "workspace")?;
+    let rest = &args[at + 1..];
+    (rest.len() >= 2 && !rest[0].starts_with('-') && !rest[1].starts_with('-')).then_some(rest)
 }
 
 fn option_name(a: &str) -> &str {
@@ -171,8 +221,22 @@ pub struct YarnBin {
     pub node: util::NodeStart,
 }
 
+/// The first Yarn 1 whose link step asks for a clone (`fs.copyFile` with
+/// COPYFILE_FICLONE, yarn-classic `src/util/fs-normalized.js`). An older one
+/// copies with no flag, the hook leaves every copy to Node, and the engine
+/// would cost a start-up for no clone (measured on all 17 releases from
+/// 1.0.0 to 1.9.4: 0 files cloned; NOTES "Yarn 1 commands").
+const YARN1_FLOOR_MINOR: u32 = 10;
+
+/// Whether Yarn 1 `version` is at or above 1.10.0 (`YARN1_FLOOR_MINOR`):
+/// the minor number compared as a number ("1.9" sorts after "1.10" as text).
+fn yarn1_clones(version: &str) -> bool {
+    let minor = version.strip_prefix("1.").and_then(|r| r.split('.').next()).and_then(|m| m.parse::<u32>().ok());
+    minor.is_some_and(|m| m >= YARN1_FLOOR_MINOR)
+}
+
 /// The version of Yarn 1's npm package whose `bin/yarn.js` is `js`, or why
-/// it is not one.
+/// it is not one (or one too old to clone with).
 fn yarn1_package(js: &Path) -> std::result::Result<String, String> {
     let pkg = js.parent().and_then(|b| b.parent()).map(|d| d.join("package.json"));
     let v: Option<Value> = pkg.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
@@ -183,6 +247,9 @@ fn yarn1_package(js: &Path) -> std::result::Result<String, String> {
     }
     if !version.starts_with("1.") {
         return Err(format!("yarn {version} at {} is not Yarn 1", js.display()));
+    }
+    if !yarn1_clones(&version) {
+        return Err(format!("yarn {version} is older than 1.{YARN1_FLOOR_MINOR}.0, the first Yarn 1 that asks for a clone: nothing could be cloned"));
     }
     Ok(version)
 }
@@ -470,6 +537,11 @@ fn copy(reason: impl Into<String>) -> Outcome {
 #[derive(Debug, Default)]
 pub struct Stats {
     pub hello: Option<Value>,
+    /// The hello of the Yarn a workspace command started (its hook's).
+    pub child_hello: Option<Value>,
+    /// Why that Yarn's requests were left to its Node: its hook measured
+    /// other facts than the parent's (`Server::record_message`).
+    pub child_facts_differ: Option<String>,
     pub declined: Option<String>,
     pub cloned: u64,
     pub cloned_bytes: u64,
@@ -507,6 +579,10 @@ impl Stats {
             "facts": self.hello.as_ref().and_then(|h| h.get("facts")).cloned().unwrap_or(Value::Null),
             "cache": self.cache,
             "cache_secs": self.cache_secs,
+            // Set when Yarn ran: the hook in the Yarn a workspace command
+            // started declined, and that Yarn ran without clones.
+            "declined": self.declined,
+            "child_facts_differ": self.child_facts_differ,
             "serve_wall_secs": (wall * 100.0).round() / 100.0,
             "errors": self.errors,
         })
@@ -551,6 +627,9 @@ pub struct Server {
     cache_wait: Duration,
     started: Instant,
     facts: OnceLock<Facts>,
+    /// Set when the hello of a workspace command's Yarn (its hook's) names
+    /// other facts than the parent's.
+    child_differs: AtomicBool,
     /// Set once a clone failed because the filesystem pair cannot clone.
     unsupported: AtomicBool,
     stopping: AtomicBool,
@@ -582,6 +661,7 @@ impl Server {
             cache_wait: CACHE_WAIT,
             started: Instant::now(),
             facts: OnceLock::new(),
+            child_differs: AtomicBool::new(false),
             unsupported: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             dest_dirs: Mutex::new(HashMap::new()),
@@ -590,6 +670,28 @@ impl Server {
             requests: AtomicU64::new(0),
             stats: Mutex::new(Stats::default()),
         })
+    }
+
+    /// `yarn workspace <name> <command> …`: the directory the Yarn the
+    /// workspace command started runs in, from its hook's hello; waits for it
+    /// as `chosen_yarn` does. A directory of the project only (its
+    /// destinations would be refused anywhere else).
+    fn child_dir(&self, install_ended: &AtomicBool) -> std::result::Result<PathBuf, String> {
+        loop {
+            let named = self.stats.lock().unwrap().child_hello.as_ref().map(|h| h["cwd"].as_str().map(PathBuf::from));
+            match named {
+                Some(Some(d)) => {
+                    let real = std::fs::canonicalize(&d).map_err(|e| format!("the workspace's Yarn runs in {}: {e}", d.display()))?;
+                    if !plain_absolute(&d) || !real.starts_with(&self.root) {
+                        return Err(format!("the workspace's Yarn runs in {}, outside the project", d.display()));
+                    }
+                    return Ok(d);
+                }
+                Some(None) => return Err("the workspace's hook names no directory".into()),
+                None if install_ended.load(Ordering::Relaxed) => return Err("the install ended first".into()),
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
     }
 
     /// Under corepack: the `bin/yarn.js` corepack chose, as the hook's hello
@@ -687,6 +789,14 @@ impl Server {
 
     fn clone_file(&self, src: &Path, dest: &Path) -> Outcome {
         let Some(facts) = self.facts.get().copied() else { return copy("no-hello") };
+        // A workspace command's Yarn whose hook measured other facts: a clone
+        // made to the parent's facts would not look like its Node's copy. In
+        // a workspace command the parent Yarn links nothing (it starts that
+        // Yarn and waits), so every request after the child's hello is the
+        // child's; fatal: its hook stops asking.
+        if self.child_differs.load(Ordering::Relaxed) {
+            return Outcome::Copy { reason: "child-facts-differ".into(), fatal: true, message: None };
+        }
         let cache = {
             let g = self.cache.lock().unwrap();
             // Until it is known, the deadline has passed, or the node child is
@@ -775,10 +885,30 @@ impl Server {
     /// A message that needs no answer. Returns false when `v` is something else.
     fn record_message(&self, v: &Value) -> bool {
         if v.get("hello").is_some() {
-            if let Some(f) = v.get("facts").and_then(Facts::from_json) {
-                let _ = self.facts.set(f);
+            let facts = v.get("facts").and_then(Facts::from_json);
+            let mut s = self.stats.lock().unwrap();
+            if v.get("child") == Some(&Value::Bool(true)) {
+                // The clones are made to the parent's facts (the only ones
+                // kept); the child's own Node measured its own. Compared, not
+                // assumed: on a mismatch (or no facts) its files are its
+                // Node's copies.
+                let parent = self.facts.get().copied();
+                if facts.is_none() || facts != parent {
+                    self.child_differs.store(true, Ordering::Relaxed);
+                    let shown = |h: Option<&Value>| h.and_then(|h| h.get("facts")).map_or("none".to_string(), |f| f.to_string());
+                    s.child_facts_differ = Some(format!(
+                        "the workspace's Yarn measured other facts than the command's Yarn ({} against {}): its files are its Node's copies",
+                        shown(Some(v)),
+                        shown(s.hello.as_ref())
+                    ));
+                }
+                s.child_hello = Some(v.clone());
+            } else {
+                if let Some(f) = facts {
+                    let _ = self.facts.set(f);
+                }
+                s.hello = Some(v.clone());
             }
-            self.stats.lock().unwrap().hello = Some(v.clone());
             return true;
         }
         if let Some(why) = v.get("declined").and_then(|d| d.as_str()) {
@@ -1180,6 +1310,14 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     } else {
         cmd.env_remove("MATCHAPACK_YARN_LAUNCHER");
     }
+    // `yarn workspace <name> add …`: the hook starts the Yarn the workspace
+    // command starts with itself, and passes its requests on (src/yarn1-hook.js).
+    if workspace_args(args).is_some() {
+        cmd.env("MATCHAPACK_YARN_WRAP_CHILD", "workspace");
+    } else {
+        cmd.env_remove("MATCHAPACK_YARN_WRAP_CHILD");
+    }
+    cmd.env_remove("MATCHAPACK_YARN_CHILD");
     let deadline = std::env::var("MATCHAPACK_YARN_CACHE_DIR_SECS").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs_f64).unwrap_or(CACHE_DIR_DEADLINE);
     let install_ended = AtomicBool::new(false);
     // Yarn's cache folder, asked of the same Yarn: started here, before the
@@ -1198,12 +1336,26 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // workers clone, open with O_CLOEXEC, set times, groups and xattrs; the
     // socket and its clone were made before the install's node). NOTES
     // "Yarn 1 shell route", decision 4.
-    let ask = if yarn.corepack { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, args)) };
+    //
+    // For `yarn workspace <name> <command> …` the Yarn that links is the one
+    // the workspace command starts, in the workspace's directory, with the
+    // arguments after the name only (Yarn passes it nothing of its own): its
+    // cache options are those, resolved in that directory (a relative
+    // `--cache-folder`, a workspace's `.yarnrc`). That directory is known
+    // from that Yarn's hello, so `yarn cache dir` is started after it, as
+    // under corepack and for the same reason it is then the only spawn here.
+    let workspace = workspace_args(args).is_some();
+    let cache_from = workspace_args(args).map_or(args, |w| &w[1..]);
+    let ask = if yarn.corepack || workspace { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, cache_from)) };
     let status = std::thread::scope(|s| {
         s.spawn(|| {
             let ask = match ask {
                 Some(a) => a,
-                None => server.chosen_yarn(&install_ended).and_then(|js| start_yarn_cache_dir(&node, &js, &yarn.env, cwd, args)),
+                None => {
+                    let js = if yarn.corepack { server.chosen_yarn(&install_ended) } else { Ok(yarn.js.clone()) };
+                    let dir = if workspace { server.child_dir(&install_ended) } else { Ok(cwd.to_path_buf()) };
+                    js.and_then(|js| dir.and_then(|d| start_yarn_cache_dir(&node, &js, &yarn.env, &d, cache_from)))
+                }
             };
             server.set_cache(ask.and_then(|a| a.answer(deadline, &install_ended)))
         });
@@ -1231,7 +1383,8 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // Yarn wrote .yarn-integrity in this run (it linked), but the hook saw
     // no link step: the hook no longer fits this Yarn, or another Yarn ran.
     let linked = now_mtime(&integrity).is_some_and(|t| Some(t) != integrity_before);
-    let unseen = linked && stats.link_steps == 0;
+    // (A workspace command's Yarn whose hook declined ran plain, and said so.)
+    let unseen = linked && stats.link_steps == 0 && stats.declined.is_none();
     out["linked"] = json!(linked);
     out["unseen"] = json!(unseen);
     if !status.success() {
@@ -1279,14 +1432,14 @@ fn mib(b: u64) -> String {
     format!("{:.1} MiB", b as f64 / 1048576.0)
 }
 
-/// `matchapack yarn <args>`: a bare `yarn` or `yarn install` with clones of
-/// Yarn's cache; anything else, and every install a gate refuses, is plain
-/// Yarn with the same arguments.
+/// `matchapack yarn <args>`: a bare `yarn`, `yarn install` and the other
+/// commands of `engine_command` with clones of Yarn's cache; anything else,
+/// and every command a gate refuses, is plain Yarn with the same arguments.
 pub fn cli(args: Vec<String>) -> i32 {
     // On Linux plain Yarn already clones (its libuv uses FICLONE).
-    if !cfg!(target_os = "macos") || std::env::var("MATCHAPACK").as_deref() == Ok("0") || !is_install(&args) {
+    let Some(cmd_name) = engine_command(&args).filter(|_| cfg!(target_os = "macos") && std::env::var("MATCHAPACK").as_deref() != Ok("0")) else {
         return exec_yarn(&args, None);
-    }
+    };
     // Before anything of the install runs (`load_end`: trial::append).
     let load_start = trial::loadavg();
     let cwd = match std::env::current_dir() {
@@ -1308,7 +1461,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     let yarn_version = found.as_ref().map(|y| y.version.clone()).unwrap_or_default();
     let corepack = found.as_ref().is_ok_and(|y| y.corepack);
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args, "load_start": load_start });
+        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "command": cmd_name, "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args, "load_start": load_start });
         if corepack {
             rec["launcher"] = json!("corepack");
         }
@@ -1340,6 +1493,17 @@ pub fn cli(args: Vec<String>) -> i32 {
     match outcome {
         Ok(Ok(s)) => {
             let n = |k: &str| s.stats[k].as_u64().unwrap_or(0);
+            // The Yarn a workspace command started declined: it ran as plain
+            // Yarn and copied every file; say that, not "0 files cloned" and
+            // a cache note that follows from it.
+            if let Some(why) = s.stats["declined"].as_str() {
+                eprintln!("matchapack: the workspace's Yarn ran as plain Yarn, without clones ({why})");
+                log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats }), chosen(&s.stats)));
+                return 0;
+            }
+            if let Some(why) = s.stats["child_facts_differ"].as_str() {
+                eprintln!("matchapack: {why}");
+            }
             if s.stats["linked"] == true || n("cloned") > 0 {
                 eprintln!(
                     "matchapack: {} files cloned from Yarn's cache ({}), {} copied by Node, in {:.1}s",
@@ -1399,12 +1563,51 @@ mod tests {
         // An optional value binds the next word too (`--production [prod]`).
         assert_eq!(command(&s(&["--production", "install"])), "");
         assert_eq!(command(&s(&["run", "build"])), "run");
-        for a in [vec![], vec!["install"], vec!["--frozen-lockfile", "--cache-folder", "/c"], vec!["install", "--production"]] {
-            assert!(is_install(&s(&a)), "{a:?}");
+        let handled = |a: &[&str]| engine_command(&s(a));
+        for (a, want) in [
+            (vec![], "install"),
+            (vec!["install"], "install"),
+            (vec!["--frozen-lockfile", "--cache-folder", "/c"], "install"),
+            (vec!["install", "--production"], "install"),
+            (vec!["add", "x"], "add"),
+            (vec!["--cache-folder", "/c", "add", "x"], "add"),
+            (vec!["-D", "add", "x"], "add"),
+            (vec!["add", "x", "--dev", "--exact"], "add"),
+            (vec!["upgrade"], "upgrade"),
+            (vec!["upgrade", "--scope", "@y1", "--latest"], "upgrade"),
+            (vec!["remove", "x"], "remove"),
+            (vec!["upgrade-interactive", "--latest"], "upgrade-interactive"),
+            (vec!["upgradeInteractive"], "upgrade-interactive"),
+            (vec!["workspace", "w2", "add", "x"], "workspace add"),
+            (vec!["--cache-folder", "/c", "workspace", "w2", "remove", "x"], "workspace remove"),
+            (vec!["workspace", "w2", "upgrade", "--latest"], "workspace upgrade"),
+            (vec!["workspace", "w2", "upgrade-interactive", "--latest"], "workspace upgrade-interactive"),
+            (vec!["workspace", "w2", "upgradeInteractive"], "workspace upgrade-interactive"),
+        ] {
+            assert_eq!(handled(&a).as_deref(), Some(want), "{a:?}");
         }
-        for a in [vec!["add", "x"], vec!["-v"], vec!["--version"], vec!["install", "--help"], vec!["global", "add", "x"], vec!["run", "install"]] {
-            assert!(!is_install(&s(&a)), "{a:?}");
+        for a in [
+            vec!["-v"],
+            vec!["--version"],
+            vec!["install", "--help"],
+            vec!["add", "--help"],
+            vec!["add", "-h", "x"],
+            vec!["global", "add", "x"],
+            vec!["run", "install"],
+            vec!["run", "add"],
+            vec!["why", "x"],
+            vec!["workspace", "w2", "run", "add"],
+            vec!["workspace", "w2", "install"],
+            vec!["workspace", "w2"],
+            vec!["workspace", "-x", "add", "y"],
+            vec!["workspace", "w2", "--dev", "add"],
+            vec!["workspaces", "run", "add"],
+        ] {
+            assert_eq!(handled(&a), None, "{a:?}");
         }
+        // The Yarn a workspace command starts gets the words after the name.
+        assert_eq!(workspace_args(&s(&["--cache-folder", "/c", "workspace", "w2", "add", "x", "--cache-folder", "/d"])), Some(&s(&["w2", "add", "x", "--cache-folder", "/d"])[..]));
+        assert_eq!(workspace_args(&s(&["add", "workspace"])), None);
     }
 
     #[test]
@@ -1470,6 +1673,29 @@ mod tests {
         assert_eq!(yarn1_package(&bin).unwrap(), "1.22.22");
         std::fs::write(d.join("yarn/package.json"), r#"{"name":"yarn","version":"4.5.0"}"#).unwrap();
         assert!(yarn1_package(&bin).unwrap_err().contains("not Yarn 1"));
+    }
+
+    /// The version floor (1.10.0): by number, not text; checked on the
+    /// package matchapack finds itself.
+    #[test]
+    fn yarn_older_than_1_10_is_declined() {
+        for (v, ok) in [("1.9.4", false), ("1.0.0", false), ("1.10.0", true), ("1.10.1", true), ("1.22.22", true), ("1.100.0", true), ("1.x", false), ("2.4.3", false)] {
+            assert_eq!(yarn1_clones(v), ok, "{v}");
+        }
+        let d = std::fs::canonicalize(crate::store::tests::scratch("y1-floor")).unwrap();
+        for v in ["1.9.4", "1.10.0", "1.22.22"] {
+            let js = d.join(v).join("bin/yarn.js");
+            std::fs::create_dir_all(js.parent().unwrap()).unwrap();
+            std::fs::write(&js, "").unwrap();
+            std::fs::write(d.join(v).join("package.json"), format!(r#"{{"name":"yarn","version":"{v}"}}"#)).unwrap();
+            let got = yarn1_package(&js);
+            if v == "1.9.4" {
+                let e = got.unwrap_err();
+                assert!(e.contains("yarn 1.9.4 is older than 1.10.0"), "{e}");
+            } else {
+                assert_eq!(got.as_deref(), Ok(v));
+            }
+        }
     }
 
     /// Homebrew's `bin/yarn` is recognized only as `write_env_script` writes
@@ -1993,6 +2219,55 @@ mod tests {
         assert_eq!((a["ok"].clone(), a["reason"].clone()), (json!(false), json!("cache-dir-pending")));
         assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
         assert!(!dest.exists());
+    }
+
+    /// A workspace command's Yarn runs in its own Node, which measured its
+    /// own facts: compared with the parent's, and on a mismatch its requests
+    /// are Node's copies (fatal), with the reason recorded. Its facts never
+    /// stand in for the parent's.
+    #[test]
+    fn a_workspace_childs_facts_must_be_the_parents() {
+        let parent = json!({ "empty_atime": true, "empty_mtime": true, "atime": true, "mtime": false, "group": null });
+        let child = |facts: Value| json!({ "hello": true, "first": 128, "facts": facts, "child": true, "cwd": "/x" });
+        let f = fx("y1-child-facts");
+        let dest = f.root.join("node_modules/a/index.js");
+
+        // The same facts: nothing recorded, requests go on to be cloned.
+        let s = server(&f);
+        hello(&s, parent.clone());
+        assert!(s.record_message(&child(parent.clone())));
+        let a = ask(&s, &src(&f), &dest);
+        assert_ne!(a["reason"], "child-facts-differ", "{a}");
+        assert!(s.stats.lock().unwrap().child_facts_differ.is_none());
+        let _ = std::fs::remove_file(&dest);
+
+        // Other facts (its copy keeps an empty file's mtime, the parent's
+        // does not): copy, fatal, the reason in the stats and the log record.
+        let s = server(&f);
+        hello(&s, parent.clone());
+        let other = json!({ "empty_atime": true, "empty_mtime": false, "atime": true, "mtime": false, "group": null });
+        assert!(s.record_message(&child(other)));
+        let a = ask(&s, &src(&f), &dest);
+        assert_eq!((a["ok"].clone(), a["reason"].clone(), a["fatal"].clone()), (json!(false), json!("child-facts-differ"), json!(true)));
+        assert!(!dest.exists());
+        let st = s.stats.lock().unwrap();
+        assert_eq!(st.copied.get("child-facts-differ"), Some(&1));
+        assert_eq!(st.cloned, 0);
+        let why = st.to_json()["child_facts_differ"].as_str().unwrap_or("").to_string();
+        assert!(why.contains("other facts") && why.contains("\"empty_mtime\":false"), "{why}");
+        drop(st);
+
+        // No facts in the child's hello: the same.
+        let s = server(&f);
+        hello(&s, parent.clone());
+        assert!(s.record_message(&json!({ "hello": true, "child": true, "cwd": "/x" })));
+        assert_eq!(ask(&s, &src(&f), &dest)["reason"], "child-facts-differ");
+
+        // No facts from the parent: the child's do not take their place.
+        let s = server(&f);
+        assert!(s.record_message(&json!({ "hello": true, "first": 128 })));
+        assert!(s.record_message(&child(parent.clone())));
+        assert_eq!(ask(&s, &src(&f), &dest)["reason"], "no-hello");
     }
 
     #[test]

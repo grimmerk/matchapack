@@ -1,0 +1,19 @@
+{
+  "name": "y1-execpath",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "y1-execpath",
+      "version": "1.0.0",
+      "scripts": {
+        "install": "node record.js"
+      },
+      "dist": {
+        "tarball": "http://127.0.0.1:48321/y1-execpath-1.0.0.tgz",
+        "shasum": "1f00908a02adc874b671c0551f02870e40663ed7"
+      }
+    }
+  }
+}

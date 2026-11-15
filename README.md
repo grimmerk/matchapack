@@ -53,8 +53,9 @@ Bypass for one command: `MATCHAPACK=0 npm ci`, or `command npm ci`.
 Remove: delete the line. Installed node_modules keep working without the store
 (clones are independent files); the store is `~/.cache/matchapack/store`.
 
-On macOS the same line also routes a bare `yarn` / `yarn install` in Yarn 1
-projects (see "Yarn 1 (classic) projects").
+On macOS the same line also routes a bare `yarn`, `yarn install`, `yarn add`,
+`upgrade`, `remove` and `upgrade-interactive` in Yarn 1 projects (see "Yarn 1
+(classic) projects").
 
 **Node version managers.** matchapack uses the npm (and Yarn) that your
 `npm` (and `yarn`) would run in that directory:
@@ -259,10 +260,30 @@ source `shell/matchapack-yarn.sh` (fish: `shell/matchapack-yarn.fish`) after
 it.
 
 **What goes through matchapack.**
-- A bare `yarn`, `yarn install …`, and `yarn` with a flag first (`yarn
-  --frozen-lockfile`) go to `matchapack yarn`.
-- Every other command (`yarn add`, `yarn run`, `yarn build`, `yarn
-  --version`, `yarn --help`) runs Yarn directly; matchapack does not start.
+- The commands that copy packages into `node_modules` go to `matchapack
+  yarn`: a bare `yarn`, `yarn install …`, `yarn` with a flag first (`yarn
+  --frozen-lockfile`), `yarn add`, `yarn upgrade`, `yarn remove`, `yarn
+  upgrade-interactive`, and `yarn workspace <name>
+  add|remove|upgrade|upgrade-interactive …` (the Yarn that `yarn workspace`
+  starts for the command runs with the hook too). Each prints matchapack's two lines and costs about 0.25 s of CPU
+  more than plain Yarn (measured on `yarn add` of a 3-file package). A
+  `yarn workspace` command costs more, not measured: it starts two hooked
+  Nodes, probes twice, and asks `yarn cache dir` only after the
+  workspace's Yarn has started.
+- Every other command runs Yarn directly; matchapack does not start. Which
+  ones and why: "What stays plain Yarn" below.
+- matchapack leaves Yarn's first 128 file copies of each command to Node
+  (so that Yarn's own time check sees real copies). A `yarn add` that
+  copies 128 files or fewer therefore clones nothing, however large the
+  files are (`typescript`: 117 files, 30.9 MiB, none cloned; `date-fns`:
+  4,783 files, 94 % of its bytes cloned). On a full install the 128 are
+  noise.
+- The first `yarn add` in a new project, before it has a `yarn.lock`, is
+  plain Yarn (the gate below), so its packages are real copies until the
+  next install over an empty `node_modules`. Unless the project sits
+  below another project's `yarn.lock`: matchapack finds the project by the
+  nearest `yarn.lock` at or above the directory, so then it runs, with
+  clones (the tree is still Yarn's).
 - In a Yarn 2+ project (a `.yarnrc.yml`, `packageManager: yarn@2` or later,
   or a Yarn 2+ lockfile) `matchapack yarn` runs plain Yarn at once. It
   decides from those files only, without starting node, and prints and
@@ -271,6 +292,24 @@ it.
   install: Yarn checks `.yarn-integrity`, finds nothing to do and stops.
   matchapack adds about 30–40 ms to that (0.25 s instead of 0.21 s on one
   project).
+
+**What stays plain Yarn, and why.**
+- `yarn global add|remove|upgrade …`, and `yarn create` (which runs `yarn
+  global add`): they install into Yarn's global folder, outside any project;
+  matchapack clones only into a project's `node_modules`.
+- `yarn workspace <name> install`: Yarn installs at the workspace root, the
+  same install as `yarn install` there, which is routed. The other `yarn
+  workspace <name> …` commands (`run`, a script, `why`) copy no package.
+- `yarn workspaces …`, `yarn run` and scripts, `yarn why`, `info`, `list`,
+  `outdated`, `cache`, `link` / `unlink` (a symlink), `pack`, `publish`,
+  `import`, `check`, `autoclean`, `policies`: they copy no package into
+  `node_modules`.
+- `yarn --version`, `yarn --help`, and any command with `--help` / `-h`.
+- Routed, but handed to plain Yarn by the checks in "When it runs plain Yarn
+  instead": among them the first `yarn add` of a project that has no
+  `yarn.lock` yet (matchapack finds the project by its lockfile, the nearest
+  one at or above: a project below another one's `yarn.lock` is not
+  declined), and a Yarn older than 1.10.0 (it asks for no clone).
 
 **Bypass for one command**: `MATCHAPACK=0 yarn`, or `command yarn`.
 
@@ -289,6 +328,8 @@ and prints why when:
 - `node_modules` is a symlink;
 - the project is outside the trial scope (`~/.config/matchapack/paths`);
 - `--modules-folder`, `--cwd` or `--global-folder` move the install;
+- the Yarn is older than 1.10.0, the first Yarn 1 that asks for a clone
+  (an older one would cost a start-up for nothing);
 - Yarn's code does not have the shape the hook needs, or Node's own copy has
   changed (it keeps a file's time, or clones).
 

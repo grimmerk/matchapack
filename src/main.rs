@@ -52,15 +52,17 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Stand in for `yarn <args>` (Yarn 1, macOS): a bare `yarn` or `yarn
-    /// install` runs the user's Yarn with each file of its link step cloned
-    /// from Yarn's cache; anything else, and every install matchapack
-    /// declines, runs plain Yarn with the same arguments.
+    /// Stand in for `yarn <args>` (Yarn 1, macOS): a bare `yarn`, `yarn
+    /// install`, `add`, `upgrade`, `remove`, `upgrade-interactive` and `yarn
+    /// workspace <name> add|remove|upgrade|upgrade-interactive` run the user's
+    /// Yarn with each file of its link step cloned from Yarn's cache; anything
+    /// else, and every command matchapack declines, runs plain Yarn with the
+    /// same arguments.
     Yarn {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Print the shell integration for an rc file (routes a bare `npm ci`, and on macOS a bare `yarn` / `yarn install`, through matchapack)
+    /// Print the shell integration for an rc file (routes a bare `npm ci`, and on macOS Yarn 1's installs and `yarn add` / `upgrade` / `remove`, through matchapack)
     ///
     /// zsh: ~/.zshrc, bash: ~/.bashrc, after the line that puts matchapack on
     /// PATH (otherwise the guard skips it silently):

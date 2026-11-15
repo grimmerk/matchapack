@@ -1,0 +1,19 @@
+{
+  "name": "y1-script",
+  "dist-tags": {
+    "latest": "1.0.0"
+  },
+  "versions": {
+    "1.0.0": {
+      "name": "y1-script",
+      "version": "1.0.0",
+      "scripts": {
+        "install": "node -e \"require('fs').writeFileSync('built.txt','x')\""
+      },
+      "dist": {
+        "tarball": "http://127.0.0.1:48321/y1-script-1.0.0.tgz",
+        "shasum": "b4a222ea23d8443f9dfde45996fe4a0f6cdf20e6"
+      }
+    }
+  }
+}
