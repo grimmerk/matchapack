@@ -409,9 +409,24 @@ async function watchPoll (state, opts, npmAll, supported, date) {
   const libuv = (v) => libuvOf(v, opts.nodeUvDir)
   const todo = []
   const record = []
+  // One item per release. A second trigger for a release already listed (a
+  // release requested by hand that is also a libuv change or a new major)
+  // adds what it knows: the libuv change and its "before", newMajor, its
+  // reason. Dropping it would hide the change (and the rule that a libuv
+  // change on a line without facts asks for a person).
   const add = (t) => {
-    if (!todo.some((x) => x.node === t.node)) {
-      todo.push({ npm: true, yarn: true, newMajor: false, uvBefore: null, uvSrcBefore: null, uvChange: false, ...t })
+    const item = { npm: true, yarn: true, newMajor: false, uvBefore: null, uvSrcBefore: null, uvChange: false, ...t }
+    const x = todo.find((y) => y.node === t.node)
+    if (!x) {
+      todo.push(item)
+      return
+    }
+    x.uvChange = x.uvChange || item.uvChange
+    x.newMajor = x.newMajor || item.newMajor
+    x.uvBefore = x.uvBefore || item.uvBefore
+    x.uvSrcBefore = x.uvSrcBefore || item.uvSrcBefore
+    if (!x.reason.split('; ').includes(item.reason)) {
+      x.reason = `${x.reason}; ${item.reason}`
     }
   }
   if (opts.node) {

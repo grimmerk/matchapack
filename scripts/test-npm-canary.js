@@ -267,7 +267,7 @@ check('watch: an incomplete line and a new same-libuv release: the new release i
 // 17c. A Node release requested by hand: on a first run (no watch state)
 //      not a new major; above every known line, a new major.
 pl = plan(wpoll(state0, nodeIndex('ordinary', lines), ['--node', '26.13.1']))
-check('watch: --node 26.13.1 on a first run: tested, not a new major', pl.node && pl.node.todo.some((t) => t.node === '26.13.1' && t.reason === 'requested' && t.newMajor === false), JSON.stringify(pl.node || pl))
+check('watch: --node 26.13.1 on a first run: tested, not a new major', pl.node && pl.node.todo.some((t) => t.node === '26.13.1' && /^requested(; |$)/.test(t.reason) && t.newMajor === false), JSON.stringify(pl.node || pl))
 pl = plan(wpoll(watchState(upTo24), nodeIndex('ordinary', lines), ['--node', '26.13.1']))
 check('watch: --node 26.13.1 with lines 22 and 24 known: a new major', pl.node && pl.node.todo.some((t) => t.node === '26.13.1' && t.newMajor === true), JSON.stringify(pl.node || pl))
 
@@ -434,6 +434,17 @@ check('watch report: an fs.c change on a line recorded without facts: action nee
 //      a pass: verdict of no jobs is incomplete.
 w = wreport(watchState(steady), { node: { todo: [], record: [], watched: [22, 24, 26] }, yarn: { todo: [{ yarn: '1.22.22', reason: 'requested' }], record: null }, nodeLinux: [], nodeMacos: [] }, {})
 check('watch report: an item with no job: incomplete, not verified, red', w.state.yarn.suites === 'incomplete' && !w.state.yarn.verified && w.flags.red, JSON.stringify({ y: w.state.yarn, f: w.flags }))
+
+// 22g. A release requested by hand that is also a libuv change on a line
+//      without facts: one item that keeps both triggers (the libuv change
+//      is not dropped as a duplicate), and the report asks for a person.
+uvh('24.23.0', '1.53.0')
+pl = plan(wpoll(watchState(steady), nodeIndex('req-uv24', [...lines, ['24.23.0', '2026-11-14']]), ['--node', '24.23.0']))
+const t24 = pl.node ? pl.node.todo.filter((t) => t.node === '24.23.0') : []
+check('watch: a requested release that is also a libuv change: one item with both reasons and the libuv change', t24.length === 1 && t24[0].uvChange === true && t24[0].uvBefore === '1.52.1' &&
+  /^requested; libuv 1\.52\.1 → 1\.53\.0/.test(t24[0].reason) && pl.nodeMacos.filter((e) => e.node === '24.23.0').length === 1, JSON.stringify(pl.node || pl))
+w = wreport(watchState(steady), { node: pl.node, yarn: pl.yarn, nodeLinux: pl.nodeLinux, nodeMacos: pl.nodeMacos }, res24('24.23.0', '1.53.0'))
+check('watch report: that item, green, on a line recorded without facts: action needed, said in the comment', w.state.node.lines[24].suites === 'pass' && w.state.node.lines[24].action === 'action needed' && /No facts to compare with/.test(w.comment), JSON.stringify({ l: w.state.node.lines[24], f: w.flags }))
 
 // 23. Recorded releases only (the "nothing to test" path): state updated,
 //     green.
