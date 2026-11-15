@@ -210,28 +210,47 @@ adds or changes is replaced by clones. So:
   writes one log line (it waits while `matchapack store gc` or `store verify
   --fix` holds the store); the cost is about one more process, within the
   noise of npm's own run (NOTES);
-- what the project's record for `store gc` holds is kept across commands:
-  entries of packages that are still installed stay, entries of removed or
-  replaced packages drop out;
-- the "npm placed packages the hook never saw" check compares what the run
-  added or changed in the hidden lockfile, and whose directory it wrote,
-  with what the hook saw, so it stays silent on an incremental install,
-  also where npm keeps a package the hidden lockfile did not list (only the
-  root's `node_modules` removed in a workspaces project);
+- the project's record for `store gc` follows npm's hidden lockfile: when
+  that file names where every installed package came from, the record is
+  exactly its packages (so a record that fell behind, for example after a
+  Ctrl-C, is completed by the next routed command, and entries of removed
+  or replaced packages drop out); when it does not (a project without
+  `package-lock.json` whose hidden lockfile npm stopped trusting), nothing
+  is dropped;
+- the "npm placed packages the hook never saw" check compares the packages
+  this run added or changed in the hidden lockfile, and whose own
+  `package.json` it wrote, with what the hook saw, so it stays silent on an
+  incremental install, also where npm keeps a package the hidden lockfile
+  did not list (only the root's `node_modules` removed in a workspaces
+  project), where a kept package gets a nested `node_modules`, and with
+  npm 10's `--install-strategy=linked`;
 - if matchapack breaks during one of these commands (npm read something of
   the hook's result that pacote's own result does not have, or matchapack
   itself failed), it does not repair anything by itself: running the
   command again would not rebuild what is in place, and `npm ci` is a
   rebuild from the lockfile, not what plain `npm install` would have left
-  (NOTES). It stops with a non-zero status and says what to do: check
-  `git diff` of `package.json` and `package-lock.json`, then
-  `MATCHAPACK=0 npm ci <the same arguments>`. When the run left no
-  lockfile to rebuild from (no `package-lock.json` or
-  `npm-shrinkwrap.json`, or `--no-package-lock` / `package-lock=false`),
-  `npm ci` would refuse or install an old one, so it says instead: remove
-  `node_modules` and run the same command with plain npm
-  (`MATCHAPACK=0 npm install …`). (`npm ci` itself is rebuilt with plain
-  `npm ci` automatically, as before.)
+  (NOTES). It stops with a non-zero status and prints the repair that fits,
+  from npm's own settings for that run:
+  - usually: check `git diff` of `package.json` and `package-lock.json`,
+    then `MATCHAPACK=0 npm ci <the same arguments>`;
+  - no lockfile to rebuild from (no `package-lock.json` or
+    `npm-shrinkwrap.json`, or `--no-package-lock` / `package-lock=false`),
+    or `--no-save` (not for `npm update`): `npm ci` would refuse, install an
+    old lockfile or leave out what the run added, so: remove
+    `node_modules` and run the same command with plain npm;
+  - a command filtered to some workspaces (`-w`, `--workspaces`, or started
+    inside a member): `npm ci` with the filter would remove the other
+    workspaces' packages, so: rebuild the whole project,
+    `(cd <root> && MATCHAPACK=0 npm ci <its options>)`, without the filter
+    (npm's own parse of the options, so abbreviations such as `--prefi`
+    are gone too), with `env -u` for a filter set in the environment; a
+    filter set in an npmrc file is named, since a command line cannot unset
+    it;
+  - both: remove `node_modules`, reinstall the whole project the same way
+    (`npm install` instead of `npm ci`), then run the command again.
+
+  (`npm ci` itself is rebuilt with plain `npm ci` automatically, as
+  before.)
 
 matchapack runs plain npm instead, and prints why, when (before npm starts,
 unless marked "npm's root": those are decided on the root npm reports, after
@@ -424,7 +443,9 @@ own and complete).
   Every routed npm command that reaches matchapack appends one line to
   `~/.cache/matchapack/log.jsonl` (`MATCHAPACK_LOG=0` turns it off), with
   npm's command (`command`: ci, install, update, uninstall) and npm's install
-  root (`root`); the report counts runs per command. Each
+  root (`root`); the report counts runs per command, and gives install
+  times for `npm ci` and for the install family apart (a no-op
+  `npm install` takes a fraction of an `npm ci`). Each
   line carries the 1- and 5-minute load average at the start and the end of
   the run (`load_start`, `load_end`); the report's recent runs show the
   1-minute pair (`load 3.1→5.4`), so a slow install can be read against what

@@ -847,9 +847,22 @@ p=$(project fam-trap-nolock small)
 p=$work/fam-trap-ws; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap, workspace: npm ci"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p/packages/app" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
-[ $rc = 1 ] && grep -qF "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check \`git diff\` of package.json and package-lock.json, then rebuild the whole project with plain npm from its root: cd $p && MATCHAPACK=0 npm ci left-pad@1.3.0 --no-audit --no-fund" "$work/out" \
+[ $rc = 1 ] && grep -qF "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check \`git diff\` of package.json and package-lock.json, then rebuild the whole project with plain npm: (cd $p && MATCHAPACK=0 npm ci --no-audit --no-fund)" "$work/out" \
   && ok "trap during npm install inside a workspace member: the repair is npm ci of the whole project, from its root" \
   || bad "family trap, workspace member: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+# A broken run (here a lost child status, MATCHAPACK_TEST_BROKE) carries
+# npm's settings too: a command filtered by an exported
+# npm_config_workspace gets the whole-project rebuild with that variable
+# unset; npm is not run again. npm ci is rebuilt with plain npm ci.
+(export npm_config_workspace=ws-app MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
+[ $rc = 1 ] && grep -qF "matchapack: waiting for npm: a lost child status (MATCHAPACK_TEST_BROKE); npm may not have finished as it would have alone. The command was filtered to some workspaces" "$work/out" \
+  && grep -qF "(cd $p && env -u npm_config_workspace MATCHAPACK=0 npm ci --no-audit --no-fund)" "$work/out" && [ "$(grep -c 'added [0-9]* package\|up to date' "$work/out")" = 1 ] \
+  && [ "$(last_log_in "$work/logs-broke" "r['outcome'], r['repair'], r['root'] == '$p', r['inject']['workspace_filter']")" = "broke stopped True True" ] \
+  && ok "a broken npm install filtered by npm_config_workspace: stopped, the whole-project rebuild with that variable unset, npm not run again" \
+  || bad "broke, family: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
+(export MATCHAPACK_TEST_BROKE=1; MATCHAPACK_LOG_DIR=$work/logs-broke wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+[ $rc = 0 ] && grep -q 'running npm ci to rebuild node_modules' "$work/out" && [ "$(last_log_in "$work/logs-broke" "r['outcome'], r['repair']")" = "broke npm ci" ] \
+  && ok "a broken npm ci: rebuilt with plain npm ci, as before" || bad "broke, ci: rc=$rc ($(grep '^matchapack' "$work/out" | head -2))"
 MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
   && grep -q 'failed and stopped 1' "$work/report" \
   && grep -q "in 1 runs npm read an unexpected key of the hook's result, and the run stopped with the repair command" "$work/report" \

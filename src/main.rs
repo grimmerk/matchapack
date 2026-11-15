@@ -236,8 +236,8 @@ pub enum InstallError {
     /// Refused before anything in the project changed: npm can take over as is.
     Declined(anyhow::Error),
     /// matchapack itself failed after node_modules was changed (a panic, a
-    /// lost child status).
-    Broke(anyhow::Error),
+    /// lost child status); the run's counts and npm's settings when known.
+    Broke { error: anyhow::Error, inject: Option<serde_json::Value> },
     /// npm read a key of what the hook returned that pacote's own result
     /// does not have (src/inject.js `resultTrap`): npm's files may differ
     /// from what npm alone would have written. npm's exit status, and the
@@ -251,7 +251,7 @@ pub enum InstallError {
 impl InstallError {
     pub fn into_inner(self) -> anyhow::Error {
         match self {
-            InstallError::Declined(e) | InstallError::Broke(e) | InstallError::Trap { error: e, .. } => e,
+            InstallError::Declined(e) | InstallError::Broke { error: e, .. } | InstallError::Trap { error: e, .. } => e,
             InstallError::Npm { code, .. } => anyhow::anyhow!("npm exited with status {code}"),
         }
     }

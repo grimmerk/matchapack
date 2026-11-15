@@ -280,6 +280,18 @@ async function helperCases () {
       check('helper: save and the workspace filter are reported',
         JSON.stringify([...[r, r5, r6, r3].map(x => roots(x).map(m => [m.save, m.workspace_filter])[0])]),
         JSON.stringify([[true, false], [false, false], [true, true], [true, true]]))
+      // What the repair advice keeps of the command (src/inject.js
+      // repairInfo), from npm's own parse: the workspace filter and the root
+      // gone, abbreviations included (--prefi, --include-workspace-r), the
+      // command word and package names gone, other options kept. And the
+      // npmrc layer that sets a workspace filter.
+      const r7 = await helperRun({ args: ['install', '--prefi=' + other, '-w', 'a', 'left-pad', '--omit', 'dev', '--include-workspace-r', '--legacy-peer-deps'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
+      fs.writeFileSync(path.join(ws, '.npmrc'), 'workspace=a\n')
+      const r8 = await helperRun({ args: ['install', '--no-save'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: ws })
+      fs.rmSync(path.join(ws, '.npmrc'))
+      check('helper: the repair keeps the options npm parsed, without the filter and the root (abbreviations too), and names an npmrc filter',
+        JSON.stringify([roots(r7).map(m => m.repair)[0], roots(r8).map(m => m.repair)[0]]),
+        JSON.stringify([{ args: ['--omit', 'dev', '--legacy-peer-deps'], npmrc: [] }, { args: ['--no-save'], npmrc: ['project'] }]))
     }
     // The probe of the tarball server gives up on a listener that accepts
     // and never answers.

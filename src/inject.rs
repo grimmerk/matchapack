@@ -336,8 +336,13 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
 
     let status = match status {
         Ok(s) => s,
-        Err(e) => return Err(InstallError::Broke(anyhow!("waiting for npm: {e}"))),
+        Err(e) => return Err(InstallError::Broke { error: anyhow!("waiting for npm: {e}"), inject: Some(stats.to_json()) }),
     };
+    // Tests only (test-inject.sh): the same, after npm ran with its command,
+    // so that the answer to a broken run of each command can be checked.
+    if std::env::var("MATCHAPACK_TEST_BROKE").as_deref() == Ok("1") && stats.root.is_some() {
+        return Err(InstallError::Broke { error: anyhow!("waiting for npm: a lost child status (MATCHAPACK_TEST_BROKE)"), inject: Some(stats.to_json()) });
+    }
     // The helper exits with HELPER_DECLINED when it stops before npm's
     // command runs, having told this process why: before npm starts (no
     // pacote file, a fingerprint not on the list), or because the server

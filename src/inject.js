@@ -184,6 +184,87 @@ function resultTrap (value, report) {
   })
 }
 
+// The options that filter a command to some workspaces or name its root.
+const FILTERS = new Set(['workspace', 'workspaces', 'include-workspace-root', 'prefix'])
+
+// `{ args, npmrc }` for the repair advice of a broken run (wrapper.rs), or
+// null: `args`, the command's options as npm parsed them (`-w` expanded,
+// `--x=y` split: nopt's `cooked`) without the command word, the package
+// names, and the options in FILTERS with their values, an abbreviation
+// (`--prefi`) resolved as npm's nopt resolves it; `npmrc`, the npmrc layers
+// (project, user, global, builtin) whose `workspace` or `workspaces` is in
+// effect.
+function repairInfo (config, typed) {
+  try {
+    const cooked = config.parsedArgv && config.parsedArgv.cooked
+    const defs = config.definitions
+    if (!Array.isArray(cooked) || !defs) {
+      return null
+    }
+    const names = Object.keys(defs)
+    // nopt resolves an abbreviation to the one option it starts (`abbrev`).
+    const resolve = (name) => {
+      if (defs[name]) {
+        return name
+      }
+      const hits = names.filter(n => n.startsWith(name))
+      return hits.length === 1 ? hits[0] : null
+    }
+    const isBool = (key) => {
+      const t = defs[key] && defs[key].type
+      return t === Boolean || (Array.isArray(t) && t.includes(Boolean))
+    }
+    const args = []
+    let cmdSeen = false
+    for (let i = 0; i < cooked.length; i++) {
+      const t = String(cooked[i])
+      if (t.startsWith('--') && t.length > 2) {
+        let name = t.slice(2)
+        let neg = false
+        if (!defs[name] && name.startsWith('no-')) {
+          name = name.slice(3)
+          neg = true
+        }
+        const key = resolve(name)
+        if (key && FILTERS.has(key)) {
+          const next = cooked[i + 1]
+          if (!neg && (!isBool(key) || next === 'true' || next === 'false') && next !== undefined) {
+            i++
+          }
+          continue
+        }
+        args.push(t)
+        continue
+      }
+      if (!cmdSeen && t === typed) {
+        cmdSeen = true
+        continue
+      }
+      args.push(t)
+    }
+    // Package names (nopt's `remain` after the command word) are not kept:
+    // a whole-project rebuild installs from package.json.
+    for (const name of (config.parsedArgv.remain || []).slice(1)) {
+      const i = args.indexOf(String(name))
+      if (i >= 0) {
+        args.splice(i, 1)
+      }
+    }
+    const npmrc = []
+    for (const key of ['workspace', 'workspaces']) {
+      const v = config.get(key)
+      const on = key === 'workspace' ? Array.isArray(v) && v.length > 0 : v === true
+      const where = on && typeof config.find === 'function' ? config.find(key) : null
+      if (where && ['project', 'user', 'global', 'builtin'].includes(where) && !npmrc.includes(where)) {
+        npmrc.push(where)
+      }
+    }
+    return { args, npmrc }
+  } catch {
+    return null
+  }
+}
+
 // The socket's fd, while this process still owns it as a plain blocking fd
 // (until net.Socket takes it over): fail() then tells matchapack why.
 let rawFd = null
@@ -499,6 +580,12 @@ function main () {
             }
           })(),
           usage: flag('usage'),
+          // For the repair after a broken run (wrapper.rs): the command's
+          // arguments as npm parsed them, without the ones that filter it
+          // to some workspaces or name its root, abbreviations resolved by
+          // npm's own rules; and the npmrc files that set such a filter
+          // (the command line cannot unset them).
+          repair: repairInfo(this.config, String(cmd)),
         }
       } catch (e) {
         send({ no_root: `could not read npm's install root: ${e && e.message}` })
@@ -615,5 +702,5 @@ if (require.main === module && process.argv[2] === '--fingerprint') {
     fail(`before npm started: ${e && e.stack ? e.stack : e}`)
   }
 } else {
-  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, RESULT_KEYS }
+  module.exports = { ineligible, resultTrap, fingerprint, fingerprintFile, fetcherBase, pacotePaths, repairInfo, RESULT_KEYS }
 }

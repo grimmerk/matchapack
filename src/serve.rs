@@ -161,6 +161,9 @@ pub struct Stats {
     /// filtered to some workspaces, at the root report.
     pub save: Option<bool>,
     pub workspace_filter: Option<bool>,
+    /// What the repair advice of a broken run needs of npm's parse of the
+    /// command (src/inject.js `repairInfo`): `{args, npmrc}`.
+    pub repair: Option<Value>,
     /// Why npm's root could not be read (the helper's `no_root`).
     pub no_root: Option<String>,
     /// The hook's state once npm loaded pacote: `on`, `off`, `none`, or
@@ -257,6 +260,7 @@ impl Stats {
             "package_lock": self.package_lock,
             "save": self.save,
             "workspace_filter": self.workspace_filter,
+            "repair": self.repair,
             "hook": self.hook,
             "hook_reason": self.hook_reason,
             "no_root": self.no_root,
@@ -1270,6 +1274,7 @@ impl<'a> Server<'a> {
             s.package_lock = v.get("package_lock").and_then(|b| b.as_bool());
             s.save = v.get("save").and_then(|b| b.as_bool());
             s.workspace_filter = v.get("workspace_filter").and_then(|b| b.as_bool());
+            s.repair = v.get("repair").filter(|r| r.is_object()).cloned();
             return vec![match verdict {
                 Ok(root) => {
                     let _ = self.root.set(root.clone());
