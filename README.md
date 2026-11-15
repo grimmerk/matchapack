@@ -218,12 +218,13 @@ adds or changes is replaced by clones. So:
   `package-lock.json` whose hidden lockfile npm stopped trusting), nothing
   is dropped;
 - the "npm placed packages the hook never saw" check compares the packages
-  this run added or changed in the hidden lockfile, and whose own
-  `package.json` it wrote, with what the hook saw, so it stays silent on an
-  incremental install, also where npm keeps a package the hidden lockfile
-  did not list (only the root's `node_modules` removed in a workspaces
-  project), where a kept package gets a nested `node_modules`, and with
-  npm 10's `--install-strategy=linked`;
+  of the hidden lockfile whose own `package.json` this run wrote (the
+  packages npm extracted, whether new, changed or restored) with what the
+  hook saw, so it stays silent on an incremental install, also where npm
+  keeps a package the hidden lockfile did not list (only the root's
+  `node_modules` removed in a workspaces project), where a kept package
+  gets a nested `node_modules`, and with npm 10's
+  `--install-strategy=linked`;
 - if matchapack breaks during one of these commands (npm read something of
   the hook's result that pacote's own result does not have, or matchapack
   itself failed), it does not repair anything by itself: running the

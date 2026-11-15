@@ -129,49 +129,28 @@ fn hidden_packages(text: &[u8]) -> Option<Packages> {
 }
 
 /// The packages npm must have extracted in this run, so the hook should
-/// have seen each (by its destination): read from the hidden lockfile npm
-/// wrote. `npm ci` empties node_modules first: every package. The install
-/// family changes only some (NOTES "The install family"; the plan's U2): a
-/// package that is new in the hidden lockfile since `before` (read when npm
-/// reported its root, before the command ran), or whose version or
-/// integrity changed. Without a hidden lockfile before: every package when
-/// node_modules was absent or empty, else nothing can be said (None).
+/// have seen each (by its destination): of the packages in the hidden
+/// lockfile npm wrote, those placed in this run, for every command. A
+/// package counts as placed when its key is a real directory whose own
+/// package.json was written after `since` (when npm reported its root,
+/// before its command ran; None: no filter, tests): an extraction and a
+/// clone (touched) both write it then. Not counted: a package npm left in
+/// place, also when it gets a nested node_modules in this run (its
+/// directory's time changes then, its package.json's does not), and a key
+/// that is a symlink (npm 10 with --install-strategy=linked: hoisted paths
+/// point into node_modules/.store, which the hook saw).
 ///
-/// Of those, only the packages placed in this run: a real directory at the
-/// key whose own package.json was written after `since` (when npm reported
-/// its root, before its command ran; None: no filter, tests). An extraction
-/// and a clone (touched) both write it then; a package npm left in place
-/// is not counted, also when it gets a nested node_modules in this run
-/// (its directory's time changes then, its package.json's does not), and
-/// neither is a key that is a symlink (npm 10 with
-/// --install-strategy=linked: hoisted paths point into node_modules/.store,
-/// which the hook saw). The hidden lockfile alone cannot tell: a package
-/// that is new in it but already on disk with the version package-lock.json
-/// names is kept, not extracted (arborist's Shrinkwrap `add` takes its
-/// integrity from the lockfile), as after removing only the root's
-/// node_modules in a workspaces project, or after an npm that was stopped
-/// before it saved the hidden lockfile (NOTES "Whole-PR review", "Review
-/// round 3"). A lower bound: a package the hook missed was extracted by
-/// npm, so its package.json is new and it is counted; one npm or a script
-/// set back in time is not.
-fn expected_packages(command: &str, root: &std::path::Path, before: Option<&[u8]>, nm_empty_before: bool, since: Option<std::time::SystemTime>) -> Option<BTreeSet<String>> {
+/// This replaced, in review round 4, a first filter by the hidden lockfile
+/// before the run (a package new in it, or with another version or
+/// integrity; the plan's U2): a package npm keeps that is new in the hidden
+/// lockfile is not extracted, and a package npm restores at the same
+/// version (its directory removed by hand) is, so that filter both raised
+/// false alarms and missed packages (NOTES "Review round 4"). A lower
+/// bound: a package the hook missed was extracted by npm, so its
+/// package.json is new and it is counted; one npm or a script set back in
+/// time is not. None: no hidden lockfile after the run.
+fn expected_packages(root: &std::path::Path, since: Option<std::time::SystemTime>) -> Option<BTreeSet<String>> {
     let after = hidden_packages(&std::fs::read(root.join("node_modules/.package-lock.json")).ok()?)?;
-    let keys: BTreeSet<String> = if command == "ci" {
-        after.into_keys().collect()
-    } else {
-        match before.and_then(hidden_packages) {
-            Some(before) => after.into_iter().filter(|(k, v)| before.get(k) != Some(v)).map(|(k, _)| k).collect(),
-            None if nm_empty_before => after.into_keys().collect(),
-            None => return None,
-        }
-    };
-    // A real directory at the key (npm 10 with --install-strategy=linked
-    // lists hoisted paths that are symlinks into node_modules/.store, whose
-    // targets the hook saw), and its own package.json written in this run:
-    // an extraction and a clone (touched) both write it; a nested
-    // node_modules made inside a package npm left in place does not (the
-    // package directory's own time does change then). Not the birth time: a
-    // directory clone keeps the store entry's.
     let written = |k: &String| match since {
         None => true,
         Some(t) => {
@@ -179,7 +158,7 @@ fn expected_packages(command: &str, root: &std::path::Path, before: Option<&[u8]
                 && std::fs::symlink_metadata(root.join(k).join("package.json")).and_then(|m| m.modified()).is_ok_and(|m| m >= t)
         }
     };
-    Some(keys.into_iter().filter(written).collect())
+    Some(after.into_keys().filter(written).collect())
 }
 
 /// The store entries the hidden lockfile npm wrote names, and whether it
@@ -485,7 +464,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     // When the hook was knowingly not installed, the line above said so.
     let hook_absent = stats.hook.as_deref() == Some("not-installed");
     let command = stats.command.as_deref().unwrap_or("ci");
-    let expected = root.as_deref().and_then(|r| expected_packages(command, r, stats.hidden_before.as_deref(), stats.nm_empty_before, stats.root_at));
+    let expected = root.as_deref().and_then(|r| expected_packages(r, stats.root_at));
     if let Some(expected) = expected {
         // Compared by destination, not by count: pacote's temporary
         // extractions and npm's extra ones cannot hide a package the hook
@@ -539,60 +518,51 @@ mod tests {
         }
         let d = crate::store::tests::scratch("inject-installed");
         std::fs::create_dir_all(d.join("node_modules")).unwrap();
-        assert_eq!(expected_packages("ci", &d, None, true, None), None, "no hidden lockfile");
+        assert_eq!(expected_packages(&d, None), None, "no hidden lockfile");
         let hidden = serde_json::json!({ "name": "p", "lockfileVersion": 3, "requires": true, "packages": {
             "node_modules/a": { "version": "1.0.0", "integrity": "sha512-a" },
             "node_modules/a/node_modules/b": { "version": "1.0.0", "inBundle": true },
             "node_modules/@s/w": { "resolved": "packages/w", "link": true },
             "packages/w": { "version": "1.0.0" },
             "packages/w/node_modules/c": { "version": "2.0.0", "integrity": "sha512-c" },
+            "node_modules/r": { "version": "1.0.0", "integrity": "sha512-r" },
             "../out/node_modules/o": { "version": "1.0.0", "integrity": "sha512-o" },
         }});
         std::fs::write(d.join("node_modules/.package-lock.json"), hidden.to_string()).unwrap();
         let set = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>());
-        let all = set(&["node_modules/a", "packages/w/node_modules/c"]);
-        assert_eq!(expected_packages("ci", &d, None, false, None), all, "npm ci: every package npm extracts, inside the root");
-        // The install family: what changed since the hidden lockfile before.
-        let before = |p: serde_json::Value| serde_json::json!({ "lockfileVersion": 3, "packages": p }).to_string().into_bytes();
-        let same = before(hidden["packages"].clone());
-        assert_eq!(expected_packages("install", &d, Some(&same), false, None), set(&[]), "nothing changed");
-        assert_eq!(expected_packages("ci", &d, Some(&same), false, None), all, "npm ci ignores what was there");
-        let b = before(serde_json::json!({
-            "node_modules/a": { "version": "0.9.0", "integrity": "sha512-a" },
-            "packages/w/node_modules/c": { "version": "2.0.0", "integrity": "sha512-c", "resolved": "elsewhere" },
-            "node_modules/gone": { "version": "1.0.0" },
-        }));
-        assert_eq!(expected_packages("update", &d, Some(&b), false, None), set(&["node_modules/a"]), "a new version; a new resolved alone extracts nothing");
-        let b = before(serde_json::json!({ "node_modules/a": { "version": "1.0.0", "integrity": "sha512-x" } }));
-        assert_eq!(expected_packages("install", &d, Some(&b), false, None), all, "a new integrity, and a new key");
-        // No hidden lockfile before: everything when node_modules was absent
-        // or empty, else nothing can be said.
-        assert_eq!(expected_packages("install", &d, None, true, None), all);
-        assert_eq!(expected_packages("install", &d, None, false, None), None);
-        assert_eq!(expected_packages("uninstall", &d, Some(b"not json"), false, None), None);
-        // Only directories written in this run: `node_modules/a` new (made
-        // after `since`), `packages/w/node_modules/c` left as it was (older),
-        // one that does not exist is not counted either.
+        assert_eq!(expected_packages(&d, None), set(&["node_modules/a", "node_modules/r", "packages/w/node_modules/c"]), "every package npm extracts, inside the root");
+        // Only packages placed in this run: `node_modules/a` new (made after
+        // `since`), `packages/w/node_modules/c` left as it was (older), one
+        // whose directory is not there is not counted either.
         let since = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
-        std::fs::create_dir_all(d.join("node_modules/a")).unwrap();
-        std::fs::write(d.join("node_modules/a/package.json"), "{}").unwrap();
-        std::fs::create_dir_all(d.join("packages/w/node_modules/c")).unwrap();
-        std::fs::write(d.join("packages/w/node_modules/c/package.json"), "{}").unwrap();
-        let old = std::fs::File::options().write(true).open(d.join("packages/w/node_modules/c/package.json")).unwrap();
-        old.set_modified(since - std::time::Duration::from_secs(3600)).unwrap();
+        let pkg = |k: &str, old: bool| {
+            std::fs::create_dir_all(d.join(k)).unwrap();
+            std::fs::write(d.join(k).join("package.json"), "{}").unwrap();
+            if old {
+                let f = std::fs::File::options().write(true).open(d.join(k).join("package.json")).unwrap();
+                f.set_modified(since - std::time::Duration::from_secs(3600)).unwrap();
+            }
+        };
+        pkg("node_modules/a", false);
+        pkg("packages/w/node_modules/c", true);
         // c is left in place and gets a nested node_modules in this run: its
         // directory's time is new, its package.json's is not.
         std::fs::create_dir_all(d.join("packages/w/node_modules/c/node_modules")).unwrap();
-        assert_eq!(expected_packages("install", &d, None, true, Some(since)), set(&["node_modules/a"]), "c is in place, untouched");
-        assert_eq!(expected_packages("ci", &d, None, true, Some(since)), set(&["node_modules/a"]));
+        assert_eq!(expected_packages(&d, Some(since)), set(&["node_modules/a"]), "c is in place, untouched");
+        // A package npm restores at the same version (its directory had been
+        // removed by hand): extracted, so counted, whatever the hidden
+        // lockfile said before.
+        pkg("node_modules/r", false);
+        assert_eq!(expected_packages(&d, Some(since)), set(&["node_modules/a", "node_modules/r"]), "r restored");
+        std::fs::remove_dir_all(d.join("node_modules/r")).unwrap();
         // A key that is a symlink (npm 10, --install-strategy=linked: hoisted
         // paths point into node_modules/.store, which the hook saw) is not
         // counted, whatever the times.
         std::fs::rename(d.join("node_modules/a"), d.join("a-target")).unwrap();
         std::os::unix::fs::symlink(d.join("a-target"), d.join("node_modules/a")).unwrap();
-        assert_eq!(expected_packages("install", &d, None, true, Some(since)), set(&[]), "a symlink key");
+        assert_eq!(expected_packages(&d, Some(since)), set(&[]), "a symlink key");
         std::fs::remove_file(d.join("node_modules/a")).unwrap();
-        assert_eq!(expected_packages("install", &d, None, true, Some(since)), set(&[]), "a directory that is not there");
+        assert_eq!(expected_packages(&d, Some(since)), set(&[]), "a directory that is not there");
     }
 
     #[test]

@@ -209,15 +209,9 @@ pub struct Stats {
     /// (pacote reading a URL, file or git package's manifest in a temporary
     /// directory in npm's cache).
     pub asides: BTreeMap<String, usize>,
-    /// The root's hidden lockfile as it was when npm reported the root,
-    /// before its command ran (commands other than `ci`; None: there was
-    /// none, or it could not be read), and whether the root's node_modules
-    /// was then absent or empty.
-    pub hidden_before: Option<Vec<u8>>,
     /// When the root was accepted, before npm's command ran: a package
     /// directory written in this run is newer ("unseen", inject.rs).
     pub root_at: Option<std::time::SystemTime>,
-    pub nm_empty_before: bool,
     first: Option<Instant>,
     last: Option<Instant>,
 }
@@ -389,17 +383,6 @@ fn dest_state(dst: &Path) -> std::io::Result<DestState> {
 
 fn is_real_dir(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir())
-}
-
-/// `<root>/node_modules/.package-lock.json` as it is now (None: none, or
-/// unreadable), and whether `<root>/node_modules` is absent or empty.
-fn hidden_lockfile_before(root: &Path) -> (Option<Vec<u8>>, bool) {
-    let nm = root.join("node_modules");
-    let empty = match std::fs::read_dir(&nm) {
-        Ok(mut rd) => rd.next().is_none(),
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-    };
-    (std::fs::read(nm.join(".package-lock.json")).ok(), empty)
 }
 
 /// Move every entry of `from` into `to`; a directory present on both sides (a
@@ -1262,13 +1245,6 @@ impl<'a> Server<'a> {
                 Some(_) => Err("npm reported its install root twice".to_string()),
                 None => self.accept_root(&v),
             };
-            // What the install family's "unseen" count compares with
-            // (inject.rs): the hidden lockfile before the command runs. npm
-            // ci empties node_modules first, so it needs none.
-            let before = match (&verdict, command.as_deref()) {
-                (Ok(root), Some(c)) if c != "ci" => Some(hidden_lockfile_before(root)),
-                _ => None,
-            };
             let mut s = self.stats.lock().unwrap();
             s.command = command;
             s.package_lock = v.get("package_lock").and_then(|b| b.as_bool());
@@ -1280,10 +1256,6 @@ impl<'a> Server<'a> {
                     let _ = self.root.set(root.clone());
                     if let Some(r) = v.get("root").and_then(|r| r.as_str()) {
                         let _ = self.reported.set(PathBuf::from(r));
-                    }
-                    if let Some((hidden, empty)) = before {
-                        s.hidden_before = hidden;
-                        s.nm_empty_before = empty;
                     }
                     s.root = Some(root.clone());
                     s.root_at = Some(std::time::SystemTime::now());
@@ -2381,33 +2353,9 @@ mod tests {
         assert_eq!(st.asides.get("outside-root"), Some(&2));
         assert_eq!(st.fallbacks.get("no-integrity"), Some(&3), "notes are still packages left to npm");
         assert_eq!(st.to_json()["asides"]["outside-root"], 2);
-        // The hidden lockfile before the command: read for a command other
-        // than ci, with node_modules not empty.
-        assert_eq!((st.hidden_before.as_deref(), st.nm_empty_before), (Some(hidden.as_bytes()), false));
+        assert!(st.root_at.is_some(), "the moment the root was accepted ('unseen', inject.rs)");
         drop(st);
         drop(s);
-
-        // npm ci empties node_modules itself: nothing is read.
-        let s = new();
-        s.handle_line(&root_msg(&fx.root, "ci").to_string());
-        assert_eq!(s.stats.lock().unwrap().hidden_before, None);
-        drop(s);
-        // An empty node_modules, and none at all.
-        fs::remove_dir_all(fx.root.join("node_modules")).unwrap();
-        for make in [true, false] {
-            if make {
-                fs::create_dir(fx.root.join("node_modules")).unwrap();
-            }
-            let s = new();
-            s.handle_line(&root_msg(&fx.root, "update").to_string());
-            let st = s.stats.lock().unwrap();
-            assert_eq!((st.hidden_before.is_none(), st.nm_empty_before), (true, true), "node_modules made: {make}");
-            drop(st);
-            drop(s);
-            if make {
-                fs::remove_dir(fx.root.join("node_modules")).unwrap();
-            }
-        }
     }
 
     /// Answer lines from `handle_line`, by id.

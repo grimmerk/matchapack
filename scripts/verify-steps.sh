@@ -282,11 +282,14 @@ def is_pkg(k):
         return sc.startswith("@") and rest != "" and "/" not in rest
     return name != "" and not name.startswith("@")
 def packages(path):
+    """(version, resolved) by package key, and whether every package has an
+    integrity or a resolved (the record's rule, store.rs update_record)."""
     try:
         pk = json.load(open(path)).get("packages", {})
     except (OSError, ValueError):
-        return {}
-    return {k: p.get("version") for k, p in pk.items() if is_pkg(k) and not p.get("link") and not p.get("inBundle")}
+        return {}, False
+    ps = {k: p for k, p in pk.items() if is_pkg(k) and not p.get("link") and not p.get("inBundle")}
+    return {k: (p.get("version"), p.get("resolved")) for k, p in ps.items()}, all(p.get("integrity") or p.get("resolved") for p in ps.values())
 tree = set()
 complete = True
 # Entries of the packages whose directory was written in this step.
@@ -322,9 +325,14 @@ if have_tree and complete and r.get("command") != "ci" and not (before & tree) <
 # A bound that does not use integrities: the record loses at most as many
 # entries as package keys that left B's hidden lockfile or changed version
 # in this step (a package still installed keeps its entry).
-hb, ha = packages(hbf), packages(os.path.join(root, "node_modules/.package-lock.json"))
+# Only when B's hidden lockfile before the step named every package's
+# source: a record kept as a superset (store.rs, an incomplete tree) may
+# lose entries later that no package change of this step explains. A
+# changed `resolved` counts as a change (a registry package replaced by the
+# same version from git).
+(hb, hb_complete), (ha, _) = packages(hbf), packages(os.path.join(root, "node_modules/.package-lock.json"))
 moved = sum(1 for k, v in hb.items() if ha.get(k) != v)
-if len(before - after) > moved:
+if hb_complete and len(before - after) > moved:
     bad.append(f"the gc record lost {len(before - after)} entries, but only {moved} packages left or changed")
 # A step that cloned: the record has the entries of what it placed.
 if have_tree and status == "0" and cloned and not (after & written):

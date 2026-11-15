@@ -169,6 +169,9 @@ steps_ update-one            "$small" --start ci -- npm_config_before=$day updat
 steps_ omit-dev-on-full      "$small" --start ci -- CLONES=none install --omit=dev
 steps_ edited-package-json   "$small" --start ci --pre "$edit_pkg" -- CLONES=1 install
 steps_ repair-missing-dirs   "$small" --start ci --pre 'rm -rf node_modules/lodash node_modules/express' -- CLONES=some install
+# The same with the hook not installed: npm restores the two packages at the
+# versions the hidden lockfile already had; both count as unseen.
+steps_ repair-missing-nohook "$small" --start ci --pre 'rm -rf node_modules/lodash node_modules/express' -- MATCHAPACK_INJECT_HOOK=none CLONES=0 UNSEEN=2 install
 steps_ no-hidden-lockfile    "$small" --start ci --pre 'rm -f node_modules/.package-lock.json' -- CLONES=1 install left-pad@1.3.0
 steps_ no-package-lock       "$small" --start ci -- CLONES=some install --no-package-lock left-pad@1.3.0
 # npm fails after packages were placed (an install script exits 1): the
@@ -210,6 +213,10 @@ steps_ nested-behind         "$fx" --start ci --pre 'node -e "const fs=require(\
 # races with npm's own write of the hidden lockfile, in plain npm too.)
 fx=$(mkfx nolock-cache '{"name":"nolock-cache","version":"1.0.0","dependencies":{"chalk":"2.4.2","ms":"2.1.3","is-number":"7.0.0"}}' 'package-lock=false')
 steps_ nolock-untrusted       "$fx" -- npm_config_before=$day CLONES=some install -- 'RUN=sleep 1; mkdir node_modules/.cache' CLONES=1 install left-pad@1.3.0
+# The same project: uninstall (the record keeps what an incomplete hidden
+# lockfile cannot account for), then update. The harness's bound applies
+# only after a complete hidden lockfile.
+steps_ nolock-uninstall-update "$fx" -- npm_config_before=$day install -- 'RUN=sleep 1; mkdir node_modules/.cache' uninstall ms -- npm_config_before=$day update
 # --install-strategy=linked (npm 10 lists hoisted paths as symlinks into
 # node_modules/.store): npm ci and npm install, no "unseen" alarm.
 steps_ ci-linked             "$small" -- ci --install-strategy=linked --ignore-scripts
