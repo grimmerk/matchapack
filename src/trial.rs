@@ -27,22 +27,28 @@ pub fn now() -> f64 {
 }
 
 /// Options whose value is a secret, by a word in their name (npm's `--otp`,
-/// `--_auth`, `--//host/:_authToken=…`, `--password`; Yarn's `--otp`).
+/// `--_auth`, `--//host/:_authToken=…`, `--password`; Yarn's `--otp`), and
+/// npm's client key (`--key=<PEM>`, also per registry; `--cert` is public).
 fn secret_option(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    ["auth", "token", "password", "otp", "secret"].iter().any(|w| n.contains(w))
+    let n = name.trim_start_matches('-').to_ascii_lowercase();
+    ["auth", "token", "password", "otp", "secret"].iter().any(|w| n.contains(w)) || n == "key" || n.ends_with(":key") || n.ends_with("_key")
 }
 
 /// `scheme://user:pass@host…` → `scheme://***@host…` (proxy and registry
-/// URLs carry credentials that way).
+/// URLs carry credentials that way), and the value of a query parameter
+/// named like a secret (`?private_token=…`) → `***`. The user name of an
+/// ssh URL without a password (`git+ssh://git@github.com/…`) is not a
+/// secret and stays.
 fn redact_userinfo(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find("://") {
         let (head, tail) = rest.split_at(i + 3);
         out.push_str(head);
+        let scheme: String = head[..i].chars().rev().take_while(|c| c.is_ascii_alphanumeric() || "+.-".contains(*c)).collect::<String>().chars().rev().collect();
         let end = tail.find(|c: char| c == '/' || c.is_whitespace()).unwrap_or(tail.len());
         match tail[..end].rfind('@') {
+            Some(at) if scheme.to_ascii_lowercase().contains("ssh") && !tail[..at].contains(':') => out.push_str(&tail[..end]),
             Some(at) => {
                 out.push_str("***");
                 out.push_str(&tail[at..end]);
@@ -50,6 +56,28 @@ fn redact_userinfo(s: &str) -> String {
             None => out.push_str(&tail[..end]),
         }
         rest = &tail[end..];
+    }
+    out.push_str(rest);
+    redact_query(&out)
+}
+
+/// The value of each `?name=value` / `&name=value` whose name is a secret's
+/// (`secret_option`) → `***`.
+fn redact_query(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find(['?', '&']) {
+        out.push_str(&rest[..=i]);
+        rest = &rest[i + 1..];
+        let end = rest.find(|c: char| c == '&' || c == '#' || c.is_whitespace()).unwrap_or(rest.len());
+        match rest[..end].split_once('=') {
+            Some((k, _)) if secret_option(k) => {
+                out.push_str(k);
+                out.push_str("=***");
+            }
+            _ => out.push_str(&rest[..end]),
+        }
+        rest = &rest[end..];
     }
     out.push_str(rest);
     out
@@ -854,6 +882,16 @@ mod tests {
         assert_eq!(redact_args(&v(&["--otp", "--frozen-lockfile"])), v(&["--otp", "--frozen-lockfile"]));
         assert_eq!(redact_userinfo("option --registry=https://me:pw@r.example/x is not handled"), "option --registry=https://***@r.example/x is not handled");
         assert_eq!(redact_userinfo("http://host:80/a@b"), "http://host:80/a@b", "an @ after the host is not userinfo");
+        // npm's client key; a secret in a query; an ssh user name is not one.
+        assert_eq!(
+            redact_args(&v(&["install", "--key=-----BEGIN PRIVATE KEY-----x", "--cert=-----BEGIN CERTIFICATE-----y", "--//r.example/:key=z", "--keyfile=/k"])),
+            v(&["install", "--key=***", "--cert=-----BEGIN CERTIFICATE-----y", "--//r.example/:key=***", "--keyfile=/k"])
+        );
+        assert_eq!(
+            redact_args(&v(&["install", "https://gitlab.example/api/x.tgz?private_token=abc&ref=main", "--registry=https://r.example/?access_token=t#f"])),
+            v(&["install", "https://gitlab.example/api/x.tgz?private_token=***&ref=main", "--registry=https://r.example/?access_token=***#f"])
+        );
+        assert_eq!(redact_args(&v(&["install", "git+ssh://git@github.com/o/r.git", "ssh://u:pw@h/r"])), v(&["install", "git+ssh://git@github.com/o/r.git", "ssh://***@h/r"]));
         let mut rec = json!({ "args": ["--proxy", "http://u:p@h"], "reason": "x http://a:b@h y", "yarn1": { "errors": ["https://c:d@e"] } });
         redact(&mut rec);
         assert_eq!(rec, json!({ "args": ["--proxy", "http://***@h"], "reason": "x http://***@h y", "yarn1": { "errors": ["https://***@e"] } }));
