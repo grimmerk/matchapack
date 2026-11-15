@@ -1287,6 +1287,7 @@ impl<'a> Server<'a> {
                     }
                     s.root = Some(root.clone());
                     s.root_at = Some(std::time::SystemTime::now());
+                    crate::inject::set_root_report(s.to_json());
                     json!({ "id": id, "ok": true, "root": root })
                 }
                 Err(why) => {

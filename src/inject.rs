@@ -217,6 +217,22 @@ fn trap_fired(unexpected: &std::collections::BTreeMap<String, usize>) -> Option<
     ))
 }
 
+/// npm's root report of this process's run (the run's counts and npm's
+/// settings at that moment), set by the server when it accepts the root: a
+/// panic loses the run's stats, and the wrapper's advice after it still
+/// needs the root, `save` and the workspace filter.
+static ROOT_REPORT: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+pub(crate) fn set_root_report(v: serde_json::Value) {
+    *ROOT_REPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+}
+
+/// The root report of this process's run, if npm reported one (for the
+/// advice after a panic).
+pub(crate) fn root_report() -> Option<serde_json::Value> {
+    ROOT_REPORT.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 pub(crate) fn threads() -> usize {
     std::env::var("MATCHAPACK_INJECT_THREADS")
         .ok()
@@ -340,8 +356,13 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     };
     // Tests only (test-inject.sh): the same, after npm ran with its command,
     // so that the answer to a broken run of each command can be checked.
-    if std::env::var("MATCHAPACK_TEST_BROKE").as_deref() == Ok("1") && stats.root.is_some() {
-        return Err(InstallError::Broke { error: anyhow!("waiting for npm: a lost child status (MATCHAPACK_TEST_BROKE)"), inject: Some(stats.to_json()) });
+    // `panic`: a real panic, caught by the wrapper (`root_report`).
+    match std::env::var("MATCHAPACK_TEST_BROKE").as_deref() {
+        Ok("1") if stats.root.is_some() => {
+            return Err(InstallError::Broke { error: anyhow!("waiting for npm: a lost child status (MATCHAPACK_TEST_BROKE)"), inject: Some(stats.to_json()) });
+        }
+        Ok("panic") if stats.root.is_some() => panic!("a panic after npm ran (MATCHAPACK_TEST_BROKE=panic)"),
+        _ => {}
     }
     // The helper exits with HELPER_DECLINED when it stops before npm's
     // command runs, having told this process why: before npm starts (no

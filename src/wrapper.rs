@@ -192,16 +192,19 @@ fn without_filter(args: &[String]) -> Vec<String> {
     out
 }
 
-/// Environment variables that set a workspace filter for npm (it reads
-/// `npm_config_*` in any case).
-const FILTER_ENV: &[&str] = &[
-    "npm_config_workspace",
-    "NPM_CONFIG_WORKSPACE",
-    "npm_config_workspaces",
-    "NPM_CONFIG_WORKSPACES",
-    "npm_config_include_workspace_root",
-    "NPM_CONFIG_INCLUDE_WORKSPACE_ROOT",
-];
+/// The environment variables among `names` that set a workspace filter for
+/// npm: npm reads `npm_config_<name>` with any case, `_` for `-`
+/// (`NPM_CONFIG_workspace=a` filters).
+fn filter_env(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.strip_prefix("npm_config_").is_some_and(|k| ["workspace", "workspaces", "include-workspace-root"].contains(&k.replace('_', "-").as_str()))
+        })
+        .cloned()
+        .collect()
+}
 
 /// What to tell a user after a run of the install family that broke, so
 /// that they can check and rebuild (the owner's notes, Q5 §18). By default
@@ -217,25 +220,34 @@ const FILTER_ENV: &[&str] = &[
 ///   for both: remove node_modules and run the same command with plain npm;
 /// - a command filtered to some workspaces: `npm ci -w x` removes the
 ///   packages of the other workspaces (§18.3 w-add-w, w-add-member), so npm
-///   ci from the root, without the filter, rebuilds the whole project;
-/// - both: remove node_modules, reinstall the whole project from the root,
-///   then the command again (the filtered command alone would bring back
-///   that workspace's packages only).
+///   ci of the whole project rebuilds it;
+/// - both: remove node_modules, reinstall the whole project, then the
+///   command again (the filtered command alone would bring back that
+///   workspace's packages only).
 ///
-/// A whole-project command runs in a subshell (the user's directory stays),
-/// without the filter's environment variables that are set (`env_set`),
-/// and names the npmrc files that set one.
-fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: &RepairSettings, env_set: &dyn Fn(&str) -> bool) -> String {
+/// A whole-project command names the root with `--prefix` (no `cd`: fish
+/// rejects a subshell, and the options' relative paths stay as typed), keeps
+/// the options npm parsed, one token each (`RepairSettings::flags`), unsets
+/// the filter's environment variables among `env` (the names set in the
+/// environment), and names the npmrc files that set one. Credentials in the
+/// arguments are shown as `***` (the run log's redaction), and the advice
+/// says so.
+fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: &RepairSettings, env: &[String]) -> String {
     let lockfile = ["package-lock.json", "npm-shrinkwrap.json"].iter().any(|f| root.join(f).is_file());
     let no_lock = !lockfile || s.package_lock == Some(false);
     let no_save = s.save == Some(false) && command != "update";
     let filtered = s.workspace_filter == Some(true);
     let nm = root.join("node_modules").display().to_string();
+    let shown_args = trial::redact_args(args);
+    let flags = s.flags.clone().unwrap_or_else(|| without_filter(&args[1..]));
+    let shown_flags = trial::redact_args(&flags);
+    let redacted = shown_args != args || shown_flags != flags;
     let whole = |verb: &str| {
-        let flags = s.flags.clone().unwrap_or_else(|| without_filter(&args[1..]));
-        let unset: Vec<String> = FILTER_ENV.iter().filter(|v| env_set(v)).map(|v| format!("-u {v} ")).collect();
+        let unset: Vec<String> = filter_env(env).iter().map(|v| format!("-u {} ", shell_quote(v))).collect();
         let env = if unset.is_empty() { String::new() } else { format!("env {}", unset.concat()) };
-        format!("(cd {} && {})", shell_quote(&root.display().to_string()), shell_line(&format!("{env}MATCHAPACK=0 npm {verb}"), &flags))
+        let mut words = vec!["--prefix".to_string(), root.display().to_string()];
+        words.extend(shown_flags.iter().cloned());
+        shell_line(&format!("{env}MATCHAPACK=0 npm {verb}"), &words)
     };
     let npmrc = if filtered && !s.npmrc.is_empty() {
         format!(
@@ -252,16 +264,16 @@ fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: &Rep
     } else {
         None
     };
-    match (why, filtered) {
+    let advice = match (why, filtered) {
         (Some(why), true) => format!(
             "{why}, and the command was filtered to some workspaces: check `git diff` of package.json, then remove {}, reinstall the whole project with plain npm: {}, and run the command again: {}{npmrc}",
             shell_quote(&nm),
             whole("install"),
-            shell_line("MATCHAPACK=0 npm", args)
+            shell_line("MATCHAPACK=0 npm", &shown_args)
         ),
         (Some(why), false) => format!(
             "{why}: check `git diff` of package.json, then remove {nm} and run the command again with plain npm: {}",
-            shell_line("MATCHAPACK=0 npm", args)
+            shell_line("MATCHAPACK=0 npm", &shown_args)
         ),
         (None, true) => format!(
             "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check `git diff` of package.json and package-lock.json, then rebuild the whole project with plain npm: {}{npmrc}",
@@ -269,8 +281,13 @@ fn repair_advice(args: &[String], command: &str, root: &std::path::Path, s: &Rep
         ),
         (None, false) => format!(
             "Check `git diff` of package.json and package-lock.json, then rebuild with plain npm: {}",
-            shell_line("MATCHAPACK=0 npm ci", &args[1..])
+            shell_line("MATCHAPACK=0 npm ci", &shown_args[1..])
         ),
+    };
+    if redacted {
+        format!("{advice}\nmatchapack: credentials in the command line are shown as *** above: add them back, or put them in .npmrc.")
+    } else {
+        advice
     }
 }
 
@@ -296,7 +313,8 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::inject::run(&opts)));
     let outcome = match outcome {
         Ok(o) => o,
-        Err(_) => Err(InstallError::Broke { error: anyhow::anyhow!("internal error (panic)"), inject: None }),
+        // A panic loses the run's stats; npm's root report is kept apart.
+        Err(_) => Err(InstallError::Broke { error: anyhow::anyhow!("internal error (panic)"), inject: crate::inject::root_report() }),
     };
     // For the install family a second run of the command would not repair
     // anything (npm leaves in place what is there), and npm ci rebuilds
@@ -311,8 +329,8 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let settings = inject.map(RepairSettings::of).unwrap_or_default();
         let command = inject.and_then(|i| i["command"].as_str()).unwrap_or(command);
-        let env_set = |v: &str| std::env::var_os(v).is_some();
-        eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, &root, &settings, &env_set));
+        let env: Vec<String> = std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect();
+        eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, &root, &settings, &env));
     };
     match outcome {
         Ok(s) => {
@@ -619,14 +637,13 @@ mod tests {
 
     #[test]
     fn the_repair_command_keeps_the_commands_arguments() {
-        use super::{repair_advice, shell_quote, without_filter, RepairSettings};
+        use super::{filter_env, repair_advice, shell_quote, without_filter, RepairSettings};
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let d = crate::store::tests::scratch("wrapper-repair");
         std::fs::create_dir_all(&d).unwrap();
-        let none = |_: &str| false;
         let ends = |s: String, tail: &str| assert!(s.ends_with(tail), "{s}\n  does not end with\n{tail}");
         let known = RepairSettings { package_lock: Some(true), save: Some(true), workspace_filter: Some(false), flags: None, npmrc: vec![] };
-        let adv = |args: &[&str], cmd: &str, s: &RepairSettings| repair_advice(&a(args), cmd, &d, s, &none);
+        let adv = |args: &[&str], cmd: &str, s: &RepairSettings| repair_advice(&a(args), cmd, &d, s, &[]);
         // No lockfile in the root: npm ci would refuse; the same command
         // with plain npm on an emptied node_modules.
         let s = adv(&["install", "--no-package-lock", "left-pad"], "install", &known);
@@ -650,22 +667,23 @@ mod tests {
         ends(s, "MATCHAPACK=0 npm install --no-save left-pad");
         ends(adv(&["uninstall", "--no-save", "x"], "uninstall", &nosave), "MATCHAPACK=0 npm uninstall --no-save x");
         ends(adv(&["update", "x"], "update", &nosave), "rebuild with plain npm: MATCHAPACK=0 npm ci x");
-        // Filtered to some workspaces: npm ci of the whole project, in a
-        // subshell at the root, with npm's own parse of the options when
-        // known (an abbreviated --prefi is gone there), else the exact
-        // spellings stripped.
+        // Filtered to some workspaces: npm ci of the whole project, the root
+        // named with --prefix (no cd: fish rejects a subshell), with npm's
+        // own parse of the options when known, else the exact spellings
+        // stripped.
         let root = shell_quote(&d.display().to_string());
         let ws = RepairSettings { workspace_filter: Some(true), ..known.clone() };
         let s = adv(&["install", "left-pad", "-w", "ws-app", "--omit=dev"], "install", &ws);
         assert!(s.starts_with("The command was filtered to some workspaces"), "{s}");
-        ends(s, &format!("rebuild the whole project with plain npm: (cd {root} && MATCHAPACK=0 npm ci left-pad --omit=dev)"));
-        let parsed = RepairSettings { flags: Some(a(&["--omit", "dev"])), ..ws.clone() };
-        ends(adv(&["install", "--prefi=project", "-w", "a", "left-pad", "--omit", "dev"], "install", &parsed), &format!("(cd {root} && MATCHAPACK=0 npm ci --omit dev)"));
-        // A filter from the environment is unset for that command; one from
-        // an npmrc cannot be, and the advice says so.
-        let env = |v: &str| v == "npm_config_workspace";
+        ends(s, &format!("rebuild the whole project with plain npm: MATCHAPACK=0 npm ci --prefix {root} left-pad --omit=dev"));
+        let parsed = RepairSettings { flags: Some(a(&["--omit=dev"])), ..ws.clone() };
+        ends(adv(&["install", "--prefi=project", "-w", "a", "left-pad", "--omit", "dev"], "install", &parsed), &format!("MATCHAPACK=0 npm ci --prefix {root} --omit=dev"));
+        // A filter from the environment, in any case, is unset for that
+        // command; one from an npmrc cannot be, and the advice says so.
+        let env = a(&["PATH", "NPM_CONFIG_workspace", "npm_config_include_workspace_root", "npm_config_workspaces_update", "npm_config_omit"]);
+        assert_eq!(filter_env(&env), a(&["NPM_CONFIG_workspace", "npm_config_include_workspace_root"]));
         let s = repair_advice(&a(&["i", "x"]), "install", &d, &parsed, &env);
-        ends(s, &format!("(cd {root} && env -u npm_config_workspace MATCHAPACK=0 npm ci --omit dev)"));
+        ends(s, &format!("env -u NPM_CONFIG_workspace -u npm_config_include_workspace_root MATCHAPACK=0 npm ci --prefix {root} --omit=dev"));
         let rc = RepairSettings { npmrc: vec!["project".into()], ..parsed.clone() };
         let s = adv(&["i", "x"], "install", &rc);
         assert!(s.ends_with("Your project npmrc sets a workspace filter, which a command line cannot unset: take it out for that command, or npm rebuilds only those workspaces."), "{s}");
@@ -674,7 +692,17 @@ mod tests {
         let both = RepairSettings { save: Some(false), ..parsed.clone() };
         let s = adv(&["install", "--no-save", "left-pad", "-w", "a"], "install", &both);
         assert!(s.starts_with("This run saved neither package.json nor package-lock.json (--no-save), so npm ci would rebuild without what it added, and the command was filtered to some workspaces"), "{s}");
-        ends(s, &format!("reinstall the whole project with plain npm: (cd {root} && MATCHAPACK=0 npm install --omit dev), and run the command again: MATCHAPACK=0 npm install --no-save left-pad -w a"));
+        ends(s, &format!("reinstall the whole project with plain npm: MATCHAPACK=0 npm install --prefix {root} --omit=dev, and run the command again: MATCHAPACK=0 npm install --no-save left-pad -w a"));
+        // Credentials are shown as *** (the run log's redaction), and the
+        // advice says so; without any, no such line.
+        let cred = RepairSettings { flags: Some(a(&["--//r.example/:_authToken=SECRET", "--_password=-abc"])), ..ws.clone() };
+        let s = adv(&["install", "--//r.example/:_authToken=SECRET", "--_password=-abc", "-w", "a"], "install", &cred);
+        assert!(!s.contains("SECRET") && !s.contains("-abc"), "{s}");
+        assert!(s.contains("'--//r.example/:_authToken=***' '--_password=***'"), "{s}");
+        assert!(s.ends_with("matchapack: credentials in the command line are shown as *** above: add them back, or put them in .npmrc."), "{s}");
+        assert!(!adv(&["i", "x"], "install", &parsed).contains("credentials"));
+        let s = adv(&["install", "--no-save", "--//r.example/:_authToken=SECRET", "x"], "install", &nosave);
+        assert!(!s.contains("SECRET") && s.contains("credentials in the command line"), "{s}");
         assert_eq!(
             without_filter(&a(&["--workspace=a", "-w", "b", "--workspaces", "--ws", "--include-workspace-root", "--prefix", "/p", "-C=/q", "--omit=dev", "x"])),
             a(&["--omit=dev", "x"])

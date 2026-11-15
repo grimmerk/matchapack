@@ -750,5 +750,10 @@ mod tests {
         let mut rec = json!({ "args": ["--proxy", "http://u:p@h"], "reason": "x http://a:b@h y", "yarn1": { "errors": ["https://c:d@e"] } });
         redact(&mut rec);
         assert_eq!(rec, json!({ "args": ["--proxy", "http://***@h"], "reason": "x http://***@h y", "yarn1": { "errors": ["https://***@e"] } }));
+        // The options the repair advice keeps (src/inject.js repairInfo, one
+        // token each), in the log's inject record: redacted as args are.
+        let mut rec = json!({ "inject": { "repair": { "args": ["--_password=-abcSECRET", "--//r.example/:_authToken=t0k", "--omit=dev"], "npmrc": [] } } });
+        redact(&mut rec);
+        assert_eq!(rec["inject"]["repair"]["args"], json!(["--_password=***", "--//r.example/:_authToken=***", "--omit=dev"]));
     }
 }

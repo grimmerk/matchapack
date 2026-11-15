@@ -188,13 +188,20 @@ function resultTrap (value, report) {
 const FILTERS = new Set(['workspace', 'workspaces', 'include-workspace-root', 'prefix'])
 
 // `{ args, npmrc }` for the repair advice of a broken run (wrapper.rs), or
-// null: `args`, the command's options as npm parsed them (`-w` expanded,
-// `--x=y` split: nopt's `cooked`) without the command word, the package
-// names, and the options in FILTERS with their values, an abbreviation
-// (`--prefi`) resolved as npm's nopt resolves it; `npmrc`, the npmrc layers
-// (project, user, global, builtin) whose `workspace` or `workspaces` is in
-// effect.
-function repairInfo (config, typed, positional) {
+// null.
+// `args`: the command's options as npm parsed them, each as ONE token
+// (`--name=value`, `--flag`, `--no-flag`), without the options in FILTERS
+// (an abbreviation such as `--prefi` resolved as npm's nopt resolves it).
+// nopt's `cooked` list splits `--name=value`; repeated split, an option
+// npm's definitions do not know (`--//host/:_authToken=…`,
+// `--@scope:registry=…`) would be a flag and its value a package name, so
+// a value goes out joined to its option whenever npm's parse took it as
+// that option's value. Every other token (the command word, package names,
+// whatever follows `--`) is dropped by its position, never by its value.
+// `npmrc`: the npmrc layers (project, user, global, builtin) whose own data
+// sets `workspace` or `workspaces` (each layer, since `config.find` names the
+// highest one only, and a typed `-w` would hide one in an npmrc).
+function repairInfo (config) {
   try {
     const cooked = config.parsedArgv && config.parsedArgv.cooked
     const defs = config.definitions
@@ -214,48 +221,47 @@ function repairInfo (config, typed, positional) {
       const t = defs[key] && defs[key].type
       return t === Boolean || (Array.isArray(t) && t.includes(Boolean))
     }
+    const original = new Set((Array.isArray(config.parsedArgv.original) ? config.parsedArgv.original : []).map(String))
     const args = []
-    let cmdSeen = false
     for (let i = 0; i < cooked.length; i++) {
       const t = String(cooked[i])
-      if (t.startsWith('--') && t.length > 2) {
-        let name = t.slice(2)
-        let neg = false
-        if (!defs[name] && name.startsWith('no-')) {
-          name = name.slice(3)
-          neg = true
-        }
-        const key = resolve(name)
-        if (key && FILTERS.has(key)) {
-          const next = cooked[i + 1]
-          if (!neg && (!isBool(key) || next === 'true' || next === 'false') && next !== undefined) {
-            i++
-          }
-          continue
-        }
-        args.push(t)
+      if (t === '--') {
+        break
+      }
+      if (!(t.startsWith('--') && t.length > 2)) {
         continue
       }
-      if (!cmdSeen && t === typed) {
-        cmdSeen = true
+      let name = t.slice(2)
+      let neg = false
+      if (!defs[name] && name.startsWith('no-')) {
+        name = name.slice(3)
+        neg = true
+      }
+      const key = resolve(name)
+      const next = cooked[i + 1] === undefined ? undefined : String(cooked[i + 1])
+      const type = key ? defs[key].type : undefined
+      // Typed as `--name=value`: the value is this option's, whatever it is.
+      const withEq = next !== undefined && original.has(`${t}=${next}`)
+      // Else as nopt decides: a flag takes `true` / `false` (or one of its
+      // listed words); another known option takes a token that does not
+      // look like an option; an unknown option takes nothing.
+      const takes = next !== undefined && !neg && (withEq || (key
+        ? (isBool(key) ? (next === 'true' || next === 'false' || (Array.isArray(type) && type.includes(next))) : !next.startsWith('-'))
+        : false))
+      if (takes) {
+        i++
+      }
+      if (key && FILTERS.has(key)) {
         continue
       }
-      args.push(t)
-    }
-    // Package names (the command's positional arguments) are not kept: a
-    // whole-project rebuild installs from package.json.
-    for (const name of Array.isArray(positional) ? positional : []) {
-      const i = args.indexOf(String(name))
-      if (i >= 0) {
-        args.splice(i, 1)
-      }
+      args.push(takes ? `${t}=${next}` : t)
     }
     const npmrc = []
-    for (const key of ['workspace', 'workspaces']) {
-      const v = config.get(key)
-      const on = key === 'workspace' ? Array.isArray(v) && v.length > 0 : v === true
-      const where = on && typeof config.find === 'function' ? config.find(key) : null
-      if (where && ['project', 'user', 'global', 'builtin'].includes(where) && !npmrc.includes(where)) {
+    for (const where of ['project', 'user', 'global', 'builtin']) {
+      const layer = config.data && typeof config.data.get === 'function' ? config.data.get(where) : null
+      const d = layer && layer.data
+      const ws = d && d.workspace
+      if (d && ((Array.isArray(ws) ? ws.length > 0 : (ws !== undefined && ws !== null && ws !== '')) || d.workspaces === true)) {
         npmrc.push(where)
       }
     }
@@ -585,10 +591,7 @@ function main () {
           // to some workspaces or name its root, abbreviations resolved by
           // npm's own rules; and the npmrc files that set such a filter
           // (the command line cannot unset them).
-          // The package names are the arguments exec is given (npm 11 and
-          // 12 pass them; npm 10 defaults to npm.argv, its parse's `remain`
-          // with the command word already shifted off).
-          repair: repairInfo(this.config, String(cmd), Array.isArray(arguments[1]) ? arguments[1] : this.argv),
+          repair: repairInfo(this.config),
         }
       } catch (e) {
         send({ no_root: `could not read npm's install root: ${e && e.message}` })

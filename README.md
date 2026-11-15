@@ -241,16 +241,22 @@ adds or changes is replaced by clones. So:
   - a command filtered to some workspaces (`-w`, `--workspaces`, or started
     inside a member): `npm ci` with the filter would remove the other
     workspaces' packages, so: rebuild the whole project,
-    `(cd <root> && MATCHAPACK=0 npm ci <its options>)`, without the filter
-    (npm's own parse of the options, so abbreviations such as `--prefi`
-    are gone too), with `env -u` for a filter set in the environment; a
-    filter set in an npmrc file is named, since a command line cannot unset
-    it;
+    `MATCHAPACK=0 npm ci --prefix <root> <its options>`, without the filter
+    (the options as npm parsed them, one word each, so abbreviations such as
+    `--prefi` are gone too), with `env -u` for a filter set in the
+    environment (in any case: `NPM_CONFIG_workspace` too); a filter set in an
+    npmrc file is named, since a command line cannot unset it;
   - both: remove `node_modules`, reinstall the whole project the same way
     (`npm install` instead of `npm ci`), then run the command again.
 
+  The advice works the same after a panic of matchapack (npm's settings for
+  the run are kept apart). Credentials typed on the command line
+  (`--//host/:_authToken=…`, `--_password=…`) are shown as `***`, as in the
+  run log, and the advice says to add them back or put them in `.npmrc`.
   (`npm ci` itself is rebuilt with plain `npm ci` automatically, as
-  before.)
+  before.) For tests, `MATCHAPACK_TEST_BROKE=1` makes a run of the family
+  end as if its child status was lost, and `MATCHAPACK_TEST_BROKE=panic`
+  as if matchapack panicked, after npm ran.
 
 matchapack runs plain npm instead, and prints why, when (before npm starts,
 unless marked "npm's root": those are decided on the root npm reports, after

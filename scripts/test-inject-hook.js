@@ -281,19 +281,43 @@ async function helperCases () {
         JSON.stringify([...[r, r5, r6, r3].map(x => roots(x).map(m => [m.save, m.workspace_filter])[0])]),
         JSON.stringify([[true, false], [false, false], [true, true], [true, true]]))
       // What the repair advice keeps of the command (src/inject.js
-      // repairInfo), from npm's own parse: the workspace filter and the root
-      // gone, abbreviations included (--prefi, --include-workspace-r), the
-      // command word and package names gone, other options kept. And the
-      // npmrc layer that sets a workspace filter.
+      // repairInfo), from npm's own parse: each kept option as ONE token
+      // (`--name=value`), the workspace filter and the root gone
+      // (abbreviations too: --prefi, --include-workspace-r), every
+      // positional token (the command word, package names) dropped by its
+      // position, never by its value. And each npmrc layer that sets a
+      // workspace filter, also when a typed -w is the one in effect.
       // (npm 12 refuses abbreviated options: there the full names.)
       const abbr = Number(require(path.join(npmDir, 'package.json')).version.split('.')[0]) < 12
-      const r7 = await helperRun({ args: ['install', (abbr ? '--prefi=' : '--prefix=') + other, '-w', 'a', 'left-pad', '--omit', 'dev', abbr ? '--include-workspace-r' : '--include-workspace-root', '--legacy-peer-deps'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: d })
+      const repairOf = async (args, cwd) => {
+        const r = await helperRun({ args, rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd })
+        return roots(r).map(m => m.repair)[0]
+      }
+      const cases = [
+        [['install', (abbr ? '--prefi=' : '--prefix=') + other, '-w', 'a', 'left-pad', '--omit', 'dev', abbr ? '--include-workspace-r' : '--include-workspace-root', '--legacy-peer-deps'], ['--omit=dev', '--legacy-peer-deps']],
+        // An option npm's definitions do not know keeps its value joined:
+        // split, the token would be a package name (and sent as one).
+        [['install', '--//registry.example/:_authToken=SECRET', 'left-pad', '-w', 'a'], ['--//registry.example/:_authToken=SECRET']],
+        [['install', '--@myscope:registry=https://r.example/', '-w', 'a', 'left-pad'], ['--@myscope:registry=https://r.example/']],
+        // A package named like an option's value: dropped by position.
+        [['install', '--tag', 'latest', '-E', 'latest', '-w', 'a'], ['--tag=latest', '--save-exact']],
+        [['install', '--omit', 'dev', '--ignore-scripts', 'dev', '-w', 'a'], ['--omit=dev', '--ignore-scripts']],
+        // A value that starts with `-`, typed with `=`: one token (the log's
+        // redaction then sees the pair).
+        [['install', '-w', 'a', '--_password=-abcSECRET'], ['--_password=-abcSECRET']],
+      ]
+      const got = []
+      for (const [args] of cases) {
+        got.push((await repairOf(args, d) || {}).args)
+      }
+      check('helper: the repair keeps each option npm parsed as one token, without the filter, the root and the positional tokens',
+        JSON.stringify(got), JSON.stringify(cases.map(c => c[1])))
       fs.writeFileSync(path.join(ws, '.npmrc'), 'workspace=a\n')
-      const r8 = await helperRun({ args: ['install', '--no-save'], rootAnswer: () => ({ ok: false, reason: 'test refusal' }), cwd: ws })
+      const n1 = await repairOf(['install', '--no-save'], ws)
+      const n2 = await repairOf(['install', '-w', 'a'], ws)
       fs.rmSync(path.join(ws, '.npmrc'))
-      check('helper: the repair keeps the options npm parsed, without the filter and the root (abbreviations too), and names an npmrc filter',
-        JSON.stringify([roots(r7).map(m => m.repair)[0], roots(r8).map(m => m.repair)[0]]),
-        JSON.stringify([{ args: ['--omit', 'dev', '--legacy-peer-deps'], npmrc: [] }, { args: ['--no-save'], npmrc: ['project'] }]))
+      check('helper: an npmrc that sets a workspace filter is named, also behind a typed -w',
+        JSON.stringify([n1, n2]), JSON.stringify([{ args: ['--no-save'], npmrc: ['project'] }, { args: [], npmrc: ['project'] }]))
     }
     // The probe of the tarball server gives up on a listener that accepts
     // and never answers.
