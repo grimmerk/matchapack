@@ -565,14 +565,16 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
         if unseen > 0 && !hook_absent {
             if command == "ci" {
                 eprintln!(
-                    "matchapack: npm installed {installed} packages, but only {} went through matchapack's hook: \
-                     this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for the rest)",
+                    "matchapack: npm installed {installed} packages, but only {} went through matchapack's hook \
+                     (npm, an install script or another npm placed the rest): this npm may extract packages another way \
+                     (the install is complete; nothing was cloned for the rest)",
                     installed - unseen
                 );
             } else {
                 eprintln!(
-                    "matchapack: npm installed {installed} packages in this run, but {unseen} of them did not go through matchapack's hook: \
-                     this npm may extract packages another way (the install is npm's own and complete; nothing was cloned for them)"
+                    "matchapack: npm installed {installed} packages in this run, but {unseen} of them did not go through matchapack's hook \
+                     (npm, an install script or another npm placed them): this npm may extract packages another way \
+                     (the install is complete; nothing was cloned for them)"
                 );
             }
         }
