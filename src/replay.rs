@@ -84,22 +84,29 @@ fn hashes(root: &Path, lockfiles: &[&str], dirs: &[String]) -> Value {
 /// package.json, relative, sorted) from its package.json's `workspaces`,
 /// and whether every pattern could be expanded in full.
 pub fn workspaces(root: &Path) -> (Vec<String>, bool) {
-    let Ok(text) = std::fs::read_to_string(root.join("package.json")) else { return (vec![], true) };
-    let Ok(pj) = serde_json::from_str::<Value>(&text) else { return (vec![], true) };
+    let (dirs, walk) = walk_workspaces(root);
+    (dirs, walk.complete)
+}
+
+/// `workspaces`, with the walk (how many directories it listed).
+fn walk_workspaces(root: &Path) -> (Vec<String>, Walk) {
+    let mut walk = Walk { listed: 0, complete: true };
+    let Ok(text) = std::fs::read_to_string(root.join("package.json")) else { return (vec![], walk) };
+    let Ok(pj) = serde_json::from_str::<Value>(&text) else { return (vec![], walk) };
     let list = match &pj["workspaces"] {
         Value::Array(a) => a.clone(),
         Value::Object(o) => o.get("packages").and_then(|p| p.as_array()).cloned().unwrap_or_default(),
         Value::Null => vec![],
-        _ => return (vec![], false),
-    };
-    let mut walk = Walk { listed: 0, complete: true };
-    let mut keep = std::collections::BTreeSet::new();
-    for p in list.iter() {
-        // Once a pattern ran out of its listing budget the set is incomplete
-        // whatever the others find: no more listing (bounded cost per run).
-        if walk.listed >= MAX_LISTED {
-            break;
+        _ => {
+            walk.complete = false;
+            return (vec![], walk);
         }
+    };
+    let mut keep = std::collections::BTreeSet::new();
+    // Once the listing budget is spent the set is incomplete whatever the
+    // other patterns find, and `Walk::expand` lists nothing more (bounded
+    // cost per run).
+    for p in list.iter() {
         let Some(p) = p.as_str() else {
             walk.complete = false;
             continue;
@@ -144,7 +151,7 @@ pub fn workspaces(root: &Path) -> (Vec<String>, bool) {
     if walk.listed >= MAX_LISTED {
         walk.complete = false;
     }
-    (keep.into_iter().filter(|d| !d.is_empty()).collect(), walk.complete)
+    (keep.into_iter().filter(|d| !d.is_empty()).collect(), walk)
 }
 
 /// `a/{b,c}/d` → `a/b/d`, `a/c/d` (every group, left to right); a pattern
@@ -391,8 +398,9 @@ mod tests {
             std::fs::create_dir_all(d.join(a)).unwrap();
             std::fs::write(d.join(a).join("package.json"), "{}").unwrap();
         }
-        let (dirs, complete) = workspaces(&d);
-        assert!(!complete, "the big pattern ran out of the budget");
+        let (dirs, walk) = walk_workspaces(&d);
+        assert!(!walk.complete, "the big pattern ran out of the budget");
+        assert!(walk.listed <= MAX_LISTED, "listed {} directories, the budget is {MAX_LISTED}", walk.listed);
         assert!(dirs.is_empty(), "nothing listed after the budget: {dirs:?}");
         // The same patterns the other way round: apps/* is found, and the
         // set is still incomplete.
