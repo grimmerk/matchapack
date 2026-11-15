@@ -91,6 +91,9 @@ if [ -n "${MATCHAPACK_VERIFY_ARGS_FILE:-}" ]; then
   [ ${#npm_args[@]} -gt 0 ] || { echo "MATCHAPACK_VERIFY_ARGS_FILE holds no arguments" >&2; exit 2; }
 fi
 echo "== npm ${npm_args[*]} (A)"
+# The words as run, one JSON array (verify-sample.sh checks them against the
+# logged run's: the boundaries between words included).
+python3 -c 'import json,sys; print("npm words:", json.dumps(sys.argv[1:]))' "${npm_args[@]}"
 t0=$(python3 -c 'import time;print(time.time_ns())')
 (cd "$work/A" && npm "${npm_args[@]}" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
 if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.json"; then

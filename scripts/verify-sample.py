@@ -697,6 +697,10 @@ def npm_one(plan, here, work):
                        capture_output=True, text=True, errors="replace")
     show_npm(p.stdout + p.stderr)
     rec = npm_result(p.returncode, p.stdout + p.stderr)
+    # The words verify.sh ran must be the logged ones, word for word.
+    ran = re.search(r"^npm words: (.*)$", p.stdout, re.M)
+    if not ran or json.loads(ran.group(1)) != plan["args"]:
+        rec["result"], rec["reason"] = "ERROR", "the replay ran other words than the logged run (%s, not %s)" % (ran.group(1) if ran else "none reported", json.dumps(plan["args"]))
     # B's own log record (verify.sh gives it the work directory's log).
     logged = [x for x in read_log(os.path.join(work, "logs", "log.jsonl")) if x.get("engine") != "yarn1"]
     last = logged[-1] if logged else {}
