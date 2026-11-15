@@ -9,10 +9,13 @@
 //! read and hashed once before the run and once after it. Workspaces are
 //! found from the root `package.json`'s `workspaces` (an array, or Yarn's
 //! `{"packages": [...]}`) with `*`, `?` and `**` path segments and `{a,b}`
-//! alternatives, as Yarn's and npm's globs expand them. A pattern beyond that
-//! (character classes, extended globs, nested braces), or one whose listing
-//! budget runs out, makes the state incomplete (`complete: false`): a sample
-//! does not replay a run whose file set is not known.
+//! alternatives, as Yarn's and npm's globs expand them. Anything beyond that
+//! makes the state incomplete (`complete: false`), and a sample does not
+//! replay a run whose file set is not known: character classes, extended
+//! globs, other brace forms, a negated pattern (npm and Yarn 1 read it
+//! differently), a pattern outside the project, a symlink to a directory
+//! on the way, a listing that failed, or the listing budget reached (one
+//! budget for all patterns: after it, nothing more is listed).
 
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -22,9 +25,9 @@ use std::path::{Path, PathBuf};
 pub const NPM_LOCKFILES: &[&str] = &["package-lock.json", "npm-shrinkwrap.json"];
 pub const YARN_LOCKFILES: &[&str] = &["yarn.lock"];
 
-/// At most this many directories are listed per workspace pattern while
-/// expanding it (a `**` over a large tree must not slow an install down);
-/// a pattern that reaches it makes the state incomplete.
+/// At most this many directories are listed for all the workspace patterns
+/// (a `**` over a large tree must not slow an install down); reaching it
+/// makes the state incomplete and ends the listing.
 const MAX_LISTED: usize = 2000;
 
 /// At most this many alternatives per brace pattern.
@@ -89,71 +92,80 @@ pub fn workspaces(root: &Path) -> (Vec<String>, bool) {
         Value::Null => vec![],
         _ => return (vec![], false),
     };
-    let mut complete = true;
-    let (mut keep, mut drop) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+    let mut walk = Walk { listed: 0, complete: true };
+    let mut keep = std::collections::BTreeSet::new();
     for p in list.iter() {
+        // Once a pattern ran out of its listing budget the set is incomplete
+        // whatever the others find: no more listing (bounded cost per run).
+        if walk.listed >= MAX_LISTED {
+            break;
+        }
         let Some(p) = p.as_str() else {
-            complete = false;
+            walk.complete = false;
             continue;
         };
-        let (neg, pat) = match p.strip_prefix('!') {
-            Some(r) => (true, r),
-            None => (false, p),
-        };
-        let Some(alternatives) = expand_braces(pat) else {
-            complete = false;
+        // A negated pattern: npm drops its matches, Yarn 1 still treats them
+        // as workspaces; which one runs is not known here.
+        if p.starts_with('!') {
+            walk.complete = false;
+            continue;
+        }
+        let Some(alternatives) = expand_braces(p) else {
+            walk.complete = false;
             continue;
         };
         for pat in alternatives {
             let pat = pat.trim_start_matches("./").trim_end_matches('/');
             let segs: Vec<&str> = pat.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
-            if pat.starts_with('/') || segs.is_empty() || segs.contains(&"..") {
-                // Outside the project: npm and Yarn do not take it either.
+            if segs.is_empty() {
                 continue;
             }
-            if segs.iter().any(|s| s.contains(['[', ']', '(', ')', '{', '}'])) {
-                complete = false;
+            // Outside the project (`../shared`, `/abs`): a copy of the
+            // project cannot hold it.
+            if pat.starts_with('/') || segs.contains(&"..") || pat.starts_with('~') {
+                walk.complete = false;
                 continue;
             }
-            // A budget per pattern: one large pattern cannot starve another.
-            let mut listed = 0usize;
+            if segs.iter().any(|s| s.contains(['[', ']', '(', ')', '{', '}', '!', '+', '@'])) {
+                walk.complete = false;
+                continue;
+            }
             let mut found = vec![];
-            expand(root, &segs, &mut found, &mut listed);
-            if listed >= MAX_LISTED {
-                complete = false;
-            }
+            walk.expand(root, &segs, &mut found);
             for d in found {
                 if d.join("package.json").is_file() {
                     if let Ok(rel) = d.strip_prefix(root) {
-                        let rel = rel.to_string_lossy().to_string();
-                        if neg {
-                            drop.insert(rel);
-                        } else {
-                            keep.insert(rel);
-                        }
+                        keep.insert(rel.to_string_lossy().to_string());
                     }
                 }
             }
         }
     }
-    (keep.into_iter().filter(|d| !d.is_empty() && !drop.contains(d)).collect(), complete)
+    if walk.listed >= MAX_LISTED {
+        walk.complete = false;
+    }
+    (keep.into_iter().filter(|d| !d.is_empty()).collect(), walk.complete)
 }
 
 /// `a/{b,c}/d` → `a/b/d`, `a/c/d` (every group, left to right); a pattern
-/// without braces → itself. None for what this does not expand: nested or
-/// unbalanced braces, or more than MAX_BRACES alternatives.
+/// without braces → itself. Only plain alternatives, two or more, are
+/// expanded; None (the set is then incomplete) for anything else: a single
+/// alternative (`{tools}`, which npm and Yarn keep as it is), a range
+/// (`{1..3}`), an empty alternative, nested or unbalanced braces, or more
+/// than MAX_BRACES alternatives.
 fn expand_braces(p: &str) -> Option<Vec<String>> {
     let Some(open) = p.find('{') else {
         return (!p.contains('}')).then(|| vec![p.to_string()]);
     };
     let close = open + p[open..].find('}')?;
     let inner = &p[open + 1..close];
-    if inner.contains('{') {
+    let alts: Vec<&str> = inner.split(',').collect();
+    if inner.contains('{') || inner.contains("..") || alts.len() < 2 || alts.iter().any(|a| a.is_empty()) {
         return None;
     }
     let (head, tail) = (&p[..open], &p[close + 1..]);
     let mut out = vec![];
-    for alt in inner.split(',') {
+    for alt in alts {
         for rest in expand_braces(tail)? {
             out.push(format!("{head}{alt}{rest}"));
             if out.len() > MAX_BRACES {
@@ -164,39 +176,81 @@ fn expand_braces(p: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn expand(dir: &Path, segs: &[&str], out: &mut Vec<PathBuf>, listed: &mut usize) {
-    let Some((seg, rest)) = segs.split_first() else {
-        out.push(dir.to_path_buf());
-        return;
-    };
-    let glob = seg.contains(['*', '?']);
-    if !glob {
-        let d = dir.join(seg);
-        if d.is_dir() {
-            expand(&d, rest, out, listed);
+/// The walk over the workspace patterns: how many directories it listed
+/// (one budget for all of them), and whether what it found is complete (a
+/// listing that failed, or a symlink to a directory on the way, makes it
+/// incomplete: npm and Yarn may follow it, a copy holds no such link).
+struct Walk {
+    listed: usize,
+    complete: bool,
+}
+
+impl Walk {
+    fn expand(&mut self, dir: &Path, segs: &[&str], out: &mut Vec<PathBuf>) {
+        let Some((seg, rest)) = segs.split_first() else {
+            out.push(dir.to_path_buf());
+            return;
+        };
+        if !seg.contains(['*', '?']) {
+            let d = dir.join(seg);
+            match std::fs::symlink_metadata(&d) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    if d.is_dir() {
+                        self.complete = false;
+                    }
+                }
+                Ok(m) if m.is_dir() => self.expand(&d, rest, out),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => self.complete = false,
+            }
+            return;
         }
-        return;
-    }
-    if *seg == "**" {
-        expand(dir, rest, out, listed);
-    }
-    if *listed >= MAX_LISTED {
-        return;
-    }
-    *listed += 1;
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut subs: Vec<(String, PathBuf)> = rd
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| e.file_name().into_string().ok().map(|n| (n, e.path())))
-        .filter(|(n, _)| n != "node_modules" && !n.starts_with('.'))
-        .collect();
-    subs.sort();
-    for (name, p) in subs {
         if *seg == "**" {
-            expand(&p, segs, out, listed);
-        } else if matches(seg.as_bytes(), name.as_bytes()) {
-            expand(&p, rest, out, listed);
+            self.expand(dir, rest, out);
+        }
+        if self.listed >= MAX_LISTED {
+            return;
+        }
+        self.listed += 1;
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => {
+                self.complete = false;
+                return;
+            }
+        };
+        let mut subs: Vec<(String, PathBuf)> = vec![];
+        for e in rd {
+            let Ok(e) = e else {
+                self.complete = false;
+                continue;
+            };
+            let Ok(name) = e.file_name().into_string() else {
+                self.complete = false;
+                continue;
+            };
+            if name == "node_modules" || name.starts_with('.') {
+                continue;
+            }
+            match e.file_type() {
+                Ok(t) if t.is_dir() => subs.push((name, e.path())),
+                Ok(t) if t.is_symlink() => {
+                    if e.path().is_dir() && (*seg == "**" || matches(seg.as_bytes(), name.as_bytes())) {
+                        self.complete = false;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => self.complete = false,
+            }
+        }
+        subs.sort();
+        for (name, p) in subs {
+            if *seg == "**" {
+                self.expand(&p, segs, out);
+            } else if matches(seg.as_bytes(), name.as_bytes()) {
+                self.expand(&p, rest, out);
+            }
         }
     }
 }
@@ -284,22 +338,38 @@ mod tests {
                 std::fs::write(d.join(w).join("package.json"), w).unwrap();
             }
         }
-        assert_eq!(workspaces(&d), (vec!["packages/a".to_string(), "packages/b".into(), "tools/x/y".into()], true));
+        assert!(!workspaces(&d).1, "a negated pattern: incomplete");
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/*", "tools/**"]}"#).unwrap();
+        assert_eq!(workspaces(&d), (vec!["packages/a".to_string(), "packages/b".into(), "packages/skip".into(), "tools/x/y".into()], true));
         let (f, complete) = files_state(&d, YARN_LOCKFILES);
         assert!(complete);
         assert_eq!(f["yarn.lock"], json!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "sha256 of abc");
         assert_eq!(f["packages/a/package.json"], json!(hex::encode(sha2::Sha256::digest(b"packages/a"))));
         let keys: Vec<&String> = f.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["yarn.lock", "package.json", "packages/a/package.json", "packages/b/package.json", "tools/x/y/package.json"]);
+        assert_eq!(keys, ["yarn.lock", "package.json", "packages/a/package.json", "packages/b/package.json", "packages/skip/package.json", "tools/x/y/package.json"]);
         let (n, _) = files_state(&d, NPM_LOCKFILES);
         assert_eq!((n["package-lock.json"].clone(), n["npm-shrinkwrap.json"].clone()), (Value::Null, Value::Null));
         // Yarn's object form; braces.
         std::fs::write(d.join("package.json"), r#"{"workspaces": {"packages": ["packages/?"], "nohoist": ["**"]}}"#).unwrap();
-        assert_eq!(workspaces(&d).0, ["packages/a", "packages/b"]);
-        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/{a,skip}", "{tools}/x/*"]}"#).unwrap();
+        assert_eq!(workspaces(&d), (vec!["packages/a".to_string(), "packages/b".into()], true));
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/{a,skip}", "tools/x/*"]}"#).unwrap();
         assert_eq!(workspaces(&d), (vec!["packages/a".to_string(), "packages/skip".into(), "tools/x/y".into()], true));
-        // What is not expanded makes the set incomplete.
-        for w in [r#"["packages/[ab]"]"#, r#"["packages/{a,{b}}"]"#, r#"["packages/{a"]"#, r#"["packages/@(a|b)"]"#, r#"[3]"#, r#""packages/*""#] {
+        // What is not expanded, or not representable in a copy, makes the
+        // set incomplete.
+        for w in [
+            r#"["packages/[ab]"]"#,
+            r#"["packages/{a,{b}}"]"#,
+            r#"["packages/{a"]"#,
+            r#"["packages/@(a|b)"]"#,
+            r#"[3]"#,
+            r#""packages/*""#,
+            r#"["{tools}/x/*"]"#,
+            r#"["packages/{1..3}"]"#,
+            r#"["packages/{a,}"]"#,
+            r#"["packages/*", "!packages/skip"]"#,
+            r#"["../shared"]"#,
+            r#"["/abs"]"#,
+        ] {
             std::fs::write(d.join("package.json"), format!(r#"{{"workspaces": {w}}}"#)).unwrap();
             assert!(!workspaces(&d).1, "{w}: incomplete");
         }
@@ -309,9 +379,9 @@ mod tests {
     }
 
     #[test]
-    fn each_pattern_has_its_own_listing_budget() {
-        // One `**` over more directories than its budget: incomplete, and a
-        // second pattern after it is still listed in full.
+    fn a_budget_hit_ends_the_listing() {
+        // One `**` over more directories than the budget: incomplete, and
+        // the patterns after it are not listed at all.
         let d = scratch("budget");
         std::fs::write(d.join("package.json"), r#"{"workspaces": ["big/**", "apps/*"]}"#).unwrap();
         for i in 0..(MAX_LISTED + 10) {
@@ -322,8 +392,46 @@ mod tests {
             std::fs::write(d.join(a).join("package.json"), "{}").unwrap();
         }
         let (dirs, complete) = workspaces(&d);
-        assert!(!complete, "the big pattern ran out of its budget");
-        assert_eq!(dirs, ["apps/one", "apps/two"]);
+        assert!(!complete, "the big pattern ran out of the budget");
+        assert!(dirs.is_empty(), "nothing listed after the budget: {dirs:?}");
+        // The same patterns the other way round: apps/* is found, and the
+        // set is still incomplete.
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["apps/*", "big/**"]}"#).unwrap();
+        assert_eq!(workspaces(&d), (vec!["apps/one".to_string(), "apps/two".into()], false));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn symlinks_and_failed_listings_make_the_set_incomplete() {
+        let d = scratch("links");
+        std::fs::create_dir_all(d.join("packages/a")).unwrap();
+        std::fs::write(d.join("packages/a/package.json"), "{}").unwrap();
+        std::fs::create_dir_all(d.join("elsewhere/b")).unwrap();
+        std::fs::write(d.join("elsewhere/b/package.json"), "{}").unwrap();
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/*"]}"#).unwrap();
+        assert_eq!(workspaces(&d), (vec!["packages/a".to_string()], true));
+        // A workspace that is a symlink to a directory, under a glob.
+        std::os::unix::fs::symlink(d.join("elsewhere/b"), d.join("packages/b")).unwrap();
+        assert!(!workspaces(&d).1, "a symlinked workspace under a glob");
+        // Named directly.
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/a", "packages/b"]}"#).unwrap();
+        assert!(!workspaces(&d).1, "a symlinked workspace named directly");
+        // A symlink to a file under a glob is no workspace: still complete.
+        std::fs::remove_file(d.join("packages/b")).unwrap();
+        std::os::unix::fs::symlink(d.join("package.json"), d.join("packages/c")).unwrap();
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/*"]}"#).unwrap();
+        assert!(workspaces(&d).1, "a symlink to a file");
+        // A directory that cannot be listed.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(d.join("locked/x")).unwrap();
+        std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["locked/*"]}"#).unwrap();
+        let unlistable = std::fs::read_dir(d.join("locked")).is_err();
+        let (_, complete) = workspaces(&d);
+        std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        if unlistable {
+            assert!(!complete, "a listing that failed");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -332,6 +440,7 @@ mod tests {
         assert_eq!(expand_braces("a/{b,c}/{d,e}").unwrap(), ["a/b/d", "a/b/e", "a/c/d", "a/c/e"]);
         assert_eq!(expand_braces("plain").unwrap(), ["plain"]);
         assert!(expand_braces("a/{b,{c}}").is_none() && expand_braces("a/b}").is_none() && expand_braces("a/{b").is_none());
+        assert!(expand_braces("{tools}/x").is_none() && expand_braces("p/{1..3}").is_none() && expand_braces("p/{a,}").is_none());
         assert!(matches(b"*", b"abc") && matches(b"a*c", b"abbc") && matches(b"a?c", b"abc") && matches(b"*", b""));
         assert!(!matches(b"a?c", b"ac") && !matches(b"b*", b"abc"));
     }
