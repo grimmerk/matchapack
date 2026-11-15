@@ -882,6 +882,17 @@ if [ $rc = 0 ] && same && both_changed packages/w2/package.json && [ "$(ejson c-
   ok "a workspace command's Yarn whose hook declines runs as plain Yarn: command done, engine identical, nothing cloned, the reason logged"
 else bad "workspace child decline (exit $rc, declined $(ejson c-ws-decline "y.get('declined')"))"; fi
 
+# The same when the workspace's hook fails outside its decline path (an
+# exception before Yarn starts: MATCHAPACK_YARN_SIMULATE=child-throw): plain
+# Yarn in that process, and the reason reaches the log (not "unseen").
+MATCHAPACK_YARN_SIMULATE=child-throw cverify c-ws-throw "workspace w2 add $T/y1-many-2.0.0.tgz" --engine-min-clones 0 "$here/fixtures/yarn1-workspaces"
+if [ $rc = 0 ] && same && both_changed packages/w2/package.json && [ "$(ejson c-ws-throw "r['outcome']")" = installed ] \
+  && ejson c-ws-throw "y.get('declined') or ''" | grep -q "in the workspace's Yarn: an error before Yarn started: simulated" \
+  && [ "$(ejson c-ws-throw "y['unseen']")" = False ] && grep -q "matchapack: the workspace's Yarn ran as plain Yarn, without clones" "$work/c-ws-throw/engine.log" \
+  && ! grep -q 'never saw its link step' "$work/c-ws-throw/engine.log"; then
+  ok "a workspace command's Yarn whose hook throws before Yarn starts runs as plain Yarn: command done, engine identical, the error logged as its decline"
+else bad "workspace child error before Yarn (exit $rc, declined $(ejson c-ws-throw "y.get('declined')"))"; fi
+
 # upgrade-interactive, through a pseudo-terminal that takes every update:
 # one Yarn process, one link step per dependency type (y1-many in
 # dependencies, y1-b in devDependencies); Yarn's first 128 copies of the

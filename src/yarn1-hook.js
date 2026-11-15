@@ -37,7 +37,9 @@
 //                                  copies keep the source's times, as a libuv
 //                                  that sets times after writing would;
 //                                  `child-copy-keeps-times` the same in a
-//                                  workspace command's child only
+//                                  workspace command's child only;
+//                                  `child-throw`: that child throws before
+//                                  Yarn starts (outside decline())
 //       MATCHAPACK_YARN_WRAP_CHILD `workspace`: the command is `yarn workspace
 //                                  <name> <command> …`, whose own Yarn is a
 //                                  child process (`wrapWorkspaceChild`)
@@ -310,6 +312,21 @@ async function main () {
       const child = spawn.call(this, file, [__filename, ...args], Object.assign({}, options, { env, stdio: ['inherit', 'inherit', 'inherit', 'pipe'] }))
       if (child.stdio && child.stdio[3]) {
         relayFrom(child.stdio[3])
+        // Yarn waits for the child's 'close', which needs fd 3 closed too.
+        // Where the child's fd 3 is not close-on-exec (libuv before 1.45,
+        // Node before 20, on macOS), a process a lifecycle script leaves
+        // behind can hold it open and Yarn would wait forever where plain
+        // Yarn does not. So once the child has exited, its socket is
+        // destroyed (after a moment, for its last messages still in
+        // flight).
+        const fd3 = child.stdio[3]
+        child.on('exit', () => {
+          setTimeout(() => {
+            if (!fd3.destroyed) {
+              fd3.destroy()
+            }
+          }, 1000).unref()
+        })
       }
       return child
     }
@@ -358,6 +375,12 @@ async function main () {
       p = probe(probeDir, isChild && simulate === 'child-copy-keeps-times' ? 'copy-keeps-times' : simulate)
     } catch (e) {
       return decline(`the start-up probe of Node's copy failed: ${e.message}`)
+    }
+    if (isChild && simulate === 'child-throw') {
+      // Tests only: an error outside decline(), before Yarn starts (as a
+      // failed removal of the probe's directory would be).
+      fs.rmSync(p.dir, { recursive: true, force: true })
+      throw new Error('simulated (MATCHAPACK_YARN_SIMULATE=child-throw)')
     }
     try {
       if (p.facts.mtime) {
@@ -484,6 +507,9 @@ function beforeYarn (e) {
   if (plainFallback) {
     const run = plainFallback
     plainFallback = null
+    // As decline() does: the run is then reported as the workspace's Yarn
+    // run plain, not as a link step the hook never saw.
+    send({ declined: `in the workspace's Yarn: an error before Yarn started: ${e && e.message ? e.message : e}` })
     return run()
   }
   process.exit(90)
