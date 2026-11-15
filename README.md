@@ -266,7 +266,10 @@ it.
   upgrade-interactive`, and `yarn workspace <name>
   add|remove|upgrade|upgrade-interactive …` (the Yarn that `yarn workspace`
   starts for the command runs with the hook too). Each prints matchapack's two lines and costs about 0.25 s of CPU
-  more than plain Yarn (measured on `yarn add` of a 3-file package).
+  more than plain Yarn (measured on `yarn add` of a 3-file package). A
+  `yarn workspace` command costs more, not measured: it starts two hooked
+  Nodes, probes twice, and asks `yarn cache dir` only after the
+  workspace's Yarn has started.
 - Every other command runs Yarn directly; matchapack does not start. Which
   ones and why: "What stays plain Yarn" below.
 - matchapack leaves Yarn's first 128 file copies of each command to Node
@@ -277,7 +280,10 @@ it.
   noise.
 - The first `yarn add` in a new project, before it has a `yarn.lock`, is
   plain Yarn (the gate below), so its packages are real copies until the
-  next install over an empty `node_modules`.
+  next install over an empty `node_modules`. Unless the project sits
+  below another project's `yarn.lock`: matchapack finds the project by the
+  nearest `yarn.lock` at or above the directory, so then it runs, with
+  clones (the tree is still Yarn's).
 - In a Yarn 2+ project (a `.yarnrc.yml`, `packageManager: yarn@2` or later,
   or a Yarn 2+ lockfile) `matchapack yarn` runs plain Yarn at once. It
   decides from those files only, without starting node, and prints and
@@ -301,8 +307,9 @@ it.
 - `yarn --version`, `yarn --help`, and any command with `--help` / `-h`.
 - Routed, but handed to plain Yarn by the checks in "When it runs plain Yarn
   instead": among them the first `yarn add` of a project that has no
-  `yarn.lock` yet (matchapack finds the project by its lockfile), and a Yarn
-  older than 1.10.0 (it asks for no clone).
+  `yarn.lock` yet (matchapack finds the project by its lockfile, the nearest
+  one at or above: a project below another one's `yarn.lock` is not
+  declined), and a Yarn older than 1.10.0 (it asks for no clone).
 
 **Bypass for one command**: `MATCHAPACK=0 yarn`, or `command yarn`.
 
