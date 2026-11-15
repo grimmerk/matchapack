@@ -119,7 +119,11 @@ steps_() { # name source [verify-steps.sh options] -- step [-- step ...]
   if "$here/scripts/verify-steps.sh" "$src" "$work/steps-$name" "$@" > "$out" 2>&1; then
     echo "ok    steps $name ($(grep -c '^step ' "$out") steps)"
   else
-    fail=1; echo "FAIL  steps $name (log: $out)"; grep -E '^step|FAIL' "$out" | head -14 | sed 's/^/      /'
+    fail=1; echo "FAIL  steps $name (log: $out)"
+    # Why, in the job log too (CI keeps no artifacts): the step lines, then
+    # from the first FAIL on, at most 40 lines; the space left.
+    { grep -E '^step ' "$out" | head -8; awk '/FAIL/ {p=1} p' "$out" | head -32; } | cut -c1-240 | sed 's/^/      /'
+    echo "      (free on the work directory: $(df -Pk "$work" | awk 'NR==2 {print int($4/1024) " MB"}'))"
   fi
 }
 # The harness's own self-test: one byte of B's package-lock.json changed

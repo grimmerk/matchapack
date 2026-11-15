@@ -48,8 +48,9 @@ run() { # name script args...
   "$@" > "$work/$name.log" 2>&1; rc=$?
   echo "$name: exit $rc, $(( $(date +%s) - t0 )) s ($(grep -cE '^(PASS|ok) ' "$work/$name.log") passed, $(grep -cE '^FAIL ' "$work/$name.log") failed)"
   # Each failure with the indented lines the suite prints after it.
-  awk '/^FAIL / {p=1; print; next} p && /^ / {print; next} {p=0}' "$work/$name.log" | head -60 | sed 's/^/    /'
-  echo "$rc" > "$work/$name.status"
+  awk '/^FAIL / {p=1; print; next} p && /^ / {print; next} {p=0}' "$work/$name.log" | head -400 | sed 's/^/    /'
+  echo "    free on $work after $name: $(df -Pk "$work" | awk 'NR==2 {print int($4/1024) " MB of " int($2/1024) " MB"}')"
+  echo "$rc" > "$work/$name.status" || echo "    could not write $work/$name.status (the filesystem may be full)"
 }
 run test-inject "$here/scripts/test-inject.sh" "$work/inject"
 run verify-npm "$here/scripts/verify-npm.sh" "$work/vi"
@@ -59,8 +60,16 @@ import json, re, sys
 work, version, node, os_, fs = sys.argv[1:6]
 suites = {}
 for name in ("test-inject", "verify-npm"):
-    log = open(f"{work}/{name}.log", errors="replace").read().splitlines()
-    status = int(open(f"{work}/{name}.status").read().strip())
+    try:
+        log = open(f"{work}/{name}.log", errors="replace").read().splitlines()
+    except OSError:
+        log = []
+    # A status file that could not be written (a full filesystem) is a
+    # failure, not a crash of the summary.
+    try:
+        status = int(open(f"{work}/{name}.status").read().strip())
+    except (OSError, ValueError):
+        status = -1
     suites[name] = {
         "status": status,
         "pass": sum(1 for l in log if re.match(r"^(PASS|ok) ", l)),
@@ -69,6 +78,12 @@ for name in ("test-inject", "verify-npm"):
         "failed": [l[:300] for l in log if l.startswith("FAIL ")][:20],
         "last": log[-1][:300] if log else "",
     }
-json.dump({"npm": version, "node": node, "os": os_, "fs": fs, "suites": suites}, open(f"{work}/suites.json", "w"), indent=2)
+summary = {"npm": version, "node": node, "os": os_, "fs": fs, "suites": suites}
+try:
+    with open(f"{work}/suites.json", "w") as f:
+        json.dump(summary, f, indent=2)
+except OSError as e:
+    print(f"could not write suites.json ({e}); the summary:")
+    print(json.dumps(summary, indent=2))
 PY
-[ "$(cat "$work/test-inject.status")" = 0 ] && [ "$(cat "$work/verify-npm.status")" = 0 ]
+[ "$(cat "$work/test-inject.status" 2>/dev/null)" = 0 ] && [ "$(cat "$work/verify-npm.status" 2>/dev/null)" = 0 ]
