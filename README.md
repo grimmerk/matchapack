@@ -166,9 +166,13 @@ In detail:
   workspaces fixture in `scripts/test-inject.sh`). With
   `--install-strategy=linked` npm extracts every package itself (its
   fetchers there carry no integrity): the tree is npm's, nothing is cloned.
-  Packages matchapack cannot clone are extracted by npm, the rest are cloned
-  (checked with a `file:` tarball and bundled dependencies; git dependencies
-  and a shrinkwrap follow the same rule but have not been run yet).
+  Packages matchapack cannot clone are extracted by npm, the rest are cloned.
+  Checked with a `file:` tarball, bundled dependencies and a git dependency
+  (the git dependency on npm 10.5.2, 10.9.10, 11.19.1 and 12.2.2, #74): a git
+  dependency and a `file:` tarball have no registry integrity and so no
+  store key, so npm's own pacote extracts them (a git dependency may run its
+  `prepare` script), and everything else is cloned; the tree is npm's. A
+  shrinkwrap follows the same rule but has not been run yet.
 - A package is cloned only when the result is exactly what npm would extract:
   a registry tarball with an integrity in the lockfile, npm's default file
   modes, umask 022. A package missing from the store is extracted into it by
@@ -431,6 +435,10 @@ it.
   workspace's Yarn has started.
 - Every other command runs Yarn directly; matchapack does not start. Which
   ones and why: "What stays plain Yarn" below.
+- Git dependencies go through Yarn's cache like any package, and are
+  cloned at the link step like any package (a real project with a git
+  dependency came out identical to plain Yarn: `NOTES.md`, "Yarn 1 trial
+  on real projects", the codev row).
 - matchapack leaves Yarn's first 128 file copies of each command to Node
   (so that Yarn's own time check sees real copies). A `yarn add` that
   copies 128 files or fewer therefore clones nothing, however large the
