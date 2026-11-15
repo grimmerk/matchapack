@@ -104,6 +104,29 @@ const CACHE_OPTIONS: &[&str] = &["--cache-folder", "--preferred-cache-folder", "
 /// 314 of 314 files).
 const CACHE_WAIT: Duration = Duration::from_secs(10);
 
+/// The arguments a replay of a full install gives Yarn (scripts/verify-sample.sh
+/// --yarn, through `verify-yarn1.sh`, which says `install` itself and gives
+/// the cache folder the run used): `args` without the command word
+/// `install` and without `--cache-folder` / `--preferred-cache-folder` and
+/// their values. The command word is found as Yarn finds it (`command_at`).
+fn replay_args(args: &[String]) -> Vec<String> {
+    let at = command_at(args).filter(|&i| args[i] == "install");
+    let mut out = vec![];
+    let mut skip_value = false;
+    for (i, a) in args.iter().enumerate() {
+        if std::mem::take(&mut skip_value) || Some(i) == at {
+            continue;
+        }
+        let name = option_name(a);
+        if name == "--cache-folder" || name == "--preferred-cache-folder" {
+            skip_value = name == a.as_str();
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
 /// The name of the command Yarn will run (empty: Yarn's default, install),
 /// found the way Yarn finds it.
 pub fn command(args: &[String]) -> &str {
@@ -575,6 +598,11 @@ impl Stats {
             "copied_total": self.copied_total(),
             "link_steps": self.link_steps,
             "yarn": self.hello.as_ref().and_then(|h| h.get("yarn")).cloned().unwrap_or(Value::Null),
+            // The Yarn and the node that ran (under corepack, the Yarn it
+            // chose): what scripts/verify-sample.sh --yarn replays with.
+            "yarn_js": self.hello.as_ref().and_then(|h| h.get("yarn_js")).cloned().unwrap_or(Value::Null),
+            "node": self.hello.as_ref().and_then(|h| h.get("node")).cloned().unwrap_or(Value::Null),
+            "node_path": self.hello.as_ref().and_then(|h| h.get("node_path")).cloned().unwrap_or(Value::Null),
             "first": self.hello.as_ref().and_then(|h| h.get("first")).cloned().unwrap_or(Value::Null),
             "facts": self.hello.as_ref().and_then(|h| h.get("facts")).cloned().unwrap_or(Value::Null),
             "cache": self.cache,
@@ -1113,6 +1141,32 @@ pub struct Summary {
     pub unseen: bool,
 }
 
+/// The project's `yarn.lock` and `package.json` at `root` as they are now
+/// (after an install): `[size, mtime in ns]` each, null for a file that is
+/// not there. Two `stat` calls, no read. A later sample replays the run only
+/// while both are unchanged (scripts/verify-sample.sh --yarn).
+fn manifest_state(root: &Path) -> Value {
+    use std::os::unix::fs::MetadataExt;
+    let st = |name: &str| match std::fs::metadata(root.join(name)) {
+        Ok(m) => json!([m.len(), m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128]),
+        Err(_) => Value::Null,
+    };
+    json!({ "yarn.lock": st("yarn.lock"), "package.json": st("package.json") })
+}
+
+/// What a replay of a full install needs from its arguments, logged as
+/// `{"args": [...]}`: under the key `args`, so trial.rs redacts them as
+/// command-line words (a secret option's value, credentials in a URL) like
+/// the record's own `args`. Null for an incremental command, which a replay
+/// cannot repeat (#77 part 2).
+fn replay(args: &[String]) -> Value {
+    if command(args).is_empty() || command(args) == "install" {
+        json!({ "args": replay_args(args) })
+    } else {
+        Value::Null
+    }
+}
+
 fn now_mtime(p: &Path) -> Option<std::time::SystemTime> {
     std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok()
 }
@@ -1498,7 +1552,7 @@ pub fn cli(args: Vec<String>) -> i32 {
             // a cache note that follows from it.
             if let Some(why) = s.stats["declined"].as_str() {
                 eprintln!("matchapack: the workspace's Yarn ran as plain Yarn, without clones ({why})");
-                log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats }), chosen(&s.stats)));
+                log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats, "root": root.display().to_string(), "manifests": manifest_state(&root), "replay": replay(&args) }), chosen(&s.stats)));
                 return 0;
             }
             if let Some(why) = s.stats["child_facts_differ"].as_str() {
@@ -1522,7 +1576,7 @@ pub fn cli(args: Vec<String>) -> i32 {
                      this Yarn may run another way (the install is Yarn's own and complete; nothing was cloned)"
                 );
             }
-            log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats }), chosen(&s.stats)));
+            log("installed", with(json!({ "secs": s.secs, "yarn1": s.stats, "root": root.display().to_string(), "manifests": manifest_state(&root), "replay": replay(&args) }), chosen(&s.stats)));
             0
         }
         Ok(Err(RunError::Declined(reason))) => {
@@ -1824,6 +1878,35 @@ mod tests {
         assert_eq!(Facts::from_json(&json!({ "empty_atime": true, "empty_mtime": true, "atime": true, "mtime": false, "group": null })).unwrap().group, None);
         assert!(Facts::from_json(&json!({ "empty_atime": true, "empty_mtime": true, "atime": true, "mtime": true })).is_none(), "a copy that keeps mtimes: no facts, no clones");
         assert!(Facts::from_json(&json!({ "atime": true })).is_none());
+    }
+
+    #[test]
+    fn the_record_carries_what_a_replay_needs() {
+        // The Yarn and node that ran, from the hello (scripts/verify-sample.sh --yarn).
+        let st = Stats { hello: Some(json!({ "hello": true, "yarn": "1.22.22", "yarn_js": "/y/bin/yarn.js", "node": "v24.22.1", "node_path": "/n/bin/node", "first": 128 })), ..Default::default() };
+        let j = st.to_json();
+        assert_eq!((j["yarn_js"].clone(), j["node"].clone(), j["node_path"].clone()), (json!("/y/bin/yarn.js"), json!("v24.22.1"), json!("/n/bin/node")));
+        assert_eq!(Stats::default().to_json()["node_path"], Value::Null);
+        // The manifests' state: size and mtime in ns, null when missing.
+        let d = std::env::temp_dir().join(format!("matchapack-manifests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("yarn.lock"), "abc").unwrap();
+        let t = std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        std::fs::File::options().write(true).open(d.join("yarn.lock")).unwrap().set_modified(t).unwrap();
+        let m = manifest_state(&d);
+        assert_eq!(m["yarn.lock"], json!([3, 1_700_000_000_123_456_789i64]));
+        assert_eq!(m["package.json"], Value::Null);
+        let _ = std::fs::remove_dir_all(&d);
+        // The replay's arguments: no command word, no cache folder options
+        // (verify-yarn1.sh gives both), every other word as given.
+        assert_eq!(replay_args(&s(&["install", "--frozen-lockfile", "--cache-folder", "/c", "--ignore-scripts"])), s(&["--frozen-lockfile", "--ignore-scripts"]));
+        assert_eq!(replay_args(&s(&["--cache-folder=/c", "--preferred-cache-folder", "/p", "--production", "install", "--check-files"])), s(&["--production", "install", "--check-files"]), "`install` after --production is that option's value, as Yarn reads it");
+        assert_eq!(replay_args(&s(&["--mutex", "file:/tmp/m", "install"])), s(&["--mutex", "file:/tmp/m"]));
+        assert_eq!(replay_args(&s(&[])), s(&[]));
+        assert_eq!(replay(&s(&["install", "--frozen-lockfile"])), json!({ "args": ["--frozen-lockfile"] }));
+        assert_eq!(replay(&s(&["--frozen-lockfile"])), json!({ "args": ["--frozen-lockfile"] }));
+        assert_eq!(replay(&s(&["add", "x"])), Value::Null);
     }
 
     struct Fx {
