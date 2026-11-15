@@ -55,7 +55,8 @@ pub enum Found {
     /// integrity, or the entry's integrity is sha1 only: cacache keeps those
     /// under sha512): nothing to compare with.
     NoTarball,
-    /// pacote could not extract the tarball.
+    /// pacote could not extract the tarball, or its extraction is not what
+    /// a clone reproduces: the message.
     Failed(String),
 }
 
@@ -85,7 +86,7 @@ pub fn verify_entry(store: &Store, key: &str, i: &Integrity, extract: &dyn Fn(&I
     let started = std::time::SystemTime::now();
     if let Err(e) = extract(i, &fresh.path) {
         discard();
-        return Ok(Found::Failed(format!("{e:#}")));
+        return Ok(Found::Failed(format!("pacote could not extract it: {e:#}")));
     }
     let ino = |p: &Path| std::fs::symlink_metadata(p).ok().filter(|m| m.is_dir()).map(|m| std::os::unix::fs::MetadataExt::ino(&m));
     // Shared while comparing: an install does not replace the entry meanwhile.
@@ -101,7 +102,9 @@ pub fn verify_entry(store: &Store, key: &str, i: &Integrity, extract: &dyn Fn(&I
         Ok(Compared::Differs(d)) => Some(d),
         Ok(Compared::Unexpected(odd)) => {
             discard();
-            return Ok(Found::Failed(format!("pacote's extraction is not what matchapack's clones reproduce ({odd})")));
+            return Ok(Found::Failed(format!(
+                "not checked: pacote's extraction of it is not what matchapack's clones reproduce ({odd}); not recorded, so an install under this code compares it, stops cloning and declines the code"
+            )));
         }
         Err(e) => {
             discard();

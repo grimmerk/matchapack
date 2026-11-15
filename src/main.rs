@@ -472,7 +472,7 @@ fn main() -> Result<()> {
                     let st = if fix { Store::exclusive(s, cacache.clone())? } else { Store::new(s, cacache.clone())? };
                     let (r, key) = verify::verify_store(&st, &cacache, fix)?;
                     println!(
-                        "{} entries compared with npm's extraction ({key}) in {:.1}s: {} match, {} differ, {} not directories, {} not checked (tarball no longer in the npm cache), {} pacote could not extract",
+                        "{} entries compared with npm's extraction ({key}) in {:.1}s: {} match, {} differ, {} not directories, {} not checked (tarball no longer in the npm cache), {} not checked (pacote's extraction failed or is not what a clone gives)",
                         r.entries,
                         r.secs,
                         r.matched,
@@ -496,7 +496,7 @@ fn main() -> Result<()> {
                         println!("  {}/{}…: the entry is not a directory (a symlink?)", i.algo, &i.hex[..16]);
                     }
                     for (i, e) in &r.failed {
-                        println!("  {}/{}…: pacote could not extract it: {e}", i.algo, &i.hex[..16]);
+                        println!("  {}/{}…: {e}", i.algo, &i.hex[..16]);
                     }
                     let bad = r.differs.len() + r.not_dir.len();
                     if bad > 0 {

@@ -202,8 +202,12 @@ pub struct Stats {
     /// extraction code costs.
     pub new_key_checks: usize,
     /// pacote's extraction was not what a clone reproduces (serve.rs module
-    /// comment): the run is broken, the key declined.
+    /// comment): the first such package and why.
     pub extraction_unexpected: Option<String>,
+    /// Then: the decline list's file written for the key, or why the key
+    /// was not declined (the unknown key; a write that failed).
+    pub declined_file: Option<String>,
+    pub not_declined: Option<String>,
     /// The running key is on the store's decline list: why.
     pub key_declined: Option<String>,
     /// Why the helper stopped before npm's command ran: its own `declined`
@@ -259,6 +263,8 @@ impl Stats {
             "key_error": self.key_error,
             "new_key_checks": self.new_key_checks,
             "extraction_unexpected": self.extraction_unexpected,
+            "declined_file": self.declined_file,
+            "not_declined": self.not_declined,
             "key_declined": self.key_declined,
             "root": self.root.as_ref().map(|r| r.display().to_string()),
             "command": self.command,
@@ -361,8 +367,9 @@ pub struct Server<'a> {
     /// hook's `key` message (sent when npm has loaded pacote, before any
     /// request), or given to `new` (tests).
     key: std::sync::OnceLock<String>,
-    /// When this install began (this server was made before node started):
-    /// pacote's extraction must not be older (`store::compare_extraction`).
+    /// When this install began, on the filesystem's clock (this server was
+    /// made before node started): pacote's extraction must not be older
+    /// (`store::compare_extraction`, `store::extraction_odd`).
     started: std::time::SystemTime,
     /// Set when no further request is served from the store in this run (a
     /// declined key, or an extraction no clone reproduces): every request is
@@ -456,10 +463,13 @@ fn already_exists(e: &anyhow::Error) -> bool {
 impl<'a> Server<'a> {
     /// `root`, when given, must be the canonical project directory (tests);
     /// None: npm reports it (the `root` message).
-    /// `key` names the pacote and tar versions npm extracts with (None: from
-    /// the hook's hello); an entry not yet known to it is compared before use.
+    /// `key` names the extraction code npm runs (None: from the hook's `key`
+    /// message); an entry not yet known to it is compared before use.
     pub fn new(store: &'a Store, root: Option<PathBuf>, mode: Mode, key: Option<String>, policy: CheckPolicy) -> Result<Server<'a>> {
         let tmp = TmpDir::create(store.root.join("tmp").join(format!("{}-inject", crate::store::process_tag())), 0o700)?;
+        // The install's start on the filesystem's clock, the one pacote's
+        // files get theirs from: the time of this directory, just made.
+        let started = std::fs::metadata(&tmp.path).and_then(|m| m.modified()).unwrap_or_else(|_| std::time::SystemTime::now());
         let key_cell = std::sync::OnceLock::new();
         if let Some(k) = key {
             let _ = key_cell.set(k);
@@ -480,7 +490,7 @@ impl<'a> Server<'a> {
             unsupported: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             key: key_cell,
-            started: std::time::SystemTime::now(),
+            started,
             halted: std::sync::OnceLock::new(),
             policy,
             issued: Mutex::new(HashMap::new()),
@@ -1120,10 +1130,19 @@ impl<'a> Server<'a> {
             let mut s = self.stats.lock().unwrap();
             s.extraction_unexpected.get_or_insert_with(|| message.clone());
         }
-        if known_key(self.k()) {
+        let declined = if known_key(self.k()) {
             let why = format!("pacote's extraction is not what matchapack's clones reproduce ({message})");
-            if let Err(e) = self.store.decline_key(self.k(), &why) {
-                crate::info!("could not put the key on the store's decline list: {e:#}");
+            self.store.decline_key(self.k(), &why).map_err(|e| format!("it could not be put on the store's decline list: {e:#}"))
+        } else {
+            Err("the extraction code could not be named, so it is not declined: every install under it stops cloning at such a package".to_string())
+        };
+        {
+            let mut s = self.stats.lock().unwrap();
+            if s.declined_file.is_none() && s.not_declined.is_none() {
+                match declined {
+                    Ok(f) => s.declined_file = Some(f.display().to_string()),
+                    Err(e) => s.not_declined = Some(e),
+                }
             }
         }
         let _ = self.halted.set(("extraction-unexpected", message));
@@ -1263,8 +1282,9 @@ impl<'a> Server<'a> {
                 .map(String::from);
             s.key_error = v.get("key_error").and_then(text);
             if let Some(why) = declined {
+                let file = self.store.declined_path(&key);
                 let _ = self.halted.set(("key-declined", format!("this extraction code ({key}) is on the store's decline list: {why}")));
-                s.key_declined = Some(why);
+                s.key_declined = Some(format!("{why}; delete {} to try it again", file.display()));
             }
             return true;
         }

@@ -116,16 +116,30 @@ fn installed_packages(root: &std::path::Path) -> Option<usize> {
     Some(v.get("packages")?.as_object()?.iter().filter(|(k, p)| is_package_key(k) && !flag(p, "link") && !flag(p, "inBundle")).count())
 }
 
-/// The error for an extraction of pacote's that the clones do not
-/// reproduce (serve.rs `halt_on_extraction`), or None. `matchapack report`
-/// finds these runs by the words "not what matchapack's clones reproduce".
-fn extraction_broke(odd: Option<&str>, key: &str) -> Option<anyhow::Error> {
-    odd.map(|odd| {
-        anyhow!(
-            "pacote's extraction is not what matchapack's clones reproduce ({odd}): node_modules may not be npm ci's; \
-             this extraction code ({key}) is left to npm in this store from now on (a file in its declined/ directory)"
-        )
-    })
+/// What happened to the extraction code after its extraction was not what
+/// the clones reproduce (serve.rs `halt_on_extraction`): declined in this
+/// store (and how to undo it), or why not.
+fn decline_sentence(key: &str, declined_file: Option<&str>, not_declined: Option<&str>) -> String {
+    match (declined_file, not_declined) {
+        (Some(f), _) => format!("this extraction code ({key}) is left to npm in this store from now on (delete {f} to try it again)"),
+        (None, Some(why)) => why.to_string(),
+        (None, None) => "the extraction code was not declined".to_string(),
+    }
+}
+
+/// An extraction of pacote's that the clones do not reproduce: the error
+/// when something had been cloned before it was seen (node_modules may then
+/// differ from npm ci's: the run is broken, npm ci rebuilds it), or the line
+/// to print when nothing had (the tree is npm's own; the install stands).
+/// `matchapack report` finds both by "not what matchapack's clones reproduce".
+fn extraction_outcome(odd: &str, cloned: usize, decline: &str) -> std::result::Result<String, anyhow::Error> {
+    if cloned > 0 {
+        Err(anyhow!("pacote's extraction is not what matchapack's clones reproduce ({odd}): node_modules may not be npm ci's; {decline}"))
+    } else {
+        Ok(format!(
+            "matchapack: pacote's extraction is not what matchapack's clones reproduce ({odd}); nothing had been cloned, so node_modules is npm's own; {decline}"
+        ))
+    }
 }
 
 /// The line that says why an install was slow (NOTES "PR C1: the key is
@@ -346,6 +360,18 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     if let Some(why) = &stats.key_declined {
         eprintln!("matchapack: no clones from the store, npm extracted the packages itself (this npm's extraction code is on the store's decline list: {why})");
     }
+    // pacote's extraction was not what a clone gives (a path older than this
+    // install, or not a file or directory). Clones placed before it was
+    // seen may differ from npm's files: the same answer as the result trap
+    // below. When nothing had been cloned the tree is npm's own: said, and
+    // the install stands (npm ci again would run its scripts twice).
+    let extraction = stats.extraction_unexpected.as_deref().map(|odd| {
+        let decline = decline_sentence(&key, stats.declined_file.as_deref(), stats.not_declined.as_deref());
+        extraction_outcome(odd, stats.cloned, &decline)
+    });
+    if let Some(Ok(line)) = &extraction {
+        eprintln!("{line}");
+    }
     if let Some(why) = &stats.key_error {
         crate::info!("inject: the extraction code could not be named ({why}); every package is compared with npm's extraction");
     }
@@ -388,10 +414,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     if let Some(e) = trap_fired(&stats.result_unexpected) {
         return Err(InstallError::Broke(e));
     }
-    // pacote's extraction was not what a clone gives (a file older than
-    // this install, or not a file or directory): the clones placed before it
-    // was seen may differ from npm's files, so the same answer.
-    if let Some(e) = extraction_broke(stats.extraction_unexpected.as_deref(), &key) {
+    if let Some(Err(e)) = extraction {
         return Err(InstallError::Broke(e));
     }
     if !status.success() {
@@ -471,9 +494,14 @@ mod tests {
         let l = new_code_line(6, 10, key).unwrap();
         assert!(l.contains("was new to the store: 6 packages were compared") && l.contains("matchapack store verify"), "{l}");
         assert!(new_code_line(6, 10, crate::serve::UNKNOWN_KEY).unwrap().contains("could not be named"));
-        assert!(extraction_broke(None, key).is_none());
-        let e = format!("{:#}", extraction_broke(Some("sha512-x: a: modified at 1"), key).unwrap());
-        assert!(e.contains("not what matchapack's clones reproduce (sha512-x: a: modified at 1)") && e.contains(key), "{e}");
+        let d = decline_sentence(key, Some("/s/declined/ab"), None);
+        assert!(d.contains("left to npm in this store from now on (delete /s/declined/ab to try it again)") && d.contains(key), "{d}");
+        assert_eq!(decline_sentence(key, None, Some("could not be named")), "could not be named");
+        let e = format!("{:#}", extraction_outcome("sha512-x: a: modified at 1", 3, &d).unwrap_err());
+        assert!(e.contains("not what matchapack's clones reproduce (sha512-x: a: modified at 1): node_modules may not be npm ci's") && e.contains(&d), "{e}");
+        // Nothing cloned: npm's own tree, said, not an error.
+        let l = extraction_outcome("sha512-x: a: modified at 1", 0, &d).unwrap();
+        assert!(l.contains("nothing had been cloned, so node_modules is npm's own") && l.contains(&d), "{l}");
     }
 
     #[test]

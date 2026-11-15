@@ -320,14 +320,14 @@ impl Store {
     /// The file that declines extraction-code `key`: one per key, named by
     /// the key's SHA-256, so that two installs declining two keys at once
     /// never rewrite each other's file (no read-modify-write of a list).
-    fn declined_file(&self, key: &str) -> PathBuf {
+    pub fn declined_path(&self, key: &str) -> PathBuf {
         self.root.join("declined").join(hex::encode(sha2::Sha256::digest(key.as_bytes())))
     }
 
     /// Why installs under extraction-code `key` are left to npm in this
     /// store (`decline_key`), or None. Removing the file clears it.
     pub fn declined(&self, key: &str) -> Option<String> {
-        let text = fs::read_to_string(self.declined_file(key)).ok()?;
+        let text = fs::read_to_string(self.declined_path(key)).ok()?;
         let (k, why) = text.split_once('\n')?;
         (k == key).then(|| why.trim_end().to_string())
     }
@@ -335,18 +335,18 @@ impl Store {
     /// Put `key` on the store's decline list, so that later installs under
     /// that code let npm extract every package: `<store>/declined/<sha256 of
     /// the key>`, holding the key on its first line and why on the second.
-    /// Written whole (tmp, then rename).
-    pub fn decline_key(&self, key: &str, why: &str) -> Result<()> {
+    /// Written whole (tmp, then rename). Returns the file.
+    pub fn decline_key(&self, key: &str, why: &str) -> Result<PathBuf> {
+        let f = self.declined_path(key);
         if self.declined(key).is_some() {
-            return Ok(());
+            return Ok(f);
         }
-        let f = self.declined_file(key);
         fs::create_dir_all(f.parent().unwrap())?;
         let why: String = why.chars().map(|c| if c.is_control() { ' ' } else { c }).take(300).collect();
         let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
         fs::write(&tmp, format!("{key}\n{why}\n"))?;
         fs::rename(&tmp, &f)?;
-        Ok(())
+        Ok(f)
     }
 
     /// Sum of the file sizes in a store entry, cached in `<store>/sizes/` (never
@@ -634,14 +634,15 @@ enum Node {
 
 /// Why the path `rel` of pacote's extraction (file type `ft`, metadata
 /// `meta`, not followed) is not what a clone, touched to the install's time,
-/// reproduces: neither a file nor a directory, or a file last modified
-/// before `since`. None when it is. The one rule for the comparison and the
+/// reproduces: neither a file nor a directory, or a file or directory last
+/// modified before `since` (a placed clone's paths are all touched to now).
+/// None when it is. The one rule for the comparison and the
 /// fill (`compare_extraction`, `extraction_odd`).
 fn odd_path(rel: &Path, ft: fs::FileType, meta: &fs::Metadata, since: std::time::SystemTime) -> Result<Option<String>> {
     if !ft.is_dir() && !ft.is_file() {
         return Ok(Some(format!("{}: neither a file nor a directory", show_rel(rel))));
     }
-    if ft.is_file() {
+    {
         let mtime = meta.modified()?;
         if mtime < since {
             let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(-1);
@@ -1059,6 +1060,43 @@ pub(crate) mod tests {
         drop(install);
         let gc = Store::exclusive(d.join("store"), d.join("cacache")).unwrap();
         drop(gc);
+        let _ = fs::remove_dir_all(&d);
+    }
+    /// The rule on pacote's extraction (`odd_path`), on its own and in the
+    /// comparison: every path a file or a directory, none more than
+    /// EXTRACTION_TIME_SLACK (an hour) older than the install's start. No
+    /// clone needed, so this runs everywhere (CI's ext4 included).
+    #[test]
+    fn the_extraction_rule_has_an_hour_of_slack_and_looks_at_every_path() {
+        let d = scratch("extraction-rule");
+        let started = std::time::SystemTime::now();
+        let fresh = |name: &str| {
+            let x = d.join(name);
+            fs::create_dir_all(x.join("lib")).unwrap();
+            fs::write(x.join("lib/a.js"), "a\n").unwrap();
+            fs::write(x.join("package.json"), "{}\n").unwrap();
+            x
+        };
+        let x = fresh("ok");
+        assert_eq!(extraction_odd(&x, started).unwrap(), None);
+        // Half an hour old: within the slack (a clock stepped back).
+        age(&x.join("lib/a.js"), 1800);
+        assert_eq!(extraction_odd(&x, started).unwrap(), None);
+        assert_eq!(compare_extraction(&x, &x, started).unwrap(), Compared::Same);
+        // An hour and a minute: not written by this install.
+        age(&x.join("lib/a.js"), 3660);
+        let odd = extraction_odd(&x, started).unwrap().unwrap();
+        assert!(odd.starts_with("lib/a.js: modified at"), "{odd}");
+        assert!(matches!(compare_extraction(&x, &fresh("other"), started).unwrap(), Compared::Unexpected(o) if o == odd));
+        // A directory counts too (a placed clone's directories are touched).
+        let y = fresh("dir");
+        age(&y.join("lib"), 3660);
+        assert!(extraction_odd(&y, started).unwrap().unwrap().starts_with("lib: modified at"));
+        // A symlink: not reproduced.
+        let z = fresh("link");
+        std::os::unix::fs::symlink("a.js", z.join("lib/b.js")).unwrap();
+        assert_eq!(extraction_odd(&z, started).unwrap().as_deref(), Some("lib/b.js: neither a file nor a directory"));
+        assert!(matches!(compare_extraction(&z, &z, started).unwrap(), Compared::Unexpected(_)));
         let _ = fs::remove_dir_all(&d);
     }
 }

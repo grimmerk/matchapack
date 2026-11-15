@@ -456,11 +456,13 @@ declined_keys() { for f in "$1"/declined/*; do [ -f "$f" ] && head -1 "$f"; done
 
 # 4i. pacote's extraction is no longer what a clone reproduces: an npm whose
 #     pacote keeps the tarball's file times (noMtime off; it runs with
-#     MATCHAPACK_NPM_FINGERPRINT=any). Its code is new to the store, so the
-#     entries are compared, and the first comparison sees files older than
-#     the install: through the shell function the run counts as broken and
-#     plain npm ci rebuilds node_modules, and the code goes on the store's
-#     decline list. The next install under it leaves every package to npm.
+#     MATCHAPACK_NPM_FINGERPRINT=any). Its code is recorded on every entry
+#     but lodash's (as if earlier installs had used it), so those are cloned
+#     at once and lodash is compared: the comparison sees files older than
+#     the install after clones were placed. Through the shell function the
+#     run counts as broken, plain npm ci rebuilds node_modules, and the code
+#     goes on the store's decline list. The next install under it leaves
+#     every package to npm.
 km=$(npm_copy npm-key-mtime)
 python3 - "$km/npm/node_modules/pacote/lib/fetcher.js" <<'PY' || bad "key: could not turn pacote's noMtime off"
 import sys
@@ -470,44 +472,58 @@ open(p, "w").write(s.replace("noMtime: true,", "noMtime: false,"))
 PY
 mt_key=$(node "$here/src/inject.js" --key "$km/npm" | head -1)
 ref_mt=$(project ref-mtime small); (cd "$ref_mt" && PATH=$km/bin:$PATH npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci with the noMtime-off npm"
+for f in "$ks"/made-by/sha512/*/*; do echo "$mt_key" >> "$f"; done
+klentry=${lhex:0:2}/${lhex:2}
+grep -vxF "$mt_key" "$ks/made-by/sha512/$klentry" > "$work/rec" && cp "$work/rec" "$ks/made-by/sha512/$klentry" || bad "key: lodash's record"
 mt_log=$work/logs-mtime; rm -rf "${mt_log:?}"
 p=$(project key-mtime small)
 (PATH=$km/bin:$PATH; export MATCHAPACK_NPM_FINGERPRINT=any MATCHAPACK_STORE=$ks MATCHAPACK_LOG_DIR=$mt_log MATCHAPACK_INJECT_CHECK=1000000; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
-[ $rc = 0 ] && grep -q "running npm ci to rebuild node_modules" "$work/out" && grep -q "not what matchapack's clones reproduce (.*before this install began)" "$work/out" \
+[ $rc = 0 ] && grep -q "running npm ci to rebuild node_modules" "$work/out" && grep -q "not what matchapack's clones reproduce (.*before this install began): node_modules may not be npm ci's; .*delete $ks/declined/[0-9a-f]* to try it again" "$work/out" \
   && [ "$(last_log_in "$mt_log" "r['outcome']")" = broke ] && [ "$(declined_keys "$ks")" = "$mt_key" ] && same "$ref_mt" "$p" \
-  && ok "key: an extraction with old file times: the run is rebuilt by plain npm ci, the code declined in this store, tree identical" \
+  && ok "key: old file times seen after clones were placed: the run is rebuilt by plain npm ci, the code declined in this store, tree identical" \
   || bad "key: old file times: rc=$rc, $(last_log_in "$mt_log" "r['outcome'], r.get('reason')")"
 p=$(project key-mtime2 small)
 (PATH=$km/bin:$PATH; export MATCHAPACK_NPM_FINGERPRINT=any MATCHAPACK_STORE=$ks MATCHAPACK_LOG_DIR=$mt_log MATCHAPACK_INJECT_CHECK=1000000; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
-[ $rc = 0 ] && grep -q "no clones from the store, npm extracted the packages itself (this npm's extraction code is on the store's decline list" "$work/out" \
+[ $rc = 0 ] && grep -q "no clones from the store, npm extracted the packages itself (this npm's extraction code is on the store's decline list: .*; delete $ks/declined/[0-9a-f]* to try it again)" "$work/out" \
   && [ "$(last_log_in "$mt_log" "r['outcome'], r['inject']['cloned'], r['inject']['fallbacks'].get('key-declined', 0) > 0")" = "installed 0 True" ] && same "$ref_mt" "$p" \
-  && ok "key: the next install under the declined code: npm extracts every package, said once, tree identical" \
+  && ok "key: the next install under the declined code: npm extracts every package, the file to delete named, tree identical" \
   || bad "key: declined code, second install: rc=$rc, $(last_log_in "$mt_log" "r['outcome'], (r.get('inject') or {}).get('cloned')")"
-MATCHAPACK_LOG_DIR=$mt_log "$bin" report > "$work/report" 2>&1 && grep -q "in 1 runs pacote's extraction was not what the clones reproduce" "$work/report" \
-  && ok "key: matchapack report counts the run whose extraction was not what the clones reproduce" || bad "key: report ($(grep -c reproduce "$work/report"))"
+MATCHAPACK_LOG_DIR=$mt_log "$bin" report > "$work/report" 2>&1 && grep -q "in 1 runs pacote's extraction was not what the clones reproduce (1 rebuilt by npm ci, 0 had cloned nothing" "$work/report" \
+  && ok "key: matchapack report counts the rebuilt run" || bad "key: report ($(grep reproduce "$work/report"))"
 
 # 4j. The same npm with an empty store: pacote's extractions would become the
 #     entries (fills, nothing to compare with). They are checked the same
-#     way first: the run is rebuilt by plain npm ci, the code is declined,
-#     and no entry is left recorded as this code's.
+#     way first, before anything is cloned: node_modules is npm's own, so
+#     the install stands (no second npm ci), says why, and declines the
+#     code; no entry is left recorded as this code's. The next install there
+#     is npm's own. Removing the key's file clears the decline: the install
+#     after that sees the old times again, and declines the code again.
 es=$work/store-mtime-empty; rm -rf "${es:?}"
 mt_log2=$work/logs-mtime-empty; rm -rf "${mt_log2:?}"
+mt_install() { (PATH=$km/bin:$PATH; export MATCHAPACK_NPM_FINGERPRINT=any MATCHAPACK_STORE=$es MATCHAPACK_LOG_DIR=$mt_log2; wrapped "$1" "npm ci --no-audit --no-fund"); }
 p=$(project key-mtime-empty small)
-(PATH=$km/bin:$PATH; export MATCHAPACK_NPM_FINGERPRINT=any MATCHAPACK_STORE=$es MATCHAPACK_LOG_DIR=$mt_log2; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
-[ $rc = 0 ] && grep -q "running npm ci to rebuild node_modules" "$work/out" && grep -q "not what matchapack's clones reproduce (.*before this install began)" "$work/out" \
-  && [ "$(last_log_in "$mt_log2" "r['outcome']")" = broke ] && [ "$(declined_keys "$es")" = "$mt_key" ] \
-  && [ -z "$(cat "$es"/made-by/sha512/*/* 2>/dev/null | grep -xF "$mt_key")" ] && same "$ref_mt" "$p" \
-  && ok "key: the same with an empty store: the fills are checked too, the run rebuilt by plain npm ci, the code declined, no entry recorded under it, tree identical" \
-  || bad "key: old file times, empty store: rc=$rc, $(last_log_in "$mt_log2" "r['outcome'], r.get('reason')")"
+mt_install "$p"; rc=$?
+[ $rc = 0 ] && ! grep -q "rebuild node_modules" "$work/out" \
+  && grep -q "not what matchapack's clones reproduce (.*before this install began); nothing had been cloned, so node_modules is npm's own; .*delete $es/declined/[0-9a-f]* to try it again" "$work/out" \
+  && [ "$(last_log_in "$mt_log2" "r['outcome'], r['inject']['cloned'], r['inject']['extraction_unexpected'] is not None")" = "installed 0 True" ] \
+  && [ "$(declined_keys "$es")" = "$mt_key" ] && [ -z "$(cat "$es"/made-by/sha512/*/* 2>/dev/null | grep -xF "$mt_key")" ] && same "$ref_mt" "$p" \
+  && ok "key: the same with an empty store: the fills are checked first, nothing cloned, so the install stands (no second npm ci), the code declined, nothing recorded under it, tree identical" \
+  || bad "key: old file times, empty store: rc=$rc, $(last_log_in "$mt_log2" "r['outcome'], r.get('reason'), (r.get('inject') or {}).get('cloned')")"
 p=$(project key-mtime-empty2 small)
-(PATH=$km/bin:$PATH; export MATCHAPACK_NPM_FINGERPRINT=any MATCHAPACK_STORE=$es MATCHAPACK_LOG_DIR=$mt_log2; wrapped "$p" "npm ci --no-audit --no-fund"); rc=$?
+mt_install "$p"; rc=$?
 [ $rc = 0 ] && grep -q "this npm's extraction code is on the store's decline list" "$work/out" \
-  && [ "$(last_log_in "$mt_log2" "r['outcome'], r['inject']['cloned']")" = "installed 0" ] && same "$ref_mt" "$p" \
+  && [ "$(last_log_in "$mt_log2" "r['outcome'], r['inject']['cloned'], r['inject']['extraction_unexpected']")" = "installed 0 None" ] && same "$ref_mt" "$p" \
   && ok "key: the next install there: npm extracts every package, tree identical" || bad "key: empty store, second install: rc=$rc"
-# Clearing a decline by hand: remove its file; the next install clones again
-# (from the original npm's code here, which was never declined).
 dk=$(grep -lxF "$mt_key" "$es"/declined/* 2>/dev/null)
-[ -n "$dk" ] && rm -f "$dk" && [ -z "$(declined_keys "$es")" ] && ok "key: removing the key's file in <store>/declined clears the decline" || bad "key: clearing a decline (${dk:-no file for the key})"
+[ -n "$dk" ] && rm -f "$dk" && [ -z "$(declined_keys "$es")" ] || bad "key: clearing a decline (${dk:-no file for the key})"
+p=$(project key-mtime-empty3 small)
+mt_install "$p"; rc=$?
+[ $rc = 0 ] && [ -n "$dk" ] && ! grep -q "on the store's decline list" "$work/out" \
+  && [ "$(last_log_in "$mt_log2" "r['outcome'], r['inject']['cloned'], r['inject']['extraction_unexpected'] is not None")" = "installed 0 True" ] \
+  && [ "$(declined_keys "$es")" = "$mt_key" ] && same "$ref_mt" "$p" \
+  && ok "key: after its file is removed, the code is tried again: the check fires again and declines it again" || bad "key: after clearing: rc=$rc"
+MATCHAPACK_LOG_DIR=$mt_log2 "$bin" report > "$work/report" 2>&1 && grep -q "in 2 runs pacote's extraction was not what the clones reproduce (0 rebuilt by npm ci, 2 had cloned nothing" "$work/report" \
+  && ok "key: matchapack report counts the runs that cloned nothing" || bad "key: report, empty store ($(grep reproduce "$work/report"))"
 
 # 10c. The fingerprint gate: an npm whose pacote class has one statement more
 #      inside a private method (#entryMode: not part of extract's own text)

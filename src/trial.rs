@@ -406,21 +406,28 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
             trapped[0].chars().take(120).collect::<String>()
         );
     }
-    // pacote's extraction held a file older than the install, or something
-    // other than files and directories: npm ci rebuilt node_modules, and the
-    // extraction code went on the store's decline list (serve.rs,
-    // inject.rs `extraction_broke`).
-    let odd: Vec<&str> = runs
+    // pacote's extraction held a path older than the install, or something
+    // other than files and directories (serve.rs, inject.rs
+    // `extraction_outcome`): broken runs, which npm ci rebuilt (something
+    // had been cloned), and installed or npm-failed runs that had cloned
+    // nothing (npm's own tree; the run log has `inject.extraction_unexpected`).
+    // Either way the extraction code was declined in that store, when known.
+    let rebuilt: Vec<String> = runs
         .iter()
         .filter(|r| r["outcome"] == "broke")
         .filter_map(|r| r["reason"].as_str())
         .filter(|w| w.contains("not what matchapack's clones reproduce"))
+        .map(String::from)
         .collect();
-    if !odd.is_empty() {
+    let kept: Vec<String> = runs.iter().filter_map(|r| r["inject"]["extraction_unexpected"].as_str()).map(String::from).collect();
+    if !rebuilt.is_empty() || !kept.is_empty() {
+        let first = rebuilt.first().or(kept.first()).unwrap();
         println!(
-            "inject engine: in {} runs pacote's extraction was not what the clones reproduce, npm ci rebuilt node_modules, and that extraction code is left to npm in the store; first: {}",
-            odd.len(),
-            odd[0].chars().take(160).collect::<String>()
+            "inject engine: in {} runs pacote's extraction was not what the clones reproduce ({} rebuilt by npm ci, {} had cloned nothing and kept npm's own tree); that extraction code is left to npm in the store; first: {}",
+            rebuilt.len() + kept.len(),
+            rebuilt.len(),
+            kept.len(),
+            first.chars().take(160).collect::<String>()
         );
     }
     // One line per matchapack build, in order of first use, so numbers from
