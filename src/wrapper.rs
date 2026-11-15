@@ -535,7 +535,7 @@ pub fn process_umask() -> u32 {
 /// npm major versions the inject engine runs on. It has no code per npm
 /// version: what keeps it right on a new release is checked at run time (the
 /// hook installs itself only when pacote has the expected shape; the first
-/// install under a new pacote/tar version compares every store entry it uses
+/// install under new extraction code (pacote, tar, libuv) compares every store entry it uses
 /// with pacote's extraction; npm placing packages the hook never saw is
 /// reported). A major is listed once the inject harness has run on it
 /// (`scripts/verify-npm.sh`, `scripts/test-inject.sh`):

@@ -12,8 +12,13 @@
 //!
 //! Protocol: one JSON object per line, both ways, over one socket.
 //!   node → matchapack
-//!     {"hello":true,"pacote":"21.5.1","fingerprint":"…","hook":"pending"}
-//!                                                    once, before npm starts
+//!     {"hello":true,"pacote":"21.5.1","tar":"7.5.22","uv":"1.52.1","fingerprint":"…",
+//!      "hook":"pending"}                             once, before npm starts
+//!     {"key":"fetcher:… tar:… uv:1.52.1","tar_fingerprint":"…"}
+//!                                                    the store key of the extraction
+//!                                                    code (`code_key`), once, when npm
+//!                                                    has loaded pacote, before the hook
+//!                                                    (null, with `key_error`: unknown)
 //!     {"id":0,"root":"/abs/dir","global":false,"command":"ci","typed":"ic",
 //!      "dry_run":false,"package_lock_only":false,"usage":false,"package_lock":true,
 //!      "save":true,"workspace_filter":false}
@@ -54,19 +59,31 @@
 //! again with `extracted`. The directory then becomes the store entry
 //! (renamed in only if no other install got there first) and is cloned.
 //! The same round trip checks the store against pacote (`why: "check"`): the
-//! entry is compared with pacote's extraction (`store::compare_trees`) before
-//! anything is placed. Each entry records the pacote and tar versions under
-//! which it is known to be what pacote extracts (`store.made_by`; keys such as
-//! `pacote@21.5.1 tar@7.5.22`): the one that made it, and each one that later
-//! extracted it to the same tree. An entry is compared before use **once per
-//! key**: whenever the npm that is running (its pacote and tar) is not in the
-//! record yet (matchapack's own extractor, the classic engine's until PR C2,
-//! recorded nothing), and then added to it; an entry whose record has this key is
-//! compared one time in MATCHAPACK_INJECT_CHECK (default 50), at random, to
-//! catch an entry changed since. pacote or tar extract differently across
-//! versions for odd tarballs (tar 6 extracts a file named `a\..\b` that tar 7
-//! refuses), and no install under one version can vouch for entries it did
-//! not use, so every version checks every entry it uses, once.
+//! entry is compared with pacote's extraction (`store::compare_extraction`) before
+//! anything is placed. Each entry records the extraction code under which it
+//! is known to be what pacote extracts (`store.made_by`; keys such as
+//! `fetcher:<32 hex> tar:<32 hex> uv:1.52.1`, `code_key`: pacote's
+//! lib/fetcher.js, the tar files node loaded with tar's dependencies, and
+//! libuv's version; NOTES "PR C1: the key is the code"): the code that made
+//! it, and each one that later extracted it to the same tree. An entry is
+//! compared before use **once per key**: whenever the code that is running is
+//! not in the record yet (matchapack's own extractor, the classic engine's
+//! until PR C2, recorded nothing; records written before PR C1 of #39 hold
+//! `pacote@… tar@…` keys, which no code key matches), and then added to it;
+//! an entry whose record has this key is compared one time in
+//! MATCHAPACK_INJECT_CHECK (default 50), at random, to catch an entry changed
+//! since. pacote or tar extract differently across versions for odd tarballs
+//! (tar 6 extracts a file named `a\..\b` that tar 7 refuses), and no install
+//! under one version can vouch for entries it did not use, so every code
+//! checks every entry it uses, once.
+//! The comparison also checks pacote's extraction itself
+//! (`store::compare_extraction`), and so does a fill before the extraction
+//! becomes the entry (`store::extraction_odd`, the same rule): only files and
+//! directories, every file written by this install. Otherwise the clones (touched to now) are not
+//! what npm puts on disk: the hook stops for this run (a fatal refusal), the
+//! install counts as broken (npm ci rebuilds node_modules, inject.rs), and
+//! the key goes on the store's decline list (`store.declined`), under which
+//! every later request is refused the same way: npm extracts every package.
 //! A difference places pacote's extraction and replaces the entry with it
 //! (renamed aside first: an install cloning from it at that moment gets the
 //! whole old entry or an error, never a mix); the record is then this key
@@ -189,6 +206,24 @@ pub struct Stats {
     pub paths_regrouped: usize,
     /// The first few refusal messages, for the log.
     pub errors: Vec<String>,
+    /// The SHA-256 of tar's loaded code (the helper's `key` message), for
+    /// the log and `matchapack report`; `key_error` when the key could not
+    /// be named.
+    pub tar_fingerprint: Option<String>,
+    pub key_error: Option<String>,
+    /// Comparisons asked for because the entry's record lacked the running
+    /// key (not the sample), counted when decided: the work a new
+    /// extraction code costs.
+    pub new_key_checks: usize,
+    /// pacote's extraction was not what a clone reproduces (serve.rs module
+    /// comment): the first such package and why.
+    pub extraction_unexpected: Option<String>,
+    /// Then: the decline list's file written for the key, or why the key
+    /// was not declined (the unknown key; a write that failed).
+    pub declined_file: Option<String>,
+    pub not_declined: Option<String>,
+    /// The running key is on the store's decline list: why.
+    pub key_declined: Option<String>,
     /// Why the helper stopped before npm's command ran: its own `declined`
     /// (before npm started), or this server's refusal of npm's root.
     pub declined: Option<String>,
@@ -248,7 +283,16 @@ impl Stats {
             "serve_wall_secs": r(self.wall_secs()),
             "errors": self.errors,
             "pacote": self.hello.as_ref().and_then(|h| h.get("pacote")).cloned().unwrap_or(Value::Null),
+            "tar": self.hello.as_ref().and_then(|h| h.get("tar")).cloned().unwrap_or(Value::Null),
+            "uv": self.hello.as_ref().and_then(|h| h.get("uv")).cloned().unwrap_or(Value::Null),
             "fingerprint": self.hello.as_ref().and_then(|h| h.get("fingerprint")).cloned().unwrap_or(Value::Null),
+            "tar_fingerprint": self.tar_fingerprint,
+            "key_error": self.key_error,
+            "new_key_checks": self.new_key_checks,
+            "extraction_unexpected": self.extraction_unexpected,
+            "declined_file": self.declined_file,
+            "not_declined": self.not_declined,
+            "key_declined": self.key_declined,
             "root": self.root.as_ref().map(|r| r.display().to_string()),
             "command": self.command,
             "package_lock": self.package_lock,
@@ -305,9 +349,28 @@ pub(crate) fn differs_kind(made_by: &[String], key: &str) -> &'static str {
     }
 }
 
-/// A key the hook could not name (`pacote@? tar@?`) vouches for nothing.
+/// The key of extraction code the hook could not name: it vouches for
+/// nothing, so every entry is compared.
+pub const UNKNOWN_KEY: &str = "pacote@? tar@?";
+
+/// A key the hook could not name vouches for nothing.
 fn known_key(key: &str) -> bool {
     !key.contains('?')
+}
+
+/// The store key from a helper's message (the inject hook's `key` message,
+/// store verify's hello): its `key` when it has exactly the shape
+/// `fetcher:<32 hex> tar:<32 hex> uv:<digits and dots>` (src/inject.js
+/// `extractionKey`), else UNKNOWN_KEY.
+pub fn code_key(v: &Value) -> String {
+    let hex = |s: &str| s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let version = |s: &str| !s.is_empty() && s.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let ok = v.get("key").and_then(|k| k.as_str()).filter(|k| {
+        let mut parts = k.split(' ');
+        let (Some(f), Some(t), Some(u), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return false };
+        f.strip_prefix("fetcher:").is_some_and(hex) && t.strip_prefix("tar:").is_some_and(hex) && u.strip_prefix("uv:").is_some_and(version)
+    });
+    ok.map(String::from).unwrap_or_else(|| UNKNOWN_KEY.to_string())
 }
 
 /// The commands whose install root the server accepts (npm's names, after
@@ -337,9 +400,18 @@ pub struct Server<'a> {
     unsupported: AtomicBool,
     /// Set when the node child has exited: queued requests are dropped.
     stopping: AtomicBool,
-    /// The pacote and tar versions npm extracts with, known from the hook's
-    /// hello (the versions node really loaded), or given to `new` (tests).
+    /// The key of the extraction code npm runs (`code_key`), from the
+    /// hook's `key` message (sent when npm has loaded pacote, before any
+    /// request), or given to `new` (tests).
     key: std::sync::OnceLock<String>,
+    /// When this install began, on the filesystem's clock (this server was
+    /// made before node started): pacote's extraction must not be older
+    /// (`store::compare_extraction`, `store::extraction_odd`).
+    started: std::time::SystemTime,
+    /// Set when no further request is served from the store in this run (a
+    /// declined key, or an extraction no clone reproduces): every request is
+    /// refused, fatally, with this reason and message.
+    halted: std::sync::OnceLock<(&'static str, String)>,
     policy: CheckPolicy,
     /// Directories handed out for pacote's extraction, and for which entry.
     issued: Mutex<HashMap<PathBuf, Integrity>>,
@@ -428,10 +500,13 @@ fn already_exists(e: &anyhow::Error) -> bool {
 impl<'a> Server<'a> {
     /// `root`, when given, must be the canonical project directory (tests);
     /// None: npm reports it (the `root` message).
-    /// `key` names the pacote and tar versions npm extracts with (None: from
-    /// the hook's hello); an entry not yet known to it is compared before use.
+    /// `key` names the extraction code npm runs (None: from the hook's `key`
+    /// message); an entry not yet known to it is compared before use.
     pub fn new(store: &'a Store, root: Option<PathBuf>, mode: Mode, key: Option<String>, policy: CheckPolicy) -> Result<Server<'a>> {
         let tmp = TmpDir::create(store.root.join("tmp").join(format!("{}-inject", crate::store::process_tag())), 0o700)?;
+        // The install's start on the filesystem's clock, the one pacote's
+        // files get theirs from: the time of this directory, just made.
+        let started = std::fs::metadata(&tmp.path).and_then(|m| m.modified()).unwrap_or_else(|_| std::time::SystemTime::now());
         let key_cell = std::sync::OnceLock::new();
         if let Some(k) = key {
             let _ = key_cell.set(k);
@@ -453,6 +528,8 @@ impl<'a> Server<'a> {
             unsupported: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             key: key_cell,
+            started,
+            halted: std::sync::OnceLock::new(),
             policy,
             issued: Mutex::new(HashMap::new()),
             filling: Mutex::new(HashMap::new()),
@@ -463,13 +540,19 @@ impl<'a> Server<'a> {
     }
 
     fn k(&self) -> &str {
-        // The hello comes before any request; without one, nothing is known.
-        self.key.get_or_init(|| "pacote@? tar@?".into())
+        // The key message comes before any request; without one, nothing is
+        // known.
+        self.key.get_or_init(|| UNKNOWN_KEY.into())
     }
 
-    /// The pacote and tar versions the check rules used.
+    /// The key of the extraction code the check rules used.
     pub fn key(&self) -> String {
         self.k().to_string()
+    }
+
+    /// The fatal refusal of every request once the run is halted.
+    fn halted_refusal(&self) -> Option<Outcome> {
+        self.halted.get().map(|(reason, message)| Outcome::Refused { reason, message: message.clone(), fatal: true })
     }
 
     /// Check the root npm reports against the trial scope (the shell
@@ -701,6 +784,9 @@ impl<'a> Server<'a> {
     /// done: an empty list.
     fn place_or_wait(&self, id: &Value, sri: &str, dest: &Path) -> Vec<(Value, Outcome)> {
         let one = |o: Outcome| vec![(id.clone(), o)];
+        if let Some(o) = self.halted_refusal() {
+            return one(o);
+        }
         if self.unsupported.load(Ordering::Relaxed) {
             return one(Outcome::Refused { reason: "clone-unsupported", message: "this filesystem cannot clone".into(), fatal: true });
         }
@@ -722,8 +808,12 @@ impl<'a> Server<'a> {
                     Ok(l) => l,
                     Err(e) => return one(refused("store-error", format!("{e:#}"))),
                 };
-                if self.should_check(&self.store.made_by(&i)) {
+                let made_by = self.store.made_by(&i);
+                if self.should_check(&made_by) {
                     drop(shared);
+                    if !made_by.iter().any(|k| k == self.k()) {
+                        self.stats.lock().unwrap().new_key_checks += 1;
+                    }
                     return one(self.issue(i, "check"));
                 }
                 if !is_real_dir(&dir) {
@@ -825,6 +915,10 @@ impl<'a> Server<'a> {
             discard();
             return refused("pacote-extract-failed", "pacote could not extract the package into matchapack's directory");
         }
+        if let Some(o) = self.halted_refusal() {
+            discard();
+            return o;
+        }
         if self.unsupported.load(Ordering::Relaxed) {
             discard();
             return Outcome::Refused { reason: "clone-unsupported", message: "this filesystem cannot clone".into(), fatal: true };
@@ -883,8 +977,14 @@ impl<'a> Server<'a> {
                 }
                 return refused("clone-error", format!("{e:#}"));
             }
-            let differs = match crate::store::compare_trees(extracted, &cand, true) {
-                Ok(d) => d,
+            let differs = match crate::store::compare_extraction(extracted, &cand, self.started) {
+                Ok(crate::store::Compared::Same) => None,
+                Ok(crate::store::Compared::Differs(d)) => Some(d),
+                Ok(crate::store::Compared::Unexpected(odd)) => {
+                    drop_cand();
+                    discard();
+                    return self.halt_on_extraction(&i, odd);
+                }
                 Err(e) => {
                     drop_cand();
                     discard();
@@ -984,6 +1084,22 @@ impl<'a> Server<'a> {
             }
             return o;
         }
+        // A fill: pacote's extraction becomes the entry with nothing to
+        // compare it with, and is recorded as this key's. The same check as
+        // a comparison's on it first (metadata only): an entry recorded
+        // from an extraction no clone reproduces would be cloned unchecked
+        // by every later install under this key.
+        match crate::store::extraction_odd(extracted, self.started) {
+            Ok(None) => {}
+            Ok(Some(odd)) => {
+                discard();
+                return self.halt_on_extraction(&i, odd);
+            }
+            Err(e) => {
+                discard();
+                return refused("store-error", format!("reading pacote's extraction of {}: {e:#}", i.key()));
+            }
+        }
         // pacote's extraction was made just now: placed without a touch.
         let mut o = self.finish(i.clone(), extracted, dst, false, false, None, true);
         let parent = entry.parent().unwrap();
@@ -1060,6 +1176,35 @@ impl<'a> Server<'a> {
             },
             Err(e) => Err(err(format!("moving into {}: {e}", dst.display()))),
         }
+    }
+
+    /// pacote's extraction of `i` is not what a placed clone reproduces
+    /// (`store::compare_extraction`): this run is halted (the hook leaves
+    /// this and every later package to npm), it is reported as broken
+    /// (inject.rs), and a known key goes on the store's decline list.
+    fn halt_on_extraction(&self, i: &Integrity, odd: String) -> Outcome {
+        let message = format!("{}: {odd}", i.key());
+        {
+            let mut s = self.stats.lock().unwrap();
+            s.extraction_unexpected.get_or_insert_with(|| message.clone());
+        }
+        let declined = if known_key(self.k()) {
+            let why = format!("pacote's extraction is not what matchapack's clones reproduce ({message})");
+            self.store.decline_key(self.k(), &why).map_err(|e| format!("it could not be put on the store's decline list: {e:#}"))
+        } else {
+            Err("the extraction code could not be named, so it is not declined: every install under it stops cloning at such a package".to_string())
+        };
+        {
+            let mut s = self.stats.lock().unwrap();
+            if s.declined_file.is_none() && s.not_declined.is_none() {
+                match declined {
+                    Ok(f) => s.declined_file = Some(f.display().to_string()),
+                    Err(e) => s.not_declined = Some(e),
+                }
+            }
+        }
+        let _ = self.halted.set(("extraction-unexpected", message));
+        self.halted_refusal().unwrap()
     }
 
     fn mark_made_by(&self, i: &Integrity) {
@@ -1179,9 +1324,29 @@ impl<'a> Server<'a> {
         // whatever arrives.
         let text = |x: &Value| x.as_str().map(|s| s.chars().take(300).collect::<String>());
         if v.get("hello").is_some() {
-            let ver = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("?").to_string();
-            let _ = self.key.set(format!("pacote@{} tar@{}", ver("pacote"), ver("tar")));
             self.stats.lock().unwrap().hello = Some(v.clone());
+            return true;
+        }
+        // The key comes when npm has loaded pacote, before any request.
+        if v.get("key").is_some() && v.get("id").is_none() {
+            let key = code_key(v);
+            let _ = self.key.set(key.clone());
+            let declined = if known_key(&key) { self.store.declined(&key) } else { None };
+            if declined.is_none() && known_key(&key) && self.store.declined_path(&key).exists() {
+                crate::info!("inject: this extraction code was declined by another matchapack build; trying it again");
+            }
+            let mut s = self.stats.lock().unwrap();
+            s.tar_fingerprint = v
+                .get("tar_fingerprint")
+                .and_then(|x| x.as_str())
+                .filter(|f| f.len() == 64 && f.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(String::from);
+            s.key_error = v.get("key_error").and_then(text);
+            if let Some(why) = declined {
+                let file = self.store.declined_path(&key);
+                let _ = self.halted.set(("key-declined", format!("this extraction code ({key}) is on the store's decline list: {why}")));
+                s.key_declined = Some(format!("{why}; delete {} to try it again", file.display()));
+            }
             return true;
         }
         if let Some(state) = v.get("hook").and_then(text) {
@@ -1440,7 +1605,7 @@ mod tests {
         }
 
         fn server_with(&self, mode: Mode, policy: CheckPolicy) -> Server<'_> {
-            Server::new(&self.store, Some(self.root.clone()), mode, Some("pacote@1.0.0 tar@2.0.0".into()), policy).unwrap()
+            Server::new(&self.store, Some(self.root.clone()), mode, Some(KEY.into()), policy).unwrap()
         }
 
         /// What the hook does with an `extract_to` answer, with matchapack's own
@@ -2020,8 +2185,8 @@ mod tests {
         assert!(s.stats.lock().unwrap().filled.is_empty());
     }
 
-    const KEY: &str = "pacote@1.0.0 tar@2.0.0";
-    const OLD: &str = "pacote@0.9.0 tar@1.0.0";
+    const KEY: &str = "fetcher:11111111111111111111111111111111 tar:22222222222222222222222222222222 uv:1.52.1";
+    const OLD: &str = "fetcher:11111111111111111111111111111111 tar:33333333333333333333333333333333 uv:1.52.1";
 
     /// Check `dst` with pacote's extraction of `i`, changed by `change`
     /// first (the stand-in for a pacote whose rules differ from the entry's).
@@ -2063,7 +2228,7 @@ mod tests {
         let (j, _) = fx.entry(&[("package.json", 0o644, "{\"name\":\"j\"}\n"), ("bin/cli", 0o755, "x\n")]);
         let (d, _) = check_once(&fx, &s, &j, &fx.root.join("node_modules/c"), chmod_644);
         assert_eq!(d.map(|x| x.0), Some("extractor"));
-        // Known to other pacote/tar versions only: their rules differ from
+        // Known to other extraction code only: its rules differ from
         // this one's for this tarball. The record becomes this key alone.
         let (k, _) = fx.entry(&[("package.json", 0o644, "{\"name\":\"k\"}\n"), ("bin/cli", 0o755, "y\n")]);
         fx.store.set_made_by(&k, OLD).unwrap();
@@ -2159,11 +2324,38 @@ mod tests {
     }
 
     #[test]
-    fn the_key_comes_from_the_hooks_hello() {
+    fn the_key_comes_from_the_hooks_key_message() {
         let fx = Fx::new("serve-key");
-        let s = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, None, CheckPolicy::OneIn(50)).unwrap();
-        assert!(s.record_message(&json!({ "hello": true, "pacote": "21.5.1", "tar": "7.5.22", "hook": "on" })));
-        assert_eq!(s.key(), "pacote@21.5.1 tar@7.5.22");
+        let new = || Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, None, CheckPolicy::OneIn(50)).unwrap();
+        // The hello names versions only: no key (pacote is not loaded yet).
+        let s = new();
+        assert!(s.record_message(&json!({ "hello": true, "pacote": "21.5.1", "tar": "7.5.22", "uv": "1.52.1", "hook": "pending" })));
+        let fp = "ab".repeat(32);
+        assert!(s.record_message(&json!({ "key": KEY, "tar_fingerprint": fp })));
+        assert_eq!(s.key(), KEY);
+        let st = s.stats.lock().unwrap().to_json();
+        assert_eq!((st["tar_fingerprint"].as_str(), st["tar"].as_str(), st["uv"].as_str()), (Some(fp.as_str()), Some("7.5.22"), Some("1.52.1")));
+        drop(s);
+        // Anything not of the exact shape is the unknown key.
+        for bad in [
+            json!(null),
+            json!(42),
+            json!("pacote@21.5.1 tar@7.5.22"),
+            json!(KEY.replace(" uv:1.52.1", "")),
+            json!(format!("{KEY} x")),
+            json!(KEY.replace("uv:1.52.1", "uv:")),
+            json!(KEY.replace("uv:1.52.1", "uv:1..2")),
+            json!(KEY.replace("uv:1.52.1", "uv:1.52.1-rc")),
+            json!(KEY.replace("fetcher:1", "fetcher:A")),
+            json!(KEY.replace("tar:2", "tar:")),
+            json!(KEY.replace(' ', "  ")),
+        ] {
+            let s = new();
+            assert!(s.record_message(&json!({ "key": bad, "tar_fingerprint": null, "key_error": "x" })));
+            assert_eq!(s.key(), UNKNOWN_KEY, "{bad}");
+        }
+        assert_eq!(code_key(&json!({ "hello": true, "key": KEY })), KEY, "store verify's hello");
+        assert_eq!(code_key(&json!({ "hello": true })), UNKNOWN_KEY);
     }
 
     #[test]
@@ -2201,7 +2393,7 @@ mod tests {
         }
         // Known to other versions only: compared once under this one.
         fx.store.set_made_by(&i, OLD).unwrap();
-        assert!(checks(&never()), "not yet compared under this pacote/tar");
+        assert!(checks(&never()), "not yet compared under this extraction code");
         // Known to both (an install under each): sampled, whichever runs and
         // in whichever order they were recorded.
         fx.store.add_made_by(&i, KEY).unwrap();
@@ -2210,12 +2402,123 @@ mod tests {
         fx.store.add_made_by(&i, OLD).unwrap();
         assert_eq!(fx.store.made_by(&i), vec![KEY.to_string(), OLD.to_string()]);
         assert!(!checks(&never()), "this version first in the record");
+        // Records written before the key was the code (`pacote@… tar@…`)
+        // vouch for nothing under a code key; nor does another libuv.
+        fx.store.set_made_by(&i, "pacote@21.5.1 tar@7.5.22").unwrap();
+        assert!(checks(&never()), "an old-format record");
+        fx.store.set_made_by(&i, &KEY.replace("uv:1.52.1", "uv:1.51.0")).unwrap();
+        assert!(checks(&never()), "only another libuv recorded");
+        fx.store.add_made_by(&i, KEY).unwrap();
+        assert!(!checks(&never()), "both libuv versions recorded");
         // A key the hook could not name vouches for nothing.
         let fresh = Fx::new("serve-policy-unknown");
         let (j, sri_j) = fresh.entry(PKG);
-        let unknown = Server::new(&fresh.store, Some(fresh.root.clone()), clone::Mode::File, Some("pacote@? tar@?".into()), CheckPolicy::OneIn(1_000_000)).unwrap();
-        fresh.store.set_made_by(&j, "pacote@? tar@?").unwrap();
+        let unknown = Server::new(&fresh.store, Some(fresh.root.clone()), clone::Mode::File, Some(UNKNOWN_KEY.into()), CheckPolicy::OneIn(1_000_000)).unwrap();
+        fresh.store.set_made_by(&j, UNKNOWN_KEY).unwrap();
         assert!(matches!(unknown.place_entry(&sri_j, &fresh.root.join("node_modules/r")), Outcome::Extract { why: "check", .. }));
+    }
+
+    #[test]
+    fn an_extraction_no_clone_reproduces_halts_the_run_and_declines_the_key() {
+        let fx = Fx::new("serve-odd-extraction");
+        if !fx.can_clone() {
+            return;
+        }
+        let (i, sri) = fx.entry(PKG);
+        fx.store.set_made_by(&i, OLD).unwrap();
+        // pacote's extraction with a file older than the install (here, an
+        // hour and a minute): not what a clone touched to now gives.
+        let s = fx.server_with(clone::Mode::File, CheckPolicy::OneIn(1_000_000));
+        let dst = fx.root.join("node_modules/odd");
+        let to = extract_to(s.place_entry(&sri, &dst), "check");
+        fx.pacote_extract(&i, &to);
+        crate::store::tests::age(&to.join("lib/index.js"), 3660);
+        let (reason, message, fatal) = refusal(s.place_extracted(&sri, &dst, &to));
+        assert_eq!((reason, fatal), ("extraction-unexpected", true), "{message}");
+        assert!(message.contains("lib/index.js: modified at") && message.contains("before this install began"), "{message}");
+        assert!(!to.exists() && !dst.exists(), "nothing placed, the extraction removed");
+        assert_eq!(fx.store.made_by(&i), vec![OLD.to_string()], "the entry and its record as they were");
+        assert!(fx.store.declined(KEY).is_some_and(|w| w.contains("index.js")), "{:?}", fx.store.declined(KEY));
+        assert!(fx.store.declined(OLD).is_none());
+        assert!(s.stats.lock().unwrap().extraction_unexpected.is_some());
+        // Every later request of this run: the same fatal refusal.
+        let (reason, _, fatal) = refusal(s.place_entry(&sri, &fx.root.join("node_modules/later")));
+        assert_eq!((reason, fatal), ("extraction-unexpected", true));
+        drop(s);
+        // A later install under the declined key: refused from its first
+        // request, as soon as the key is known (npm extracts everything).
+        let s = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, None, CheckPolicy::OneIn(50)).unwrap();
+        assert!(s.record_message(&json!({ "key": KEY, "tar_fingerprint": null })));
+        let (reason, message, fatal) = refusal(s.place_entry(&sri, &fx.root.join("node_modules/next")));
+        assert_eq!((reason, fatal), ("key-declined", true), "{message}");
+        assert!(s.stats.lock().unwrap().key_declined.is_some());
+        drop(s);
+        // Under another key nothing is declined. A symlink in pacote's
+        // extraction is not reproduced either; a file written just now is.
+        let other = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, Some(OLD.into()), CheckPolicy::All).unwrap();
+        let to = extract_to(other.place_entry(&sri, &fx.root.join("node_modules/l")), "check");
+        fx.pacote_extract(&i, &to);
+        std::os::unix::fs::symlink("index.js", to.join("lib/link.js")).unwrap();
+        let (reason, message, _) = refusal(other.place_extracted(&sri, &fx.root.join("node_modules/l"), &to));
+        assert_eq!(reason, "extraction-unexpected", "{message}");
+        assert!(message.contains("lib/link.js: neither a file nor a directory"), "{message}");
+        drop(other);
+        fx.store.forget_made_by(&i);
+        let fresh = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, Some(KEY.replace("uv:1.52.1", "uv:9")), CheckPolicy::All).unwrap();
+        let to = extract_to(fresh.place_entry(&sri, &fx.root.join("node_modules/f")), "check");
+        fx.pacote_extract(&i, &to);
+        assert!(placed_full(fresh.place_extracted(&sri, &fx.root.join("node_modules/f"), &to)).2, "a fresh extraction is compared and placed");
+        assert_eq!(fresh.stats.lock().unwrap().new_key_checks, 1);
+    }
+
+    #[test]
+    fn a_fill_no_clone_reproduces_halts_the_run_and_declines_the_key() {
+        let fx = Fx::new("serve-odd-fill");
+        if !fx.can_clone() {
+            return;
+        }
+        let i = cached_tarball(&fx.cacache, PKG);
+        let sri = sri_of(&i);
+        // An empty store: pacote's extraction would become the entry. With a
+        // file older than the install, it does not, and nothing is recorded.
+        let s = fx.server_with(clone::Mode::File, CheckPolicy::OneIn(1_000_000));
+        let dst = fx.root.join("node_modules/fill");
+        let to = extract_to(s.place_entry(&sri, &dst), "fill");
+        fx.pacote_extract(&i, &to);
+        crate::store::tests::age(&to.join("lib/index.js"), 3660);
+        let (reason, message, fatal) = refusal(s.place_extracted(&sri, &dst, &to));
+        assert_eq!((reason, fatal), ("extraction-unexpected", true), "{message}");
+        assert!(message.contains("lib/index.js: modified at"), "{message}");
+        assert!(!to.exists() && !dst.exists() && !fx.store.dir_for(&i).exists(), "nothing placed, no entry");
+        assert!(fx.store.made_by(&i).is_empty(), "nothing recorded");
+        assert!(fx.store.declined(KEY).is_some());
+        assert!(s.stats.lock().unwrap().filled.is_empty());
+        let (reason, _, _) = refusal(s.place_entry(&sri, &fx.root.join("node_modules/later")));
+        assert_eq!(reason, "extraction-unexpected", "every later request of this run");
+        drop(s);
+        // A symlink in a fill, under another key: the same.
+        let other = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, Some(OLD.into()), CheckPolicy::All).unwrap();
+        let to = extract_to(other.place_entry(&sri, &fx.root.join("node_modules/l")), "fill");
+        fx.pacote_extract(&i, &to);
+        std::os::unix::fs::symlink("index.js", to.join("lib/link.js")).unwrap();
+        let (reason, message, _) = refusal(other.place_extracted(&sri, &fx.root.join("node_modules/l"), &to));
+        assert_eq!(reason, "extraction-unexpected", "{message}");
+        assert!(message.contains("lib/link.js: neither a file nor a directory") && !fx.store.dir_for(&i).exists(), "{message}");
+        assert!(fx.store.declined(OLD).is_some() && fx.store.declined(KEY).is_some(), "both keys declined, each in its own file");
+        drop(other);
+        // A fresh extraction is a fill as before.
+        let third = KEY.replace("uv:1.52.1", "uv:9");
+        let ok = Server::new(&fx.store, Some(fx.root.clone()), clone::Mode::File, Some(third.clone()), CheckPolicy::All).unwrap();
+        let to = extract_to(ok.place_entry(&sri, &fx.root.join("node_modules/f")), "fill");
+        fx.pacote_extract(&i, &to);
+        assert!(placed_full(ok.place_extracted(&sri, &fx.root.join("node_modules/f"), &to)).1, "filled");
+        assert_eq!(fx.store.made_by(&i), vec![third]);
+        // The decline list: one file per key; removing it clears that key only.
+        let files: Vec<_> = fs::read_dir(fx.dir.join("store/declined")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(files.len(), 2, "{files:?}");
+        let k = files.iter().find(|f| fs::read_to_string(f).unwrap().starts_with(&format!("{KEY}\n"))).unwrap();
+        fs::remove_file(k).unwrap();
+        assert!(fx.store.declined(KEY).is_none() && fx.store.declined(OLD).is_some());
     }
 
     #[test]
@@ -2239,7 +2542,7 @@ mod tests {
     #[test]
     fn the_root_npm_reports_is_gated_and_pinned_once() {
         let fx = Fx::new("serve-root-handshake");
-        let new = || Server::new(&fx.store, None, clone::Mode::File, Some("pacote@1.0.0 tar@2.0.0".into()), CheckPolicy::OneIn(50)).unwrap();
+        let new = || Server::new(&fx.store, None, clone::Mode::File, Some(KEY.into()), CheckPolicy::OneIn(50)).unwrap();
         let line = |s: &Server, v: Value| serde_json::from_str::<Value>(&s.handle_line(&v.to_string())[0]).unwrap();
         let root_msg = |root: &Path, extra: Value| {
             let mut m = json!({ "id": 0, "root": root, "global": false, "command": "ci", "typed": "ci", "dry_run": false, "package_lock_only": false, "usage": false });

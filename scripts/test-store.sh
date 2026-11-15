@@ -114,8 +114,8 @@ release
 verify() { "$bin" store verify "$@" > "$work/out" 2>&1; }
 verify && grep -q "$n match, 0 differ" "$work/out" \
   && ok "verify: $n entries match npm's extraction" || bad "verify: clean store"
-# Every entry is now known to this pacote/tar: a difference is a change.
-made="changed after this pacote/tar had made or checked it"
+# Every entry is now known to this extraction code: a difference is a change.
+made="changed after this extraction code had made or checked it"
 victim=$(find "$store/v2" -path '*/lodash.js' -type f | head -1)
 printf 'x' >> "$victim"
 verify; rc=$?
@@ -130,7 +130,8 @@ verify && grep -q "$n match, 0 differ" "$work/out" && ok "verify: after --fix, e
 # 8b. Entries made by the classic engine's extractor (no record; in stores
 #     filled before PR C2) are judged by npm's extraction too: odd-tarballs'
 #     lc-dup (a path listed twice) differs and is replaced; the matching one
-#     is recorded as known to this pacote.
+#     is recorded as known to this extraction code, under the key an
+#     install uses: the next install compares nothing.
 if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
   os=$work/store-odd; rm -rf "${os:?}"
   po=$work/odd; rm -rf "${po:?}"; mkdir -p "$po"; cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$po/"
@@ -138,10 +139,14 @@ if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
   classic_entries "$os"
   MATCHAPACK_STORE=$os "$bin" store verify > "$work/out" 2>&1; rc=$?
   [ $rc = 1 ] && grep -q "2 entries compared.*: 1 match, 1 differ" "$work/out" && grep -q "run.sh: mode 644, the tarball gives 755 (made by the classic engine's extractor)" "$work/out" \
-    && grep -q '1 matching entries recorded as known to pacote@' "$work/out" \
+    && grep -q '1 matching entries recorded as known to fetcher:[0-9a-f]\{32\} tar:[0-9a-f]\{32\} uv:' "$work/out" \
     && ok "verify: the classic engine's entry for a path listed twice differs from npm's extraction; the other is recorded" || bad "verify odd-tarballs (rc=$rc)"
   MATCHAPACK_STORE=$os "$bin" store verify --fix > "$work/out" 2>&1 && MATCHAPACK_STORE=$os "$bin" store verify > "$work/out" 2>&1 && grep -q '2 match, 0 differ' "$work/out" \
     && ok "verify --fix: replaced by npm's extraction, then both match" || bad "verify --fix odd-tarballs"
+  po2=$work/odd2; rm -rf "${po2:?}"; mkdir -p "$po2"; cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$po2/"
+  MATCHAPACK_STORE=$os MATCHAPACK_INJECT_CHECK=1000000 "$bin" install "$po2" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1 \
+    && grep -q ' 0 checked against pacote' "$work/out" && grep -q 'inject: cloned 2 ' "$work/out" \
+    && ok "verify then install: the install compares nothing (verify recorded the key the install uses)" || bad "verify then install: $(grep -Eo '[0-9]+ checked against pacote' "$work/out")"
 else
   echo "SKIP verify odd-tarballs: the fixtures' tarball server is not running (127.0.0.1:48321)"
 fi

@@ -7,7 +7,10 @@
 // stdin:  one job per line, {"id", "integrity", "dir"}: extract the tarball
 //         with that integrity from the cache into `dir` (an empty directory
 //         matchapack made)
-// stdout: first {"hello": true, "pacote", "tar"} (the versions node loaded),
+// stdout: first {"hello": true, "pacote", "tar", "key", "tar_fingerprint"}
+//         (the versions, and the store key of the extraction code node
+//         loaded, as the inject hook computes it: src/inject.js
+//         `extractionCode`; a null key when it cannot be named),
 //         then one line per job, {"id", "ok"} or {"id", "ok": false, "error"},
 //         in the order the extractions finish. Jobs run as they arrive;
 //         matchapack bounds how many are outstanding.
@@ -20,7 +23,7 @@
 // entry) is not reached.
 'use strict'
 const path = require('path')
-const { ineligible } = require('./inject.js')
+const { ineligible, pacotePaths, fingerprintFile, extractionCode } = require('./inject.js')
 
 function fail (message) {
   process.stderr.write(`matchapack verify helper: ${message}\n`)
@@ -32,11 +35,14 @@ function main () {
   if (!npmDir || !cache) {
     fail('usage: node store-verify.js <npm dir> <npm _cacache dir>')
   }
-  const from = path.join(npmDir, 'node_modules', '@npmcli', 'arborist')
-  let pacote, pacoteVersion, tarVersion
+  let pacote, pacoteVersion, tarVersion, code
   try {
-    const main = require.resolve('pacote', { paths: [from] })
+    // The same pacote the hook hashes and hooks (arborist's).
+    const paths = pacotePaths(npmDir)
+    const fp = fingerprintFile(paths.fetcher)
+    const main = paths.main
     pacote = require(main)
+    code = extractionCode(paths, fp)
     const pacoteDir = path.dirname(path.dirname(main))
     pacoteVersion = require(path.join(pacoteDir, 'package.json')).version
     tarVersion = require(require.resolve('tar/package.json', { paths: [pacoteDir] })).version
@@ -51,7 +57,7 @@ function main () {
   // get modes 666/777 (seen on a store of 8,779 entries).
   const processUmask = process.umask()
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n')
-  out({ hello: true, pacote: pacoteVersion, tar: tarVersion })
+  out({ hello: true, pacote: pacoteVersion, tar: tarVersion, key: code.key, tar_fingerprint: code.tar_fingerprint })
 
   const run = async ({ id, integrity, dir }) => {
     try {
