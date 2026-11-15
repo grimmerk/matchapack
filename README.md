@@ -439,6 +439,16 @@ it.
   cloned at the link step like any package (a real project with a git
   dependency came out identical to plain Yarn: `NOTES.md`, "Yarn 1 trial
   on real projects", the codev row).
+- `file:` dependencies, a directory or a tarball, also go through Yarn's
+  cache and are cloned at the link step. Yarn copies a `file:` directory
+  into a new cache entry on every install (plain Yarn's own behaviour: the
+  cache gains one entry per install), and unpacks a `file:` tarball into
+  an entry keyed by its sha1, which later installs reuse. Checked: trees
+  identical to plain Yarn for a directory, a tarball, both together with
+  registry packages, and a workspace that depends on a sibling through
+  `file:../lib` (`fixtures/yarn1-file` is the test). Plain Yarn ignores
+  edits to a `file:` directory while `.yarn-integrity` still matches
+  ("Already up-to-date"); so does matchapack.
 - matchapack leaves Yarn's first 128 file copies of each command to Node
   (so that Yarn's own time check sees real copies). A `yarn add` that
   copies 128 files or fewer therefore clones nothing, however large the

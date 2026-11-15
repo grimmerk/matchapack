@@ -1,0 +1,8 @@
+{
+  "name": "matchapack-fixture-yarn1-file-tgz",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "local-tgz": "file:./local-1.0.0.tgz"
+  }
+}

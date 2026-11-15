@@ -809,6 +809,32 @@ if [ $rc = 0 ] && same && [ -f "$work/e-wsub/engine/node_modules/.yarn-integrity
   ok "yarn install in a workspace directory: installed at the workspace root, engine identical; $n files cloned, as from the root"
 else bad "install in a workspace directory (exit $rc, cloned ${n:-?}, from the root $(ejson e-ws "y['cloned']"))"; fi
 
+# `file:` dependencies (fixtures/yarn1-file): a tarball and a directory in
+# the project, each a package of 308 files (two of them empty; more than
+# Yarn's first 128 copies, so the engine clones some). Yarn takes both
+# through its cache: the tarball into an entry keyed by its sha1, the
+# directory into a new entry on every install. One pool thread: with
+# empty and non-empty files among Yarn's first copies, plain Yarn's own
+# probe race (#57) makes even two plain runs differ now and then at the
+# default pool (measured: 5 of 14 runs of the tarball case, the mtime of
+# one non-empty file; 0 of 16 with one thread). The tarball case is
+# strict; the directory case also accepts plain Yarn's own variation
+# (exit 3, the engine differing only where plain does), which Yarn's copy
+# of the directory into its cache was seen to have on a second install.
+for kind in tgz dir; do
+  fsrc=$work/file-$kind-src; rm -rf "${fsrc:?}"; mkdir -p "$fsrc"
+  cp -p "$here/fixtures/yarn1-file/$kind/package.json" "$here/fixtures/yarn1-file/$kind/yarn.lock" "$fsrc/"
+  python3 -I "$here/fixtures/yarn1-file/make.py" "$kind" "$fsrc"
+  UV_THREADPOOL_SIZE=1 everify e-file-$kind "$fsrc"
+  n=$(ejson e-file-$kind "y['cloned']")
+  if [ $kind = tgz ]; then verdict_ok() { [ $rc = 0 ] && same; }
+  else verdict_ok() { { [ $rc = 0 ] && same; } || { [ $rc = 3 ] && grep -Eq 'plain vs engine: (IDENTICAL|differs only where plain varies)' "$work/out"; }; }; fi
+  if verdict_ok && [ "${n:-0}" -gt 0 ] && [ -x "$work/e-file-$kind/engine/node_modules/local-$kind/bin/cli.js" ] \
+    && [ -L "$work/e-file-$kind/engine/node_modules/.bin/local-$kind-cli" ]; then
+    ok "a file: $kind dependency: engine as plain ($(grep -o 'plain vs engine: [a-zA-Z ]*' "$work/out" | head -1)); $n files cloned"
+  else bad "file: $kind dependency (exit $rc, cloned ${n:-?})"; fi
+done
+
 # --focus in a workspace: its dependencies are installed (hoisted to the
 # root's node_modules), its sibling workspace y1-c as a copy from the
 # "registry" (the lockfile's tarball) into the workspace's own node_modules.

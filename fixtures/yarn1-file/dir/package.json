@@ -1,0 +1,8 @@
+{
+  "name": "matchapack-fixture-yarn1-file-dir",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "local-dir": "file:./local-dir"
+  }
+}
