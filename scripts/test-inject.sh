@@ -1327,6 +1327,9 @@ cl_rollback() {
   cl_pj "$1/failing-src/check.js" "process.exit(require('fs').existsSync('$cl_flag') ? 1 : 0)"
   (cd "$1/failing-src" && MATCHAPACK=0 npm pack --pack-destination "$1" > /dev/null 2>&1)
   cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz","failing":"file:../failing-1.0.0.tgz"},"allowScripts":{"failing":true}}'
+  # npm 11.19 and 12 run a dependency's install scripts only by policy; an
+  # npmrc is what both honour for a file: tarball (older npm ignore it).
+  echo 'dangerously-allow-all-scripts=true' > "$1/proj/.npmrc"
 }
 cl_rollback_after() {
   local d=$1/proj/packages/b/node_modules/lc-s
@@ -1334,6 +1337,11 @@ cl_rollback_after() {
   echo marker > "$d/MARKER"; : > "$cl_flag"
 }
 cl_case rollback cl_rollback cl_rollback_after -- --no-audit --no-fund
+# The case tests something only if plain npm ci failed there from the
+# install script (a script npm skipped would pass it trivially).
+[ "$(cat "$work/cl-plain.rc")" != 0 ] && grep -q 'node check.js' "$work/cl-plain.out" \
+  && ok "the rollback case's plain npm ci failed from the install script (npm rolled back)" \
+  || bad "rollback case: plain npm ci did not fail from check.js (status $(cat "$work/cl-plain.rc"))"
 rm -f "$cl_flag"
 # And the clones matchapack placed outside the root's node_modules are what
 # it removes: in the member-placed case (the member's node_modules removed
