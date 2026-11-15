@@ -470,6 +470,7 @@ check('watch report: a recorded release keeps its fs.c hash (a seed too); one wi
 // 24. A new Yarn 1 release: always a person, even when green.
 w = wreport(watchState(steady), { node: { todo: [], record: [], watched: [22, 24, 26] }, yarn: { todo: [{ yarn: '1.22.23', reason: 'Yarn 1.22.23 is new' }], record: null }, nodeLinux: [], nodeMacos: [{ key: 'yarn1.22.23', node: null, yarn: '1.22.23' }] }, { 'nodemacos-yarn1.22.23': ysuites(true, factsOk, 'v24.22.1', '1.22.23', '1.52.1') })
 check('watch report: Yarn 1.22.23, green: verified, and a comment asks for a person', w.state.yarn.newest === '1.22.23' && w.state.yarn.verified === '1.22.23' && w.flags.notify === true && /Yarn 1\.22\.23 \(Yarn 1\.22\.23 is new\): action needed/.test(w.comment), JSON.stringify({ y: w.state.yarn, f: w.flags }))
+check('watch report: a Yarn row of the history has "-" in the tar code column', w.state.history.some((h) => /^Yarn /.test(h.version) && h.tar === '-'), JSON.stringify(w.state.history[0]))
 
 // 25. The workflow: the watch's jobs and the report wait for them.
 check('workflow: node-linux and node-macos jobs; the report needs both', /\n  node-linux:\n/.test(wf) && /\n  node-macos:\n/.test(wf) && /needs: \[poll, linux, decide, macos, node-linux, node-macos\]/.test(wf), '')

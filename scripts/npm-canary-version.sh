@@ -4,8 +4,11 @@
 # <item.json> is one entry of the poll's plan ({"version", "baseline",
 # "reason", "newMajor", ...}). Runs the npm suites on that release with both
 # overrides (the canary tests a release whatever the gates say), installs the
-# baseline release next to it, and records the fingerprint and the diff of
-# the tracked functions. <out dir> gets item.json, suites.json, the suites'
+# baseline release next to it, and records the fingerprint, the tar code
+# (the tar fingerprint, part of the store key since PR C1 of #39; recorded
+# in result.json and compared with the baseline's, for the report only:
+# it never changes the canary's action) and the diff of the tracked
+# functions. <out dir> gets item.json, suites.json, the suites'
 # logs, inspect-new.json, inspect-base.json, compare.json, diffs/ and
 # result.json (scripts/npm-canary.js has the formats). Exit status: the
 # suites'; everything else is recorded even when they fail.
