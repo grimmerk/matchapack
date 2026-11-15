@@ -585,6 +585,57 @@ wrapped "$p" "npm ci --dry-run --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'running plain npm instead (option --dry-run installs nothing' "$work/out" && ! grep -q 'matchapack: added' "$work/out" \
   && ok "npm ci --dry-run: plain npm (not an install)" || bad "dry-run: rc=$rc"
 
+# 11d. The install family logs three kinds of decline without a line (the
+#      owner's decision, 2026-11-15): a global install, a project outside
+#      the trial scope, a run that installs nothing. Each is decided both
+#      before node starts (a typed flag, the start directory) and on npm's
+#      own root (an npmrc or environment setting, a --prefix root). Plain
+#      npm runs once, with its status; the run is logged as declined with
+#      the reason. npm ci with the same reasons prints the line (11c above,
+#      and the three cases after these), and so does the family for any
+#      other reason. Global installs go to a scratch prefix; every package
+#      comes from the local tarball server.
+gp=$work/global-prefix; rm -rf "${gp:?}"; mkdir -p "$gp"
+tgz=http://127.0.0.1:48321/lc-s-1.0.0.tgz
+quiet_case() { # name dir want-reason [env...] -- npm args
+  local name=$1 d=$2 reason=$3; shift 3
+  local e=(); while [ "$1" != -- ]; do e+=("$1"); shift; done; shift
+  (cd "$d" && env ${e[@]+"${e[@]}"} PATH="$(dirname "$bin"):$PATH" zsh -c ". '$here/shell/matchapack.sh'; npm $*" > "$work/out" 2>&1); local rc=$?
+  if [ $rc = 0 ] && ! grep -q '^matchapack' "$work/out" && ! grep -q 'Exit handler never called' "$work/out" \
+    && [ "$(last_log "r['outcome']")" = declined ] && last_log "r['reason']" | grep -qF "$reason"; then
+    ok "$name: no line, plain npm, logged as declined ($reason)"
+  else
+    bad "$name: rc=$rc, logged $(last_log "r['outcome'], r.get('reason')" 2>&1 | cut -c1-120)"
+  fi
+}
+p=$(project fam-quiet-g bundled)
+quiet_case "npm install -g <tarball>" "$p" "option -g makes npm install globally" npm_config_prefix="$gp" -- install -g "$tgz" --no-audit --no-fund
+[ -f "$gp/lib/node_modules/lc-s/package.json" ] && [ ! -e "$p/node_modules" ] && ok "npm install -g: plain npm installed into the (scratch) global prefix" || bad "npm install -g: not installed globally"
+p=$(project fam-quiet-npmrc bundled); echo 'global=true' > "$p/.npmrc"
+quiet_case "npm install with global=true in the project's .npmrc" "$p" "npm installs globally" npm_config_prefix="$gp" -- install "$tgz" --no-audit --no-fund
+p=$(project fam-quiet-dry bundled)
+quiet_case "npm update --dry-run" "$p" "option --dry-run installs nothing" -- update --dry-run --no-audit --no-fund
+quiet_case "npm uninstall with npm_config_dry_run=true" "$p" "this run installs nothing (--dry-run)" npm_config_dry_run=true -- uninstall lc-s --no-audit --no-fund
+[ ! -e "$p/node_modules" ] && cmp -s "$p/package.json" "$here/fixtures/bundled/package.json" && ok "dry runs: nothing changed" || bad "dry runs changed the project"
+p=$(project fam-quiet-scope bundled)
+quiet_case "npm install outside the trial scope" "$p" "outside the trial scope" MATCHAPACK_PATHS="$work/nowhere" -- install --no-audit --no-fund
+[ -f "$p/node_modules/lc-s/package.json" ] && ok "outside the trial scope: plain npm installed" || bad "outside the trial scope: not installed"
+p=$(project fam-quiet-prefix bundled); q=$(project fam-quiet-elsewhere bundled)
+quiet_case "npm install --prefix <root outside the trial scope>" "$p" "outside the trial scope" MATCHAPACK_PATHS="$p" -- install --prefix "'$q'" --no-audit --no-fund
+[ -f "$q/node_modules/lc-s/package.json" ] && [ ! -e "$p/node_modules" ] && ok "--prefix root out of scope: plain npm installed there" || bad "--prefix root out of scope: not installed there"
+# npm ci with the reasons 11c does not cover: the line is printed.
+p=$(project ci-quiet-g bundled)
+want=$(plain_status "$p" npm_config_prefix="$gp" -- ci -g --no-audit --no-fund)
+decline_case "npm ci -g" "$p" "option -g makes npm install globally" "$want" npm_config_prefix="$gp" -- ci -g --no-audit --no-fund
+p=$(project ci-quiet-dry bundled)
+decline_case "npm ci with npm_config_dry_run=true" "$p" "this run installs nothing (--dry-run)" 0 npm_config_dry_run=true -- ci --no-audit --no-fund
+p=$(project ci-quiet-scope bundled)
+decline_case "npm ci outside the trial scope" "$p" "outside the trial scope" 0 MATCHAPACK_PATHS="$work/nowhere" -- ci --no-audit --no-fund
+# The family with another reason: the line is printed.
+p=$(project fam-loud bundled)
+want=$(plain_status "$p" -- install --prefix "$work/fam-loud-plain" --no-audit --no-fund)
+decline_case "npm install with a --prefix root that does not exist" "$p" "the install root $work/fam-loud-root does not exist yet" "$want" -- install --prefix "'$work/fam-loud-root'" --no-audit --no-fund
+
 # 11b. A workspace directory that is a symlink to a directory outside the
 #      project: npm installs the workspace's own dependency there, as npm ci
 #      does; matchapack refuses to clone outside the project (rejected-dest),

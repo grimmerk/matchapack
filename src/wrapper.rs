@@ -89,7 +89,7 @@ pub fn run(args: Vec<String>) -> i32 {
     // the classic engine's, from logs written before PR C2.
     if let Err(reason) = crate::inject::engine() {
         log("declined", json!({ "engine": "inject", "reason": reason }));
-        return decline(&args, &reason);
+        return decline(&args, command, &reason);
     }
     run_inject(&args, command, &log)
 }
@@ -319,7 +319,7 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
         Ok(o) => o,
         Err(reason) => {
             log("declined", json!({ "engine": "inject", "reason": reason }));
-            return decline(args, &reason);
+            return decline(args, command, &reason);
         }
     };
     util::set_quiet(true);
@@ -385,7 +385,7 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
         }
         Err(InstallError::Declined(e)) => {
             log("declined", json!({ "engine": "inject", "reason": one_line(&e) }));
-            decline(args, &one_line(&e))
+            decline(args, command, &one_line(&e))
         }
         // npm ran and failed, and has said why: its status is the answer.
         Err(InstallError::Npm { code, inject }) => {
@@ -474,13 +474,33 @@ fn early_flags(rest: &[String]) -> Result<bool, String> {
 /// matchapack will not handle this install and nothing has been changed. Run
 /// plain npm, unless MATCHAPACK_NO_FALLBACK=1 (scripts/convert-existing.sh):
 /// then report and exit 3, leaving the existing node_modules as it is.
-fn decline(args: &[String], reason: &str) -> i32 {
+/// `command`: npm's name for the routed word. The run is logged by the
+/// caller in every case; only the line is left out (`quiet_decline`).
+fn decline(args: &[String], command: &str, reason: &str) -> i32 {
     if std::env::var("MATCHAPACK_NO_FALLBACK").as_deref() == Ok("1") {
         eprintln!("matchapack: not handled, left unchanged ({reason})");
         return 3;
     }
-    eprintln!("matchapack: running plain npm instead ({reason})");
+    if !quiet_decline(command, reason) {
+        eprintln!("matchapack: running plain npm instead ({reason})");
+    }
     exec_npm(args)
+}
+
+/// Declines the install family logs without printing a line (the owner's
+/// decision, 2026-11-15): a global install, a project outside the trial
+/// scope, and a run that installs nothing. These commands are typed often,
+/// `npm install -g <pkg>` above all, and the line would say every time
+/// what the user already knows. `npm ci` keeps the line, and so does every
+/// other reason (a gate that says something about this npm or project).
+/// The reasons come from `early_flags`, serve.rs `accept_root` and
+/// `trial::in_scope`; the unit tests run each of them through this.
+pub(crate) fn quiet_decline(command: &str, reason: &str) -> bool {
+    command != "ci"
+        && (reason == trial::OUT_OF_SCOPE
+            || reason.ends_with("makes npm install globally")
+            || reason == "npm installs globally"
+            || reason.contains("installs nothing"))
 }
 
 fn one_line(e: &anyhow::Error) -> String {
@@ -599,17 +619,26 @@ fn fingerprints_allowed(user: Option<&str>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{early_flags, fingerprints_allowed, inject_version_allowed, is_fingerprint, npm_fingerprints};
+    use super::{early_flags, fingerprints_allowed, inject_version_allowed, is_fingerprint, npm_fingerprints, quiet_decline};
 
     #[test]
     fn flags_that_decline_before_node_starts() {
         let f = |a: &[&str]| early_flags(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        // Each of these declines without a line for the install family,
+        // with the line for npm ci (`quiet_decline`).
         for a in [&["-g"][..], &["--global"], &["--location=global"], &["--no-audit", "--location", "global"]] {
-            assert!(f(a).unwrap_err().contains("makes npm install globally"), "{a:?}");
+            let why = f(a).unwrap_err();
+            assert!(why.contains("makes npm install globally"), "{a:?}");
+            assert!(quiet_decline("install", &why) && quiet_decline("uninstall", &why) && !quiet_decline("ci", &why), "{why}");
         }
         for a in [&["--dry-run"][..], &["--help"], &["-h"], &["-?"], &["--usage"], &["--package-lock-only"]] {
-            assert!(f(a).unwrap_err().contains("installs nothing"), "{a:?}");
+            let why = f(a).unwrap_err();
+            assert!(why.contains("installs nothing"), "{a:?}");
+            assert!(quiet_decline("update", &why) && !quiet_decline("ci", &why), "{why}");
         }
+        let why = crate::trial::OUT_OF_SCOPE;
+        assert!(quiet_decline("install", why) && !quiet_decline("ci", why));
+        assert!(!quiet_decline("install", "umask is 002 (npm ci would give group write)"));
         // npm's to decide on its own values: a local location, abbreviations,
         // a value that only looks like a flag.
         for a in [&["--location=project"][..], &["--location", "project"], &["--glob"], &["--omit=dev"], &[]] {

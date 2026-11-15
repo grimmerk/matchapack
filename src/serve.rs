@@ -2259,25 +2259,29 @@ mod tests {
         drop(s);
 
         // Refusals: recorded as the decline reason, the root stays unset.
+        // `quiet`: the install family logs it without a line (wrapper.rs
+        // `quiet_decline`); npm ci always prints it.
         let other = fx.dir.join("not-there");
         let nm_link = fx.dir.join("nm-link");
         fs::create_dir_all(&nm_link).unwrap();
         std::os::unix::fs::symlink(fx.dir.join("elsewhere"), nm_link.join("node_modules")).unwrap();
-        for (msg, want) in [
-            (root_msg(&fx.root, json!({ "global": true })), "npm installs globally"),
-            (root_msg(&fx.root, json!({ "command": "install-test", "typed": "it" })), "npm runs `install-test` for `it`"),
-            (root_msg(&fx.root, json!({ "command": null, "typed": "u" })), "npm has no command `u`"),
-            (root_msg(&fx.root, json!({ "dry_run": true })), "this run installs nothing (--dry-run)"),
-            (root_msg(&fx.root, json!({ "package_lock_only": true })), "this run installs nothing (--package-lock-only)"),
-            (root_msg(&fx.root, json!({ "usage": true })), "this run installs nothing (--usage)"),
-            (root_msg(&other, json!({})), "does not exist yet"),
-            (root_msg(Path::new("relative"), json!({})), "no absolute install root"),
-            (root_msg(&nm_link, json!({})), "node_modules is a symlink"),
+        for (msg, want, quiet) in [
+            (root_msg(&fx.root, json!({ "global": true })), "npm installs globally", true),
+            (root_msg(&fx.root, json!({ "command": "install-test", "typed": "it" })), "npm runs `install-test` for `it`", false),
+            (root_msg(&fx.root, json!({ "command": null, "typed": "u" })), "npm has no command `u`", false),
+            (root_msg(&fx.root, json!({ "dry_run": true })), "this run installs nothing (--dry-run)", true),
+            (root_msg(&fx.root, json!({ "package_lock_only": true })), "this run installs nothing (--package-lock-only)", true),
+            (root_msg(&fx.root, json!({ "usage": true })), "this run installs nothing (--usage)", true),
+            (root_msg(&other, json!({})), "does not exist yet", false),
+            (root_msg(Path::new("relative"), json!({})), "no absolute install root", false),
+            (root_msg(&nm_link, json!({})), "node_modules is a symlink", false),
         ] {
             let s = new();
             let a = line(&s, msg.clone());
             assert_eq!(a["ok"], false, "{msg}");
             assert!(a["reason"].as_str().unwrap().contains(want), "{a} {want}");
+            let why = a["reason"].as_str().unwrap();
+            assert_eq!((crate::wrapper::quiet_decline("install", why), crate::wrapper::quiet_decline("ci", why)), (quiet, false), "{why}");
             let st = s.stats.lock().unwrap();
             assert!(st.declined.as_deref().is_some_and(|d| d.contains(want)) && st.root.is_none(), "{msg}");
             drop(st);

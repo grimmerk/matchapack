@@ -195,8 +195,11 @@ pub fn in_scope(dir: &Path) -> std::result::Result<(), String> {
             return Ok(());
         }
     }
-    Err("outside the trial scope (~/.config/matchapack/paths or MATCHAPACK_PATHS)".into())
+    Err(OUT_OF_SCOPE.into())
 }
+
+/// The reason `in_scope` gives (wrapper.rs `quiet_decline` compares it).
+pub const OUT_OF_SCOPE: &str = "outside the trial scope (~/.config/matchapack/paths or MATCHAPACK_PATHS)";
 
 /// The records from `since` on, and how many lines (of any date) were not
 /// readable JSON: a line cut short or two interleaved lines are skipped,

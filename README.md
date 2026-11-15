@@ -297,6 +297,16 @@ unchanged; one npm debug log of about 1 KB stays in npm's `_logs`):
 - npm maps the routed word to another command (npm's root: `npm u` on npm
   10, where it is no command);
 - `MATCHAPACK_ENGINE` names another engine (`classic` was removed in PR C2).
+
+For `npm install`, `update` and `uninstall` (and their first words) three of
+these print nothing: a global install, a project outside the trial scope,
+and a command that installs nothing. These commands are typed often
+(`npm install -g <pkg>` above all), and the line would repeat what the user
+already knows. The run is still logged as declined, with the reason
+(`matchapack report` counts it). `npm ci` prints the line for every reason,
+and the install family prints it for every other reason (the owner's
+decision, 2026-11-15).
+
 When the filesystem cannot clone, npm extracts every package itself, and
 matchapack says so: the first clone the filesystem refuses stops cloning for
 that install. The same happens, said the same way, when npm's root cannot be
