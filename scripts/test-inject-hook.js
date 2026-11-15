@@ -276,11 +276,26 @@ async function helperCases () {
 ;(async () => {
   await quiet('await of an async function\'s result', async (v) => JSON.stringify(await (async () => v)()))
   await quiet('Promise.resolve', async (v) => JSON.stringify(await Promise.resolve(v)))
-  await quiet('util.inspect', (v) => util.inspect(v))
+  {
+    // util.inspect: from Node 26 every Proxy prints as `Proxy(<the target's
+    // text>)`, even with showProxy off (#69). So the trap must print exactly
+    // what a bare Proxy of the plain object prints (before Node 26: the plain
+    // object's own text), and inspecting it reads nothing through the trap.
+    const t = trapped()
+    const p = plain()
+    const text = util.inspect(p)
+    const bare = util.inspect(new Proxy(p, {}))
+    check('trap: util.inspect prints what a bare Proxy of the plain object prints, and reads nothing unexpected',
+      JSON.stringify([util.inspect(t.value), t.reads.filter(r => r.endsWith(':false'))]), JSON.stringify([bare, []]))
+    const major = Number(process.versions.node.split('.')[0])
+    check('trap: a bare Proxy prints as the plain object before Node 26, as "Proxy(…)" around it from Node 26',
+      bare, major >= 26 ? `Proxy(${text})` : text)
+  }
   await quiet('util.format %j', (v) => util.format('%j', v))
   {
-    // %o (and inspect's showProxy) print the object as a Proxy: a difference
-    // in a debug line only, and nothing is read through the trap.
+    // %o (and inspect's showProxy) print the object as a Proxy on every
+    // Node: a difference in a debug line only, and nothing is read through
+    // the trap.
     const t = trapped()
     check('trap: util.format %o reads nothing through the trap', [util.format('%o', t.value).startsWith('Proxy ['), t.reads.length].join(), 'true,0')
   }
