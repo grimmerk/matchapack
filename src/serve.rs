@@ -1274,6 +1274,9 @@ impl<'a> Server<'a> {
             let key = code_key(v);
             let _ = self.key.set(key.clone());
             let declined = if known_key(&key) { self.store.declined(&key) } else { None };
+            if declined.is_none() && known_key(&key) && self.store.declined_path(&key).exists() {
+                crate::info!("inject: this extraction code was declined by another matchapack build; trying it again");
+            }
             let mut s = self.stats.lock().unwrap();
             s.tar_fingerprint = v
                 .get("tar_fingerprint")

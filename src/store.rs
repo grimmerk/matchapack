@@ -325,28 +325,56 @@ impl Store {
     }
 
     /// Why installs under extraction-code `key` are left to npm in this
-    /// store (`decline_key`), or None. Removing the file clears it.
+    /// store (`decline_key`), or None. Removing the file clears it. A decline
+    /// that another matchapack build recorded (or one with no build, from
+    /// before builds were recorded) is void: None, so this build compares
+    /// and fill-checks again, and declines again if the extraction is still
+    /// not what a clone reproduces (`decline_key` then rewrites the file).
     pub fn declined(&self, key: &str) -> Option<String> {
-        let text = fs::read_to_string(self.declined_path(key)).ok()?;
-        let (k, why) = text.split_once('\n')?;
-        (k == key).then(|| why.trim_end().to_string())
+        self.declined_by(key, build_identity)
+    }
+
+    /// `declined`, with this build named by `build` (asked only when a
+    /// decline file for the key exists: computing it may hash the binary).
+    fn declined_by(&self, key: &str, build: impl FnOnce() -> &'static str) -> Option<String> {
+        let d = read_decline(&self.declined_path(key))?;
+        (d.key == key && d.build.as_deref() == Some(build())).then_some(d.why)
     }
 
     /// Put `key` on the store's decline list, so that later installs under
     /// that code let npm extract every package: `<store>/declined/<sha256 of
-    /// the key>`, holding the key on its first line and why on the second.
-    /// Written whole (tmp, then rename). Returns the file.
+    /// the key>`, holding the key, why, and `build: <this build>` on three
+    /// lines. Written whole (tmp, then rename), replacing a void decline.
+    /// Returns the file.
     pub fn decline_key(&self, key: &str, why: &str) -> Result<PathBuf> {
+        self.decline_key_as(key, why, build_identity())
+    }
+
+    fn decline_key_as(&self, key: &str, why: &str, build: &'static str) -> Result<PathBuf> {
         let f = self.declined_path(key);
-        if self.declined(key).is_some() {
+        if self.declined_by(key, || build).is_some() {
             return Ok(f);
         }
         fs::create_dir_all(f.parent().unwrap())?;
         let why: String = why.chars().map(|c| if c.is_control() { ' ' } else { c }).take(300).collect();
         let tmp = f.with_extension(format!("{}-{}", process_tag(), self.tmp_seq.fetch_add(1, Ordering::Relaxed)));
-        fs::write(&tmp, format!("{key}\n{why}\n"))?;
+        fs::write(&tmp, format!("{key}\n{why}\nbuild: {build}\n"))?;
         fs::rename(&tmp, &f)?;
         Ok(f)
+    }
+
+    /// Every decline file of the store (`matchapack report`), with whether
+    /// it holds for this build.
+    pub fn declines(&self) -> Vec<Decline> {
+        let Ok(rd) = fs::read_dir(self.root.join("declined")) else { return vec![] };
+        let mut v: Vec<Decline> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit())))
+            .filter_map(|p| read_decline(&p))
+            .collect();
+        v.sort_by(|a, b| a.key.cmp(&b.key));
+        v
     }
 
     /// Sum of the file sizes in a store entry, cached in `<store>/sizes/` (never
@@ -567,6 +595,54 @@ impl Store {
         let _ = fs::remove_file(self.size_file(i));
     }
 
+}
+
+/// One decline file (`Store::declines`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decline {
+    pub key: String,
+    pub why: String,
+    /// The matchapack build that recorded it (None: before builds were
+    /// recorded, which counts as another build).
+    pub build: Option<String>,
+    pub path: PathBuf,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+impl Decline {
+    /// Void for this build: the next install under the key retries.
+    pub fn void(&self) -> bool {
+        self.build.as_deref() != Some(build_identity())
+    }
+}
+
+fn read_decline(p: &Path) -> Option<Decline> {
+    let text = fs::read_to_string(p).ok()?;
+    let mut lines = text.lines();
+    let key = lines.next()?.to_string();
+    let why = lines.next().unwrap_or("").to_string();
+    let build = lines.find_map(|l| l.strip_prefix("build: ")).map(String::from);
+    let modified = fs::metadata(p).and_then(|m| m.modified()).ok();
+    Some(Decline { key, why, build, path: p.to_path_buf(), modified })
+}
+
+/// This matchapack build, as a decline file records it: the version and
+/// the git commit embedded at build time (`--version`). A build from a
+/// checkout with uncommitted changes (`-dirty`) or from outside git
+/// (`unknown`) is not told apart by that, so the SHA-256 of the running
+/// executable is added; it is computed once, and only when a decline file
+/// is read for a matching key or written.
+pub fn build_identity() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let build = env!("MATCHAPACK_BUILD");
+        let mut id = format!("{} ({build})", env!("CARGO_PKG_VERSION"));
+        if build == "unknown" || build.ends_with("-dirty") {
+            let exe = std::env::current_exe().and_then(fs::read).map(|b| hex::encode(&sha2::Sha256::digest(&b)[..8]));
+            id.push_str(&format!(" exe {}", exe.unwrap_or_else(|_| "?".into())));
+        }
+        id
+    })
 }
 
 /// What comparing a store entry with pacote's extraction found
@@ -1062,6 +1138,39 @@ pub(crate) mod tests {
         drop(gc);
         let _ = fs::remove_dir_all(&d);
     }
+    /// A decline holds for the build that recorded it only: another build's
+    /// (or one with no build line) is void, retried, and rewritten when
+    /// declined again. `declines` lists every file, with whether it is void.
+    #[test]
+    fn a_decline_holds_for_the_build_that_recorded_it() {
+        let d = scratch("declines");
+        let store = Store::new(d.join("store"), d.join("cacache")).unwrap();
+        let (k1, k2) = ("fetcher:1 tar:1 uv:1", "fetcher:2 tar:2 uv:2");
+        let f = store.decline_key_as(k1, "odd", "0.1.0 (aaaa)").unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), format!("{k1}\nodd\nbuild: 0.1.0 (aaaa)\n"), "readable: key, why, build");
+        assert_eq!(store.declined_by(k1, || "0.1.0 (aaaa)").as_deref(), Some("odd"), "the same build: declined");
+        assert_eq!(store.declined_by(k1, || "0.1.0 (bbbb)"), None, "another build: void");
+        // Declined again by the other build: the file is now that build's.
+        store.decline_key_as(k1, "odd again", "0.1.0 (bbbb)").unwrap();
+        assert_eq!(store.declined_by(k1, || "0.1.0 (bbbb)").as_deref(), Some("odd again"));
+        assert_eq!(store.declined_by(k1, || "0.1.0 (aaaa)"), None);
+        // A file with no build line (the format before builds were recorded):
+        // another build, whatever this one is.
+        fs::write(store.declined_path(k2), format!("{k2}\nold\n")).unwrap();
+        assert_eq!(store.declined_by(k2, || "0.1.0 (bbbb)"), None);
+        assert_eq!(store.declined(k2), None);
+        // This build's own decline holds for it.
+        store.decline_key(k2, "mine").unwrap();
+        assert_eq!(store.declined(k2).as_deref(), Some("mine"));
+        let all = store.declines();
+        assert_eq!(all.iter().map(|x| (x.key.as_str(), x.void(), x.path == store.declined_path(&x.key))).collect::<Vec<_>>(), vec![(k1, true, true), (k2, false, true)]);
+        assert_eq!(all[1].build.as_deref(), Some(build_identity()));
+        // Deleting the file clears it.
+        fs::remove_file(store.declined_path(k2)).unwrap();
+        assert_eq!(store.declined(k2), None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// The rule on pacote's extraction (`odd_path`), on its own and in the
     /// comparison: every path a file or a directory, none more than
     /// EXTRACTION_TIME_SLACK (an hour) older than the install's start. No

@@ -522,8 +522,29 @@ mt_install "$p"; rc=$?
   && [ "$(last_log_in "$mt_log2" "r['outcome'], r['inject']['cloned'], r['inject']['extraction_unexpected'] is not None")" = "installed 0 True" ] \
   && [ "$(declined_keys "$es")" = "$mt_key" ] && same "$ref_mt" "$p" \
   && ok "key: after its file is removed, the code is tried again: the check fires again and declines it again" || bad "key: after clearing: rc=$rc"
-MATCHAPACK_LOG_DIR=$mt_log2 "$bin" report > "$work/report" 2>&1 && grep -q "in 2 runs pacote's extraction was not what the clones reproduce (0 rebuilt by npm ci, 2 had cloned nothing" "$work/report" \
+# A decline another matchapack build recorded is void: the next install
+# tries the code again, the check fires again, and the file is rewritten
+# with this build.
+dk=$(grep -lxF "$mt_key" "$es"/declined/* 2>/dev/null)
+python3 - "$dk" <<'PY' || bad "key: could not make the decline another build's"
+import sys
+p = sys.argv[1]; lines = open(p).read().split("\n")
+assert lines[2].startswith("build: "), lines
+lines[2] = "build: 0.0.0 (another-build)"
+open(p, "w").write("\n".join(lines))
+PY
+this_build=$("$bin" --version | sed 's/^matchapack //')
+p=$(project key-mtime-empty4 small)
+mt_install "$p"; rc=$?
+[ $rc = 0 ] && ! grep -q "on the store's decline list" "$work/out" \
+  && [ "$(last_log_in "$mt_log2" "r['outcome'], r['inject']['cloned'], r['inject']['extraction_unexpected'] is not None")" = "installed 0 True" ] \
+  && [[ "$(sed -n 3p "$dk")" == "build: $this_build"* ]] && same "$ref_mt" "$p" \
+  && ok "key: a decline recorded by another build is void: tried again, declined again, now by this build ($this_build)" || bad "key: another build's decline: rc=$rc, $(sed -n 3p "$dk")"
+MATCHAPACK_STORE=$es MATCHAPACK_LOG_DIR=$mt_log2 "$bin" report > "$work/report" 2>&1 && grep -q "in 3 runs pacote's extraction was not what the clones reproduce (0 rebuilt by npm ci, 3 had cloned nothing" "$work/report" \
   && ok "key: matchapack report counts the runs that cloned nothing" || bad "key: report, empty store ($(grep reproduce "$work/report"))"
+grep -qF "  $mt_key: declined " "$work/report" && grep -qF "by $this_build" "$work/report" && grep -qF "file $dk" "$work/report" \
+  && grep -q "to clear one: delete its file; a new matchapack build tries a declined code again by itself" "$work/report" \
+  && ok "key: matchapack report lists the declined code with its build and file, and how to clear it" || bad "key: report, declines ($(grep -A2 'declined extraction code' "$work/report"))"
 
 # 10c. The fingerprint gate: an npm whose pacote class has one statement more
 #      inside a private method (#entryMode: not part of extract's own text)
