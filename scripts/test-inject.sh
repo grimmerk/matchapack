@@ -804,7 +804,7 @@ decline_case "npm ci with npm_config_dry_run=true" "$p" "this run installs nothi
 p=$(project ci-quiet-scope bundled)
 decline_case "npm ci outside the trial scope" "$p" "outside the trial scope" 0 MATCHAPACK_PATHS="$work/nowhere" -- ci --no-audit --no-fund
 # The family with another reason: the line is printed.
-p=$(project fam-loud bundled)
+p=$(project fam-loud bundled); rm -rf "${work:?}/fam-loud-root" "${work:?}/fam-loud-plain"
 want=$(plain_status "$p" -- install --prefix "$work/fam-loud-plain" --no-audit --no-fund)
 decline_case "npm install with a --prefix root that does not exist" "$p" "the install root $work/fam-loud-root does not exist yet" "$want" -- install --prefix "'$work/fam-loud-root'" --no-audit --no-fund
 
