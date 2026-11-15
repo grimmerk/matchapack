@@ -197,7 +197,7 @@ else bad "sample: the logged run's record (exit $rc): $(tail -1 "$sp/log/log.jso
 before=$(loglines)
 sp_sample -- 1
 if [ $rc = 0 ] && [ "$(vrec 'r["result"]')" = IDENTICAL ] && [ "$(vrec 'r["dir"]')" = "$pm_real" ] && [ "$(vrec 'r["args"]')" = "['--frozen-lockfile']" ] \
-  && [ "$(vrec 'r["cloned"] > 0')" = True ] && [ "$(vrec 'r["yarn"]')" = "$("$node" "$yarnjs" --version)" ] && [ "$(loglines)" = "$before" ]; then
+  && [ "$(vrec 'r["cloned"] > 0 and r["logged_build"] == r["build"]')" = True ] && [ "$(vrec 'r["yarn"]')" = "$("$node" "$yarnjs" --version)" ] && [ "$(loglines)" = "$before" ]; then
   ok "sample: a logged install replayed: IDENTICAL, $(vrec 'r["cloned"]') files cloned, the run log unchanged"
 else bad "sample: identical replay (exit $rc, $(vrec 'r.get("result"), r.get("reason")'))"; fi
 # The replay's matchapack run must clone when the logged run did: every
@@ -207,6 +207,13 @@ sp_sample MATCHAPACK_YARN_FAIL_EVERY=1 -- "$pm"
 case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
   "ERROR: the replay cloned 0, the logged run 194"*) ok "sample: a replay in which matchapack cloned nothing: ERROR, not IDENTICAL" ;;
   *) bad "sample: replay that cloned nothing ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned")'))" ;;
+esac
+# Fewer clones than the logged run (every other clone refused): the replay
+# did not repeat the run (measured before: IDENTICAL with 97 of 194).
+sp_sample MATCHAPACK_YARN_FAIL_EVERY=2 -- "$pm"
+case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
+  "ERROR: the replay cloned "*", the logged run 194: it did not repeat the run") ok "sample: a replay that cloned fewer than the logged run: ERROR ($(vrec 'r["cloned"]') of 194)" ;;
+  *) bad "sample: replay that cloned fewer ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned")'))" ;;
 esac
 # (TMPDIR also gets Yarn's own temporary files.)
 if [ -z "$(ls -d "$sp/tmp"/matchapack-verify-yarn.* 2>/dev/null)" ]; then ok "sample: its work directory is removed"; else bad "sample: left $(ls -d "$sp/tmp"/matchapack-verify-yarn.*)"; fi
@@ -248,9 +255,9 @@ pe=$(sp_project empty yarn1-emptyfirst)
 sp_install "$pe" --frozen-lockfile
 # An mtime on a non-empty package file next to empty ones has the race's
 # shape (under Node >= 22.12); the sampler runs it once more with one pool
-# thread, where the race cannot happen: a damage that stays is DIFFERENT, one
-# that the second run does not have (the race) ends IDENTICAL, with the
-# first verdict kept. One pool thread for the first run too, so that plain
+# thread, where the race cannot happen: a damage that stays is DIFFERENT;
+# one that the second run does not have stays RACE-SHAPED (a faulty engine
+# need not repeat itself either), with the second verdict kept. One pool thread for the first run too, so that plain
 # Yarn's real race does not add to the damage.
 race_node=0; "$node" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=12)?0:1)' && race_node=1
 sp_sample UV_THREADPOOL_SIZE=1 MATCHAPACK_VERIFY_YARN_DAMAGE='touch -t 200001010000 node_modules/y1-empty/index.js' MATCHAPACK_VERIFY_KEEP=1 -- "$pe"
@@ -261,9 +268,9 @@ else bad "sample: race-shaped damage, want $want ($(vrec 'r.get("result"), r.get
 kept=$(sed -n 's/^  kept: //p' "$work/out" | tail -1)
 once=$sp/damaged-once; rm -f "$once"
 sp_sample UV_THREADPOOL_SIZE=1 MATCHAPACK_VERIFY_YARN_DAMAGE="[ -e '$once' ] || { touch '$once'; touch -t 200001010000 node_modules/y1-empty/index.js; }" -- "$pe"
-want="('DIFFERENT', None)"; [ $race_node = 1 ] && want="('IDENTICAL', 'RACE-SHAPED')"
-if [ "$(vrec '(r["result"], r.get("first_result"))')" = "$want" ]; then ok "sample: a race-shaped difference gone with one pool thread: $want"
-else bad "sample: race-shaped once, want $want ($(vrec 'r.get("result"), r.get("first_result"), r.get("reason")'))"; fi
+want="('DIFFERENT', None, None)"; [ $race_node = 1 ] && want="('RACE-SHAPED', 'RACE-SHAPED', 'IDENTICAL')"
+if [ "$(vrec '(r["result"], r.get("first_result"), r.get("rerun_result"))')" = "$want" ]; then ok "sample: a race-shaped difference gone with one pool thread stays RACE-SHAPED (no proof it was the race): $want"
+else bad "sample: race-shaped once, want $want ($(vrec 'r.get("result"), r.get("first_result"), r.get("rerun_result"), r.get("reason")'))"; fi
 # The race rule on the kept tree, called directly: an empty file's mtime,
 # a content difference, .yarn-integrity, a path outside node_modules, or
 # Node before 22.12 is not the race.
@@ -300,6 +307,16 @@ c = vs.yarn_result(1, "plain yarn failed in plain1 (exit 1):\n  error Command fa
 print(a[0], a[1] == "matchapack failed where plain Yarn did not: error An unexpected error occurred", b[0], "outside the trial scope" in b[1], c[0], bool(c[1]))' "$here/scripts/verify-sample.py" "$here")
 if [ "$r" = "DIFFERENT True ERROR True ERROR True" ]; then ok "sample: matchapack failing where plain Yarn installed is DIFFERENT; a decline and plain Yarn failing are ERROR, with reasons"
 else bad "sample: failure verdicts: $r"; fi
+# The engine's invariant on its own record: when it cloned, Yarn's first
+# copies (`first`) were all left to Node (`first-copies`).
+r=$(python3 -I -B -c '
+import importlib.util, sys
+s = importlib.util.spec_from_file_location("vs", sys.argv[1]); vs = importlib.util.module_from_spec(s); s.loader.exec_module(vs)
+y = lambda **k: {"yarn1": dict({"cloned": 194, "first": 128, "copied": {"first-copies": 128}}, **k)}
+print(vs.first_copies_kept(y()) is None, bool(vs.first_copies_kept(y(copied={}))), bool(vs.first_copies_kept(y(copied={"first-copies": 0}))),
+      vs.first_copies_kept(y(cloned=0, copied={})) is None, bool(vs.first_copies_kept(y(first=None))))' "$here/scripts/verify-sample.py")
+if [ "$r" = "True True True True True" ]; then ok "sample: the engine's first-copies invariant (a record with copied {} breaks it)"
+else bad "sample: first-copies invariant: $r"; fi
 
 # skip <label> <expected reason text> [verify-sample.sh args]: SKIPPED with that reason.
 skip() { # skip <label> <expected reason text> [verify-sample.sh args]
@@ -358,7 +375,13 @@ $2"
 # with nothing cloned).
 pf=$(sp_project filedir yarn1-file/dir); pf=$(cd "$pf" && pwd -P); python3 -I "$here/fixtures/yarn1-file/make.py" dir "$pf"
 sp_install "$pf" --frozen-lockfile
-skip "a file: dependency" "a file:/link: dependency (package.json: local-dir file:./local-dir); the copies hold manifests only" "$pf"
+skip "a file: dependency" "a local dependency (package.json: local-dir file:./local-dir); the copies hold manifests only" "$pf"
+# A local directory without `file:` (measured before: IDENTICAL, 1 file of
+# 308 cloned).
+pd2=$(sp_project dotdir yarn1-many); pd2=$(cd "$pd2" && pwd -P)
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["dependencies"]["loc"]="./loc"; json.dump(d, open(p,"w"), indent=2)' "$pd2/package.json"
+fake_at "$pd2" ""
+skip "a ./ dependency" "a local dependency (package.json: loc ./loc)" "$pd2"
 # A logged run that cloned nothing (all its files among Yarn's first copies,
 # or an up-to-date install): nothing to check a clone against.
 pz=$(sp_project zero yarn1-many); pz=$(cd "$pz" && pwd -P)
@@ -418,10 +441,32 @@ else bad "sample: npm sampler on a yarn record (exit $rc)"; fi
 
 # 7. The report shows the Yarn samples beside the npm ones.
 MATCHAPACK_LOG_DIR="$sp/log" "$bin" report > "$work/out" 2>&1
-if grep -q '^verification samples (npm): none yet' "$work/out" && grep -Eq '^verification samples \(yarn\): [0-9]+ run: identical [1-9]' "$work/out" \
+if grep -q '^verification samples (npm): none yet' "$work/out" && grep -Eq '^verification samples \(yarn\): [0-9]+ samples: identical [1-9]' "$work/out" \
   && grep -Eq '^verification samples \(yarn\): .*skipped [1-9]' "$work/out" && grep -Eq '^  .* SKIPPED +/' "$work/out" \
   && grep -Eq '^  .* +/.*\(yarn [a-z-]+, started empty; ' "$work/out"; then ok "sample: matchapack report shows the Yarn samples"
 else bad "sample: report"; fi
+# 8. The skip cap, and a build that cannot answer.
+# More skippable projects than the skip records allowed per run (25 gone
+# directories, newer than every replayable run): the search goes on, 20 skips
+# are recorded, and one replay runs.
+for i in $(seq 25); do sp_fake "r['root'] = r['dir'] = '$sp/gone-many-$i'"; done
+n0=$(wc -l < "$sp/log/verify.jsonl")
+sp_sample -- 1
+got=$(tail -n +$((n0 + 1)) "$sp/log/verify.jsonl" | python3 -c '
+import json, sys
+recs = [json.loads(l) for l in sys.stdin]
+print(sum(r["result"] == "SKIPPED" for r in recs), sum(r["result"] != "SKIPPED" for r in recs))')
+if [ "$got" = "20 1" ]; then ok "sample: 25 projects to skip, then a replayable one, N=1: 20 skips recorded, one replay"
+else bad "sample: skip cap: $got (skipped, replayed)"; fi
+# A checkout whose build cannot answer replay-state: one ERROR, nothing else.
+fc=$sp/oldcheckout; mkdir -p "$fc/scripts" "$fc/target/release"
+cp "$here/scripts/verify-sample.sh" "$here/scripts/verify-sample.py" "$fc/scripts/"
+printf '#!/bin/sh\n[ "$1" = --version ] && { echo "matchapack 0.1.0 (old)"; exit 0; }\necho "unrecognized subcommand" >&2; exit 2\n' > "$fc/target/release/matchapack"; chmod +x "$fc/target/release/matchapack"
+n0=$(wc -l < "$sp/log/verify.jsonl")
+MATCHAPACK_LOG_DIR_REAL="$sp/log" TMPDIR="$sp/tmp" "$fc/scripts/verify-sample.sh" --yarn 1 > "$work/out" 2>&1; rc=$?
+got=$(tail -n +$((n0 + 1)) "$sp/log/verify.jsonl" | python3 -c 'import json,sys; recs=[json.loads(l) for l in sys.stdin]; print(len(recs), recs[0]["result"] if recs else None, "replay-state" in (recs[0].get("reason", "") if recs else ""))')
+if [ $rc = 1 ] && [ "$got" = "1 ERROR True" ]; then ok "sample: a build without replay-state: one ERROR, nothing replayed"
+else bad "sample: old build (exit $rc, $got)"; fi
 fi # TEST_YARN1_PART sample
 if [ "${TEST_YARN1_PART:-all}" = sample ]; then
   if [ "$(ls -l ~/.yarnrc 2>/dev/null || echo absent)" = "$yarnrc_before" ]; then ok "~/.yarnrc untouched"; else bad "~/.yarnrc changed"; fi

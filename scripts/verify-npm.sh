@@ -383,7 +383,7 @@ for t in "abs:r['args'] = ['install', '--prefix', '/elsewhere']:an argument is a
          "newline:r['args'] = ['install', 'a\nb']:a line break" \
          "nothing-cloned:r['packages'] = 0:nothing was cloned in the logged run" \
          "incomplete:r['files_complete'] = False:the logged file set may be incomplete" \
-         "file-dep:r['command'] = 'install':a file:/link: dependency"; do
+         "file-dep:r['command'] = 'install':a local dependency"; do
   label=${t%%:*}; rest=${t#*:}; edit=${rest%%:*}; want=${rest#*:}
   [ $label = sub ] && mkdir -p "$pn/sub"
   if [ $label = file-dep ]; then

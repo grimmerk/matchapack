@@ -832,7 +832,9 @@ fn verify_lines(ver: &[Value], yarn_runs: bool, at: &dyn Fn(f64) -> String) -> V
         if other > 0 {
             parts.push(format!("other {other}"));
         }
-        out.push(format!("verification samples ({name}): {} run: {}", list.len(), parts.join(", ")));
+        // Samples, not distinct runs: a logged run is sampled again on every
+        // run of the sampler until a newer one replaces it.
+        out.push(format!("verification samples ({name}): {} samples: {}", list.len(), parts.join(", ")));
         for v in list.iter().rev().take(5) {
             let result = v["result"].as_str().unwrap_or("?");
             // npm records from before samples named their command are npm ci's.
@@ -895,10 +897,10 @@ mod tests {
             json!({ "ts": 5.0, "engine": "yarn1", "result": "ERROR", "dir": "/p/e", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": null, "matchapack_secs": null, "cloned": null, "build": "b2", "reason": "plain Yarn failed in its copy" }),
         ];
         let l = verify_lines(&ver, false, &at);
-        assert_eq!(l[0], "verification samples (npm): 2 run: identical 1, different 1, error 0, skipped 0");
+        assert_eq!(l[0], "verification samples (npm): 2 samples: identical 1, different 1, error 0, skipped 0");
         assert_eq!(l[1], "  t1.5  DIFFERENT         /p/n2  (npm install, started empty; npm 3.0 s, matchapack 2.0 s, build b2; 1 differ, first: bytes package-lock.json)");
         assert_eq!(l[2], "  t1  IDENTICAL         /p/npm  (npm ci; npm 2.5 s, matchapack 1.5 s, build b1)");
-        assert_eq!(l[3], "verification samples (yarn): 4 run: identical 1, different 1, race-shaped (#57: sample again) 0, error 1, skipped 1");
+        assert_eq!(l[3], "verification samples (yarn): 4 samples: identical 1, different 1, race-shaped (#57: sample again) 0, error 1, skipped 1");
         assert_eq!(l[4], "  t5  ERROR             /p/e  (yarn install; yarn 1.22.22, node v24.22.1, yarn null s, matchapack null s, null cloned, build b2; plain Yarn failed in its copy)");
         assert_eq!(l[5], "  t4  DIFFERENT         /p/y  (yarn add, started empty; yarn 1.22.22, node v24.22.1, yarn 3.1 s, matchapack 3.0 s, 190 cloned, build b2; 1 differ, first: content node_modules/y1-a/index.js)");
         assert_eq!(l[6], "  t3  SKIPPED           /p/gone  (yarn install; the project directory is gone)");

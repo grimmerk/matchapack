@@ -21,11 +21,14 @@ runs"). Two kinds of run are replayed (issue grimmerk/matchapack-private#77):
   while they still have the hashes the run logged, else its git HEAD's
   when those have them.
 
-The rule (review round 1): a sample says IDENTICAL only when (a) the
-replay's inputs provably equal the logged run's (the set of files, their
-bytes, the arguments), (b) matchapack's run in the replay went through
-matchapack and cloned, as the logged run did, and (c) every check of the
-comparison passed (its exit status, not only the line it printed).
+The rule (review rounds 1 and 2): a sample says IDENTICAL only when (a)
+the replay's inputs equal what the logged run recorded (the files it
+hashed, their bytes, the words it logged; the environment and the rc
+files are not logged), (b) matchapack's run in the replay went through
+matchapack and cloned at least as much as the logged run, and (c) every
+check of the comparison passed (its exit status, not only the line it
+printed). When the sampler cannot be sure the replay repeated the logged
+run, it does not say IDENTICAL.
 Whatever cannot be proven is SKIPPED or ERROR, with the reason; matchapack
 failing where plain npm or Yarn succeeded is DIFFERENT.
 """
@@ -40,8 +43,8 @@ STARTED_EMPTY = ("absent", "empty")
 COPIED = {"yarn1": ("package.json", "yarn.lock", ".yarnrc", ".npmrc", ".yarnclean"),
           "npm": ("package.json", "package-lock.json", "npm-shrinkwrap.json", ".npmrc")}
 DEP_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "resolutions", "overrides")
-# At most this many projects are recorded as SKIPPED in one run while it
-# looks for N it can replay.
+# At most this many projects are recorded as SKIPPED (or as failed to plan)
+# in one run; the search for N replays goes on past them.
 MAX_SKIPS = 20
 
 
@@ -216,11 +219,12 @@ def files_state(r, root, kind, now_state):
 
 
 def local_dependency(files):
-    """A `file:` / `link:` / `portal:` dependency named by one of the
-    manifests the replay reads, or None. The copies hold manifests only: the
-    directory or tarball it names is not in them, so the replay would not be
-    the run's (measured: a `file:` directory replayed IDENTICAL with nothing
-    cloned)."""
+    """A dependency on a local path named by one of the manifests the replay
+    reads (`file:`, `link:`, `portal:`, or a path: `./`, `../`, `/`, `~/`),
+    or None. The copies hold manifests only: the directory or tarball it
+    names is not in them, so the replay would not be the run's (measured: a
+    `file:` directory, and a `./` one, replayed IDENTICAL with nothing or
+    almost nothing of it cloned)."""
     for k, b in sorted(files.items()):
         if b is None or not k.endswith("package.json"):
             continue
@@ -233,7 +237,7 @@ def local_dependency(files):
             if not isinstance(deps, dict):
                 continue
             for name, spec in deps.items():
-                if isinstance(spec, str) and re.match(r"(file|link|portal):", spec):
+                if isinstance(spec, str) and re.match(r"(file|link|portal):|\.{1,2}/|/|~/", spec.strip()):
                     return "%s: %s %s" % (k, name, spec)
     return None
 
@@ -325,7 +329,28 @@ def cloned_as_logged(plan, cloned, result, reason):
         return "ERROR", "the replay cloned 0, the logged run %s: the comparison would not test matchapack" % plan["logged_cloned"]
     if cloned == 0 and plan.get("logged_cloned") is None:
         return "ERROR", "the replay cloned nothing: the comparison would not test matchapack"
+    # Fewer than the logged run: the replay did not repeat it (every faithful
+    # replay measured cloned as many: 194, 314, 632, 190; npm 2, 3). More is
+    # fine: the logged run's store may have lacked some packages.
+    if isinstance(plan.get("logged_cloned"), int) and cloned < plan["logged_cloned"]:
+        return "ERROR", "the replay cloned %d, the logged run %d: it did not repeat the run" % (cloned, plan["logged_cloned"])
     return result, reason
+
+
+def first_copies_kept(e):
+    """None, or why the Yarn engine's own record breaks its invariant: when
+    it cloned, it left exactly Yarn's first copies (`first`, 128 in every
+    correct record measured) to Node (`copied["first-copies"]`). A replay
+    that breaks it is DIFFERENT, whatever the trees: with those copies
+    cloned, plain Yarn's time probe sees clones, and the tree is right only
+    by chance (NOTES "The probe race", mutation M2)."""
+    y = e.get("yarn1") or {}
+    if not isinstance(y.get("cloned"), int) or y["cloned"] == 0:
+        return None
+    first, kept = y.get("first"), (y.get("copied") or {}).get("first-copies", 0)
+    if not isinstance(first, int) or kept != first:
+        return "the engine did not leave Yarn's first copies to Node (first-copies %s, first %s)" % (kept, first)
+    return None
 
 
 def first_error(lines):
@@ -363,7 +388,7 @@ def yarn_plan(r, d, here):
         return None, why
     why = local_dependency(files)
     if why:
-        return None, "a file:/link: dependency (%s); the copies hold manifests only" % why
+        return None, "a local dependency (%s); the copies hold manifests only" % why
     node, yarn_js = y["node_path"], y["yarn_js"]
     version = r.get("yarn") or y.get("yarn")
     if not os.access(node, os.X_OK):
@@ -520,12 +545,15 @@ def yarn_run(plan, here, src, v, one_thread):
         if l.startswith(("yarn ", "engine: ", "plain vs ", "engine tree damaged", "command: ")):
             print("  " + l)
     result, reason, extra = yarn_result(p.returncode, out, v, here, plan["node_version"], race_possible=not one_thread)
-    cloned, started = None, None
+    cloned, started, e = None, None, {}
     try:
         e = json.load(open(os.path.join(v, "engine.json")))
         cloned, started = (e.get("yarn1") or {}).get("cloned"), e.get("node_modules_before")
     except (OSError, ValueError):
         pass
+    broken = first_copies_kept(e)
+    if broken and result != "DIFFERENT":
+        result, reason = "DIFFERENT", broken
     result, reason = started_as_logged(plan, started, result, reason)
     result, reason = cloned_as_logged(plan, cloned, result, reason)
     return result, reason, extra, cloned
@@ -545,14 +573,22 @@ def yarn_one(plan, here, work):
         rec["replayed_fresh"] = True
     if result in ("RACE-SHAPED", "PLAIN-VARIES"):
         # Once more with one pool thread, where plain Yarn's probe race
-        # cannot happen: a difference that stays is the engine's.
+        # cannot happen: a difference that stays is the engine's (DIFFERENT).
+        # One that is gone does not prove the first was plain Yarn's race (a
+        # faulty engine is not deterministic either: measured with mutation
+        # M2, 7 of 40 samples identical after a race-shaped first run), so
+        # the sample stays RACE-SHAPED, with the second run's verdict kept.
         print("  %s: once more with one pool thread (UV_THREADPOOL_SIZE=1)" % result)
-        rec["first_result"], rec["first_reason"] = result, reason
+        first, first_reason, first_extra = result, reason, extra
+        rec["first_result"], rec["first_reason"] = first, first_reason
         rec["first_differing"] = extra.get("differing") or extra.get("plain_varies")
         shutil.rmtree(v, ignore_errors=True)
         result, reason, extra, cloned = yarn_run(plan, here, src, v, True)
         rec["rerun"] = "one pool thread"
-        if result == "PLAIN-VARIES":
+        rec["rerun_result"], rec["rerun_reason"] = result, reason
+        if first == "RACE-SHAPED" and result in ("IDENTICAL", "PLAIN-VARIES"):
+            result, reason, extra = first, first_reason + "; gone with one pool thread, which does not prove it was the race: sample it again", first_extra
+        elif result == "PLAIN-VARIES":
             # Not the race (one thread): output that varies from run to run,
             # in which the engine differs only where plain Yarn does.
             result = "IDENTICAL"
@@ -625,7 +661,7 @@ def npm_plan(r, d, here, explicit):
     if kind != "full":
         why = local_dependency(files)
         if why:
-            return None, "a file:/link: dependency (%s); the copies hold manifests only" % why
+            return None, "a local dependency (%s); the copies hold manifests only" % why
     nv, err = run_version(["npm", "--version"], tempfile.gettempdir())
     if not r.get("npm") or nv != r.get("npm"):
         return None, "the npm on PATH is %s, the run used %s" % (nv or "not runnable (%s)" % err, r.get("npm") or "an unknown version")
@@ -748,25 +784,49 @@ def main_engine(engine, logdir, n, here, dirs):
     # A replay's copies go even when the sampler is stopped (SIGTERM, SIGHUP).
     for s in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(s, on_signal)
-    replayed = skipped = 0
+    # The checkout's build must answer for the sampler's own questions.
+    try:
+        state_now(here, engine, tempfile.gettempdir())
+    except Exception as e:
+        append(vlog, {"build": build, "engine": engine, "result": "ERROR",
+                      "reason": "this checkout's matchapack (%s) cannot tell a project's state (`replay-state`): build it first (cargo build --release); %s" % (build, e)})
+        print("ERROR: %s cannot answer replay-state: %s" % (os.path.join(here, "target/release/matchapack"), e))
+        return 1
+    replayed = not_replayed = 0
+    def note(rec):
+        """A skip or a plan-step failure: recorded up to MAX_SKIPS per run;
+        the search goes on either way."""
+        nonlocal not_replayed
+        not_replayed += 1
+        if not_replayed <= MAX_SKIPS:
+            append(vlog, rec)
+            print("recorded: %s (%s)" % (rec["result"], rec["reason"]))
+        else:
+            print("not recorded (more than %d skips in this run): %s (%s)" % (MAX_SKIPS, rec["result"], rec["reason"]))
     for r, d in picked:
-        # Without directories: until N replays ran (a skip does not use up
-        # one), recording at most MAX_SKIPS skips.
-        if not dirs and (replayed >= n or skipped >= MAX_SKIPS):
+        # Without directories: until N replays ran; the search covers every
+        # logged project (a skip does not use up one of N).
+        if not dirs and replayed >= n:
             break
         kind = kind_of(r) if r else None
         command = (r.get("command") or ("install" if engine == "yarn1" else "ci")) if r else None
         print("######## %s %s %s" % ("yarn" if engine == "yarn1" else "npm", command or "", d))
-        base = {"build": build, "engine": engine, "kind": kind, "command": command, "dir": d, "logged_ts": r.get("ts") if r else None}
-        work = None
+        base = {"build": build, "logged_build": r.get("build") if r else None, "engine": engine, "kind": kind, "command": command, "dir": d,
+                "logged_ts": r.get("ts") if r else None}
         try:
             plan, why = yarn_plan(r, d, here) if engine == "yarn1" else npm_plan(r, d, here, explicit)
-            if why:
-                append(vlog, dict(base, result="SKIPPED", reason=why))
-                print("recorded: SKIPPED (%s)" % why)
-                skipped += 1
-                continue
-            replayed += 1
+        except Stop as e:
+            append(vlog, dict(base, result="ERROR", reason="the sampler was stopped (%s)" % e))
+            return 1
+        except Exception as e:
+            note(dict(base, result="ERROR", reason="planning the replay failed: %s: %s" % (type(e).__name__, e)))
+            continue
+        if why:
+            note(dict(base, result="SKIPPED", reason=why))
+            continue
+        replayed += 1
+        work = None
+        try:
             work = tempfile.mkdtemp(prefix="matchapack-verify-%s." % ("yarn" if engine == "yarn1" else "npm"), dir=os.environ.get("TMPDIR") or None)
             rec = yarn_one(plan, here, work) if engine == "yarn1" else npm_one(plan, here, work)
         except Stop as e:
@@ -792,6 +852,8 @@ def main_engine(engine, logdir, n, here, dirs):
             print("    " + l)
         if rec["result"] == "ERROR":
             print("\n".join("    " + l for l in rec.get("detail", [])))
+    if not_replayed > MAX_SKIPS:
+        print("%d projects skipped in all, %d of them recorded" % (not_replayed, MAX_SKIPS))
     return 0
 
 
