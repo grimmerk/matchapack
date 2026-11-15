@@ -382,6 +382,35 @@ packages that never reached matchapack's hook (the sign that the hook no
 longer fits a new npm: installs stay correct, only slower; the install
 itself prints a line too).
 
+### How matchapack checks itself while it runs (npm)
+
+Before every run, the fingerprint gate: pacote's `lib/fetcher.js` must be on
+the list this build was tested with, or the run is plain npm (above). Then,
+per package:
+
+| Situation | What happens | How often |
+|---|---|---|
+| A. The package is not in the store | npm's own pacote extracts it, and that extraction becomes the store entry (after the check of its times and file kinds, "After an npm or Node upgrade") | every run, for new packages |
+| B. The entry is not yet known under the extraction code that runs (the store key: pacote's `lib/fetcher.js`, the tar code Node loads, libuv's version) | pacote extracts it and it is compared file by file with the entry: equal, the key is recorded and the entry cloned; different, the entry is replaced by npm's extraction | once per entry and key: after an npm or Node upgrade that changed that code, not on every run |
+| C. The entry is known under the running key | cloned without a comparison, except one in 50 at random, which goes through B's comparison (`MATCHAPACK_INJECT_CHECK`) | every run |
+| D. The result trap: npm reads a field of pacote's result that a clone may not give | the run counts as broken: `npm ci` is rebuilt with plain npm; the install family stops with the repair advice | every run |
+
+Why C does not compare everything: the same tarball (fixed by its
+integrity) through the same extraction code gives the same files, and B
+has already shown them equal to the entry, so a second comparison adds
+nothing. The one-in-50 sample is a safety net for what the key does not
+cover (a store file changed or damaged since, Node's own file-system layer,
+zlib, the OS; #72), not a speed-up. To check the whole store at once after
+an upgrade, run `matchapack store verify` ([After an npm or Node
+upgrade](#after-an-npm-or-node-upgrade), [Store
+maintenance](#store-maintenance)).
+
+The Yarn 1 engine has no such comparison while it runs: it clones from
+Yarn's own cache at Yarn's link step, with no store and no extraction to
+compare with. That is why the sampled verification of real runs
+(`scripts/verify-sample.sh --yarn`, "Trial: logs, checks, scope") matters
+more for Yarn.
+
 ## Yarn 1 (classic) projects (macOS)
 
 **What it does.** In a Yarn 1 project, `yarn` runs your own Yarn 1, as it
