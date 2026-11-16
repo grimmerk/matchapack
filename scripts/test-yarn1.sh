@@ -1067,7 +1067,10 @@ else bad "install in a workspace directory (exit $rc, cloned ${n:-?}, from the r
 for kind in tgz dir; do
   fsrc=$work/file-$kind-src; rm -rf "${fsrc:?}"; mkdir -p "$fsrc"
   cp -p "$here/fixtures/yarn1-file/$kind/package.json" "$here/fixtures/yarn1-file/$kind/yarn.lock" "$fsrc/"
-  python3 -I "$here/fixtures/yarn1-file/make.py" "$kind" "$fsrc"
+  # The tarball is kept as it is (its bytes depend on Python's zlib: CI's
+  # Python wrote another sha1 than yarn.lock's); the directory is written.
+  if [ $kind = tgz ]; then cp -p "$here/fixtures/yarn1-file/tgz/local-1.0.0.tgz" "$fsrc/"
+  else python3 -I "$here/fixtures/yarn1-file/make.py" dir "$fsrc"; fi
   UV_THREADPOOL_SIZE=1 everify e-file-$kind "$fsrc"
   n=$(ejson e-file-$kind "y['cloned']")
   if [ $kind = tgz ]; then verdict_ok() { [ $rc = 0 ] && same; }

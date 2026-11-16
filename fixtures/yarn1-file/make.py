@@ -8,11 +8,13 @@ One package, `local-tgz` or `local-dir` 1.0.0: package.json with a bin,
 index.js, README.md, nested files, an executable bin/cli.js, two empty
 files, and 300 padding files (more than the 128 first copies of Yarn's link
 step, which the engine leaves to Node, so some files must be clones).
-Deterministic: fixed times, owner and order, a gzip header without a name or
-time, so the tarball's sha1 is the one in tgz/yarn.lock (Yarn's
---frozen-lockfile checks it: a change here makes the install fail with
-"Integrity check failed" until yarn.lock is generated again, with plain Yarn
-and a scratch cache of its own).
+Fixed times, owner and order, a gzip header without a name or time; but the
+compressed bytes depend on the zlib Python uses (CI's Python wrote another
+sha1 than this machine's), so the tarball is kept in the repository
+(tgz/local-1.0.0.tgz, the sha1 in tgz/yarn.lock) and the test copies it;
+`make.py tgz` only regenerates it. After a change: write it again, then
+generate yarn.lock again with plain Yarn and a scratch cache of its own
+(Yarn's --frozen-lockfile checks the sha1, "Integrity check failed").
 """
 import gzip, io, json, os, sys, tarfile
 
