@@ -188,7 +188,7 @@ if [ $rc = 0 ] && [ "$(lrec 'r["root"]')" = "$pm_real" ] && [ "$(lrec 'r["replay
   && [ "$(lrec 'os.path.realpath(r["yarn1"]["yarn_js"])')" = "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$yarnjs")" ] && [ "$(lrec 'r["yarn1"]["node"]')" = "$("$node" -v)" ] \
   && [ "$(lrec 'r["files_complete"]')" = True ] \
   && [ "$(lrec 'r["files_after"]["yarn.lock"]')" = "$(shasum -a 256 "$pm/yarn.lock" | cut -d' ' -f1)" ] && [ "$(lrec 'r["files_before"] == r["files_after"]')" = True ] \
-  && [ "$(lrec 'sorted(r["files_before"])')" = "['package.json', 'yarn.lock']" ] && [ "$(lrec 'r["node_modules_before"]')" = absent ] \
+  && [ "$(lrec 'sorted(r["files_before"])')" = "['.npmrc', '.yarnrc', 'package.json', 'yarn.lock']" ] && [ "$(lrec 'r["files_before"][".yarnrc"]')" = None ] && [ "$(lrec 'r["node_modules_before"]')" = absent ] \
   && [ "$(lrec 'r["replay"]["kind"]')" = install ] && [ -x "$(lrec 'r["yarn1"]["node_path"]')" ]; then
   ok "sample: the log record carries the root, the replay's arguments, Yarn's and node's paths, node_modules and the files' hashes before and after"
 else bad "sample: the logged run's record (exit $rc): $(tail -1 "$sp/log/log.jsonl" | head -c 600)"; fi
@@ -347,17 +347,31 @@ case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
   "SKIPPED: the environment's Yarn settings differ from the run's: NODE_ENV") ok "sample: a run logged under NODE_ENV=production, sampled without it: SKIPPED, naming NODE_ENV" ;;
   *) bad "sample: NODE_ENV run ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned"), r.get("logged_cloned")'))" ;;
 esac
-# A .yarnrc that made the run a production install, removed since (rc files
-# are copied as they are now, not hashed): the replay clones more than the
-# run did: ERROR.
-py=$(sp_project prodrc yarn1-many); py=$(cd "$py" && pwd -P)
-echo '--install.production true' > "$py/.yarnrc"
-sp_install "$py" --frozen-lockfile
-rm "$py/.yarnrc"
-sp_sample -- "$py"
+# The project's .yarnrc is hashed with the manifests: one that made the run
+# a production install, or one with `ignore-scripts true` (which changes
+# no clone count: the review's case), removed since: SKIPPED, naming it.
+for t in "prodrc:--install.production true" "noscripts:ignore-scripts true"; do
+  py=$(sp_project "${t%%:*}" yarn1-many); py=$(cd "$py" && pwd -P)
+  echo "${t#*:}" > "$py/.yarnrc"
+  sp_install "$py" --frozen-lockfile
+  rm "$py/.yarnrc"
+  sp_sample -- "$py"
+  case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
+    "SKIPPED: .yarnrc changed since the run") ok "sample: a project .yarnrc ($(echo "${t#*:}")) removed since the run: SKIPPED" ;;
+    *) bad "sample: removed .yarnrc ${t%%:*} ($(vrec 'r.get("result"), r.get("reason")'))" ;;
+  esac
+done
+# An rc file outside the project, named by --use-yarnrc, is not hashed:
+# made a production install, changed since, the replay clones more than the
+# run did, and the equal clone count makes it ERROR.
+pu=$(sp_project userc yarn1-many); pu=$(cd "$pu" && pwd -P)
+echo '--install.production true' > "$sp/userc.yarnrc"
+sp_install "$pu" --frozen-lockfile --use-yarnrc "$sp/userc.yarnrc"
+: > "$sp/userc.yarnrc"
+sp_sample -- "$pu"
 case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
-  "ERROR: the replay cloned "*", the logged run "*": it did not repeat the run") ok "sample: a run under a .yarnrc removed since: ERROR (clones $(vrec 'r["cloned"]') against $(vrec 'r["logged_cloned"]'))" ;;
-  *) bad "sample: removed .yarnrc ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned"), r.get("logged_cloned")'))" ;;
+  "ERROR: the replay cloned "*", the logged run "*": it did not repeat the run") ok "sample: a --use-yarnrc file changed since: ERROR by the clone count ($(vrec 'r["cloned"]') against $(vrec 'r["logged_cloned"]'))" ;;
+  *) bad "sample: changed --use-yarnrc file ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned"), r.get("logged_cloned")'))" ;;
 esac
 # A workspace that is a symlink: the logged set is incomplete, and the skip
 # says why.
@@ -441,7 +455,8 @@ pk=$(sp_project secret yarn1-many); pk=$(cd "$pk" && pwd -P)
 fake_at() { # fake_at <dir> <python statements>: a record for <dir>, its files' hashes as they are now
   sp_fake "import hashlib
 r['root'] = r['dir'] = '$1'
-r['files_before'] = r['files_after'] = {n: hashlib.sha256(open('$1/' + n, 'rb').read()).hexdigest() for n in ('yarn.lock', 'package.json')}
+import os
+r['files_before'] = r['files_after'] = {n: (hashlib.sha256(open('$1/' + n, 'rb').read()).hexdigest() if os.path.exists('$1/' + n) else None) for n in r['files_after']}
 $2"
 }
 # A file: directory dependency: the copies hold manifests only, so the

@@ -183,8 +183,9 @@ def files_state(r, root, kind, now_state):
         return None, None, "the project's workspaces cannot all be found now: %s" % (now_state.get("incomplete") or "a pattern matchapack does not expand, or its listing budget ran out")
     now = now_state.get("files") or {}
     if set(now) != set(fa) or set(fb) != set(fa):
-        added = sorted(set(now) - set(fa))
-        gone = sorted(set(fa) - set(now))
+        # Named by their manifests (each workspace also brings its rc files).
+        added = sorted(k for k in set(now) - set(fa) if k.endswith("package.json")) or sorted(set(now) - set(fa))
+        gone = sorted(k for k in set(fa) - set(now) if k.endswith("package.json")) or sorted(set(fa) - set(now))
         return None, None, "the workspaces changed since the run (%s)" % ", ".join(["+" + k for k in added] + ["-" + k for k in gone] + (["the run itself changed them"] if set(fb) != set(fa) else []))
     want = fa if kind == "full" else fb
     changed_since = sorted(k for k in fa if now.get(k) != fa[k])
