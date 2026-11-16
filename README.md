@@ -665,19 +665,25 @@ own and complete).
   stands.
 
   A sample says IDENTICAL only when the replay's inputs equal what the
-  logged run recorded (the files it hashed and the words it logged; the
-  environment and the rc files are not logged), matchapack's run in the
-  replay cloned as many files (Yarn) or packages (npm) as the logged run,
-  and every check of the comparison passed. When the sampler cannot be
-  sure the replay repeated the run, it does not say IDENTICAL. Environment
-  variables such as `NODE_ENV=production` are not logged; the equal clone
-  count is what catches a replay under other settings (it installs, and
-  clones, more or fewer packages). Only a Yarn install that ran over an
-  existing `node_modules` ("replayed fresh") may clone more. The results:
+  logged run recorded (the files it hashed, the words it logged, and the
+  environment's npm or Yarn settings), matchapack's run in the replay
+  cloned as many files (Yarn) or packages (npm) as the logged run, and
+  every check of the comparison passed. When the sampler cannot be sure
+  the replay repeated the run, it does not say IDENTICAL. The environment
+  variables npm or Yarn read as settings (`npm_config_*` in any case; for
+  Yarn also `YARN_*`; `NODE_ENV`) are logged as their names and one
+  SHA-256 over their values, never the values (they can hold tokens); a
+  sampler whose environment has other ones SKIPs the run and names them.
+  The rc files (`.npmrc`, `.yarnrc`) are copied as they are now, not
+  hashed: the equal clone count is what catches a replay under other
+  settings there (it installs, and clones, more or fewer packages). Only a
+  Yarn install that ran over an existing `node_modules` ("replayed fresh")
+  may clone more. The results:
   - IDENTICAL; for Yarn also when two plain runs differ and matchapack's
     tree is the first plain run's, or when, run again with one libuv pool
-    thread, plain Yarn still varies and matchapack differs only where it
-    does (the paths are kept);
+    thread, plain Yarn still varies at every place where matchapack
+    differed in the first run, and matchapack differs only where plain
+    varies (the paths are kept);
   - DIFFERENT: the trees differ, a check failed (npm: a stale time, `npm
     ls`, the bytes of `package.json` or the lockfile), matchapack failed
     where plain npm or Yarn installed, or (Yarn) the engine's own record

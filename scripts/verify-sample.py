@@ -23,8 +23,9 @@ runs"). Two kinds of run are replayed (issue grimmerk/matchapack-private#77):
 
 The rule (review rounds 1 and 2): a sample says IDENTICAL only when (a)
 the replay's inputs equal what the logged run recorded (the files it
-hashed, their bytes, the words it logged; the environment and the rc
-files are not logged), (b) matchapack's run in the replay went through
+hashed, their bytes, the words it logged, the environment's npm or Yarn
+settings by their hash; the rc files are copied as they are now, not
+hashed), (b) matchapack's run in the replay went through
 matchapack and cloned at least as much as the logged run, and (c) every
 check of the comparison passed (its exit status, not only the line it
 printed). When the sampler cannot be sure the replay repeated the logged
@@ -348,8 +349,9 @@ def cloned_as_logged(plan, cloned, result, reason):
     # Another count than the logged run: the replay did not repeat it (every
     # faithful replay measured cloned as many: 194, 314, 632, 190; npm 2, 3).
     # Fewer: some of it was not cloned (or not installed). More: the replay
-    # ran under other settings than the run (NODE_ENV=production, a .yarnrc
-    # since changed: neither is logged; measured 176 logged, 618 replayed).
+    # ran under other settings than the run (a .yarnrc changed since, which
+    # is not hashed; NODE_ENV=production, before the environment's settings
+    # were logged: measured 176 logged, 618 replayed).
     # Only a Yarn install that ran over an existing node_modules may clone
     # more ("replayed fresh": the run itself left in place what was there).
     logged = plan.get("logged_cloned")
