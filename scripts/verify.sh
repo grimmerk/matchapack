@@ -14,6 +14,15 @@
 # identical without testing anything), =none when it cloned anything.
 # MATCHAPACK_VERIFY_META=1 also compares mtimes outside the two runs, uid,
 # gid and xattr names (diff --meta).
+# MATCHAPACK_VERIFY_ARGS_FILE=<file> (scripts/verify-sample.sh, #77 part
+# 1b): the npm command to run instead of npm ci, its arguments in the file,
+# each ended by a NUL byte (`ci`, `install`, `left-pad@1.3.0`, …; NUL, so an
+# argument may hold a line break): A (and A2) run plain `npm <args>`,
+# B `matchapack npm <args>` (the shell function's path), both with
+# --no-audit --no-fund; package.json, package-lock.json and
+# npm-shrinkwrap.json must then also be byte-identical between A and B.
+# MATCHAPACK_VERIFY_NPM_DAMAGE (tests only): a command (sh -c) run in B
+# after its install, to show that a damaged tree is reported.
 # The store is the caller's (MATCHAPACK_STORE, else the user's own:
 # verify-sample.sh samples real projects against the real store on purpose).
 # B's install records its copy under <store>/projects/ for `store gc`; the
@@ -73,15 +82,29 @@ export MATCHAPACK_NPM_FINGERPRINT=${MATCHAPACK_NPM_FINGERPRINT:-any}
 # The copies live under the work dir: keep the user's trial scope file
 # (~/.config/matchapack/paths) from deciding a wrapper run.
 export MATCHAPACK_PATHS=${MATCHAPACK_PATHS:-$(cd "$work" && pwd -P)}
-echo "== npm $base (A)"
+# The command A, A2 and B run: npm's `$base`, or the words of
+# MATCHAPACK_VERIFY_ARGS_FILE.
+npm_args=("$base")
+if [ -n "${MATCHAPACK_VERIFY_ARGS_FILE:-}" ]; then
+  npm_args=()
+  while IFS= read -r -d '' a; do npm_args+=("$a"); done < "$MATCHAPACK_VERIFY_ARGS_FILE"
+  [ ${#npm_args[@]} -gt 0 ] || { echo "MATCHAPACK_VERIFY_ARGS_FILE holds no arguments" >&2; exit 2; }
+fi
+echo "== npm ${npm_args[*]} (A)"
+# The words as run, one JSON array (verify-sample.sh checks them against the
+# logged run's: the boundaries between words included).
+python3 -c 'import json,sys; print("npm words:", json.dumps(sys.argv[1:]))' "${npm_args[@]}"
 t0=$(python3 -c 'import time;print(time.time_ns())')
-(cd "$work/A" && npm "$base" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
+(cd "$work/A" && npm "${npm_args[@]}" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
 if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.json"; then
   echo "NOTE: npm $base rewrote package-lock.json"
 fi
 t1=$(python3 -c 'import time;print(time.time_ns())')
 echo "== matchapack install (B)"
-if [ "${MATCHAPACK_VERIFY_VIA:-install}" = wrapper ]; then
+if [ -n "${MATCHAPACK_VERIFY_ARGS_FILE:-}" ]; then
+  # `matchapack npm`, as the shell function runs it.
+  (cd "$work/B" && "$bin" npm "${npm_args[@]}" --no-audit --no-fund > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
+elif [ "${MATCHAPACK_VERIFY_VIA:-install}" = wrapper ]; then
   # The path a user takes: plain `npm ci` in a shell that sourced the wrapper.
   # Not anchored: a script may leave the line unterminated (husky prints
   # ".git can't be found" without a newline).
@@ -93,13 +116,17 @@ else
 fi
 t2=$(python3 -c 'import time;print(time.time_ns())')
 grep '^\[matchapack\]\|^matchapack:' "$work/B.log" | grep -v '\] skip ' || true
-python3 -c "print(f'npm ci: {($t1-$t0)/1e9:.2f}s   matchapack: {($t2-$t1)/1e9:.2f}s')" 2>/dev/null || true
+python3 -c "print(f'npm ${npm_args[0]}: {($t1-$t0)/1e9:.2f}s   matchapack: {($t2-$t1)/1e9:.2f}s')" 2>/dev/null || true
+if [ -n "${MATCHAPACK_VERIFY_NPM_DAMAGE:-}" ]; then
+  (cd "$work/B" && sh -c "$MATCHAPACK_VERIFY_NPM_DAMAGE") || { echo "MATCHAPACK_VERIFY_NPM_DAMAGE failed"; exit 1; }
+  echo "B damaged on purpose (MATCHAPACK_VERIFY_NPM_DAMAGE)"
+fi
 
 rc=0
 if [ -n "${MATCHAPACK_VERIFY_CLONES:-}" ]; then
   # `matchapack install` prints "inject: cloned N", the shell function
   # "matchapack: added N packages".
-  cloned=$(grep -Eo 'inject: cloned [0-9]+|matchapack: added [0-9]+' "$work/B.log" | grep -Eo '[0-9]+$' | head -1)
+  cloned=$(grep -Eo 'inject: cloned [0-9]+|matchapack: added [0-9]+|matchapack: [0-9]+ packages? cloned' "$work/B.log" | grep -Eo '[0-9]+' | head -1 || true)
   case "$MATCHAPACK_VERIFY_CLONES:${cloned:-missing}" in
     some:missing|some:0) echo "the inject hook cloned nothing (MATCHAPACK_VERIFY_CLONES=some)"; rc=1 ;;
     none:0) ;;
@@ -112,12 +139,21 @@ for i in ${MATCHAPACK_VERIFY_IGNORE:-}; do ign+=(--ignore "$i"); done
 # between two npm ci runs (non-deterministic build output) are ignored in A vs B.
 if [ "${MATCHAPACK_VERIFY_NOISE:-0}" = 1 ]; then
   cpcow "$src" "$work/A2"
-  (cd "$work/A2" && npm "$base" --no-audit --no-fund > "$work/A2.log" 2>&1) || { tail -30 "$work/A2.log"; exit 1; }
+  (cd "$work/A2" && npm "${npm_args[@]}" --no-audit --no-fund > "$work/A2.log" 2>&1) || { tail -30 "$work/A2.log"; exit 1; }
   # With --normalize-roots, as A vs B below: the ignored paths are given in
   # the form that comparison reports.
   "$bin" diff --normalize-roots "$work/A" "$work/A2" --paths > "$work/noise.txt" || true
   echo "noise (differs between two npm ci runs, ignored): $(wc -l < "$work/noise.txt" | tr -d ' ') paths"
   while IFS= read -r i; do [ -n "$i" ] && ign+=(--ignore "$i"); done < "$work/noise.txt"
+fi
+# Another command than npm ci writes package.json and the lockfile: the
+# same bytes, whatever two plain runs did with them.
+if [ -n "${MATCHAPACK_VERIFY_ARGS_FILE:-}" ]; then
+  for f in package.json package-lock.json npm-shrinkwrap.json; do
+    if [ -e "$work/A/$f" ] || [ -e "$work/B/$f" ]; then
+      if cmp -s "$work/A/$f" "$work/B/$f"; then echo "$f byte-identical (A, B): true"; else echo "$f byte-identical (A, B): false"; rc=1; fi
+    fi
+  done
 fi
 echo "== diff A B"
 "$bin" diff --normalize-roots "$work/A" "$work/B" ${ign[@]+"${ign[@]}"} > "$work/diff.txt" || rc=1

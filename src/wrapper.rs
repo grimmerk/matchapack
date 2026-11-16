@@ -77,7 +77,9 @@ pub fn run(args: Vec<String>) -> i32 {
     // `command`: npm's name for the routed word (npm's own once npm reported
     // it, `inject.command`); `root`: npm's install root, once npm reported it.
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "command": command, "phases": util::phases(), "load_start": load_start });
+        // The npm settings from the environment, hashed (src/replay.rs): what
+        // a later sample checks the replay's environment against.
+        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "command": command, "phases": util::phases(), "load_start": load_start, "env_settings": crate::replay::env_settings("npm") });
         if let (Value::Object(m), Value::Object(x)) = (&mut rec, extra) {
             m.extend(x);
         }
@@ -106,12 +108,29 @@ fn command_and_root(inject: Option<&Value>) -> serde_json::Map<String, Value> {
     m
 }
 
-/// `extra` with npm's command and root added (`command_and_root`).
+/// `extra` with npm's command and root added (`command_and_root`), and
+/// what a later sample needs to replay the run (src/replay.rs): the root's
+/// node_modules before the run and the SHA-256 of its lockfile and manifests
+/// before (taken when npm reported the root) and after it (now).
 fn with_root(mut extra: Value, inject: Option<&Value>) -> Value {
     if let Value::Object(m) = &mut extra {
         m.extend(command_and_root(inject));
+        m.extend(replay_state(inject));
+        // Once, at the top level: not again inside the inject record.
+        if let Some(Value::Object(i)) = m.get_mut("inject") {
+            i.remove("before");
+        }
     }
     extra
+}
+
+/// `node_modules_before`, `files_before`, `files_after` and `files_complete`
+/// for the log's top level, when npm reported its root.
+fn replay_state(inject: Option<&Value>) -> serde_json::Map<String, Value> {
+    let (Some(root), Some(before)) = (inject.and_then(|i| i["root"].as_str()), inject.map(|i| &i["before"]).filter(|b| b.is_object())) else {
+        return serde_json::Map::new();
+    };
+    crate::replay::record_fields(std::path::Path::new(root), crate::replay::NPM_LOCKFILES, before)
 }
 
 /// `a` as one shell word: bare only when every byte is in a set no shell
@@ -824,6 +843,29 @@ fn fingerprints_allowed(user: Option<&str>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_record_carries_the_before_and_after_state() {
+        let d = std::env::temp_dir().join(format!("matchapack-wrapper-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("package.json"), "{}").unwrap();
+        let before = crate::replay::state(&d, crate::replay::NPM_LOCKFILES);
+        std::fs::write(d.join("package-lock.json"), "x").unwrap();
+        let inject = serde_json::json!({ "root": d.to_str().unwrap(), "command": "install", "before": before });
+        let r = super::with_root(serde_json::json!({ "engine": "inject", "inject": inject.clone() }), Some(&inject));
+        assert!(r["inject"].get("before").is_none(), "the before-state is logged once, at the top level");
+        assert_eq!(r["files_complete"], true);
+        assert_eq!(r["node_modules_before"], "absent");
+        assert_eq!(r["files_before"]["package-lock.json"], serde_json::Value::Null, "absent before the run");
+        assert_eq!(r["files_after"]["package-lock.json"], "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", "sha256 of x, after the run");
+        assert_eq!(r["files_before"]["package.json"], r["files_after"]["package.json"]);
+        // No root reported: nothing.
+        let r = super::with_root(serde_json::json!({}), Some(&serde_json::json!({ "before": before })));
+        assert!(r.get("files_after").is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     use super::{early_flags, fingerprints_allowed, inject_version_allowed, is_fingerprint, npm_fingerprints, quiet_decline};
 
     #[test]

@@ -249,6 +249,10 @@ pub struct Stats {
     /// When the root was accepted, before npm's command ran: a package
     /// directory written in this run is newer ("unseen", inject.rs).
     pub root_at: Option<std::time::SystemTime>,
+    /// The root's node_modules and the SHA-256 of its lockfile and
+    /// manifests when the root was accepted (src/replay.rs `before`): what
+    /// a later sample needs to replay the run (scripts/verify-sample.sh).
+    pub before: Option<Value>,
     /// The package directories cloned in this run outside the root's own
     /// node_modules, relative to the root (`packages/b/node_modules/ms`):
     /// what the repair after a broken run removes (wrapper.rs).
@@ -305,6 +309,7 @@ impl Stats {
             "not_declined": self.not_declined,
             "key_declined": self.key_declined,
             "root": self.root.as_ref().map(|r| r.display().to_string()),
+            "before": self.before,
             "command": self.command,
             "package_lock": self.package_lock,
             "save": self.save,
@@ -1454,6 +1459,9 @@ impl<'a> Server<'a> {
                     if let Some(r) = v.get("root").and_then(|r| r.as_str()) {
                         let _ = self.reported.set(PathBuf::from(r));
                     }
+                    // Before npm's command runs (it waits for this answer):
+                    // what a later sample needs to replay the run.
+                    s.before = Some(crate::replay::state(&root, crate::replay::NPM_LOCKFILES));
                     s.root = Some(root.clone());
                     s.root_at = Some(std::time::SystemTime::now());
                     crate::inject::set_root_report(s.to_json());
@@ -2693,6 +2701,12 @@ mod tests {
         assert_eq!(st.fallbacks.get("no-integrity"), Some(&3), "notes are still packages left to npm");
         assert_eq!(st.to_json()["asides"]["outside-root"], 2);
         assert!(st.root_at.is_some(), "the moment the root was accepted ('unseen', inject.rs)");
+        // What a later sample needs (src/replay.rs), taken when the root was accepted.
+        let b = st.to_json()["before"].clone();
+        assert!(b["node_modules"].is_string(), "{b}");
+        assert!(b["files"]["package-lock.json"].is_string() || b["files"]["package-lock.json"].is_null(), "{b}");
+        assert!(b["files"].as_object().is_some_and(|f| f.contains_key("package.json") && f.contains_key("npm-shrinkwrap.json")), "{b}");
+        assert_eq!(b["complete"], true, "{b}");
         drop(st);
         drop(s);
     }

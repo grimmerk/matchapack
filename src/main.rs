@@ -2,6 +2,7 @@ mod clone;
 mod diff;
 mod gc;
 mod inject;
+mod replay;
 mod serve;
 mod store;
 mod trial;
@@ -44,6 +45,15 @@ enum Cmd {
         /// install . -- --no-audit --omit=dev`).
         #[arg(last = true)]
         npm_args: Vec<String>,
+    },
+    /// For scripts/verify-sample.sh: the state of a project now, as a run's
+    /// log record has it (src/replay.rs): its node_modules, the SHA-256 of
+    /// its lockfile and manifests, and whether that file set is complete.
+    #[command(hide = true)]
+    ReplayState {
+        /// npm or yarn1: which lockfiles.
+        engine: String,
+        root: PathBuf,
     },
     /// Stand in for `npm <args>`: run `npm ci`, `npm install`, `npm update` or
     /// `npm uninstall` (or an alias) with clones from the store when it is
@@ -312,6 +322,14 @@ fn main() -> Result<()> {
                 Err(InstallError::Npm { code, .. }) => std::process::exit(code),
                 Err(e) => return Err(e.into_inner()),
             }
+        }
+        Cmd::ReplayState { engine, root } => {
+            let lockfiles = match engine.as_str() {
+                "npm" => replay::NPM_LOCKFILES,
+                "yarn1" => replay::YARN_LOCKFILES,
+                e => anyhow::bail!("replay-state: npm or yarn1, not {e}"),
+            };
+            println!("{}", replay::state_with_env(&root, lockfiles, &engine));
         }
         Cmd::Npm { args } => {
             let code = wrapper::run(args);

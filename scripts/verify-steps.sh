@@ -206,7 +206,9 @@ EOF
     # A package directory newer than the hidden lockfile: npm no longer
     # trusts B's (what the trust check reads).
     untrust-b) f=$(cd "$B" && find node_modules -mindepth 1 -maxdepth 1 -type d ! -name '.*' | LC_ALL=C sort | head -1); [ -n "$f" ] && { sleep 1; touch "$B/$f"; } ;;
-    extra-record) tail -1 "$MATCHAPACK_LOG_DIR/log.jsonl" >> "$MATCHAPACK_LOG_DIR/log.jsonl" ;;
+    # (Read whole, then appended: not `tail -1 f >> f`, which reads and
+    # appends one file at once.)
+    extra-record) python3 -c 'import sys; p = sys.argv[1]; l = open(p, "rb").read().splitlines()[-1]; open(p, "ab").write(l + b"\n")' "$MATCHAPACK_LOG_DIR/log.jsonl" ;;
   esac
   echo "step $((i+1)): $label"
   echo "  plain: $(grep -E '^(added|removed|changed|up to date)' "$work/step$i-A.log" | head -1) | B: $(grep '^matchapack' "$work/step$i-B.log" | tr '\n' ' ')"

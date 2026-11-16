@@ -1,85 +1,59 @@
 #!/usr/bin/env bash
-# Sampled verification during the trial.
-#   verify-sample.sh [N] [project-dir...]
+# Sampled verification of real runs during the trial (issue grimmerk/matchapack-private#77).
+#   verify-sample.sh [--yarn] [N] [project-dir...]
 # With no directories: takes the N (default 2) most recent distinct projects
-# that matchapack installed (from ~/.cache/matchapack/log.jsonl). For each, on
-# copy-on-write copies of the project: npm ci twice (A, A2) and matchapack once
-# (B); paths that differ between A and A2 are build noise and ignored; then the
-# harness compares A with B. One JSON line per project goes to
-# ~/.cache/matchapack/verify.jsonl, shown by `matchapack report`.
-# Costs a real npm ci twice per project, so run it now and then, not per install.
+# whose newest run in the run log (~/.cache/matchapack/log.jsonl) can be
+# replayed, and replays that run on copies of the project, plain and through
+# matchapack, and compares the trees. One JSON line per project goes to
+# ~/.cache/matchapack/verify.jsonl, shown by `matchapack report`. Each
+# replay installs the project three or four times, so run it now and then,
+# not per install. The copies are removed after each comparison
+# (MATCHAPACK_VERIFY_KEEP=1 keeps them).
+#
+# npm (default):
+# - `npm ci`, with its logged words: on copy-on-write copies of the whole
+#   project, npm ci twice (A, A2) and `matchapack npm ci` once (B); paths
+#   that differ between A and A2 are build noise and ignored
+#   (scripts/verify.sh). Directories given are replayed as a plain `npm ci`
+#   of the project as it is now.
+# - `npm install` / `update` / `uninstall` (and their aliases) that started
+#   with no node_modules (part 1b): the same words, on copies of the
+#   manifests as they were before the run (package.json files, the
+#   lockfile, .npmrc; no node_modules), plain npm twice and `matchapack npm`
+#   once; package.json and the lockfile must also be byte-identical.
+# --yarn:
+# - `yarn` / `yarn install`, with or without --frozen-lockfile: replayed
+#   with the logged run's Yarn, node, cache folder and flags on copies of
+#   the manifests (every package.json, yarn.lock, .yarnrc and .npmrc outside
+#   node_modules): plain Yarn three times (one to make sure the cache holds
+#   every package, two compared) and `matchapack yarn` once, compared by
+#   scripts/verify-yarn1.sh --engine yarn1.
+# - `yarn add` / `upgrade` / `remove` (and `yarn workspace <name> …`) that
+#   started with no node_modules: the same command from the state before
+#   the run (verify-yarn1.sh --command … --command-fresh).
+# A run is replayed from the files it ran on: for a full install, the
+# lockfile and manifests as the run left them; for a command that started
+# empty, as they were before it (the files now, while they still have the
+# hashes the run logged, or the project's git HEAD). Otherwise, and when the
+# directory, node, npm or Yarn is gone or another version, or the run cannot
+# be repeated, the project is recorded as SKIPPED with the reason.
+# The caches and the store are the ones the runs used (the user's,
+# normally): plain npm and Yarn may add to them, as they would in a real
+# install, and matchapack's own runs fill the store with packages it lacks
+# and may replace an entry that differs from npm's extraction, as any
+# install does. A sample says IDENTICAL only when the replay's inputs equal
+# what the run recorded (the files it hashed, the words it logged),
+# matchapack cloned at least as much in it as in the run, and every check
+# passed (NOTES "Sampled verification of real runs", review rounds 1 and 2).
+# MATCHAPACK_LOG_DIR_REAL: the log directory (default ~/.cache/matchapack).
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 logdir=${MATCHAPACK_LOG_DIR_REAL:-$HOME/.cache/matchapack}
+yarn=0
+if [ "${1-}" = --yarn ]; then yarn=1; shift; fi
 n=2
 if [[ "${1-}" =~ ^[0-9]+$ ]]; then n=$1; shift; fi
 dirs=("$@")
-if [ ${#dirs[@]} -eq 0 ]; then
-  while IFS= read -r d; do dirs+=("$d"); done < <(python3 -I - "$logdir/log.jsonl" "$n" <<'EOF'
-import json, os, sys
-path, n = sys.argv[1], int(sys.argv[2])
-seen, out = set(), []
-try:
-    lines = open(path).read().splitlines()
-except FileNotFoundError:
-    lines = []
-for l in reversed(lines):
-    try:
-        r = json.loads(l)
-    except ValueError:
-        continue
-    d = r.get("dir")
-    # Replayed as npm ci: only npm ci runs (records without a command are
-    # from before the install family was routed). `npm install` in a
-    # workspace member or with --prefix installs elsewhere (`root`).
-    if r.get("command", "ci") != "ci":
-        continue
-    d = r.get("root") or d
-    if r.get("outcome") == "installed" and d and d not in seen and os.path.isdir(d):
-        seen.add(d); out.append(d)
-    if len(out) >= n:
-        break
-print("\n".join(out))
-EOF
-)
-fi
-[ ${#dirs[@]} -gt 0 ] || { echo "nothing to verify: no matchapack installs in $logdir/log.jsonl yet"; exit 0; }
-
-work=$(mktemp -d "${TMPDIR:-/tmp}/matchapack-verify.XXXXXX")
-trap 'rm -rf "$work"' EXIT
-for d in "${dirs[@]}"; do
-  echo "######## $d"
-  out=$(MATCHAPACK_VERIFY_NOISE=1 MATCHAPACK_LOG_DIR="$work/logs" "$here/scripts/verify.sh" "$d" "$work/v" 2>&1)
-  printf '%s\n' "$out" | grep -E 'RESULT|npm ci:|noise|npm ls:|stale in B|^  ' | head -20
-  printf '%s\n' "$out" > "$work/out.txt"
-  # The build verify.sh ran (target/release), which may differ from the one on PATH.
-  build=$("$here/target/release/matchapack" --version 2>/dev/null | sed -n 's/.*(\(.*\)).*/\1/p')
-  python3 -I - "$logdir/verify.jsonl" "$d" "$work/out.txt" "${build:-unknown}" <<'EOF'
-import fcntl, json, re, sys, time
-log, d, outfile, build = sys.argv[1:5]
-out = open(outfile, errors="replace").read()
-m = re.search(r"RESULT: (\w+)", out)
-t = re.search(r"npm ci: ([\d.]+)s\s+matchapack: ([\d.]+)s", out)
-n = re.search(r"noise .*?: (\d+) paths", out)
-ls = re.search(r"npm ls: (.*)", out)
-result = m.group(1) if m else "ERROR"
-# Differences only OUTSIDE node_modules come from the project's own build
-# scripts (e.g. tsdown output that varies run to run, which two npm ci runs may
-# happen to agree on): reported, but kept apart from a node_modules mismatch.
-paths = re.findall(r"^  ([^ :]+)(?::|$)", out.split("== diff A B")[-1].split("== mtime")[0], re.M)
-if result == "DIFFERENT" and paths and all(not (p.startswith("node_modules/") or "/node_modules/" in p) for p in paths):
-    result = "BUILD-OUTPUT-ONLY"
-rec = {"ts": time.time(), "build": build, "dir": d, "result": result, "differing": paths[:20],
-       "npm_ci_secs": float(t.group(1)) if t else None, "matchapack_secs": float(t.group(2)) if t else None,
-       "noise_paths": int(n.group(1)) if n else None, "npm_ls": ls.group(1).strip() if ls else None}
-# One whole line under the lock matchapack's own log writer takes (src/trial.rs
-# append_line), in case two samplers run at once.
-with open(log, "a") as f:
-    fcntl.flock(f, fcntl.LOCK_EX)
-    f.write(json.dumps(rec) + "\n")
-print("recorded:", rec["result"])
-if rec["result"] == "ERROR":
-    print("\n".join("    " + l for l in out.strip().splitlines()[-15:]))
-EOF
-  rm -rf "${work:?}/v"
-done
+[ -x "$here/target/release/matchapack" ] || { echo "build first: cargo build --release" >&2; exit 2; }
+# Picked, replayed and recorded by the helper, one project at a time.
+exec python3 -I "$here/scripts/verify-sample.py" "$([ $yarn = 1 ] && echo yarn || echo npm)" "$logdir" "$n" "$here" ${dirs[@]+"${dirs[@]}"}

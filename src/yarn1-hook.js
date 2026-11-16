@@ -469,7 +469,7 @@ async function main () {
     plainFallback = null
     // `child`, `cwd`: a workspace command's Yarn says where it runs (its
     // cache options are relative to that directory: src/yarn1.rs `run`).
-    send({ hello: true, yarn: yarnVersion, yarn_js: yarnJs, node: process.version, first: firstN, facts: p.facts, hook: hookMode, child: isChild, cwd: process.cwd() })
+    send({ hello: true, yarn: yarnVersion, yarn_js: yarnJs, node: process.version, node_path: process.execPath, first: firstN, facts: p.facts, hook: hookMode, child: isChild, cwd: process.cwd() })
     // Run Yarn's bin/yarn.js as the main module, as `node yarn.js` (or the
     // `yarn` symlink, which Node resolves to it) would, and as corepack starts
     // it: argv[1] and process.mainModule are Yarn's own. Yarn gives its

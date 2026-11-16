@@ -795,28 +795,119 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     }
     let (ver, bad) = read_jsonl(&verify_log_path(), since);
     skipped(bad, &verify_log_path());
-    if ver.is_empty() {
-        println!("verification samples: none yet (scripts/verify-sample.sh)");
-    } else {
-        let ok = ver.iter().filter(|v| v["result"] == "IDENTICAL").count();
-        println!("verification samples: {} run, {ok} identical", ver.len());
-        for v in ver.iter().rev().take(5) {
-            println!(
-                "  {}  {:<17} {}  (npm ci {} s, matchapack {} s, build {})",
-                when(v["ts"].as_f64().unwrap_or(0.0)),
-                v["result"].as_str().unwrap_or("?"),
-                v["dir"].as_str().unwrap_or("?"),
-                v["npm_ci_secs"],
-                v["matchapack_secs"],
-                v["build"].as_str().unwrap_or("not recorded")
-            );
-        }
+    for l in verify_lines(&ver, !yruns.is_empty(), &when) {
+        println!("{l}");
     }
     Ok(())
 }
 
+/// The report's lines on the sampled verifications (scripts/verify-sample.sh):
+/// npm's and Yarn's side by side, each with its counts by result and its
+/// five most recent samples (`at` formats a time), each naming the command
+/// replayed and its kind: a full install (`npm ci`, `yarn install`) or a
+/// command that started with no node_modules ("started empty", #77 part
+/// 1b). Yarn's part shows when it has samples, or when the log has
+/// `matchapack yarn` runs to sample.
+fn verify_lines(ver: &[Value], yarn_runs: bool, at: &dyn Fn(f64) -> String) -> Vec<String> {
+    let (yarn, npm): (Vec<&Value>, Vec<&Value>) = ver.iter().partition(|v| v["engine"] == "yarn1");
+    let mut out = vec![];
+    for (name, list, how) in [("npm", &npm, "scripts/verify-sample.sh"), ("yarn", &yarn, "scripts/verify-sample.sh --yarn")] {
+        if list.is_empty() {
+            if name == "npm" || yarn_runs {
+                out.push(format!("verification samples ({name}): none yet ({how})"));
+            }
+            continue;
+        }
+        let count = |r: &str| list.iter().filter(|v| v["result"] == r).count();
+        let known = ["IDENTICAL", "DIFFERENT", "BUILD-OUTPUT-ONLY", "RACE-SHAPED", "ERROR", "SKIPPED"];
+        let mut parts = vec![format!("identical {}", count("IDENTICAL")), format!("different {}", count("DIFFERENT"))];
+        for (r, label) in [("BUILD-OUTPUT-ONLY", "build output only"), ("RACE-SHAPED", "race-shaped (#57: sample again)")] {
+            if count(r) > 0 || (r == "RACE-SHAPED" && name == "yarn") {
+                parts.push(format!("{label} {}", count(r)));
+            }
+        }
+        parts.push(format!("error {}", count("ERROR")));
+        parts.push(format!("skipped {}", count("SKIPPED")));
+        let other = list.iter().filter(|v| !known.iter().any(|k| v["result"] == *k)).count();
+        if other > 0 {
+            parts.push(format!("other {other}"));
+        }
+        // Samples, not distinct runs: a logged run is sampled again on every
+        // run of the sampler until a newer one replaces it.
+        out.push(format!("verification samples ({name}): {} samples: {}", list.len(), parts.join(", ")));
+        for v in list.iter().rev().take(5) {
+            let result = v["result"].as_str().unwrap_or("?");
+            // npm records from before samples named their command are npm ci's.
+            let command = v["command"].as_str().unwrap_or(if name == "npm" { "ci" } else { "install" });
+            let mut what = match v["kind"].as_str() {
+                Some("started-empty") => format!("{name} {command}, started empty"),
+                _ => format!("{name} {command}"),
+            };
+            if v["replayed_fresh"] == true {
+                what += ", replayed fresh";
+            }
+            if let Some(first) = v["first_result"].as_str() {
+                what += &format!(", {first} at first, then with one pool thread");
+            }
+            let detail = if result == "SKIPPED" {
+                v["reason"].as_str().unwrap_or("?").chars().take(110).collect::<String>()
+            } else {
+                let mut d = if name == "yarn" {
+                    format!(
+                        "yarn {}, node {}, yarn {} s, matchapack {} s, {} cloned, build {}",
+                        v["yarn"].as_str().unwrap_or("?"),
+                        v["node"].as_str().unwrap_or("?"),
+                        v["yarn_secs"],
+                        v["matchapack_secs"],
+                        v["cloned"],
+                        v["build"].as_str().unwrap_or("not recorded")
+                    )
+                } else {
+                    format!("npm {} s, matchapack {} s, build {}", v["npm_ci_secs"], v["matchapack_secs"], v["build"].as_str().unwrap_or("not recorded"))
+                };
+                if let Some(first) = v["differing"].as_array().and_then(|a| a.first()).and_then(|x| x.as_str()) {
+                    d += &format!("; {} differ, first: {first}", v["differing_count"].as_u64().unwrap_or(v["differing"].as_array().map_or(0, |a| a.len() as u64)));
+                } else if result != "IDENTICAL" {
+                    if let Some(why) = v["reason"].as_str() {
+                        d += &format!("; {}", why.chars().take(110).collect::<String>());
+                    }
+                }
+                d
+            };
+            out.push(format!("  {}  {:<17} {}  ({what}; {detail})", at(v["ts"].as_f64().unwrap_or(0.0)), result, v["dir"].as_str().unwrap_or("?")));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verification_samples_of_both_engines() {
+        let at = |t: f64| format!("t{t}");
+        assert_eq!(verify_lines(&[], false, &at), ["verification samples (npm): none yet (scripts/verify-sample.sh)"]);
+        assert_eq!(verify_lines(&[], true, &at)[1], "verification samples (yarn): none yet (scripts/verify-sample.sh --yarn)");
+        let ver = vec![
+            // An npm sample from before samples named their engine and command.
+            json!({ "ts": 1.0, "result": "IDENTICAL", "dir": "/p/npm", "npm_ci_secs": 2.5, "matchapack_secs": 1.5, "build": "b1" }),
+            json!({ "ts": 1.5, "engine": "npm", "kind": "started-empty", "command": "install", "result": "DIFFERENT", "dir": "/p/n2", "npm_ci_secs": 3.0, "matchapack_secs": 2.0, "build": "b2", "differing": ["bytes package-lock.json"] }),
+            json!({ "ts": 2.0, "engine": "yarn1", "kind": "full", "command": "install", "result": "IDENTICAL", "dir": "/p/y", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": 3.1, "matchapack_secs": 3.0, "cloned": 190, "build": "b2", "replayed_fresh": true, "first_result": "RACE-SHAPED" }),
+            json!({ "ts": 3.0, "engine": "yarn1", "kind": "full", "command": "install", "result": "SKIPPED", "dir": "/p/gone", "reason": "the project directory is gone" }),
+            json!({ "ts": 4.0, "engine": "yarn1", "kind": "started-empty", "command": "add", "result": "DIFFERENT", "dir": "/p/y", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": 3.1, "matchapack_secs": 3.0, "cloned": 190, "build": "b2", "differing": ["content node_modules/y1-a/index.js"], "differing_count": 1 }),
+            json!({ "ts": 5.0, "engine": "yarn1", "result": "ERROR", "dir": "/p/e", "yarn": "1.22.22", "node": "v24.22.1", "yarn_secs": null, "matchapack_secs": null, "cloned": null, "build": "b2", "reason": "plain Yarn failed in its copy" }),
+        ];
+        let l = verify_lines(&ver, false, &at);
+        assert_eq!(l[0], "verification samples (npm): 2 samples: identical 1, different 1, error 0, skipped 0");
+        assert_eq!(l[1], "  t1.5  DIFFERENT         /p/n2  (npm install, started empty; npm 3.0 s, matchapack 2.0 s, build b2; 1 differ, first: bytes package-lock.json)");
+        assert_eq!(l[2], "  t1  IDENTICAL         /p/npm  (npm ci; npm 2.5 s, matchapack 1.5 s, build b1)");
+        assert_eq!(l[3], "verification samples (yarn): 4 samples: identical 1, different 1, race-shaped (#57: sample again) 0, error 1, skipped 1");
+        assert_eq!(l[4], "  t5  ERROR             /p/e  (yarn install; yarn 1.22.22, node v24.22.1, yarn null s, matchapack null s, null cloned, build b2; plain Yarn failed in its copy)");
+        assert_eq!(l[5], "  t4  DIFFERENT         /p/y  (yarn add, started empty; yarn 1.22.22, node v24.22.1, yarn 3.1 s, matchapack 3.0 s, 190 cloned, build b2; 1 differ, first: content node_modules/y1-a/index.js)");
+        assert_eq!(l[6], "  t3  SKIPPED           /p/gone  (yarn install; the project directory is gone)");
+        assert_eq!(l[7], "  t2  IDENTICAL         /p/y  (yarn install, replayed fresh, RACE-SHAPED at first, then with one pool thread; yarn 1.22.22, node v24.22.1, yarn 3.1 s, matchapack 3.0 s, 190 cloned, build b2)");
+        assert_eq!(l.len(), 8);
+    }
+
     #[test]
     fn utc_dates() {
         let t = |secs: u64| super::utc(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
@@ -1014,5 +1105,10 @@ mod tests {
         let mut rec = json!({ "inject": { "repair": { "args": ["--_password=-abcSECRET", "--//r.example/:_authToken=t0k", "--omit=dev"], "npmrc": [] } } });
         redact(&mut rec);
         assert_eq!(rec["inject"]["repair"]["args"], json!(["--_password=***", "--//r.example/:_authToken=***", "--omit=dev"]));
+        // A Yarn install's replay arguments (src/yarn1.rs `replay`), nested
+        // under `replay.args`: redacted as args are.
+        let mut rec = json!({ "engine": "yarn1", "replay": { "args": ["--otp", "123456", "--proxy", "http://u:p@h", "--frozen-lockfile"] } });
+        redact(&mut rec);
+        assert_eq!(rec["replay"]["args"], json!(["--otp", "***", "--proxy", "http://***@h", "--frozen-lockfile"]));
     }
 }
