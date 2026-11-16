@@ -156,10 +156,15 @@ for t in checker-dies:'the log check could not run' wrong-command:'want update' 
   st=$work/steps-selftest-${t%%:*}.txt
   if MATCHAPACK_VERIFY_STEPS_SELFTEST=${t%%:*} "$here/scripts/verify-steps.sh" "$here/fixtures/workspaces" "$work/steps-selftest-${t%%:*}" --start ci -- install > "$st" 2>&1; then
     fail=1; echo "FAIL  steps self-test ${t%%:*}: the run passed (log: $st)"
-  elif grep -F "${t#*:}" "$st" | grep -q FAIL; then
+  # (-a: the log is text even when GNU grep's binary detection would say
+  # otherwise; no `grep -q` at the end of a pipe under pipefail, whose early
+  # exit can give the grep before it a SIGPIPE.)
+  elif grep -a -F "${t#*:}" "$st" | grep -a FAIL > /dev/null; then
     echo "ok    steps self-test (${t%%:*}: the run fails)"
   else
     fail=1; echo "FAIL  steps self-test ${t%%:*}: the run failed, but not by the log check (log: $st)"
+    # Why, in the job log too (CI keeps no artifacts).
+    cut -c1-240 "$st" | tail -12 | sed 's/^/      /'
   fi
   drop "$work/steps-selftest-${t%%:*}"
 done
