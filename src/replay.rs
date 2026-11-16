@@ -59,6 +59,7 @@ pub fn node_modules_state(root: &Path, workspaces: &[String]) -> &'static str {
 /// for the lockfiles named, the root `package.json` and each workspace's
 /// `package.json`. A file that cannot be read is `"unreadable"`, which no
 /// file's hash equals.
+#[cfg(test)]
 pub fn files_state(root: &Path, lockfiles: &[&str]) -> (Value, bool) {
     let (dirs, complete) = workspaces(root);
     (hashes(root, lockfiles, &dirs), complete)
@@ -95,6 +96,7 @@ fn hashes(root: &Path, lockfiles: &[&str], dirs: &[String]) -> Value {
 /// The workspaces of the project at `root` (directories holding a
 /// package.json, relative, sorted) from its package.json's `workspaces`,
 /// and whether every pattern could be expanded in full.
+#[cfg(test)]
 pub fn workspaces(root: &Path) -> (Vec<String>, bool) {
     let (dirs, walk) = walk_workspaces(root);
     (dirs, walk.why.is_none())
