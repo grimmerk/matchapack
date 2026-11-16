@@ -252,7 +252,7 @@ impl Walk {
             match e.file_type() {
                 Ok(t) if t.is_dir() => subs.push((name, e.path())),
                 Ok(t) if t.is_symlink() => {
-                    if e.path().is_dir() && (*seg == "**" || matches(seg.as_bytes(), name.as_bytes())) {
+                    if e.path().is_dir() && (*seg == "**" || matches(seg, &name)) {
                         self.miss(&format!("a workspace that is a symlink ({})", e.path().display()));
                     }
                 }
@@ -264,22 +264,52 @@ impl Walk {
         for (name, p) in subs {
             if *seg == "**" {
                 self.expand(&p, segs, out);
-            } else if matches(seg.as_bytes(), name.as_bytes()) {
+            } else if matches(seg, &name) {
                 self.expand(&p, rest, out);
             }
         }
     }
 }
 
-/// `*` (any run of characters) and `?` (one character) against a name.
-fn matches(pat: &[u8], name: &[u8]) -> bool {
-    match (pat.first(), name.first()) {
-        (None, None) => true,
-        (Some(b'*'), _) => matches(&pat[1..], name) || (!name.is_empty() && matches(pat, &name[1..])),
-        (Some(b'?'), Some(_)) => matches(&pat[1..], &name[1..]),
-        (Some(a), Some(b)) if a == b => matches(&pat[1..], &name[1..]),
-        _ => false,
+/// `*` (any run of characters) and `?` (one character, as Yarn's and npm's
+/// matchers take it: `中` is one) against a name.
+fn matches(pat: &str, name: &str) -> bool {
+    fn m(pat: &[char], name: &[char]) -> bool {
+        match (pat.first(), name.first()) {
+            (None, None) => true,
+            (Some('*'), _) => m(&pat[1..], name) || (!name.is_empty() && m(pat, &name[1..])),
+            (Some('?'), Some(_)) => m(&pat[1..], &name[1..]),
+            (Some(a), Some(b)) if a == b => m(&pat[1..], &name[1..]),
+            _ => false,
+        }
     }
+    m(&pat.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
+}
+
+/// The environment variables npm or Yarn read as their settings, as a run's
+/// record keeps them: `{"names": [sorted names], "sha256": hash of the
+/// sorted name=value lines}`. Never the values: they can hold tokens.
+/// npm: `npm_config_*` (any case), Yarn: `YARN_*` and `npm_config_*`; both
+/// `NODE_ENV`. Left out: what says where a cache is or whether to look for
+/// an update (`npm_config_cache`, `YARN_CACHE_FOLDER`,
+/// `YARN_DISABLE_SELF_UPDATE_CHECK`, `npm_config_update_notifier`): the
+/// harness sets those for its own runs, and they do not change a tree.
+pub fn env_settings(engine: &str) -> Value {
+    env_settings_of(std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().unwrap_or_default()))), engine)
+}
+
+fn env_settings_of(vars: impl Iterator<Item = (String, String)>, engine: &str) -> Value {
+    const LEFT_OUT: &[&str] = &["npm_config_cache", "yarn_cache_folder", "yarn_disable_self_update_check", "npm_config_update_notifier"];
+    let mut pairs: Vec<(String, String)> = vars
+        .filter(|(k, _)| {
+            let l = k.to_ascii_lowercase();
+            let read = l == "node_env" || l.starts_with("npm_config_") || (engine == "yarn1" && l.starts_with("yarn_"));
+            read && !LEFT_OUT.contains(&l.as_str())
+        })
+        .collect();
+    pairs.sort();
+    let text: String = pairs.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    json!({ "names": pairs.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(), "sha256": hex::encode(sha2::Sha256::digest(text.as_bytes())) })
 }
 
 /// The state at `root` now: `{"node_modules": …, "files": …, "complete": …}`
@@ -287,6 +317,14 @@ fn matches(pat: &[u8], name: &[u8]) -> bool {
 pub fn state(root: &Path, lockfiles: &[&str]) -> Value {
     let (dirs, walk) = walk_workspaces(root);
     json!({ "node_modules": node_modules_state(root, &dirs), "files": hashes(root, lockfiles, &dirs), "complete": walk.why.is_none(), "incomplete": walk.why })
+}
+
+/// `state`, with this process's `env_settings` (`matchapack replay-state`:
+/// the sampler compares them with a run's).
+pub fn state_with_env(root: &Path, lockfiles: &[&str], engine: &str) -> Value {
+    let mut v = state(root, lockfiles);
+    v["env_settings"] = env_settings(engine);
+    v
 }
 
 /// The record's fields for a run whose state before it was `before`
@@ -423,6 +461,36 @@ mod tests {
     }
 
     #[test]
+    fn a_multibyte_workspace_name_is_one_character() {
+        let d = scratch("multibyte");
+        for w in ["packages/@scope/中", "packages/中文"] {
+            std::fs::create_dir_all(d.join(w)).unwrap();
+            std::fs::write(d.join(w).join("package.json"), "{}").unwrap();
+        }
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/@scope/?", "packages/中*"]}"#).unwrap();
+        assert_eq!(workspaces(&d), (vec!["packages/@scope/中".to_string(), "packages/中文".into()], true));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_settings_from_the_environment_are_hashed_not_logged() {
+        let v = |pairs: &[(&str, &str)], engine: &str| env_settings_of(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())), engine);
+        let a = v(&[("npm_config_ignore_scripts", "true"), ("NODE_ENV", "production"), ("PATH", "/bin"), ("NPM_CONFIG_//r.example/:_authToken", "SECRET123"), ("npm_config_cache", "/c")], "npm");
+        assert_eq!(a["names"], json!(["NODE_ENV", "NPM_CONFIG_//r.example/:_authToken", "npm_config_ignore_scripts"]));
+        assert!(!a.to_string().contains("SECRET123") && !a.to_string().contains("production"), "values are never kept: {a}");
+        // Another value, the same names: another hash.
+        let b = v(&[("npm_config_ignore_scripts", "false"), ("NODE_ENV", "production"), ("NPM_CONFIG_//r.example/:_authToken", "SECRET123")], "npm");
+        assert_eq!(a["names"], b["names"]);
+        assert_ne!(a["sha256"], b["sha256"]);
+        // What the harness sets for its own runs, and PATH, change nothing.
+        let c = v(&[("npm_config_ignore_scripts", "true"), ("NODE_ENV", "production"), ("NPM_CONFIG_//r.example/:_authToken", "SECRET123"), ("npm_config_update_notifier", "false"), ("HOME", "/h")], "npm");
+        assert_eq!(a["sha256"], c["sha256"]);
+        // Yarn also reads YARN_*; npm does not.
+        assert_eq!(v(&[("YARN_PRODUCTION", "true"), ("YARN_CACHE_FOLDER", "/c"), ("YARN_DISABLE_SELF_UPDATE_CHECK", "true")], "yarn1")["names"], json!(["YARN_PRODUCTION"]));
+        assert_eq!(v(&[("YARN_PRODUCTION", "true")], "npm")["names"], json!([]));
+    }
+
+    #[test]
     fn scoped_and_plus_names_are_literal() {
         let d = scratch("scoped");
         for w in ["packages/@scope/a", "packages/@scope/b", "packages/c++", "packages/x!y"] {
@@ -480,7 +548,9 @@ mod tests {
         assert_eq!(expand_braces("plain").unwrap(), ["plain"]);
         assert!(expand_braces("a/{b,{c}}").is_none() && expand_braces("a/b}").is_none() && expand_braces("a/{b").is_none());
         assert!(expand_braces("{tools}/x").is_none() && expand_braces("p/{1..3}").is_none() && expand_braces("p/{a,}").is_none());
-        assert!(matches(b"*", b"abc") && matches(b"a*c", b"abbc") && matches(b"a?c", b"abc") && matches(b"*", b""));
-        assert!(!matches(b"a?c", b"ac") && !matches(b"b*", b"abc"));
+        assert!(matches("*", "abc") && matches("a*c", "abbc") && matches("a?c", "abc") && matches("*", ""));
+        assert!(!matches("a?c", "ac") && !matches("b*", "abc"));
+        // One character, not one byte.
+        assert!(matches("?", "中") && matches("a?", "a中") && matches("*文", "中文") && !matches("??", "中"));
     }
 }

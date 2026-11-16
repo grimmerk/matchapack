@@ -77,7 +77,9 @@ pub fn run(args: Vec<String>) -> i32 {
     // `command`: npm's name for the routed word (npm's own once npm reported
     // it, `inject.command`); `root`: npm's install root, once npm reported it.
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "command": command, "phases": util::phases(), "load_start": load_start });
+        // The npm settings from the environment, hashed (src/replay.rs): what
+        // a later sample checks the replay's environment against.
+        let mut rec = json!({ "outcome": outcome, "dir": dir, "npm": npm_version, "args": args, "command": command, "phases": util::phases(), "load_start": load_start, "env_settings": crate::replay::env_settings("npm") });
         if let (Value::Object(m), Value::Object(x)) = (&mut rec, extra) {
             m.extend(x);
         }

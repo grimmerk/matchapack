@@ -329,7 +329,7 @@ fn main() -> Result<()> {
                 "yarn1" => replay::YARN_LOCKFILES,
                 e => anyhow::bail!("replay-state: npm or yarn1, not {e}"),
             };
-            println!("{}", replay::state(&root, lockfiles));
+            println!("{}", replay::state_with_env(&root, lockfiles, &engine));
         }
         Cmd::Npm { args } => {
             let code = wrapper::run(args);

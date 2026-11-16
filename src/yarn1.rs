@@ -1516,7 +1516,8 @@ pub fn cli(args: Vec<String>) -> i32 {
     let yarn_version = found.as_ref().map(|y| y.version.clone()).unwrap_or_default();
     let corepack = found.as_ref().is_ok_and(|y| y.corepack);
     let log = |outcome: &str, extra: Value| {
-        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "command": cmd_name, "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args, "load_start": load_start });
+        // Yarn's settings from the environment, hashed (src/replay.rs).
+        let mut rec = json!({ "outcome": outcome, "engine": "yarn1", "command": cmd_name, "dir": cwd.display().to_string(), "yarn": yarn_version, "args": args, "load_start": load_start, "env_settings": replay::env_settings("yarn1") });
         if corepack {
             rec["launcher"] = json!("corepack");
         }
