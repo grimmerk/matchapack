@@ -397,6 +397,14 @@ for t in "abs:r['args'] = ['install', '--prefix', '/elsewhere']:an argument is a
   ns_alone "$edit"
   case $got in "SKIPPED: "*"$want"*) ns_ok "skipped: $label ($got)" ;; *) ns_bad "$label: $got" ;; esac
 done
+# An npm ci logged with npm_config_ignore_scripts=true in the environment,
+# sampled without it (measured before: IDENTICAL while the replay ran the
+# install scripts the run had not).
+pe=$(ns_project envci optional-upward)
+(cd "$pe" && env -u MATCHAPACK_ENGINE npm_config_ignore_scripts=true MATCHAPACK_LOG_DIR="$ns/log" MATCHAPACK_PATHS="$ns" MATCHAPACK_CONFIG_DIR="$ns/config" \
+  MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_NPM_FINGERPRINT=any "$bin" npm ci --no-audit --no-fund) > "$ns/out" 2>&1
+ns_alone ""
+case $got in "SKIPPED: the environment's npm settings differ from the run's: npm_config_ignore_scripts") ns_ok "skipped: an npm ci logged under npm_config_ignore_scripts=true" ;; *) ns_bad "env: $got" ;; esac
 if [ -z "$(ls -d "$ns/tmp"/matchapack-verify-* 2>/dev/null)" ]; then ns_ok "no replay copies left"; else ns_bad "copies left: $(ls -d "$ns/tmp"/matchapack-verify-*)"; fi
 drop "$ns"
 

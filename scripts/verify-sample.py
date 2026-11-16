@@ -218,6 +218,22 @@ def files_state(r, root, kind, now_state):
     return None, None, why + ", and the files before it are not in the project's git HEAD"
 
 
+def env_differs(r, now_state, what):
+    """None, or why the environment's npm or Yarn settings (src/replay.rs
+    env_settings: names and a hash, never the values) are not the run's:
+    the replay runs in this environment (measured before: a logged `npm ci`
+    under npm_config_ignore_scripts=true, replayed without it, IDENTICAL
+    while the replay ran 4 install scripts)."""
+    logged, now = r.get("env_settings"), now_state.get("env_settings")
+    if not isinstance(logged, dict) or not logged.get("sha256"):
+        return "the log record does not say which %s settings its environment had (logged by an older matchapack build)" % what
+    if not isinstance(now, dict) or logged.get("sha256") == now.get("sha256"):
+        return None if isinstance(now, dict) else "this checkout's matchapack does not report the environment's settings"
+    a, b = set(logged.get("names") or []), set(now.get("names") or [])
+    names = sorted(a ^ b) or sorted(a)
+    return "the environment's %s settings differ from the run's: %s" % (what, ", ".join(names) or "(none set)")
+
+
 def local_dependency(files):
     """A dependency on a local path named by one of the manifests the replay
     reads (`file:`, `link:`, `portal:`, or a path: `./`, `../`, `/`, `~/`),
@@ -388,7 +404,11 @@ def yarn_plan(r, d, here):
     sub, why = subdir_of(r, root)
     if why:
         return None, why
-    files, source, why = files_state(r, root, kind, state_now(here, "yarn1", root))
+    st = state_now(here, "yarn1", root)
+    why = env_differs(r, st, "Yarn")
+    if why:
+        return None, why
+    files, source, why = files_state(r, root, kind, st)
     if why:
         return None, why
     why = local_dependency(files)
@@ -446,6 +466,22 @@ def yarn_plan(r, d, here):
             "yarn": version, "cache_root": os.path.dirname(cache), "args": args, "logged_cloned": y.get("cloned"),
             "fresh": kind == "full" and r.get("node_modules_before") not in STARTED_EMPTY,
             "equal_clones": not (kind == "full" and r.get("node_modules_before") not in STARTED_EMPTY)}, None
+
+
+def diff_classes(here, v, a, b):
+    """{(class, path)} on which trees <a> and <b> of verify-yarn1.sh's work
+    directory differ (`matchapack diff --meta --classes`, with each run's
+    window and cache from `runs`), or None when it cannot tell."""
+    try:
+        runs = {w[0]: w[1:] for w in (l.split() for l in open(os.path.join(v, "runs"))) if len(w) >= 3}
+        p = subprocess.run([os.path.join(here, "target/release/matchapack"), "diff", "--meta", "--normalize-roots", os.path.join(v, a), os.path.join(v, b),
+                            "--a-run", runs[a][0], "--b-run", runs[b][0], "--a-cache", runs[a][1], "--b-cache", runs[b][1], "--classes"],
+                           capture_output=True, text=True)
+    except (OSError, KeyError, ValueError):
+        return None
+    if p.returncode > 1:
+        return None
+    return {tuple(l.split("\t", 1)) for l in p.stdout.splitlines() if "\t" in l}
 
 
 def window_secs(runs_file, name):
@@ -591,6 +627,8 @@ def yarn_one(plan, here, work):
         # the sample stays RACE-SHAPED, with the second run's verdict kept.
         print("  %s: once more with one pool thread (UV_THREADPOOL_SIZE=1)" % result)
         first, first_reason, first_extra = result, reason, extra
+        # The engine's differences in the first run, by class and path.
+        first_engine = diff_classes(here, v, "plain1", "engine") if first == "PLAIN-VARIES" else None
         rec["first_result"], rec["first_reason"] = first, first_reason
         rec["first_differing"] = extra.get("differing") or extra.get("plain_varies")
         shutil.rmtree(v, ignore_errors=True)
@@ -609,9 +647,19 @@ def yarn_one(plan, here, work):
         elif result == "PLAIN-VARIES" or (result == "IDENTICAL" and plain_varies_again):
             # Plain Yarn varies with one thread too (not the race: output
             # that varies from run to run), and the engine differs only
-            # where plain does there.
-            result = "IDENTICAL"
-            reason = "plain Yarn varies between two runs with one pool thread too (not the race); the engine differs only there"
+            # where plain does there. Every difference the engine had in the
+            # first run must also be where plain varies with one thread: one
+            # that is not there may have been the engine's, shown only with
+            # several threads (CodeRabbit, review round 4).
+            plain_again = diff_classes(here, v, "plain1", "plain2")
+            missing = sorted(first_engine - plain_again) if first_engine is not None and plain_again is not None else None
+            if first == "PLAIN-VARIES" and (missing is None or missing):
+                result, extra = "RACE-SHAPED", first_extra
+                reason = first_reason + "; with one pool thread plain Yarn no longer varies where the engine differed (%s), so that difference is not proven plain Yarn's: sample it again" % (
+                    ", ".join("%s %s" % c for c in missing[:5]) if missing else "the differences could not be compared")
+            else:
+                result = "IDENTICAL"
+                reason = "plain Yarn varies between two runs with one pool thread too (not the race); the engine differs only there"
     rec.update(result=result, cloned=cloned)
     if reason:
         rec["reason"] = reason
@@ -672,7 +720,11 @@ def npm_plan(r, d, here, explicit):
             return None, "an argument is an absolute path (%s): the copies cannot repeat it" % a
         if "\n" in a or "\0" in a:
             return None, "an argument holds a line break or a NUL: it cannot be given back as one word"
-    files, source, why = files_state(r, root, kind, state_now(here, "npm", root))
+    st = state_now(here, "npm", root)
+    why = env_differs(r, st, "npm")
+    if why:
+        return None, why
+    files, source, why = files_state(r, root, kind, st)
     if why:
         return None, why
     if kind != "full":

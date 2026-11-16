@@ -304,14 +304,16 @@ else bad "sample: no kept work directory for the race rule ($kept)"; fi
 # does not prove the first difference was plain's: RACE-SHAPED, not
 # IDENTICAL (measured before: IDENTICAL). Plain varying with one thread too:
 # IDENTICAL.
-pv_project() { # pv_project <name> <js condition>
+pv_project() { # pv_project <name> <js condition> [<js condition for node_modules/y1-a/package.json>]
   local d; d=$(sp_project "$1" yarn1-many); d=$(cd "$d" && pwd -P)
   python3 -c '
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
-d["scripts"] = {"postinstall": "node -e \"if (" + sys.argv[2] + ") { const t = Date.now() / 1000 - Math.floor(Math.random() * 1e6); require(\x27fs\x27).utimesSync(\x27node_modules/y1-b/index.js\x27, t, t) }\""}
-json.dump(d, open(p, "w"), indent=2)' "$d/package.json" "$2"
+vary = lambda cond, f: "if (" + cond + ") { const t = Date.now() / 1000 - Math.floor(Math.random() * 1e6); require(\x27fs\x27).utimesSync(\x27" + f + "\x27, t, t) } "
+js = vary(sys.argv[2], "node_modules/y1-b/index.js") + (vary(sys.argv[3], "node_modules/y1-a/package.json") if len(sys.argv) > 3 else "")
+d["scripts"] = {"postinstall": "node -e \"" + js + "\""}
+json.dump(d, open(p, "w"), indent=2)' "$d/package.json" "${@:2}"
   echo "$d"
 }
 pv1=$(pv_project pvmany "process.env.UV_THREADPOOL_SIZE !== '1'")
@@ -326,15 +328,36 @@ sp_sample -- "$pv2"
 if [ "$(vrec '(r["result"], r.get("first_result"), r.get("rerun_result"))')" = "('IDENTICAL', 'PLAIN-VARIES', 'PLAIN-VARIES')" ]; then
   ok "sample: plain Yarn varying with one pool thread too, the engine only where plain does: IDENTICAL"
 else bad "sample: plain varies always ($(vrec 'r.get("result"), r.get("first_result"), r.get("rerun_result"), r.get("reason")'))"; fi
-# The logged run under NODE_ENV=production (not logged): the replay installs
-# the devDependencies too and clones more than the run did (measured
-# before: IDENTICAL, 176 logged, 618 replayed).
+# Plain varying at two paths with several threads, at one of them only with
+# one thread: the engine's first difference at the other is not proven
+# plain's (CodeRabbit, review round 4): RACE-SHAPED, not IDENTICAL.
+pv3=$(pv_project pvtwo "process.env.UV_THREADPOOL_SIZE !== '1'" "true")
+sp_install "$pv3" --frozen-lockfile
+sp_sample -- "$pv3"
+if [ "$(vrec '(r["result"], r.get("first_result"), r.get("rerun_result"))')" = "('RACE-SHAPED', 'PLAIN-VARIES', 'PLAIN-VARIES')" ]; then
+  ok "sample: plain varying at two paths, at one of them with one pool thread too: RACE-SHAPED, not IDENTICAL"
+else bad "sample: plain varies at two paths ($(vrec 'r.get("result"), r.get("first_result"), r.get("rerun_result"), r.get("reason")'))"; fi
+# The logged run under NODE_ENV=production: the environment's settings are
+# not the sampler's, SKIPPED (measured before: IDENTICAL, 176 logged, 618
+# replayed).
 pp=$(sp_project prodenv yarn1-many); pp=$(cd "$pp" && pwd -P)
 (cd "$pp" && NODE_ENV=production spenv "$bin" yarn --frozen-lockfile --cache-folder "$sp/cache") > "$work/out" 2>&1
 sp_sample -- "$pp"
 case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
-  "ERROR: the replay cloned "*", the logged run "*": it did not repeat the run") ok "sample: a run logged under NODE_ENV=production, replayed without it: ERROR (clones $(vrec 'r["cloned"]') against $(vrec 'r["logged_cloned"]'))" ;;
+  "SKIPPED: the environment's Yarn settings differ from the run's: NODE_ENV") ok "sample: a run logged under NODE_ENV=production, sampled without it: SKIPPED, naming NODE_ENV" ;;
   *) bad "sample: NODE_ENV run ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned"), r.get("logged_cloned")'))" ;;
+esac
+# A .yarnrc that made the run a production install, removed since (rc files
+# are copied as they are now, not hashed): the replay clones more than the
+# run did: ERROR.
+py=$(sp_project prodrc yarn1-many); py=$(cd "$py" && pwd -P)
+echo '--install.production true' > "$py/.yarnrc"
+sp_install "$py" --frozen-lockfile
+rm "$py/.yarnrc"
+sp_sample -- "$py"
+case "$(vrec 'r["result"] + ": " + r.get("reason", "")')" in
+  "ERROR: the replay cloned "*", the logged run "*": it did not repeat the run") ok "sample: a run under a .yarnrc removed since: ERROR (clones $(vrec 'r["cloned"]') against $(vrec 'r["logged_cloned"]'))" ;;
+  *) bad "sample: removed .yarnrc ($(vrec 'r.get("result"), r.get("reason"), r.get("cloned"), r.get("logged_cloned")'))" ;;
 esac
 # A workspace that is a symlink: the logged set is incomplete, and the skip
 # says why.
