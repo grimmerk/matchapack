@@ -665,8 +665,9 @@ own and complete).
   stands.
 
   A sample says IDENTICAL only when the replay's inputs equal what the
-  logged run recorded (the files it hashed, the words it logged, and the
-  environment's npm or Yarn settings), matchapack's run in the replay
+  logged run recorded (the files it hashed, the project's rc files among
+  them, the words it logged, and the environment's npm or Yarn settings),
+  matchapack's run in the replay
   cloned as many files (Yarn) or packages (npm) as the logged run, and
   every check of the comparison passed. When the sampler cannot be sure
   the replay repeated the run, it does not say IDENTICAL. The environment
@@ -674,11 +675,15 @@ own and complete).
   Yarn also `YARN_*`; `NODE_ENV`) are logged as their names and one
   SHA-256 over their values, never the values (they can hold tokens); a
   sampler whose environment has other ones SKIPs the run and names them.
-  The rc files (`.npmrc`, `.yarnrc`) are copied as they are now, not
-  hashed: the equal clone count is what catches a replay under other
-  settings there (it installs, and clones, more or fewer packages). Only a
-  Yarn install that ran over an existing `node_modules` ("replayed fresh")
-  may clone more. The results:
+  The project's own rc files are hashed with the manifests (npm: the
+  root's `.npmrc`; Yarn: `.yarnrc` and `.npmrc` in the root and in each
+  workspace): one changed since the run is a skip. The user's and the
+  global rc files (`~/.npmrc`, `~/.yarnrc`, npm's global npmrc) and a file
+  named by `--use-yarnrc` are neither logged nor hashed: a limit of the
+  sample. An equal clone count catches some changes there (a replay that
+  installs more or fewer packages), not all (`ignore-scripts` changes no
+  count). Only a Yarn install that ran over an existing `node_modules`
+  ("replayed fresh") may clone more. The results:
   - IDENTICAL; for Yarn also when two plain runs differ and matchapack's
     tree is the first plain run's, or when, run again with one libuv pool
     thread, plain Yarn still varies at every place where matchapack
