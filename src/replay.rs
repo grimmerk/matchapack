@@ -68,6 +68,18 @@ fn hashes(root: &Path, lockfiles: &[&str], dirs: &[String]) -> Value {
     let mut names: Vec<String> = lockfiles.iter().map(|s| s.to_string()).collect();
     names.push("package.json".into());
     names.extend(dirs.iter().map(|d| format!("{d}/package.json")));
+    // The project's own rc files the install reads: npm the root's .npmrc;
+    // Yarn .yarnrc and .npmrc in the root and in each workspace. Never the
+    // user's or the global ones (~/.npmrc, ~/.yarnrc, the global npmrc):
+    // they are not read here, and not part of a sample.
+    if lockfiles == YARN_LOCKFILES {
+        for d in std::iter::once(String::new()).chain(dirs.iter().map(|d| format!("{d}/"))) {
+            names.push(format!("{d}.yarnrc"));
+            names.push(format!("{d}.npmrc"));
+        }
+    } else {
+        names.push(".npmrc".into());
+    }
     let mut m = serde_json::Map::new();
     for n in names {
         let v = match std::fs::read(root.join(&n)) {
@@ -264,7 +276,16 @@ impl Walk {
         for (name, p) in subs {
             if *seg == "**" {
                 self.expand(&p, segs, out);
-            } else if matches(seg, &name) {
+                continue;
+            }
+            // Yarn's matcher counts UTF-16 code units: `?` takes half of a
+            // character outside the BMP (`packages/?*?` matches a name of one
+            // such character there, not here). Not decided here.
+            if seg.contains('?') && name.chars().any(|c| c as u32 > 0xFFFF) {
+                self.miss(&format!("a name with characters Yarn's matcher counts differently ({})", p.display()));
+                continue;
+            }
+            if matches(seg, &name) {
                 self.expand(&p, rest, out);
             }
         }
@@ -404,9 +425,21 @@ mod tests {
         assert_eq!(f["yarn.lock"], json!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "sha256 of abc");
         assert_eq!(f["packages/a/package.json"], json!(hex::encode(sha2::Sha256::digest(b"packages/a"))));
         let keys: Vec<&String> = f.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["yarn.lock", "package.json", "packages/a/package.json", "packages/b/package.json", "packages/skip/package.json", "tools/x/y/package.json"]);
+        assert_eq!(
+            keys,
+            [
+                "yarn.lock", "package.json", "packages/a/package.json", "packages/b/package.json", "packages/skip/package.json", "tools/x/y/package.json",
+                ".yarnrc", ".npmrc", "packages/a/.yarnrc", "packages/a/.npmrc", "packages/b/.yarnrc", "packages/b/.npmrc", "packages/skip/.yarnrc",
+                "packages/skip/.npmrc", "tools/x/y/.yarnrc", "tools/x/y/.npmrc"
+            ]
+        );
+        assert_eq!(f[".yarnrc"], Value::Null, "absent");
+        std::fs::write(d.join("packages/a/.yarnrc"), "ignore-scripts true\n").unwrap();
+        assert!(files_state(&d, YARN_LOCKFILES).0["packages/a/.yarnrc"].is_string(), "a workspace's .yarnrc, hashed");
         let (n, _) = files_state(&d, NPM_LOCKFILES);
         assert_eq!((n["package-lock.json"].clone(), n["npm-shrinkwrap.json"].clone()), (Value::Null, Value::Null));
+        let nkeys: Vec<&String> = n.as_object().unwrap().keys().filter(|k| k.contains("rc")).collect();
+        assert_eq!(nkeys, [".npmrc"], "npm reads the root's .npmrc only");
         // Yarn's object form; braces.
         std::fs::write(d.join("package.json"), r#"{"workspaces": {"packages": ["packages/?"], "nohoist": ["**"]}}"#).unwrap();
         assert_eq!(workspaces(&d), (vec!["packages/a".to_string(), "packages/b".into()], true));
@@ -457,6 +490,23 @@ mod tests {
         // set is still incomplete.
         std::fs::write(d.join("package.json"), r#"{"workspaces": ["apps/*", "big/**"]}"#).unwrap();
         assert_eq!(workspaces(&d), (vec!["apps/one".to_string(), "apps/two".into()], false));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_name_outside_the_bmp_under_a_question_mark_is_not_decided() {
+        let d = scratch("astral");
+        for w in ["packages/😀", "packages/ab"] {
+            std::fs::create_dir_all(d.join(w)).unwrap();
+            std::fs::write(d.join(w).join("package.json"), "{}").unwrap();
+        }
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/?*?"]}"#).unwrap();
+        let st = state(&d, YARN_LOCKFILES);
+        assert_eq!(st["complete"], false);
+        assert!(st["incomplete"].as_str().is_some_and(|w| w.contains("counts differently")), "{st}");
+        // `*` alone matches it either way: decided.
+        std::fs::write(d.join("package.json"), r#"{"workspaces": ["packages/*"]}"#).unwrap();
+        assert_eq!(workspaces(&d), (vec!["packages/ab".to_string(), "packages/😀".into()], true));
         let _ = std::fs::remove_dir_all(&d);
     }
 
