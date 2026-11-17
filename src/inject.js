@@ -48,7 +48,7 @@
 //                              an npm that no longer calls the method looks
 //                              like to matchapack)
 //       MATCHAPACK_STOP_GRACE_MS  tests: the wait before this process stops
-//                              itself (`stopSelf`; default 200)
+//                              itself (`stopSelf`; default 50)
 // Exit status: npm's. 90 when the helper stops before npm's command runs:
 // before npm starts (unknown fingerprint, no pacote; also on an unexpected
 // error up to there), or when matchapack refuses the install root npm
@@ -93,10 +93,14 @@ function watchSignals () {
     return emit.apply(this, arguments)
   }
 }
-// The wait: a group signal sent as matchapack ends reaches npm at the same
-// moment, and Node emits it a loop turn later; the check runs after one
-// more poll phase (setImmediate), where a signal already delivered to a loop
-// that was busy is emitted.
+// The wait (50 ms): a group signal reaches npm at the same moment as
+// matchapack, or a little after when its sender signals one process after
+// another (GNU `timeout`: its command, then the group); Node emits it in the
+// poll phase of a later loop turn. The check runs after the timer and one
+// more poll phase (setImmediate), so a signal delivered by then, also to a
+// loop that was busy, has been emitted. The wait is short because npm, under
+// matchapack, also finishes a step sooner: a long one lets npm get past its
+// reify (and its rollback) before the signal comes.
 // `say`: a line for stderr when it does stop (none when matchapack said why).
 let stopAsked = false
 function stopSelf (sig, graceMs, say) {
@@ -606,7 +610,7 @@ function main () {
   const hookMode = process.env.MATCHAPACK_INJECT_HOOK
   const hookOff = hookMode === 'off'
   const allowed = process.env.MATCHAPACK_INJECT_FINGERPRINTS || ''
-  const graceMs = Number(process.env.MATCHAPACK_STOP_GRACE_MS) || 200
+  const graceMs = Number(process.env.MATCHAPACK_STOP_GRACE_MS) || 50
   // Not for the scripts npm runs.
   delete process.env.MATCHAPACK_INJECT_FD
   delete process.env.MATCHAPACK_INJECT_HOOK

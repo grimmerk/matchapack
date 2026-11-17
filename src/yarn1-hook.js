@@ -46,7 +46,7 @@
 //       MATCHAPACK_YARN_CHILD      `1`: this hook was started by another one
 //                                  for that child (set by `wrapWorkspaceChild` only)
 //       MATCHAPACK_STOP_GRACE_MS   tests: the wait before this process stops
-//                                  itself (`stopSelf`; default 200)
+//                                  itself (`stopSelf`; default 50)
 // Exit status: Yarn's. 90 before Yarn starts: the hook declined (the reason
 // is sent to matchapack and printed); matchapack then runs plain Yarn. In a
 // child (MATCHAPACK_YARN_CHILD) the hook runs plain Yarn itself instead: the
@@ -191,7 +191,7 @@ async function main () {
   const timeoutMs = Number(process.env.MATCHAPACK_YARN_TIMEOUT_MS) || 30000
   const wrapChild = process.env.MATCHAPACK_YARN_WRAP_CHILD === 'workspace'
   const isChild = process.env.MATCHAPACK_YARN_CHILD === '1'
-  const graceMs = Number(process.env.MATCHAPACK_STOP_GRACE_MS) || 200
+  const graceMs = Number(process.env.MATCHAPACK_STOP_GRACE_MS) || 50
   // Not for the scripts Yarn runs.
   for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE', 'MATCHAPACK_YARN_TIMEOUT_MS',
     'MATCHAPACK_YARN_LAUNCHER', 'MATCHAPACK_YARN_WRAP_CHILD', 'MATCHAPACK_YARN_CHILD', 'MATCHAPACK_STOP_GRACE_MS']) {
