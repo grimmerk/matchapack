@@ -25,8 +25,17 @@ use std::path::{Path, PathBuf};
 pub struct Report {
     /// Projects whose entries are kept: (from records, from the trial log).
     pub projects: (usize, usize),
-    /// Records of projects whose directory or node_modules is gone.
-    pub records_dropped: usize,
+    /// Records of projects whose directory or node_modules is gone
+    /// ("records without a project"), sorted: projects moved, renamed, or
+    /// copied and the original deleted, or deleted (`store adopt` records a
+    /// moved one where it is now).
+    pub records_dropped: Vec<PathBuf>,
+    /// Of the entries removed (or, dry run, to remove), those a dropped
+    /// record listed: what only those projects used.
+    pub dropped_entries_removed: usize,
+    /// Records kept because whether their node_modules still exists could
+    /// not be told (`node_modules_state`), with why; sorted.
+    pub records_unchecked: Vec<(PathBuf, String)>,
     pub entries: usize,
     pub removed: usize,
     pub bytes_removed: u64,
@@ -36,6 +45,45 @@ pub struct Report {
 
 pub fn has_node_modules(dir: &Path) -> bool {
     dir.join("node_modules").is_dir()
+}
+
+/// Whether a recorded project still has its node_modules: Ok(true) when it
+/// is a directory, Ok(false) when it or the project is absent (or not a
+/// directory), Err(why) when that cannot be told: any other error (a parent
+/// directory this process cannot search), or, on macOS, a path on a volume
+/// under /Volumes that is not mounted (absent there means nothing about the
+/// project). gc keeps such a record: dropping it would remove entries a
+/// project may still share.
+fn node_modules_state(dir: &Path) -> std::result::Result<bool, String> {
+    match std::fs::metadata(dir.join("node_modules")) {
+        Ok(m) => Ok(m.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {
+            let mut parts = dir.components().skip(1);
+            if cfg!(target_os = "macos") && parts.next().is_some_and(|c| c.as_os_str() == "Volumes") {
+                if let Some(vol) = parts.next() {
+                    let vol = Path::new("/Volumes").join(vol.as_os_str());
+                    // Mounted when it is on another device than /Volumes
+                    // itself: an unmounted volume can leave its empty
+                    // mount-point directory behind, so existing is not
+                    // enough. The boot volume's entry is a link to / (the
+                    // same device as /Volumes): a link counts as mounted
+                    // when its target exists.
+                    use std::os::unix::fs::MetadataExt;
+                    let is_link = std::fs::symlink_metadata(&vol).is_ok_and(|m| m.file_type().is_symlink());
+                    let mounted = match (std::fs::metadata(&vol), std::fs::metadata("/Volumes")) {
+                        (Ok(_), _) if is_link => true,
+                        (Ok(v), Ok(root)) => v.dev() != root.dev(),
+                        _ => false,
+                    };
+                    if !mounted {
+                        return Err(format!("{} is not mounted", vol.display()));
+                    }
+                }
+            }
+            Ok(false)
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// The entries a hidden lockfile lists.
@@ -252,6 +300,7 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
     let mut r = Report::default();
     let mut live: HashSet<Integrity> = HashSet::new();
     let mut recorded: HashSet<PathBuf> = HashSet::new();
+    let mut dropped_used: HashSet<Integrity> = HashSet::new();
     if let Ok(rd) = std::fs::read_dir(store.root.join("projects")) {
         for ent in rd.flatten() {
             let p = ent.path();
@@ -260,16 +309,19 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
             }
             let Some(rec) = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { continue };
             let Some(dir) = rec.get("path").and_then(|x| x.as_str()).map(PathBuf::from) else { continue };
-            if has_node_modules(&dir) {
+            let listed = rec.get("entries").and_then(|e| e.as_array()).into_iter().flatten().filter_map(|k| k.as_str().and_then(Integrity::from_key));
+            let state = node_modules_state(&dir);
+            if let Err(why) = state {
+                live.extend(listed);
+                recorded.insert(dir.clone());
+                r.records_unchecked.push((dir, why));
+            } else if state == Ok(true) {
                 r.projects.0 += 1;
-                for k in rec.get("entries").and_then(|e| e.as_array()).into_iter().flatten() {
-                    if let Some(i) = k.as_str().and_then(Integrity::from_key) {
-                        live.insert(i);
-                    }
-                }
+                live.extend(listed);
                 recorded.insert(dir);
             } else {
-                r.records_dropped += 1;
+                dropped_used.extend(listed);
+                r.records_dropped.push(dir);
                 if !dry_run {
                     let _ = std::fs::remove_file(&p);
                 }
@@ -304,14 +356,70 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
     // An entry extracted moments ago may belong to an install that has not
     // written its record yet on a store where flock does not reach.
     let (recent, old): (Vec<&Integrity>, Vec<&Integrity>) = unused.into_iter().partition(|i| young(&store.dir_for(i)));
+    r.records_dropped.sort();
+    r.records_unchecked.sort();
     r.recent = recent.len();
     r.bytes_removed = old.iter().map(|i| store.entry_size(i)).sum();
     r.removed = old.len();
+    r.dropped_entries_removed = old.iter().filter(|i| dropped_used.contains(*i)).count();
     if !dry_run {
         old.par_iter().try_for_each(|i| store.remove_entry(i))?;
         store.remove_orphan_locks();
     }
     Ok(r)
+}
+
+/// How many records without a project `store gc` lists by path.
+pub const DROPPED_SHOWN: usize = 5;
+
+/// What `store gc` says about records without a project (from `r`:
+/// Report::records_dropped and dropped_entries_removed): how many, the first
+/// few paths (quoted and escaped: a path with a newline stays one line), and
+/// that `store adopt` keeps a moved project's entries, before gc. Nothing
+/// when there are none. A real gc has dropped the records already, so it
+/// says "before the next gc", and how many entries only they used it removed
+/// (none when they share them with other projects, or are younger than the
+/// grace period); adopt keeps whatever of theirs is still in the store.
+pub fn dropped_note(r: &Report, dry_run: bool) -> Vec<String> {
+    let dropped = &r.records_dropped;
+    if dropped.is_empty() {
+        return vec![];
+    }
+    let mut out = vec![format!(
+        "records without a project {}: {} (no node_modules at the recorded path: the project was moved, renamed, or copied and the original deleted, or deleted, or its node_modules removed)",
+        if dry_run { "to drop" } else { "dropped" },
+        dropped.len()
+    )];
+    out.extend(dropped.iter().take(DROPPED_SHOWN).map(|p| format!("  {p:?}")));
+    if dropped.len() > DROPPED_SHOWN {
+        out.push(format!("  ... and {} more", dropped.len() - DROPPED_SHOWN));
+    }
+    let n = r.dropped_entries_removed;
+    let s = if n == 1 { "y" } else { "ies" };
+    out.push(if dry_run {
+        format!("if these projects were moved or renamed (or copied and the original deleted), run `matchapack store adopt <where they are now>` before gc: it would remove {n} entr{s} only they use")
+    } else if n == 0 {
+        "if these projects were moved or renamed (or copied and the original deleted), run `matchapack store adopt <where they are now>` before the next gc: this one removed none of their entries (other projects use them, or they are younger than an hour), and adopt keeps them".to_string()
+    } else {
+        format!("if these projects were moved or renamed (or copied and the original deleted), run `matchapack store adopt <where they are now>` before the next gc: this one removed {n} entr{s} only they used (their next install extracts those again); adopt keeps what of theirs is still in the store")
+    });
+    out
+}
+
+/// What `store gc` says about the records it kept because it could not
+/// check them (Report::records_unchecked): how many, and the first few with
+/// why. Nothing when there are none.
+pub fn unchecked_note(r: &Report) -> Vec<String> {
+    let u = &r.records_unchecked;
+    if u.is_empty() {
+        return vec![];
+    }
+    let mut out = vec![format!("records that could not be checked (kept, with their entries): {}", u.len())];
+    out.extend(u.iter().take(DROPPED_SHOWN).map(|(p, why)| format!("  {p:?}: {why}")));
+    if u.len() > DROPPED_SHOWN {
+        out.push(format!("  ... and {} more", u.len() - DROPPED_SHOWN));
+    }
+    out
 }
 
 fn young(p: &Path) -> bool {
@@ -359,7 +467,9 @@ mod tests {
 
         let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
         let dry = gc(&store, &log, true).unwrap();
-        assert_eq!((dry.projects, dry.records_dropped, dry.removed, dry.recent), ((1, 1), 1, 2, 1));
+        assert_eq!((dry.projects, dry.removed, dry.recent), ((1, 1), 2, 1));
+        assert_eq!(dry.records_dropped, [d.join("proj-removed")], "the record without a project, by its path");
+        assert_eq!(dry.dropped_entries_removed, 1, "`gone`, which only it used");
         assert_eq!(store.entries().len(), 5, "a dry run removes nothing");
         assert_eq!(std::fs::read_dir(d.join("store/projects")).unwrap().count(), 2, "nor a record");
 
@@ -372,7 +482,71 @@ mod tests {
         assert_eq!(left, want, "kept: recorded, logged, recent; removed: the gone project's and the unused old one");
         assert!(!store.dir_for(&gone).exists() && !store.dir_for(&stale).exists());
         assert_eq!(std::fs::read_dir(d.join("store/projects")).unwrap().count(), 1, "the gone project's record is dropped");
+        assert_eq!((r.records_dropped.as_slice(), r.dropped_entries_removed), ([d.join("proj-removed")].as_slice(), 1));
         assert_eq!(std::fs::read_dir(d.join("store/tmp")).unwrap().count(), 0, "nothing left in tmp");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dropped_note_lists_the_first_paths_and_names_adopt() {
+        let rep = |paths: &[PathBuf], removed: usize| Report { records_dropped: paths.to_vec(), dropped_entries_removed: removed, ..Default::default() };
+        assert!(dropped_note(&rep(&[], 0), true).is_empty(), "nothing to say without records without a project");
+        let mut paths: Vec<PathBuf> = (0..7).map(|n| PathBuf::from(format!("/p/{n}"))).collect();
+        paths[1] = PathBuf::from("/p/1\n  /p/fake");
+        let dry = dropped_note(&rep(&paths, 3), true);
+        assert!(dry[0].starts_with("records without a project to drop: 7 ("), "{}", dry[0]);
+        assert_eq!(&dry[1..=DROPPED_SHOWN], ["  \"/p/0\"", "  \"/p/1\\n  /p/fake\"", "  \"/p/2\"", "  \"/p/3\"", "  \"/p/4\""], "quoted; a newline stays escaped, on one line");
+        assert_eq!(dry[DROPPED_SHOWN + 1], "  ... and 2 more");
+        assert_eq!(dry.last().unwrap(), "if these projects were moved or renamed (or copied and the original deleted), run `matchapack store adopt <where they are now>` before gc: it would remove 3 entries only they use");
+        assert_eq!(dry.len(), DROPPED_SHOWN + 3);
+        let one = dropped_note(&rep(&paths[..1], 1), false);
+        assert_eq!(one.len(), 3, "count, the path, the advice: {one:?}");
+        assert!(one[0].starts_with("records without a project dropped: 1 (") && one[1] == "  \"/p/0\"", "{one:?}");
+        assert!(one[2].contains("before the next gc: this one removed 1 entry only they used") && one[2].contains("adopt keeps what of theirs is still in the store"), "{}", one[2]);
+        let none = dropped_note(&rep(&paths[..1], 0), false);
+        assert!(none[2].contains("before the next gc: this one removed none of their entries"), "the real run says what it removed: {}", none[2]);
+    }
+
+    /// A record whose node_modules cannot be looked at (a parent directory
+    /// this process cannot search) is kept with its entries and listed as
+    /// could not be checked, not dropped as a project that is gone; so is
+    /// one on an unmounted volume (macOS).
+    #[test]
+    fn gc_keeps_records_it_cannot_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::fs::canonicalize(scratch("gc-unchecked")).unwrap();
+        let cacache = d.join("cacache");
+        let a = cached_tarball(&cacache, &[("index.js", 0o644, "a")]);
+        let store = Store::new(d.join("store"), cacache.clone()).unwrap();
+        store.ensure(&a, "http://x").unwrap();
+        age(&store.dir_for(&a), 2 * GRACE_SECS as i64);
+        let p = d.join("locked/p");
+        std::fs::create_dir_all(p.join("node_modules")).unwrap();
+        store.record_project(&p, &[a.clone()]).unwrap();
+        std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::metadata(p.join("node_modules")).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+        drop(store);
+        let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
+        if denied {
+            let r = gc(&store, &d.join("no-log"), false).unwrap();
+            assert!(r.records_dropped.is_empty(), "{:?}", r.records_dropped);
+            assert_eq!(r.records_unchecked.len(), 1);
+            assert_eq!(r.records_unchecked[0].0, p);
+            assert_eq!((r.removed, store.dir_for(&a).exists()), (0, true), "its entry is kept");
+            assert_eq!(std::fs::read_dir(d.join("store/projects")).unwrap().count(), 1, "and its record");
+            let note = unchecked_note(&r);
+            assert!(note[0] == "records that could not be checked (kept, with their entries): 1" && note[1].starts_with(&format!("  {p:?}: ")), "{note:?}");
+        } else {
+            eprintln!("skipped: a mode-000 directory is searchable here (root?)");
+        }
+        std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(node_modules_state(&p), Ok(true));
+        assert_eq!(node_modules_state(&d.join("gone")), Ok(false));
+        assert!(unchecked_note(&Report::default()).is_empty());
+        if cfg!(target_os = "macos") {
+            let e = node_modules_state(Path::new("/Volumes/matchapack-test-no-such-volume/p")).unwrap_err();
+            assert_eq!(e, "/Volumes/matchapack-test-no-such-volume is not mounted");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

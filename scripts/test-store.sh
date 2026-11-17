@@ -80,7 +80,7 @@ gc && grep -q 'removed 0 of' "$work/out" && [ "$(entries)" = "$n" ] && ok "gc: k
 # 3. A second project with the same lockfile, then deleted: its record goes,
 #    the entries stay (p1 uses them).
 p2=$(project p2); install "$p2"; rm -rf "${p2:?}"
-gc && grep -q 'dropped: 1' "$work/out" && [ "$(records)" = 1 ] && [ "$(entries)" = "$n" ] && ok "gc: a removed project's record is dropped, shared entries kept" || bad "gc: record or shared entries handling"
+gc && grep -q 'dropped: 1' "$work/out" && grep -qxF "  \"$p2\"" "$work/out" && grep -qF 'run `matchapack store adopt <where they are now>` before the next gc: this one removed none of their entries' "$work/out" && [ "$(records)" = 1 ] && [ "$(entries)" = "$n" ] && ok "gc: a removed project's record is dropped and named, with the adopt advice (none of its entries removed: shared); shared entries kept" || bad "gc: record or shared entries handling"
 
 # 4. Dry run, then the real thing, once no project uses the entries.
 rm -rf "${p1:?}"
