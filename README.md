@@ -76,8 +76,20 @@ or declined with the reason before npm's command runs):
 - `npm link`, `npm exec` / `npx`: they install into npm's global directory
   or npx's cache, not into the project.
 - Abbreviations npm also accepts (`npm upd`, `npm uninst`): not on the list
-  of first words; plain npm. So is a command line that starts with a flag
-  (`npm --prefix x install`).
+  of first words; plain npm.
+- npm options before the command word (`npm --prefix app install`,
+  `npm --no-audit ci`, `npm -w a install`): plain npm. The shell function
+  looks only at the first word. To find npm's command word behind options
+  one must know which options take a value (in `--prefix app install`,
+  `app` is not the command; in `--no-audit install`, `install` is), and
+  copying npm's option table into matchapack is the fragile path (npm's own
+  parser decides). Nothing is wrong in the tree; only the clones are
+  missed. Write the options after the command (`npm install --prefix app`)
+  to have it taken over. About 1–2% of npm install lines are written this
+  way (GitHub code search, 2026-11-16, an upper bound: about 1.6% of all
+  files, 0.9% of GitHub workflows, 0.3% of Dockerfiles), almost all with
+  `--prefix`, mostly in CI and Docker builds, which usually start with an
+  empty store and gain little (issue grimmerk/matchapack-private#75).
 - Global installs: `-g`, `--global`, `--location=global` on the command
   line, and `global=true` / `location=global` in the environment or any
   npmrc (the project's included): they install outside any project.
@@ -836,6 +848,17 @@ NOTES "G-lite").
   only for packages no node_modules still shares blocks with, so the real run
   reports the volume's free space before and after. Packages extracted in the
   last hour are kept. Refused while an install is running.
+  gc also lists the records without a project: recorded paths that no
+  longer have a `node_modules` (a project moved, renamed, copied or
+  deleted, or its `node_modules` removed), with their number and the first
+  five paths. Their records are dropped, and the packages only they kept
+  are removed. A moved or copied project keeps working (its files are
+  clones), but it loses the block sharing and its next install extracts
+  those packages again; so when these projects were moved or copied, run
+  `matchapack store adopt <where they are now>` before gc (`gc --dry-run`
+  shows the list first). A copy made with its `node_modules` (`cp -c -R`, a
+  tool that copies a repository to make a worktree) has no record of its
+  own either: adopt records it.
 - `matchapack store adopt [--dry-run] [--verbose] <dir>...`: record the npm
   projects under each `<dir>` so that gc keeps their packages. For projects
   installed before installs wrote records (builds before PR grimmerk/matchapack-private#29): it finds

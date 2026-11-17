@@ -164,6 +164,9 @@ enum StoreCmd {
     /// independent), but space comes back only for entries no node_modules
     /// still shares, and a later install re-extracts what it needs. Entries
     /// extracted in the last hour are kept. Refused while an install runs.
+    /// Lists the records whose path has no node_modules any more (a project
+    /// moved, renamed, copied or deleted): run `store adopt` where a moved or
+    /// copied project is now, before gc, to keep its entries.
     #[command(verbatim_doc_comment)]
     Gc {
         /// Report what would be removed; remove nothing.
@@ -409,14 +412,10 @@ fn main() -> Result<()> {
                     let r = gc::gc(&st, &trial::log_path(), dry_run)?;
                     let free1 = store::free_bytes(&st.root);
                     let gib = |b: u64| format!("{:.2} GiB", b as f64 / 1024f64.powi(3));
-                    println!(
-                        "projects in use: {} ({} recorded, {} from the trial log); records of removed projects {}: {}",
-                        r.projects.0 + r.projects.1,
-                        r.projects.0,
-                        r.projects.1,
-                        if dry_run { "to drop" } else { "dropped" },
-                        r.records_dropped
-                    );
+                    println!("projects in use: {} ({} recorded, {} from the trial log)", r.projects.0 + r.projects.1, r.projects.0, r.projects.1);
+                    for l in gc::dropped_note(&r.records_dropped, dry_run) {
+                        println!("{l}");
+                    }
                     println!(
                         "{} {} of {} entries, {} of files{}",
                         if dry_run { "would remove" } else { "removed" },

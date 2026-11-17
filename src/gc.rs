@@ -25,8 +25,10 @@ use std::path::{Path, PathBuf};
 pub struct Report {
     /// Projects whose entries are kept: (from records, from the trial log).
     pub projects: (usize, usize),
-    /// Records of projects whose directory or node_modules is gone.
-    pub records_dropped: usize,
+    /// Records of projects whose directory or node_modules is gone
+    /// ("records without a project"), sorted: moved, renamed, copied or
+    /// deleted projects (`store adopt` records a moved one where it is now).
+    pub records_dropped: Vec<PathBuf>,
     pub entries: usize,
     pub removed: usize,
     pub bytes_removed: u64,
@@ -269,7 +271,7 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
                 }
                 recorded.insert(dir);
             } else {
-                r.records_dropped += 1;
+                r.records_dropped.push(dir);
                 if !dry_run {
                     let _ = std::fs::remove_file(&p);
                 }
@@ -304,6 +306,7 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
     // An entry extracted moments ago may belong to an install that has not
     // written its record yet on a store where flock does not reach.
     let (recent, old): (Vec<&Integrity>, Vec<&Integrity>) = unused.into_iter().partition(|i| young(&store.dir_for(i)));
+    r.records_dropped.sort();
     r.recent = recent.len();
     r.bytes_removed = old.iter().map(|i| store.entry_size(i)).sum();
     r.removed = old.len();
@@ -312,6 +315,35 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
         store.remove_orphan_locks();
     }
     Ok(r)
+}
+
+/// How many records without a project `store gc` lists by path.
+pub const DROPPED_SHOWN: usize = 5;
+
+/// What `store gc` says about records without a project (`dropped`, from
+/// Report::records_dropped): how many, the first few paths, and that `store
+/// adopt` keeps a moved or copied project's entries, before gc. Nothing when
+/// there are none. A real gc has dropped them already (and removed what only
+/// they used), so it says "before the next gc".
+pub fn dropped_note(dropped: &[PathBuf], dry_run: bool) -> Vec<String> {
+    if dropped.is_empty() {
+        return vec![];
+    }
+    let mut out = vec![format!(
+        "records without a project {}: {} (no node_modules at the recorded path: the project was moved, renamed, copied or deleted, or its node_modules removed)",
+        if dry_run { "to drop" } else { "dropped" },
+        dropped.len()
+    )];
+    out.extend(dropped.iter().take(DROPPED_SHOWN).map(|p| format!("  {}", p.display())));
+    if dropped.len() > DROPPED_SHOWN {
+        out.push(format!("  ... and {} more", dropped.len() - DROPPED_SHOWN));
+    }
+    out.push(if dry_run {
+        "if these projects were moved or copied, run `matchapack store adopt <where they are now>` before gc".to_string()
+    } else {
+        "if these projects were moved or copied, run `matchapack store adopt <where they are now>` before the next gc (this one removed the entries only they used; their next install extracts those again)".to_string()
+    });
+    out
 }
 
 fn young(p: &Path) -> bool {
@@ -359,7 +391,8 @@ mod tests {
 
         let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
         let dry = gc(&store, &log, true).unwrap();
-        assert_eq!((dry.projects, dry.records_dropped, dry.removed, dry.recent), ((1, 1), 1, 2, 1));
+        assert_eq!((dry.projects, dry.removed, dry.recent), ((1, 1), 2, 1));
+        assert_eq!(dry.records_dropped, [d.join("proj-removed")], "the record without a project, by its path");
         assert_eq!(store.entries().len(), 5, "a dry run removes nothing");
         assert_eq!(std::fs::read_dir(d.join("store/projects")).unwrap().count(), 2, "nor a record");
 
@@ -372,8 +405,24 @@ mod tests {
         assert_eq!(left, want, "kept: recorded, logged, recent; removed: the gone project's and the unused old one");
         assert!(!store.dir_for(&gone).exists() && !store.dir_for(&stale).exists());
         assert_eq!(std::fs::read_dir(d.join("store/projects")).unwrap().count(), 1, "the gone project's record is dropped");
+        assert_eq!(r.records_dropped, [d.join("proj-removed")]);
         assert_eq!(std::fs::read_dir(d.join("store/tmp")).unwrap().count(), 0, "nothing left in tmp");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dropped_note_lists_the_first_paths_and_names_adopt() {
+        assert!(dropped_note(&[], true).is_empty(), "nothing to say without records without a project");
+        let paths: Vec<PathBuf> = (0..7).map(|n| PathBuf::from(format!("/p/{n}"))).collect();
+        let dry = dropped_note(&paths, true);
+        assert!(dry[0].starts_with("records without a project to drop: 7 ("), "{}", dry[0]);
+        assert_eq!(&dry[1..=DROPPED_SHOWN], ["  /p/0", "  /p/1", "  /p/2", "  /p/3", "  /p/4"]);
+        assert_eq!(dry[DROPPED_SHOWN + 1], "  ... and 2 more");
+        assert_eq!(dry.last().unwrap(), "if these projects were moved or copied, run `matchapack store adopt <where they are now>` before gc");
+        assert_eq!(dry.len(), DROPPED_SHOWN + 3);
+        let one = dropped_note(&paths[..1], false);
+        assert_eq!(one.len(), 3, "count, the path, the advice: {one:?}");
+        assert!(one[0].starts_with("records without a project dropped: 1 (") && one[1] == "  /p/0" && one[2].contains("before the next gc"), "{one:?}");
     }
 
     /// A hidden lockfile listing `ints`, at `<dir>/node_modules/.package-lock.json`.
