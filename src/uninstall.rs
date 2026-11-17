@@ -495,10 +495,31 @@ pub fn plan(env: &Env) -> Vec<Target> {
     let store_id = ids[0].0;
     all.iter()
         .map(|(k, p, set)| {
+            if let (Kind::Logs | Kind::Config, Some(sid)) = (k, store_id) {
+                if let Some(why) = inside_store(p, sid, &env.store) {
+                    return Target { kind: *k, path: normalise(p).unwrap_or_else(|_| p.to_path_buf()), set: *set, state: State::Refused(why) };
+                }
+            }
             let others: Vec<(Id, Kind)> = ids.iter().filter(|(_, o)| o != k).filter_map(|(i, o)| i.map(|i| (i, *o))).collect();
             plan_one(*k, p, *set, env, &others, store_id)
         })
         .collect()
+}
+
+/// Why the log or settings directory `p` is refused for lying inside the
+/// store (`store_id`, at `store`), at any depth, or being it: its real path
+/// (links resolved) and each directory above it compared with the store by
+/// device and inode. Each way of removing such a directory with the store
+/// (in place, then through the store moved aside) produced a new edge in
+/// review; nobody is known to use that layout, so it is refused instead.
+fn inside_store(p: &Path, store_id: Id, store: &Path) -> Option<String> {
+    let canon = std::fs::canonicalize(normalise(p).ok()?).ok()?;
+    canon.ancestors().any(|a| lid(a) == Some(store_id)).then(|| {
+        format!(
+            "is inside the store ({}) or is the store: uninstall removes no directory inside the store; move it out (or remove it yourself) and run uninstall again",
+            store.display()
+        )
+    })
 }
 
 /// Whether a matchapack process uses the store now.
@@ -752,7 +773,14 @@ fn finish_store(id: Id, delete: &[(OsString, u64)], keep_some: bool, h: Held) ->
         }
         Ok(_) => {
             if at::lstat(p, &o.name).is_err() && at::rename(p, &aside, &o.name).is_ok() {
-                // Back at the store's name; `stays` says why.
+                // Back at the store's name; `stays` says why, and the
+                // failures name where the leftovers are now.
+                let (from, to) = (aside_path.display().to_string(), aside_path.with_file_name(&o.name).display().to_string());
+                for f in r.failed.iter_mut() {
+                    if let Some(rest) = f.strip_prefix(&from) {
+                        *f = format!("{to}{rest}");
+                    }
+                }
             } else {
                 r.stays = Some(format!(
                     "what is left of it is in {} (something was made at the store's path meanwhile: an install that started during the removal)",
@@ -764,8 +792,7 @@ fn finish_store(id: Id, delete: &[(OsString, u64)], keep_some: bool, h: Held) ->
     r
 }
 
-/// Remove a log or settings directory (at `path`: its own, or inside the
-/// store moved aside): its names, then the directory.
+/// Remove a log or settings directory: its names, then the directory.
 fn remove_plain(path: &Path, id: Id, delete: &[(OsString, u64)], keep_some: bool) -> Outcome {
     let mut r = Outcome::default();
     let o = match open_target(path, id) {
@@ -792,8 +819,9 @@ fn remove_plain(path: &Path, id: Id, delete: &[(OsString, u64)], keep_some: bool
 }
 
 /// The targets to remove, each after the targets inside it (`nested`): the
-/// default store is inside the default log directory, and a log or
-/// settings directory may be inside the store.
+/// default store is inside the default log directory (and a settings
+/// directory may be inside a log directory). A log or settings directory
+/// inside the store is refused in the plan.
 fn inner_first(targets: &[Target]) -> Vec<usize> {
     let removable: Vec<usize> = (0..targets.len()).filter(|&i| matches!(targets[i].state, State::Remove { .. })).collect();
     let mut order: Vec<usize> = vec![];
@@ -971,12 +999,6 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
                 }
             }
         }
-        // Targets inside the store moved with it: removed through its new
-        // path (they are the same directories, by identity).
-        let inside_store: Vec<(Kind, PathBuf)> = match (&store_t.state, &held) {
-            (State::Remove { nested, .. }, Some(h)) => nested.iter().map(|(n, k)| (*k, h.aside_path.join(n))).collect(),
-            _ => vec![],
-        };
         let mut outcomes: Vec<Option<Outcome>> = targets.iter().map(|_| None).collect();
         for i in inner_first(targets) {
             let t = &targets[i];
@@ -987,8 +1009,7 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
                     None => Outcome { failed: vec![format!("{}: not held", t.path.display())], left_alone: true, ..Default::default() },
                 }
             } else {
-                let path = inside_store.iter().find(|(k, _)| *k == t.kind).map(|(_, p)| p.clone()).unwrap_or_else(|| t.path.clone());
-                remove_plain(&path, *id, delete, !kept.is_empty())
+                remove_plain(&t.path, *id, delete, !kept.is_empty())
             });
         }
         for (t, oc) in targets.iter().zip(&outcomes) {
@@ -1535,38 +1556,36 @@ mod tests {
         walkdir::WalkDir::new(d).into_iter().flatten().all(|e| !e.file_name().to_string_lossy().contains(".uninstall-"))
     }
 
-    /// A settings or log directory inside the store (a direct child) is
-    /// removed with it, before the store's own directory; nothing is
-    /// stranded aside. The default layout (the store inside the log
-    /// directory) is the other direction, covered by the tests above.
+    /// A log or settings directory inside the store, as a direct child or
+    /// deeper, or the store itself, is refused (dry run included), and
+    /// nothing at all is removed. The default layout, the store inside the
+    /// default log directory, is the other direction and stays supported.
     #[test]
-    fn targets_inside_the_store_are_removed() {
-        for which in [Kind::Config, Kind::Logs] {
-            let d = scratch(&format!("uninstall-inside-{}", which.var()));
+    fn targets_inside_the_store_are_refused() {
+        for (which, rel) in [(Kind::Config, "settings"), (Kind::Logs, "log"), (Kind::Config, "log/settings"), (Kind::Logs, "a/b/log"), (Kind::Config, "")] {
+            let d = scratch(&format!("uninstall-inside-{}-{}", which.var(), rel.replace('/', "-")));
             let mut env = setup(&d);
             let store = d.join("own-store");
             fs::rename(&env.store, &store).unwrap();
             env.store = store.clone();
             env.store_set = true;
+            let inside = if rel.is_empty() { store.clone() } else { store.join(rel) };
+            fs::create_dir_all(&inside).unwrap();
             if which == Kind::Config {
-                let inside = store.join("settings");
-                fs::rename(&env.config, &inside).unwrap();
-                env.config = inside;
+                fs::write(inside.join("paths"), "/x\n").unwrap();
+                env.config = inside.clone();
                 env.config_set = true;
             } else {
-                let inside = store.join("log");
-                fs::create_dir_all(&inside).unwrap();
                 fs::write(inside.join("log.jsonl"), "{}\n").unwrap();
-                env.logs = inside;
+                env.logs = inside.clone();
                 env.logs_set = true;
             }
-            let (code, out) = run_to_string(&env, false);
-            assert!(code == 0 && out.contains("(its own line)") && !out.contains("REFUSED"), "{which:?}: {out}");
-            let (code, out) = run_to_string(&env, true);
-            assert_eq!(code, 0, "{which:?}: {out}");
-            assert!(!store.exists(), "{which:?}: the store and what was inside it are gone: {out}");
-            assert!(no_aside_left(&d), "{which:?}: nothing stranded aside: {out}");
-            assert!(!out.contains("stays"), "{which:?}: {out}");
+            let before = snapshot(&d);
+            let (code, dry) = run_to_string(&env, false);
+            let (code2, out) = run_to_string(&env, true);
+            assert!(code == 1 && dry.contains("REFUSED: it is inside the store"), "{which:?} {rel}: {dry}");
+            assert!(code2 == 1 && out.contains("REFUSED: it is inside the store") && out.contains("nothing was removed"), "{which:?} {rel}: {out}");
+            assert_eq!(snapshot(&d), before, "{which:?} {rel}: nothing removed");
             let _ = fs::remove_dir_all(&d);
         }
     }
@@ -1769,6 +1788,7 @@ mod tests {
         let _ = fs::set_permissions(&stuck_now, fs::Permissions::from_mode(0o755));
         assert_eq!(code, 1, "{out}");
         assert!(out.contains(&format!("store: {}: not all removed", store.display())), "{out}");
+        assert!(out.contains(&format!("could not remove {}", store.join("projects").display())) && !out.contains(".uninstall-"), "the failure names where the leftover is: {out}");
         assert!(store.join(store::LAYOUT).is_dir() && store.join("lock").is_file(), "the marker and the lock stay: {out}");
         let (code, out) = run_to_string(&env, true);
         assert!(code == 0 && !store.exists(), "a later run removes it: {out}");

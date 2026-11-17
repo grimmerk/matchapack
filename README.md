@@ -913,7 +913,8 @@ packages again.
   directory is removed through one descriptor opened without following
   links and checked to be the directory it planned for; the store is first
   moved aside under its lock, so an install that was waiting gets a fresh
-  store (a store whose parent you cannot write is refused). A
+  store (a store whose parent you cannot write is refused, and so is a log
+  or settings directory inside the store: move it out first). A
   `.<store>.uninstall-<pid>` directory left by an interrupted uninstall is
   listed with the command to remove it, never removed. Open shells run plain npm and Yarn once the binary is gone (a
   shell whose function came from an older build: `hash -r`). Space: removing the

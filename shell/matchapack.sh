@@ -28,17 +28,19 @@ function npm {
     update | up | upgrade | udpate | u | \
     uninstall | un | unlink | remove | rm | r)
       # Routed to a matchapack that `command -v` names as an executable
-      # path (bash answers from its hash table, so a binary removed since,
+      # file (any answer with a slash, a relative PATH entry's `bin/…`
+      # too; bash answers from its hash table, so a binary removed since,
       # by `matchapack uninstall`, must still be there), or as a shell
       # function of that name. An alias is not routed: it is not expanded
-      # inside this function. The lookup is an `if` condition, so that a
+      # inside this function, and its description is never an executable
+      # file. The lookup is an `if` condition, so that a
       # shell under `set -e` without matchapack goes on to plain npm.
       local mp=
       if [ "${MATCHAPACK-1}" != 0 ]; then
         mp=$(command -v matchapack 2>/dev/null) || mp=
       fi
       case $mp in
-        /*) [ -x "$mp" ] || mp= ;;
+        */*) [ -x "$mp" ] || mp= ;;
         matchapack) ;;
         *) mp= ;;
       esac

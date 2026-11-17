@@ -210,6 +210,15 @@ after" "set -e; rm -f $rb/matchapack; npm ci; echo after" "$rb:$np:$PATH"
     check set-e-yarn "YARN [install]
 after" "set -e; rm -f $rb/matchapack; yarn install; echo after" "$rb:$np:$PATH"
     cp "$tc/matchapack" "$rb/"
+    # A relative PATH entry: `command -v` answers `bin/matchapack`, which is
+    # routed (an executable file).
+    mkdir -p /tmp/relpath/bin; cp "$tc/matchapack" /tmp/relpath/bin/
+    plain_setup=$setup
+    setup="cd /tmp/relpath; $plain_setup"
+    os=Darwin
+    check relative-path "MATCHAPACK [ci]
+MATCHAPACK-YARN [install]" "npm ci; yarn install" "bin:$np:$PATH"
+    setup=$plain_setup
     # Two aliases: one whose text holds a path, one that does not (only a
     # path that `command -v` prints is checked with -x); bash expands
     # aliases with expand_aliases, as an interactive shell does.
