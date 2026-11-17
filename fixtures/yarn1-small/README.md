@@ -4,6 +4,9 @@ The `yarn1-*` fixtures are Yarn 1 projects
 for `scripts/verify-yarn1.sh` and `scripts/test-yarn1.sh`. Every dependency is
 a tarball URL on the local tarball server (127.0.0.1:48321, which serves
 `fixtures/optional-upward/tarballs`), so they install without a network.
+That host is a placeholder: each suite serves the tarballs on a free port
+of its own and installs from a copy of `fixtures/` whose URLs name it
+(`scripts/fixture-server.sh`).
 The tarballs are made by `make-tarballs.py` (deterministic).
 
 - `yarn1-small`: a bin (`.bin/y1a`), a nested `node_modules` (two versions of

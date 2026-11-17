@@ -191,14 +191,10 @@ if [ -n "$real" ]; then
   export npm_config_cache=$t/npm-cache YARN_CACHE_FOLDER=$t/yarn-cache
   npm install --prefix "$t/yarn1" --ignore-scripts --no-audit --no-fund --silent yarn@1.22.22 || { echo "setup failed: yarn" >&2; exit 2; }
   yjs=$t/yarn1/node_modules/yarn/bin/yarn.js
-  # The fixtures' tarballs, unless a server already answers on the port.
-  srv=
-  if ! curl -sf -o /dev/null http://127.0.0.1:48321/y1-a-1.0.0.tgz; then
-    python3 -m http.server 48321 --bind 127.0.0.1 --directory "$src/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
-    srv=$!
-    trap '[ -n "$srv" ] && kill "$srv" 2>/dev/null' EXIT
-  fi
-  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/y1-a-1.0.0.tgz && break; sleep 0.2; done
+  # The fixtures' tarballs, from this run's own server on a free port; $FX
+  # is the copy of fixtures/ whose URLs name it (fixture-server.sh).
+  here=$src; . "$src/scripts/fixture-server.sh"; fixtures_serve "$t"
+  trap '[ -n "$FX_PID" ] && kill "$FX_PID" 2>/dev/null' EXIT
   # PATH: the real binary, a `yarn` that records how it was started (every
   # argument; MATCHAPACK, which `matchapack yarn` sets to 0 when it hands
   # over to Yarn, unset otherwise) and then runs the real Yarn, node and npm.
@@ -211,8 +207,8 @@ if [ -n "$real" ]; then
   # rproj <name> npm|yarn [postinstall exit code]: a fresh project.
   rproj() {
     local d=$t/rp/$1; rm -rf "${d:?}"; mkdir -p "$d"
-    if [ "$2" = npm ]; then cp "$src/fixtures/optional-upward/package.json" "$src/fixtures/optional-upward/package-lock.json" "$d/"
-    else cp "$src/fixtures/yarn1-small/package.json" "$src/fixtures/yarn1-small/yarn.lock" "$d/"; fi
+    if [ "$2" = npm ]; then cp "$FX/optional-upward/package.json" "$FX/optional-upward/package-lock.json" "$d/"
+    else cp "$FX/yarn1-small/package.json" "$FX/yarn1-small/yarn.lock" "$d/"; fi
     [ -n "${3-}" ] && python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"exit "+sys.argv[2]}; json.dump(d, open(p,"w"))' "$d/package.json" "$3"
     echo "$d"
   }

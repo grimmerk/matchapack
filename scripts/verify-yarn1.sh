@@ -201,20 +201,26 @@ rm -rf "${work:?}/prime" "${work:?}/plain1" "${work:?}/plain2" "${work:?}/engine
   "${work:?}/cache-e" "${work:?}/runs" "${work:?}/mp" "${work:?}/engine.json" "${work:?}/diff-engine.txt" "${work:?}/command-status"
 echo "yarn $yver, node $("$node" -v), $("$bin" --version), $cache_mode cache, work $work"
 
-# Fixtures install from the local tarball server (as in verify-npm.sh).
-server=
-if grep -q '127.0.0.1:48321' "$src/yarn.lock" && ! curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz; then
-  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
-  server=$!
-  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz && break; sleep 0.1; done
+# Fixtures install from a tarball server of this run, on a free port
+# (fixture-server.sh): the one test-yarn1.sh started when it runs this
+# script, else one of its own. A fixture of this checkout that names the
+# placeholder 127.0.0.1:48321 is used through the run's copy of fixtures/,
+# whose URLs name that port.
+FX_PID=
+fx_named() { grep -qs '127.0.0.1:48321' "$1/yarn.lock" "$1/package.json" "$1/.yarnrc"; }
+if [ -n "${MATCHAPACK_TEST_FX-}" ] || fx_named "$src" || { [ -n "$then" ] && fx_named "$then"; }; then
+  . "$here/scripts/fixture-server.sh"; fixtures_serve "$work"
+  fx_real=$(cd "$here/fixtures" && pwd -P)
+  for v in src then; do
+    [ -n "${!v}" ] || continue
+    r=$(cd "${!v}" && pwd -P)
+    case "$r/" in "$fx_real/"*) printf -v "$v" '%s' "$FX/${r#"$fx_real/"}" ;; esac
+    if fx_named "${!v}"; then
+      echo "${!v} names 127.0.0.1:48321, the fixtures' placeholder: give a fixture under $here/fixtures (its copy is served)" >&2; exit 2
+    fi
+  done
 fi
-# A server another checkout left running answers the tarballs, and may not
-# have the registry documents (make-tarballs.py) the Yarn command cases name
-# packages by.
-if curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz && ! curl -sf -o /dev/null http://127.0.0.1:48321/y1-c; then
-  echo "the server on 127.0.0.1:48321 has no registry documents: it serves another checkout's fixtures/optional-upward/tarballs; stop it" >&2; exit 2
-fi
-trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
+trap '[ -n "$FX_PID" ] && kill "$FX_PID" 2>/dev/null' EXIT
 
 # Copies keep the source's times, modes and group (-p), so files outside
 # node_modules compare equal. Not clones (cp -c): a clone takes the group of

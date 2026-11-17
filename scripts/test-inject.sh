@@ -35,18 +35,14 @@ npm_major=$(npm -v | cut -d. -f1)
 # local fixtures install from 127.0.0.1.
 [ "$npm_major" -ge 12 ] && export npm_config_allow_remote=all
 
-# The local fixtures install from a tarball server (as in verify-npm.sh).
-server=
-if ! curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; then
-  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
-  server=$!
-  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz && break; sleep 0.1; done
-fi
-trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
+# The local fixtures install from this run's own tarball server, on a free
+# port; $FX is the copy of fixtures/ whose URLs name it (fixture-server.sh).
+. "$here/scripts/fixture-server.sh"; fixtures_serve "$work"
+trap '[ -n "$FX_PID" ] && kill "$FX_PID" 2>/dev/null' EXIT
 
 project() { # name fixture [python statement on the package.json dict d]
   local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"
-  cp "$here/fixtures/$2/package.json" "$here/fixtures/$2/package-lock.json" "$d/"
+  cp "$FX/$2/package.json" "$FX/$2/package-lock.json" "$d/"
   if [ -n "${3-}" ]; then python3 -c "import json;p='$d/package.json';d=json.load(open(p));$3;json.dump(d,open(p,'w'),indent=2)"; fi
   echo "$d"
 }
@@ -230,7 +226,7 @@ gs=$work/store-gid; gp=$work/gid-projects
 mine=$(id -g)
 other_gid=$(python3 -c "import os;print(next((g for g in os.getgroups() if g!=$mine),''))")
 gid_diffs() { "$bin" diff --meta "$1" "$2" > "$work/meta" 2>&1; grep -Eo '^  gid: [0-9]+' "$work/meta" | grep -Eo '[0-9]+$'; }
-gproject() { local d=$gp/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo "$d"; }
+gproject() { local d=$gp/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$FX/small/package.json" "$FX/small/package-lock.json" "$d/"; echo "$d"; }
 if [ -z "$other_gid" ]; then
   echo "SKIP store under another group: the user is in one group only"
 else
@@ -253,7 +249,7 @@ else
   if python3 -c "import os,sys;sys.exit(0 if $fgid in os.getgroups() or $fgid==os.getegid() or os.geteuid()==0 else 1)"; then
     echo "SKIP a project of a group the user is not in: $fd's group $fgid is one of the user's"
   else
-    fproj() { local d=$fd/$1; mkdir -p "$d"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo "$d"; }
+    fproj() { local d=$fd/$1; mkdir -p "$d"; cp "$FX/small/package.json" "$FX/small/package-lock.json" "$d/"; echo "$d"; }
     fref=$(fproj ref); (cd "$fref" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci for the foreign-group reference"
     for chk in off all; do
       p=$(fproj "p-$chk")
@@ -710,7 +706,7 @@ wrapped "$p" "npm ci --omit=dev --no-audit --no-fund"; rc=$?
 
 # 11a. The install root is npm's own (#36): with --prefix npm installs into
 #      that directory, and matchapack clones there.
-mkdir -p "$work/elsewhere"; cp "$here/fixtures/bundled/package.json" "$here/fixtures/bundled/package-lock.json" "$work/elsewhere/"
+mkdir -p "$work/elsewhere"; cp "$FX/bundled/package.json" "$FX/bundled/package-lock.json" "$work/elsewhere/"
 wrapped "$p" "npm ci --prefix '$work/elsewhere' --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'matchapack: added' "$work/out" \
   && [ "$(last_log "r['outcome'], r['inject']['cloned'], r['inject']['root'] == '$work/elsewhere', r['inject']['command']")" = "installed 3 True ci" ] \
@@ -746,7 +742,7 @@ decline_case "global from the project's .npmrc" "$p" "npm installs globally" "$w
 (cd "$p" && PATH="$(dirname "$bin"):$PATH" MATCHAPACK_NO_FALLBACK=1 zsh -c ". '$here/shell/matchapack.sh'; npm ci --no-audit --no-fund" > "$work/out" 2>&1); rc=$?
 [ $rc = 3 ] && grep -q 'not handled, left unchanged (npm installs globally)' "$work/out" && [ -d "$p/node_modules/sentinel" ] && ! grep -q 'Exit handler never called' "$work/out" \
   && ok "MATCHAPACK_NO_FALLBACK=1 and a decline on npm's root: status 3, node_modules untouched" || bad "no fallback on npm's root: rc=$rc"
-p=$(project prefix-out small); mkdir -p "$work/elsewhere-out"; cp "$here/fixtures/bundled/package.json" "$here/fixtures/bundled/package-lock.json" "$work/elsewhere-out/"
+p=$(project prefix-out small); mkdir -p "$work/elsewhere-out"; cp "$FX/bundled/package.json" "$FX/bundled/package-lock.json" "$work/elsewhere-out/"
 decline_case "start directory in scope, --prefix root out of scope" "$p" "outside the trial scope" 0 MATCHAPACK_PATHS="$p" -- ci --prefix "'$work/elsewhere-out'" --no-audit --no-fund
 [ -d "$work/elsewhere-out/node_modules/lc-s" ] && same "$ref_local" "$work/elsewhere-out" && ok "root out of scope: plain npm installed there" || bad "root out of scope: plain npm did not install"
 p=$(project prefix-missing small)
@@ -768,7 +764,7 @@ wrapped "$p" "npm ci --dry-run --no-audit --no-fund"; rc=$?
 #      other reason. Global installs go to a scratch prefix; every package
 #      comes from the local tarball server.
 gp=$work/global-prefix; rm -rf "${gp:?}"; mkdir -p "$gp"
-tgz=http://127.0.0.1:48321/lc-s-1.0.0.tgz
+tgz=$FX_URL/lc-s-1.0.0.tgz
 quiet_case() { # name dir want-reason [env...] -- npm args
   local name=$1 d=$2 reason=$3; shift 3
   local e=(); while [ "$1" != -- ]; do e+=("$1"); shift; done; shift
@@ -788,7 +784,7 @@ quiet_case "npm install with global=true in the project's .npmrc" "$p" "npm inst
 p=$(project fam-quiet-dry bundled)
 quiet_case "npm update --dry-run" "$p" "option --dry-run installs nothing" -- update --dry-run --no-audit --no-fund
 quiet_case "npm uninstall with npm_config_dry_run=true" "$p" "this run installs nothing (--dry-run)" npm_config_dry_run=true -- uninstall lc-s --no-audit --no-fund
-[ ! -e "$p/node_modules" ] && cmp -s "$p/package.json" "$here/fixtures/bundled/package.json" && ok "dry runs: nothing changed" || bad "dry runs changed the project"
+[ ! -e "$p/node_modules" ] && cmp -s "$p/package.json" "$FX/bundled/package.json" && ok "dry runs: nothing changed" || bad "dry runs changed the project"
 p=$(project fam-quiet-scope bundled); mkdir -p "$work/scope-elsewhere"
 quiet_case "npm install outside the trial scope" "$p" "outside the trial scope" MATCHAPACK_PATHS="$work/scope-elsewhere" -- install --no-audit --no-fund
 [ -f "$p/node_modules/lc-s/package.json" ] && ok "outside the trial scope: plain npm installed" || bad "outside the trial scope: not installed"
@@ -849,8 +845,8 @@ decline_case "npm install with a --prefix root that does not exist" "$p" "the in
 #      does; matchapack refuses to clone outside the project (rejected-dest),
 #      so that package is npm's own extraction.
 p=$work/wslink; rm -rf "${p:?}" "${work:?}/outside-ws"; mkdir -p "$p/packages" "$work/outside-ws"
-echo '{"name":"wsroot","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}' > "$p/package.json"
-echo '{"name":"ws","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}' > "$work/outside-ws/package.json"
+echo '{"name":"wsroot","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz"}}' > "$p/package.json"
+echo '{"name":"ws","version":"1.0.0","dependencies":{"lc-s":"'"$FX_URL"'/lc-s-2.0.0.tgz"}}' > "$work/outside-ws/package.json"
 ln -s "$work/outside-ws" "$p/packages/ws"
 (cd "$p" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$work/out" 2>&1)
 install "$p"; rc=$?
@@ -863,8 +859,8 @@ install "$p"; rc=$?
 #      root's node_modules (the workspace's subset). npm reports that root,
 #      and matchapack clones there (#36; until 2026-11-15 it declined).
 ws=$work/ws-src; rm -rf "${ws:?}"; mkdir -p "$ws/packages/a"
-printf '{"name":"ws-root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-r":"http://127.0.0.1:48321/lc-r-1.0.0.tgz"}}\n' > "$ws/package.json"
-printf '{"name":"a","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}\n' > "$ws/packages/a/package.json"
+printf '{"name":"ws-root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-r":"'"$FX_URL"'/lc-r-1.0.0.tgz"}}\n' > "$ws/package.json"
+printf '{"name":"a","version":"1.0.0","dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz"}}\n' > "$ws/packages/a/package.json"
 (cd "$ws" && npm install --package-lock-only --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "workspace lockfile"
 wscopy() { local d=$work/$1; rm -rf "${d:?}"; cp -R "$ws" "$d"; echo "$d"; }
 ref_ws=$(wscopy ws-ref); (cd "$ref_ws/packages/a" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci in a workspace"
@@ -906,7 +902,7 @@ print(json.dumps(r))" >> "$work/logs/log.jsonl"
 #     names included, must be equal), and the same exit status. The clone
 #     count and npm's own extractions are printed with each case.
 ns() { python3 -c 'import time;print(time.time_ns())'; }
-wsproj() { local d=$work/$1; rm -rf "${d:?}"; cp -R -p "$here/fixtures/workspaces" "$d"; echo "$d"; }
+wsproj() { local d=$work/$1; rm -rf "${d:?}"; cp -R -p "$FX/workspaces" "$d"; echo "$d"; }
 ws_case() { # name flags [VAR=value]  (sets ws_cloned, ws_by_npm)
   local name=$1 flags=$2 envs=${3-} a b ta tb tc wa wb
   a=$(wsproj "ws-$name-npm"); b=$(wsproj "ws-$name-inject")
@@ -952,7 +948,7 @@ fi
 #     entry must stay pacote's (unpatched), the project the same as npm ci's
 #     (patched), with an empty store and with the filled one.
 if [ "$npm_major" -ge 12 ]; then
-  pcopy() { local d=$work/$1; rm -rf "${d:?}"; cp -R "$here/fixtures/npm12-patch" "$d"; echo "$d"; }
+  pcopy() { local d=$work/$1; rm -rf "${d:?}"; cp -R "$FX/npm12-patch" "$d"; echo "$d"; }
   ref_patch=$(pcopy patch-ref); (cd "$ref_patch" && npm ci --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "npm ci on fixtures/npm12-patch"
   n_patch=$(python3 -c "import json;print(sum(1 for k,v in json.load(open('$ref_patch/node_modules/.package-lock.json'))['packages'].items() if k))")
   ps=$work/store-patch; rm -rf "${ps:?}"
@@ -1048,7 +1044,7 @@ wrapped "$p" "npm install left-pad@1.3.0 --no-audit --no-fund"; rc=$?
 # node_modules (npm before 10.8.1 removes only the root's in npm ci, and
 # keeps the member's packages without extracting them): the record keeps
 # the entries of every installed package.
-p=$work/ws-ci-twice; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
+p=$work/ws-ci-twice; rm -rf "${p:?}"; cp -R "$FX/workspaces" "$p"
 wrapped "$p" "npm ci --no-audit --no-fund" || bad "ws ci twice: first"
 wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
 want=$(python3 -c "
@@ -1110,7 +1106,7 @@ p=$(project fam-trap-nolock small)
 # A command filtered to one workspace (started inside a member): npm ci
 # with the filter would remove the other workspaces' packages; the repair
 # rebuilds the whole project from its root.
-p=$work/fam-trap-ws; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
+p=$work/fam-trap-ws; rm -rf "${p:?}"; cp -R "$FX/workspaces" "$p"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p" "npm ci --no-audit --no-fund") || bad "family trap, workspace: npm ci"
 (PATH=$trc/bin:$PATH; MATCHAPACK_LOG_DIR=$work/logs-trap-nolock wrapped "$p/packages/app" "npm install left-pad@1.3.0 --no-audit --no-fund"); rc=$?
 [ $rc = 1 ] && grep -qF "The command was filtered to some workspaces, and npm ci with the filter removes the packages of the others: check \`git diff\` of package.json and package-lock.json, then rebuild the whole project with plain npm." "$work/out" \
@@ -1168,7 +1164,7 @@ follow_advice() {
   awk '/^matchapack: .*git diff/ {on = 1; next} on && /^  / {print substr($0, 3); next} on {exit}' "$work/out" > "$work/advice.sh"
   [ -s "$work/advice.sh" ] && (cd "$1" && sh -e "$work/advice.sh" > "$work/follow.out" 2>&1)
 }
-p=$work/fam-follow; rm -rf "${p:?}"; cp -R "$here/fixtures/workspaces" "$p"
+p=$work/fam-follow; rm -rf "${p:?}"; cp -R "$FX/workspaces" "$p"
 wrapped "$p" "npm ci --no-audit --no-fund" || bad "follow the advice: npm ci"
 mk=$p/packages/app/node_modules/y1-b/MARKER
 for c in "npm install --no-audit --no-fund" "npm install -w ws-app --no-audit --no-fund" "npm install --no-save --no-audit --no-fund"; do
@@ -1198,8 +1194,8 @@ rm -rf "${p:?}/packages/app/node_modules"
 # member's node_modules itself, through the link, so the marker is checked
 # before that only).
 p=$work/fam-symws; o=$work/fam-symws-outside; rm -rf "${p:?}" "${o:?}"; mkdir -p "$p/packages" "$o"
-echo '{"name":"symws","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}' > "$p/package.json"
-echo '{"name":"ws-ext","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}' > "$o/package.json"
+echo '{"name":"symws","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz"}}' > "$p/package.json"
+echo '{"name":"ws-ext","version":"1.0.0","dependencies":{"lc-s":"'"$FX_URL"'/lc-s-2.0.0.tgz"}}' > "$o/package.json"
 ln -s "$o" "$p/packages/ext"
 (cd "$p" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$work/out" 2>&1) || bad "symlinked member: lockfile"
 wrapped "$p" "npm ci --no-audit --no-fund" || bad "symlinked member: npm ci"
@@ -1255,18 +1251,18 @@ PY
 }
 cl_pj() { mkdir -p "$(dirname "$1")"; echo "$2" > "$1"; }
 cl_ws() { # a workspaces project: lc-s 1.0.0 at the root; member b wants 2.0.0 (its own node_modules)
-  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}'
-  cl_pj "$1/proj/packages/a/package.json" '{"name":"ws-a","version":"1.0.0","dependencies":{"lc-bundler":"http://127.0.0.1:48321/lc-bundler-1.0.0.tgz"}}'
-  cl_pj "$1/proj/packages/b/package.json" '{"name":"ws-b","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}'
+  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz"}}'
+  cl_pj "$1/proj/packages/a/package.json" '{"name":"ws-a","version":"1.0.0","dependencies":{"lc-bundler":"'"$FX_URL"'/lc-bundler-1.0.0.tgz"}}'
+  cl_pj "$1/proj/packages/b/package.json" '{"name":"ws-b","version":"1.0.0","dependencies":{"lc-s":"'"$FX_URL"'/lc-s-2.0.0.tgz"}}'
 }
 cl_member() { cl_ws "$1"; }
 cl_linkdep() { # a file: directory dependency inside the root, with its own node_modules
-  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz","loc":"file:./loc"}}'
-  cl_pj "$1/proj/loc/package.json" '{"name":"loc","version":"1.0.0","dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}'
+  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz","loc":"file:./loc"}}'
+  cl_pj "$1/proj/loc/package.json" '{"name":"loc","version":"1.0.0","dependencies":{"lc-s":"'"$FX_URL"'/lc-s-2.0.0.tgz"}}'
 }
 cl_stale() { cl_ws "$1"; }
 cl_stale_after() { # packages/b leaves the workspaces; its own install stays
-  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/a"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz"}}'
+  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/a"],"dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz"}}'
   (cd "$1/proj/packages/b" && MATCHAPACK=0 npm install --no-package-lock --no-audit --no-fund > /dev/null 2>&1)
 }
 cl_fresh_after() { # the member's own node_modules gone: the broken run places its package
@@ -1274,7 +1270,7 @@ cl_fresh_after() { # the member's own node_modules gone: the broken run places i
 }
 cl_sync() { cl_ws "$1"; }
 cl_sync_after() { # package.json asks for what the lockfile does not have: npm ci refuses
-  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-2.0.0.tgz"}}'
+  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"'"$FX_URL"'/lc-s-2.0.0.tgz"}}'
 }
 cl_case() { # name build [after] -- npm ci args
   local name=$1 build=$2 after=$3; shift 4
@@ -1330,7 +1326,7 @@ cl_rollback() {
   cl_pj "$1/failing-src/package.json" '{"name":"failing","version":"1.0.0","scripts":{"install":"node check.js"}}'
   cl_pj "$1/failing-src/check.js" "process.exit(require('fs').existsSync('$cl_flag') ? 1 : 0)"
   (cd "$1/failing-src" && MATCHAPACK=0 npm pack --pack-destination "$1" > /dev/null 2>&1)
-  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"http://127.0.0.1:48321/lc-s-1.0.0.tgz","failing":"file:../failing-1.0.0.tgz"},"allowScripts":{"failing":true}}'
+  cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz","failing":"file:../failing-1.0.0.tgz"},"allowScripts":{"failing":true}}'
   # npm 11.19 and 12 run a dependency's install scripts only by policy; an
   # npmrc is what both honour for a file: tarball (older npm ignore it).
   echo 'dangerously-allow-all-scripts=true' > "$1/proj/.npmrc"

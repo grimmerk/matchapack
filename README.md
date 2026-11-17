@@ -924,6 +924,18 @@ packages again.
 - CI (`.github/workflows/ci.yml`, on pull requests): `cargo test` and
   `test-shells.sh` on Linux; on macOS the safety, routing, store and inject
   tests, the fixture harness and the Yarn 1 harness tests.
+- The local tarballs (`fixtures/optional-upward/tarballs`): the fixtures name
+  them by the placeholder host `127.0.0.1:48321`. Each suite that installs
+  them (test-inject, verify-npm, test-store, test-yarn1, verify-yarn1,
+  test-shells `--real`, linux-test) starts its own server on a free port and
+  installs from a copy of `fixtures/` in its work directory whose URLs (and
+  the hashes of the tarballs that name the host) are rewritten to that port
+  (`scripts/fixture-server.sh`). Suites from several checkouts therefore run
+  at the same time with no lock, and none uses a server it did not start: a
+  server that does not answer the copy's token stops the suite (status 2).
+  The server stops when its suite exits. To install a fixture by hand, serve
+  the tarballs on the placeholder: `python3 -m http.server 48321 --bind
+  127.0.0.1 --directory fixtures/optional-upward/tarballs`.
 - `scripts/verify-steps.sh <project> <work> [--start bare|ci|nolock] [--pre
   cmd] -- <step> [-- <step> …]`: the install family's harness. The same npm
   commands (each `[@subdirectory] [NAME=value …] <npm arguments>`) with plain
