@@ -165,8 +165,9 @@ enum StoreCmd {
     /// still shares, and a later install re-extracts what it needs. Entries
     /// extracted in the last hour are kept. Refused while an install runs.
     /// Lists the records whose path has no node_modules any more (a project
-    /// moved, renamed, copied or deleted): run `store adopt` where a moved or
-    /// copied project is now, before gc, to keep its entries.
+    /// moved, renamed, or copied and the original deleted, or deleted): run
+    /// `store adopt` where a moved project is now, before gc, to keep its
+    /// entries.
     #[command(verbatim_doc_comment)]
     Gc {
         /// Report what would be removed; remove nothing.
@@ -413,7 +414,7 @@ fn main() -> Result<()> {
                     let free1 = store::free_bytes(&st.root);
                     let gib = |b: u64| format!("{:.2} GiB", b as f64 / 1024f64.powi(3));
                     println!("projects in use: {} ({} recorded, {} from the trial log)", r.projects.0 + r.projects.1, r.projects.0, r.projects.1);
-                    for l in gc::dropped_note(&r.records_dropped, dry_run) {
+                    for l in gc::dropped_note(&r, dry_run) {
                         println!("{l}");
                     }
                     println!(
