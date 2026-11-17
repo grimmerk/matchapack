@@ -38,7 +38,9 @@ that in `~/.zshenv` or `~/.profile`); if it comes earlier, it does nothing.
 source`): `mp` then runs matchapack (`mp store gc`); an alias in zsh and
 bash, a function in fish. The name must not be a builtin of the shell, nor
 npm, yarn or matchapack (refused: the line still defines the npm function,
-without the alias); a command of that name on PATH is only warned about.
+without the alias); a command of that name on PATH is only warned about,
+and only when you run `matchapack init … --alias` by hand (not from the
+startup file, where it would print at every shell start).
 The function comes from the binary, so no
 checkout of this repository is needed and it updates with `cargo install`.
 Sourcing `shell/matchapack.sh` from a checkout still works. Open a new terminal,

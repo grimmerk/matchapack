@@ -279,7 +279,9 @@ fi
 #     lock; then it removes the three directories, leaves the startup file
 #     alone (naming its line), and the project's files read the same and
 #     still load.
-if curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; then
+#     fixtures/small comes from the registry: no tarball server needed;
+#     npm's cache is the scratch home's.
+{
   uh=$work/uninstall-home; ust=$uh/.cache/matchapack/store
   [ -d "$uh" ] && chmod -R u+w "$uh"
   rm -rf "${uh:?}" "${work:?}/uninstall-project"
@@ -313,9 +315,7 @@ if curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; then
   uninstall --yes && [ ! -e "$uh/.cache/matchapack" ] && [ ! -e "$uh/.config/matchapack" ] && grep -q 'command -v matchapack' "$uh/.zshrc" \
     && grep -q "free space on the store's volume" "$work/out" && [ "$(usum)" = "$ubefore" ] && (cd "$up" && node -e 'require("lodash")') \
     && ok "uninstall --yes: store, logs and settings removed, the rc file untouched, the project's files the same and loadable" || bad "uninstall --yes"
-else
-  echo "SKIP uninstall: the fixtures' tarball server is not running (127.0.0.1:48321)"
-fi
+}
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

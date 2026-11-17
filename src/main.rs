@@ -365,6 +365,22 @@ fn check_alias(name: &str, shell: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The warning for an `--alias` name that is also a command on PATH, only
+/// when `tty` (stdout is a terminal: someone ran `matchapack init … --alias`
+/// by hand). From the rc line stdout is a pipe into eval / source, and the
+/// warning would print at every shell start.
+fn alias_warning(name: &str, shell: &str, tty: bool) -> Option<String> {
+    if !tty {
+        return None;
+    }
+    let p = on_path(name)?;
+    Some(format!(
+        "matchapack init: warning: `{name}` is also {} on PATH; the {} hides it in this shell (`command {name}` still runs it)",
+        p.display(),
+        if shell == "fish" { "function" } else { "alias" }
+    ))
+}
+
 /// The first executable named `name` in PATH, if any.
 fn on_path(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -442,8 +458,9 @@ fn main() -> Result<()> {
             // npm and yarn functions must not go missing over a bad name.
             let refused = alias.as_deref().and_then(|n| check_alias(n, &shell).err());
             if let (Some(name), None) = (&alias, &refused) {
-                if let Some(p) = on_path(name) {
-                    eprintln!("matchapack init: warning: `{name}` is also {} on PATH; the {} hides it in this shell (`command {name}` still runs it)", p.display(), if shell == "fish" { "function" } else { "alias" });
+                use std::io::IsTerminal;
+                if let Some(w) = alias_warning(name, &shell, std::io::stdout().is_terminal()) {
+                    eprintln!("{w}");
                 }
             }
             print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { alias.as_deref() }));
@@ -651,7 +668,17 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_alias, init_script, shell_from_comm};
+    use super::{alias_warning, check_alias, init_script, shell_from_comm};
+
+    /// A name on PATH (`ls`) is warned about only when stdout is a terminal;
+    /// a name on no PATH never.
+    #[test]
+    fn alias_warning_only_on_a_terminal() {
+        assert!(alias_warning("ls", "zsh", true).is_some_and(|w| w.contains("`ls` is also") && w.contains("alias hides it")));
+        assert!(alias_warning("ls", "fish", true).is_some_and(|w| w.contains("function hides it")));
+        assert_eq!(alias_warning("ls", "zsh", false), None);
+        assert_eq!(alias_warning("matchapack-no-such-command-x", "zsh", true), None);
+    }
 
     /// `--alias`: the name is checked per shell, and the definition comes
     /// after the functions, on both platforms, only when asked for.
