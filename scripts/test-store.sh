@@ -296,8 +296,10 @@ fi
   }
   snap() { find "$uh" -exec stat -f '%N %HT %z %p %m' {} + 2>/dev/null | sort; }
   up=$(project uninstall-project)
-  uenv "$bin" install "$up" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1 && [ -d "$ust/v2" ] && [ -f "$uh/.cache/matchapack/log.jsonl" ] \
-    || bad "uninstall: setup install into the scratch home"
+  # `matchapack install` writes no trial log (`npm ci` through the shell
+  # function does); a line stands in for one.
+  uenv "$bin" install "$up" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1 && [ -d "$ust/v2" ] \
+    && printf '{"outcome":"installed"}\n' > "$uh/.cache/matchapack/log.jsonl" || bad "uninstall: setup install into the scratch home"
   usum() { (cd "$up" && find node_modules -type f -exec shasum {} + | sort | shasum); }
   ubefore=$(usum)
   # 15a. The dry run (the default) changes nothing.
