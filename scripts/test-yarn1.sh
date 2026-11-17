@@ -1527,6 +1527,111 @@ if grep -q "Yarn linked node_modules but the hook never saw its link step" "$wor
   ok "matchapack report: yarn lines (outcomes, clones, the unseen link step), none in the npm counts"
 else bad "matchapack report"; fi
 
+# Stopped by a signal (#64; src/signals.rs): Yarn stops when matchapack goes
+# away or says a signal stopped it (the hook signals its own process), and
+# a workspace command's Yarn stops when the Yarn relaying its requests goes.
+# Nothing left running or written once Yarn is done; the run is logged as
+# interrupted; the next install succeeds. Each fix-up of a clone is made
+# slow (MATCHAPACK_YARN_SLOW_FIXUP_*) so that the signal lands inside the
+# link step, with requests in flight.
+T=$FX_URL
+ydesc() { # every descendant pid of $1
+  ps -A -o pid=,ppid= | awk -v root="$1" '{ parent[$1]=$2 } END { for (p in parent) { q=p; while (q in parent && q != root && q > 1) q=parent[q]; if (q == root && p != root) print p } }'
+}
+# ystop <dir> <signal|parent> <paths that show the link step, `:`-separated>
+# -- <yarn args>: matchapack yarn in the background (job control: its own
+# process group); once one of the paths exists, the signal to matchapack's
+# pid, or (`parent`) SIGKILL to the node that runs Yarn alone (the parent
+# of a workspace command's Yarn). Sets rc, alive, newer once every process
+# it started has gone; output in $work/out.
+ystop() {
+  local d=$1 sig=$2 mark=$3; shift 4
+  set -m
+  (cd "$d" && exec env MATCHAPACK_YARN_SLOW_FIXUP_EVERY=1 MATCHAPACK_YARN_SLOW_FIXUP_MS=300 PATH="$(dirname "$node"):$PATH" \
+    MATCHAPACK_YARN_JS="$yarnjs" MATCHAPACK_STORE="$work/y1/store" MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" \
+    YARN_DISABLE_SELF_UPDATE_CHECK=true "$bin" yarn "$@") > "$work/out" 2>&1 < /dev/null &
+  local m=$!
+  set +m
+  local _ p seen=no mk
+  for _ in $(seq 1500); do
+    for mk in ${mark//:/ }; do [ -e "$mk" ] && seen=yes; done
+    [ $seen = yes ] && break; sleep 0.02
+  done
+  local tree; tree=$(ydesc "$m" | tr '\n' ' ')
+  if [ "$sig" = parent ]; then
+    p=$(pgrep -P "$m" -f yarn1-hook.js | head -1)
+    [ -n "$p" ] && kill -KILL "$p"
+  else
+    kill -"$sig" "$m"
+  fi
+  ( sleep 90; kill -KILL "$m" 2>/dev/null ) >/dev/null 2>&1 & local guard=$!
+  wait "$m"; rc=$?
+  pkill -P "$guard" 2>/dev/null; kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null
+  for _ in $(seq 300); do
+    alive=""; for p in $tree; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+    [ -z "$alive" ] && break; sleep 0.1
+  done
+  touch "$work/ystamp"; sleep 1
+  newer=$(find "$d" -newer "$work/ystamp" | head -3 | tr '\n' ' ')
+  alive=""
+  for p in $tree; do kill -0 "$p" 2>/dev/null && alive="$alive $p:$(ps -o comm= -p "$p" | tr -d ' ')"; done
+  for p in $tree; do kill -KILL "$p" 2>/dev/null; done
+}
+# SIGTERM: Yarn passes it on to what it started and exits 1, as plain Yarn
+# given SIGTERM does.
+d=$(project sigterm)
+ystop "$d" TERM "$d/node_modules/y1-many" -- install --frozen-lockfile --non-interactive --cache-folder "$work/e-many/cache"
+if [ $rc = 1 ] && [ -z "$alive" ] && [ -z "$newer" ] && [ "$(lastlog '(r["outcome"], r["signal"], r["code"])')" = "('interrupted', 'SIGTERM', 1)" ] \
+  && grep -q 'stopped by SIGTERM; yarn exited with status 1' "$work/out" && ! grep -q 'running plain yarn' "$work/out"; then
+  myarn "$d" --
+  [ $rc = 0 ] && ok "SIGTERM to matchapack during Yarn's link step: Yarn stopped (exit 1, as plain Yarn's), nothing left running or written after, logged interrupted; the next install succeeds" \
+    || bad "SIGTERM during the link step: the next install (exit $rc)"
+else bad "SIGTERM during the link step (exit $rc, alive:${alive:- none}, written after: ${newer:-nothing})"; fi
+# SIGKILL: the socket closes; Yarn stops (SIGTERM from its hook).
+d=$(project sigkill)
+ystop "$d" KILL "$d/node_modules/y1-many" -- install --frozen-lockfile --non-interactive --cache-folder "$work/e-many/cache"
+if [ $rc = 137 ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q 'matchapack has gone; stopping Yarn (SIGTERM)' "$work/out"; then
+  myarn "$d" --
+  [ $rc = 0 ] && ok "SIGKILL to matchapack during Yarn's link step: Yarn stopped, nothing left running or written after; the next install succeeds" \
+    || bad "SIGKILL during the link step: the next install (exit $rc)"
+else bad "SIGKILL during the link step (exit $rc, alive:${alive:- none}, written after: ${newer:-nothing})"; fi
+# `yarn workspace <name> add …`: the Yarn that links is a child of the one
+# matchapack started (the hook relays its requests). A SIGHUP to matchapack
+# during that child's link step: the parent Yarn gets it from its hook and
+# dies of it (Yarn has no SIGHUP handler); the child sees the socket to its
+# parent close and stops. A fresh copy each time (a finished add leaves
+# w2's package.json changed). Where y1-many 2.0.0 lands depends on Yarn's
+# hoisting: w2's node_modules, or the root's, with 1.0.0 moved into w1's;
+# either new directory shows the link step.
+ws=$work/sig-ws
+wsfresh() {
+  rm -rf "${ws:?}"; cp -R "$FX/yarn1-workspaces" "$ws"
+  (cd "$ws" && y1env "$bin" yarn install --frozen-lockfile --non-interactive --cache-folder "$work/sig-ws-cache") > "$work/out" 2>&1
+}
+wsmark=$ws/packages/w2/node_modules/y1-many:$ws/packages/w1/node_modules/y1-many
+wsfresh
+ystop "$ws" HUP "$wsmark" -- workspace w2 add "$T/y1-many-2.0.0.tgz" --non-interactive --cache-folder "$work/sig-ws-cache"
+if [ $rc = 129 ] && [ -z "$alive" ] && [ -z "$newer" ] && [ "$(lastlog '(r["outcome"], r["command"], r["signal"], r["code"])')" = "('interrupted', 'workspace add', 'SIGHUP', 129)" ] \
+  && ! grep -q y1-many "$ws/packages/w2/package.json"; then
+  ok "SIGHUP to matchapack during a workspace command's link step: exit 129, both Yarns stopped, nothing left running or written after, logged interrupted"
+else bad "SIGHUP during a workspace command's link step (exit $rc, alive:${alive:- none}, written after: ${newer:-nothing})"; fi
+# The parent alone killed (OOM, `kill -9 <pid>`) during the child's link
+# step: the child stops instead of answering its requests in flight with
+# Node's copy (a worker may still be on those paths) and linking on. Its
+# end shows in w2's package.json, which `yarn add` writes after the link
+# step: a child that linked on adds y1-many to it.
+wsfresh
+ystop "$ws" parent "$wsmark" -- workspace w2 add "$T/y1-many-2.0.0.tgz" --non-interactive --cache-folder "$work/sig-ws-cache"
+if [ $rc = 137 ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q "Yarn that started this workspace command's Yarn has gone; stopping (SIGTERM)" "$work/out" && ! grep -q y1-many "$ws/packages/w2/package.json" \
+  && [ "$(lastlog '(r["outcome"], r["code"])')" = "('yarn_failed', 137)" ]; then
+  ok "the parent Yarn of a workspace command killed alone during the child's link step: the child stops, nothing left running or written after"
+else bad "parent Yarn killed during the child's link step (exit $rc, alive:${alive:- none}, written after: ${newer:-nothing})"; fi
+(cd "$ws" && y1env "$bin" yarn install --frozen-lockfile --non-interactive --cache-folder "$work/sig-ws-cache") > "$work/out" 2>&1; rc=$?
+[ $rc = 0 ] && ok "after the stopped workspace commands, an install succeeds (the store's lock is free)" || bad "install after the stopped workspace commands (exit $rc)"
+y1env "$bin" report > "$work/out" 2>&1
+if grep -Eq '^yarn: .* broke [0-9]+, interrupted [1-9]' "$work/out"; then ok "matchapack report: the interrupted Yarn runs counted"
+else bad "matchapack report: interrupted runs"; fi
+
 # TEST_YARN1_PART=engine: the engine's cases only (not corepack, the shell
 # route or convert-existing.sh).
 if [ "${TEST_YARN1_PART:-all}" != engine ]; then

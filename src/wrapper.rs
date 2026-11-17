@@ -567,6 +567,34 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
         let list = (placed.dirs.len() > LIST_IN_FILE).then(|| write_removal_list(&placed.dirs.iter().flat_map(|d| removal_targets(d)).collect::<Vec<_>>())).flatten();
         eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, root.as_deref(), &settings, &env, &placed, list.as_deref()));
     };
+    // Stopped by a signal while npm ran (src/signals.rs, #64): npm was told
+    // to stop, or got the signal itself, and has exited. Nothing runs npm
+    // again (no plain npm ci after a broken run, no plain npm after a
+    // decline): the user asked for the install to stop. Logged as
+    // interrupted; the status is npm's (main.rs ends by npm's signal when it
+    // died of one). npm finishing with 0 all the same is a normal run.
+    if let (Some(sig), Err(e)) = (crate::signals::received(), &outcome) {
+        let (code, inject, broke) = match e {
+            InstallError::Npm { code, inject } => (Some(*code), Some(inject.clone()), None),
+            InstallError::Trap { error, code, inject } => (Some(*code), Some(inject.clone()), Some(error)),
+            InstallError::Broke { error, inject } => (None, inject.clone(), Some(error)),
+            InstallError::Declined(_) => (None, None, None),
+        };
+        crate::signals::say(sig, "npm", code);
+        let mut rec = json!({ "engine": "inject", "signal": crate::signals::name(sig), "code": code,
+                              "reason": format!("stopped by {}", crate::signals::name(sig)), "inject": inject });
+        if let InstallError::Declined(why) = e {
+            rec["declined"] = json!(one_line(why));
+        }
+        // The run broke as well: its error is kept, and so is the repair
+        // advice (also for npm ci, which is not rebuilt here).
+        if let Some(error) = broke {
+            rec["error"] = json!(one_line(error));
+            stop(error, "node_modules may not be what npm alone would have written", inject.as_ref());
+        }
+        log("interrupted", with_root(rec, inject.as_ref()));
+        return code.filter(|c| *c != 0).unwrap_or(128 + sig);
+    }
     match outcome {
         Ok(s) => {
             let by_npm = s.inject.as_ref().and_then(|i| i["fallbacks"].as_object()).map(|m| m.values().filter_map(|v| v.as_u64()).sum::<u64>()).unwrap_or(0);

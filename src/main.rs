@@ -4,6 +4,7 @@ mod gc;
 mod inject;
 mod replay;
 mod serve;
+mod signals;
 mod store;
 mod trial;
 mod util;
@@ -322,8 +323,9 @@ fn main() -> Result<()> {
             util::remove_run_dir();
             match r {
                 Ok(_) => {}
-                // npm printed its own error; pass its status on.
-                Err(InstallError::Npm { code, .. }) => std::process::exit(code),
+                // npm printed its own error; pass its status on (by the same
+                // signal when a signal stopped the run: src/signals.rs).
+                Err(InstallError::Npm { code, .. }) => signals::finish(code),
                 Err(e) => return Err(e.into_inner()),
             }
         }
@@ -338,11 +340,11 @@ fn main() -> Result<()> {
         Cmd::Npm { args } => {
             let code = wrapper::run(args);
             util::remove_run_dir();
-            std::process::exit(code);
+            signals::finish(code);
         }
         Cmd::Yarn { args } => {
             let code = yarn1::cli(args);
-            std::process::exit(code);
+            signals::finish(code);
         }
         Cmd::Init { shell } => {
             let shell = match shell {

@@ -47,6 +47,8 @@
 //                              `none`: do not install it at all (tests: what
 //                              an npm that no longer calls the method looks
 //                              like to matchapack)
+//       MATCHAPACK_STOP_GRACE_MS  tests: the wait before this process stops
+//                              itself (`stopSelf`; default 200)
 // Exit status: npm's. 90 when the helper stops before npm's command runs:
 // before npm starts (unknown fingerprint, no pacote; also on an unexpected
 // error up to there), or when matchapack refuses the install root npm
@@ -64,6 +66,53 @@ const crypto = require('crypto')
 // The exit status of a stop before npm's command runs (inject.rs
 // HELPER_DECLINED).
 const DECLINED = 90
+
+// npm stops when matchapack goes away (grimmerk/matchapack-private#64; src/signals.rs).
+// When the socket to matchapack closes while npm runs (matchapack was
+// killed, crashed, or ended by a second signal), or matchapack says a
+// signal stopped it (`{"stop":"SIGINT"}`), this process signals itself
+// (`stopSelf`): npm's own handling runs, its reify rollback included, as for
+// plain npm given that signal. Never on top of a signal npm has already
+// received (a signal sent to the process group reaches npm and matchapack at
+// once): npm's reify handler removes itself on the first one, and a second
+// would kill npm in the middle of its rollback. Received signals are seen
+// through process.emit, by which Node hands every signal to its listeners
+// (the function is bound when a signal's first listener is added, and the
+// wrapper is in place before npm adds any): no listener is added, so npm's
+// listener counts, and signal-exit's test "only my listeners are left" (it
+// re-raises the signal only then), are unchanged.
+const STOP_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP']
+// The first of STOP_SIGNALS this process received.
+let signalled = null
+function watchSignals () {
+  const emit = process.emit
+  process.emit = function (type) {
+    if (signalled === null && STOP_SIGNALS.includes(type)) {
+      signalled = type
+    }
+    return emit.apply(this, arguments)
+  }
+}
+// The wait: a group signal sent as matchapack ends reaches npm at the same
+// moment, and Node emits it a loop turn later; the check runs after one
+// more poll phase (setImmediate), where a signal already delivered to a loop
+// that was busy is emitted.
+// `say`: a line for stderr when it does stop (none when matchapack said why).
+let stopAsked = false
+function stopSelf (sig, graceMs, say) {
+  if (stopAsked) {
+    return
+  }
+  stopAsked = true
+  setTimeout(() => setImmediate(() => {
+    if (signalled === null) {
+      if (say) {
+        process.stderr.write(say)
+      }
+      process.kill(process.pid, sig)
+    }
+  }), graceMs)
+}
 
 // The pacote that npm's arborist loads (one copy that extracts, in npm's
 // node_modules; npm 10.9.1–10.9.9 carry a second one for audit metadata),
@@ -557,10 +606,14 @@ function main () {
   const hookMode = process.env.MATCHAPACK_INJECT_HOOK
   const hookOff = hookMode === 'off'
   const allowed = process.env.MATCHAPACK_INJECT_FINGERPRINTS || ''
+  const graceMs = Number(process.env.MATCHAPACK_STOP_GRACE_MS) || 200
   // Not for the scripts npm runs.
   delete process.env.MATCHAPACK_INJECT_FD
   delete process.env.MATCHAPACK_INJECT_HOOK
   delete process.env.MATCHAPACK_INJECT_FINGERPRINTS
+  delete process.env.MATCHAPACK_STOP_GRACE_MS
+  // Before npm adds any signal listener.
+  watchSignals()
   if (!npmDir || !Number.isInteger(fd) || fd < 3) {
     fail('usage: MATCHAPACK_INJECT_FD=<fd> node inject.js <npm dir> <npm args...>')
   }
@@ -651,14 +704,25 @@ function main () {
       } catch {
         continue
       }
+      // matchapack was stopped by this signal (src/signals.rs): npm stops
+      // as if it had got it. matchapack goes on answering until npm exits.
+      if (msg && STOP_SIGNALS.includes(msg.stop)) {
+        stopSelf(msg.stop, graceMs)
+        continue
+      }
       settle(msg.id, p => p.resolve(msg))
     }
   })
+  // matchapack has gone (its end of the socket closes only when its process
+  // ends: inject.rs `run_serving`), and its workers with it: what is still
+  // asked is pacote's own to extract, and npm stops (`stopSelf`; SIGTERM:
+  // no signal was said).
   const gone = () => {
     down = down || 'server-gone'
     for (const id of [...pending.keys()]) {
       settle(id, p => p.reject(new Error('matchapack is gone')))
     }
+    stopSelf('SIGTERM', graceMs, 'matchapack inject helper: matchapack has gone; stopping npm (SIGTERM)\n')
   }
   sock.on('error', gone)
   sock.on('close', gone)

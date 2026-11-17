@@ -1556,7 +1556,10 @@ impl<'a> Server<'a> {
 /// at once on the reading thread, every other line by one of `threads`
 /// workers, which write the answer lines `handle` returns. Once `stopping` is
 /// set (the node child is gone), queued lines are dropped. Returns when the
-/// stream is at its end and every started line is handled.
+/// stream is at its end and every started line is handled. A signal that
+/// stops matchapack meanwhile is passed on as one more line, under the same
+/// lock as the answers (src/signals.rs `relay_stop`, which returns when
+/// the child has exited: `end_relay`).
 pub fn serve_lines(
     stream: UnixStream,
     threads: usize,
@@ -1585,6 +1588,11 @@ pub fn serve_lines(
                 }
             });
         }
+        s.spawn(|| {
+            crate::signals::relay_stop(|b| {
+                let _ = writer.lock().unwrap().write_all(b);
+            })
+        });
         for line in reader.lines() {
             match line {
                 Ok(l) => {

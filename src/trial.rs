@@ -332,12 +332,14 @@ fn when(ts: f64) -> String {
 fn report_yarn1(runs: &[Value]) {
     let count = |o: &str| runs.iter().filter(|r| r["outcome"] == o).count();
     println!(
-        "yarn: {} runs of `matchapack yarn`: installed {}, plain yarn {}, yarn failed {}, broke {}",
+        "yarn: {} runs of `matchapack yarn`: installed {}, plain yarn {}, yarn failed {}, broke {}{}",
         runs.len(),
         count("installed"),
         count("declined"),
         count("yarn_failed"),
-        count("broke")
+        count("broke"),
+        // Stopped by SIGTERM, SIGHUP or SIGINT (src/signals.rs, #64).
+        if count("interrupted") > 0 { format!(", interrupted {}", count("interrupted")) } else { String::new() }
     );
     // Which commands (src/yarn1.rs `engine_command`; a record from before
     // the field existed is an install).
@@ -450,7 +452,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     // (`repair: stopped`); `npm ci` is rebuilt by plain npm ci.
     let stopped = runs.iter().filter(|r| r["outcome"] == "broke" && r["repair"] == "stopped").count();
     println!(
-        "runs {}: installed {}, plain npm {}, failed then npm {}{}{}{}",
+        "runs {}: installed {}, plain npm {}, failed then npm {}{}{}{}{}",
         runs.len(),
         count("installed"),
         count("declined"),
@@ -460,7 +462,9 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() },
         // A root or dependency script failed in the classic engine's own
         // post-install step: older logs only (removed in PR C2).
-        if count("script_failed") > 0 { format!(", script failed (classic engine) {}", count("script_failed")) } else { String::new() }
+        if count("script_failed") > 0 { format!(", script failed (classic engine) {}", count("script_failed")) } else { String::new() },
+        // Stopped by SIGTERM, SIGHUP or SIGINT while npm ran (src/signals.rs, #64).
+        if count("interrupted") > 0 { format!(", interrupted {}", count("interrupted")) } else { String::new() }
     );
     // Which engine each run went to: the inject engine logs `"engine":
     // "inject"`; runs without an engine are the classic engine's (the
