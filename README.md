@@ -864,7 +864,10 @@ NOTES "G-lite").
   adopt still keeps what of theirs is left in the store. A copy made with
   its `node_modules` (`cp -c -R`, a tool that copies a repository to make a
   worktree) has no record of its own either, and is not on this list while
-  the original exists: adopt records it.
+  the original exists: adopt records it. A record whose path cannot be
+  checked (a parent directory matchapack cannot search, or, on macOS, a
+  volume under `/Volumes` that is not mounted) is kept with its packages
+  and listed separately as "could not be checked".
 - `matchapack store adopt [--dry-run] [--verbose] <dir>...`: record the npm
   projects under each `<dir>` so that gc keeps their packages. For projects
   installed before installs wrote records (builds before PR grimmerk/matchapack-private#29): it finds

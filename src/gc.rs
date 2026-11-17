@@ -33,6 +33,9 @@ pub struct Report {
     /// Of the entries removed (or, dry run, to remove), those a dropped
     /// record listed: what only those projects used.
     pub dropped_entries_removed: usize,
+    /// Records kept because whether their node_modules still exists could
+    /// not be told (`node_modules_state`), with why; sorted.
+    pub records_unchecked: Vec<(PathBuf, String)>,
     pub entries: usize,
     pub removed: usize,
     pub bytes_removed: u64,
@@ -42,6 +45,32 @@ pub struct Report {
 
 fn has_node_modules(dir: &Path) -> bool {
     dir.join("node_modules").is_dir()
+}
+
+/// Whether a recorded project still has its node_modules: Ok(true) when it
+/// is a directory, Ok(false) when it or the project is absent (or not a
+/// directory), Err(why) when that cannot be told: any other error (a parent
+/// directory this process cannot search), or, on macOS, a path on a volume
+/// under /Volumes that is not mounted (absent there means nothing about the
+/// project). gc keeps such a record: dropping it would remove entries a
+/// project may still share.
+fn node_modules_state(dir: &Path) -> std::result::Result<bool, String> {
+    match std::fs::metadata(dir.join("node_modules")) {
+        Ok(m) => Ok(m.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {
+            let mut parts = dir.components().skip(1);
+            if cfg!(target_os = "macos") && parts.next().is_some_and(|c| c.as_os_str() == "Volumes") {
+                if let Some(vol) = parts.next() {
+                    let vol = Path::new("/Volumes").join(vol.as_os_str());
+                    if !vol.exists() {
+                        return Err(format!("{} is not mounted", vol.display()));
+                    }
+                }
+            }
+            Ok(false)
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// The entries a hidden lockfile lists.
@@ -268,7 +297,12 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
             let Some(rec) = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { continue };
             let Some(dir) = rec.get("path").and_then(|x| x.as_str()).map(PathBuf::from) else { continue };
             let listed = rec.get("entries").and_then(|e| e.as_array()).into_iter().flatten().filter_map(|k| k.as_str().and_then(Integrity::from_key));
-            if has_node_modules(&dir) {
+            let state = node_modules_state(&dir);
+            if let Err(why) = state {
+                live.extend(listed);
+                recorded.insert(dir.clone());
+                r.records_unchecked.push((dir, why));
+            } else if state == Ok(true) {
                 r.projects.0 += 1;
                 live.extend(listed);
                 recorded.insert(dir);
@@ -310,6 +344,7 @@ pub fn gc(store: &Store, log: &Path, dry_run: bool) -> Result<Report> {
     // written its record yet on a store where flock does not reach.
     let (recent, old): (Vec<&Integrity>, Vec<&Integrity>) = unused.into_iter().partition(|i| young(&store.dir_for(i)));
     r.records_dropped.sort();
+    r.records_unchecked.sort();
     r.recent = recent.len();
     r.bytes_removed = old.iter().map(|i| store.entry_size(i)).sum();
     r.removed = old.len();
@@ -355,6 +390,22 @@ pub fn dropped_note(r: &Report, dry_run: bool) -> Vec<String> {
     } else {
         format!("if these projects were moved or renamed (or copied and the original deleted), run `matchapack store adopt <where they are now>` before the next gc: this one removed {n} entr{s} only they used (their next install extracts those again); adopt keeps what of theirs is still in the store")
     });
+    out
+}
+
+/// What `store gc` says about the records it kept because it could not
+/// check them (Report::records_unchecked): how many, and the first few with
+/// why. Nothing when there are none.
+pub fn unchecked_note(r: &Report) -> Vec<String> {
+    let u = &r.records_unchecked;
+    if u.is_empty() {
+        return vec![];
+    }
+    let mut out = vec![format!("records that could not be checked (kept, with their entries): {}", u.len())];
+    out.extend(u.iter().take(DROPPED_SHOWN).map(|(p, why)| format!("  {p:?}: {why}")));
+    if u.len() > DROPPED_SHOWN {
+        out.push(format!("  ... and {} more", u.len() - DROPPED_SHOWN));
+    }
     out
 }
 
@@ -441,6 +492,49 @@ mod tests {
         assert!(one[2].contains("before the next gc: this one removed 1 entry only they used") && one[2].contains("adopt keeps what of theirs is still in the store"), "{}", one[2]);
         let none = dropped_note(&rep(&paths[..1], 0), false);
         assert!(none[2].contains("before the next gc: this one removed none of their entries"), "the real run says what it removed: {}", none[2]);
+    }
+
+    /// A record whose node_modules cannot be looked at (a parent directory
+    /// this process cannot search) is kept with its entries and listed as
+    /// could not be checked, not dropped as a project that is gone; so is
+    /// one on an unmounted volume (macOS).
+    #[test]
+    fn gc_keeps_records_it_cannot_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::fs::canonicalize(scratch("gc-unchecked")).unwrap();
+        let cacache = d.join("cacache");
+        let a = cached_tarball(&cacache, &[("index.js", 0o644, "a")]);
+        let store = Store::new(d.join("store"), cacache.clone()).unwrap();
+        store.ensure(&a, "http://x").unwrap();
+        age(&store.dir_for(&a), 2 * GRACE_SECS as i64);
+        let p = d.join("locked/p");
+        std::fs::create_dir_all(p.join("node_modules")).unwrap();
+        store.record_project(&p, &[a.clone()]).unwrap();
+        std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::metadata(p.join("node_modules")).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+        drop(store);
+        let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
+        if denied {
+            let r = gc(&store, &d.join("no-log"), false).unwrap();
+            assert!(r.records_dropped.is_empty(), "{:?}", r.records_dropped);
+            assert_eq!(r.records_unchecked.len(), 1);
+            assert_eq!(r.records_unchecked[0].0, p);
+            assert_eq!((r.removed, store.dir_for(&a).exists()), (0, true), "its entry is kept");
+            assert_eq!(std::fs::read_dir(d.join("store/projects")).unwrap().count(), 1, "and its record");
+            let note = unchecked_note(&r);
+            assert!(note[0] == "records that could not be checked (kept, with their entries): 1" && note[1].starts_with(&format!("  {p:?}: ")), "{note:?}");
+        } else {
+            eprintln!("skipped: a mode-000 directory is searchable here (root?)");
+        }
+        std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(node_modules_state(&p), Ok(true));
+        assert_eq!(node_modules_state(&d.join("gone")), Ok(false));
+        assert!(unchecked_note(&Report::default()).is_empty());
+        if cfg!(target_os = "macos") {
+            let e = node_modules_state(Path::new("/Volumes/matchapack-test-no-such-volume/p")).unwrap_err();
+            assert_eq!(e, "/Volumes/matchapack-test-no-such-volume is not mounted");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A hidden lockfile listing `ints`, at `<dir>/node_modules/.package-lock.json`.

@@ -414,7 +414,7 @@ fn main() -> Result<()> {
                     let free1 = store::free_bytes(&st.root);
                     let gib = |b: u64| format!("{:.2} GiB", b as f64 / 1024f64.powi(3));
                     println!("projects in use: {} ({} recorded, {} from the trial log)", r.projects.0 + r.projects.1, r.projects.0, r.projects.1);
-                    for l in gc::dropped_note(&r, dry_run) {
+                    for l in gc::dropped_note(&r, dry_run).into_iter().chain(gc::unchecked_note(&r)) {
                         println!("{l}");
                     }
                     println!(
