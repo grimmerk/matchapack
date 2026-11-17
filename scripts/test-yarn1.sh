@@ -40,19 +40,11 @@ ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -8; }
 yarnrc_before=$(ls -l ~/.yarnrc 2>/dev/null || echo absent)
 
-server=
-if ! curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz; then
-  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
-  server=$!
-  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz && break; sleep 0.1; done
-fi
-# A server another checkout left running answers the tarballs, and may not
-# have the registry documents (make-tarballs.py) the Yarn command cases name
-# packages by.
-if curl -sf -o /dev/null http://127.0.0.1:48321/y1-b-1.0.0.tgz && ! curl -sf -o /dev/null http://127.0.0.1:48321/y1-c; then
-  echo "the server on 127.0.0.1:48321 has no registry documents: it serves another checkout's fixtures/optional-upward/tarballs; stop it" >&2; exit 2
-fi
-trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
+# The fixtures install from this run's own tarball server, on a free port;
+# $FX is the copy of fixtures/ whose URLs name it (fixture-server.sh).
+# verify-yarn1.sh, run below, uses the same server.
+. "$here/scripts/fixture-server.sh"; fixtures_serve "$work"
+trap '[ -n "$FX_PID" ] && kill "$FX_PID" 2>/dev/null' EXIT
 
 # verify <case> [verify-yarn1 options...] <fixture or dir>: output in $work/out, exit in $rc.
 verify() { local c=$1; shift; "$v" --work "$work/$c" "$@" > "$work/out" 2>&1; rc=$?; }
@@ -153,7 +145,7 @@ spenv() {
     MATCHAPACK_LOG_DIR="$sp/log" MATCHAPACK_CONFIG_DIR="$sp/mp/config" "$@"
 }
 # sp_project <name> <fixture>: a copy of the fixture's files in $sp/<name>.
-sp_project() { local d=$sp/$1; rm -rf "${d:?}"; cp -p -R "$here/fixtures/$2" "$d"; echo "$d"; }
+sp_project() { local d=$sp/$1; rm -rf "${d:?}"; cp -p -R "$FX/$2" "$d"; echo "$d"; }
 # sp_install <dir> [yarn args]: the logged run, `matchapack yarn` in <dir>.
 sp_install() { local d=$1; shift; (cd "$d" && spenv "$bin" yarn "$@" --cache-folder "$sp/cache") > "$work/out" 2>&1; rc=$?; }
 # sp_sample [env...] -- [verify-sample.sh args]: output in $work/out, exit in $rc.
@@ -225,7 +217,7 @@ if [ -z "$(ls -d "$sp/tmp"/matchapack-verify-yarn.* 2>/dev/null)" ]; then ok "sa
 # refuses only for the root's package.json, measured: a workspace's ahead of
 # yarn.lock passes --frozen-lockfile in Yarn 1.22.22).
 pw=$(sp_project ws yarn1-workspaces)
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["dependencies"]["y1-many"]="http://127.0.0.1:48321/y1-many-2.0.0.tgz"; json.dump(d, open(p,"w"), indent=2)' "$pw/package.json"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["dependencies"]["y1-many"]="'"$FX_URL"'/y1-many-2.0.0.tgz"; json.dump(d, open(p,"w"), indent=2)' "$pw/package.json"
 sp_install "$pw/packages/w2" --pure-lockfile
 sp_sample -- 1
 if [ $rc = 0 ] && [ "$(vrec 'r["result"]')" = IDENTICAL ] && [ "$(vrec 'r["subdir"]')" = packages/w2 ] && [ "$(vrec 'r["args"]')" = "['--pure-lockfile']" ] \
@@ -419,10 +411,10 @@ skip() { # skip <label> <expected reason text> [verify-sample.sh args]
 pg=$(sp_project gitadd yarn1-small); pg=$(cd "$pg" && pwd -P)
 git -C "$pg" init -q && git -C "$pg" add package.json yarn.lock \
   && git -C "$pg" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m fixture
-sp_install "$pg" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
+sp_install "$pg" add "$FX_URL/y1-many-1.0.0.tgz"
 lr=$(lrec '(r["command"], r["node_modules_before"], r["replay"], r["files_before"]["package.json"] != r["files_after"]["package.json"])')
 sp_sample -- "$pg"
-if [ "$lr" = "('add', 'absent', {'kind': 'command', 'args': ['add', 'http://127.0.0.1:48321/y1-many-1.0.0.tgz']}, True)" ] \
+if [ "$lr" = "('add', 'absent', {'kind': 'command', 'args': ['add', '$FX_URL/y1-many-1.0.0.tgz']}, True)" ] \
   && [ "$(vrec '(r["result"], r["kind"], r["command"], r["replayed_from"])')" = "('IDENTICAL', 'started-empty', 'add', 'git HEAD')" ] && [ "$(vrec 'r["cloned"] > 0')" = True ]; then
   ok "sample: a yarn add that started with no node_modules, replayed from the files before it (git HEAD): IDENTICAL, $(vrec 'r["cloned"]') cloned"
 else bad "sample: started-empty yarn add (logged $lr; $(vrec 'r.get("result"), r.get("reason"), r.get("detail")'))"; fi
@@ -433,7 +425,7 @@ else bad "sample: damaged started-empty yarn add ($(vrec 'r.get("result"), r.get
 # Without git the files before the run are gone: skipped; and a file changed
 # after the run is named as such.
 pn=$(sp_project nogitadd yarn1-small); pn=$(cd "$pn" && pwd -P)
-sp_install "$pn" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
+sp_install "$pn" add "$FX_URL/y1-many-1.0.0.tgz"
 skip "the run changed the files, no git" "the run changed package.json, yarn.lock, and the files before it are not in the project's git HEAD" "$pn"
 printf '\n' >> "$pn/package.json"
 skip "the project changed since, no git" "package.json changed since the run, and the files before it are not" "$pn"
@@ -443,7 +435,7 @@ pd=$(sp_project gitold yarn1-small); pd=$(cd "$pd" && pwd -P)
 git -C "$pd" init -q && git -C "$pd" add package.json yarn.lock \
   && git -C "$pd" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m fixture
 python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["description"]="edited"; json.dump(d, open(p,"w"), indent=2)' "$pd/package.json"
-sp_install "$pd" add http://127.0.0.1:48321/y1-many-1.0.0.tgz
+sp_install "$pd" add "$FX_URL/y1-many-1.0.0.tgz"
 skip "git HEAD older than the run" "the run changed package.json, yarn.lock, and the files before it are not in the project's git HEAD" "$pd"
 
 # 4. Skips, each recorded with its reason.
@@ -462,7 +454,7 @@ $2"
 # A file: directory dependency: the copies hold manifests only, so the
 # directory is not in them (measured before this was refused: IDENTICAL
 # with nothing cloned).
-pf=$(sp_project filedir yarn1-file/dir); pf=$(cd "$pf" && pwd -P); python3 -I "$here/fixtures/yarn1-file/make.py" dir "$pf"
+pf=$(sp_project filedir yarn1-file/dir); pf=$(cd "$pf" && pwd -P); python3 -I "$FX/yarn1-file/make.py" dir "$pf"
 sp_install "$pf" --frozen-lockfile
 skip "a file: dependency" "a local dependency (package.json: local-dir file:./local-dir); the copies hold manifests only" "$pf"
 # A local directory without `file:` (measured before: IDENTICAL, 1 file of
@@ -498,10 +490,10 @@ fake_at "$pk" "r['yarn1']['node'] = 'v1.0.0'"
 skip "another node now" "the run used v1.0.0" "$pk"
 fake_at "$pk" "r['yarn1']['cache'] = 'unusable: on another volume'"
 skip "an unusable cache" "not usable in the run (on another volume)" "$pk"
-mkdir -p "$sp/above"; pa=$sp/above/p; cp -p -R "$here/fixtures/yarn1-many" "$pa"; pa=$(cd "$pa" && pwd -P); echo 'registry=http://127.0.0.1:1/' > "$sp/above/.npmrc"
+mkdir -p "$sp/above"; pa=$sp/above/p; cp -p -R "$FX/yarn1-many" "$pa"; pa=$(cd "$pa" && pwd -P); echo 'registry=http://127.0.0.1:1/' > "$sp/above/.npmrc"
 fake_at "$pa" ""
 skip "an .npmrc above the project" "$sp/above/.npmrc, above the project" "$pa"
-skip "a directory with no logged install" "no replayable \`matchapack yarn\` run of this directory" "$here/fixtures/yarn1-small"
+skip "a directory with no logged install" "no replayable \`matchapack yarn\` run of this directory" "$FX/yarn1-small"
 fake_at "$pk" "r['command'] = 'upgrade-interactive'; r['replay'] = {'kind': 'command', 'args': ['upgrade-interactive']}"
 skip "upgrade-interactive" "the choices made in its prompt are not logged" "$pk"
 
@@ -564,19 +556,19 @@ fi
 
 if [ "${TEST_YARN1_PART:-all}" = all ]; then
 # --- Plain against plain -----------------------------------------------------
-verify small "$here/fixtures/yarn1-small"
+verify small "$FX/yarn1-small"
 n=$(classified 'written during both runs')
 if [ $rc = 0 ] && grep -q 'plain vs plain: IDENTICAL' "$work/out" && grep -q 'yarn integrity byte-identical (node_modules/.yarn-integrity): true' "$work/out" && [ "${n:-0}" -gt 0 ]; then
   ok "yarn1-small, warm cache: plain vs plain identical; $n in-run paths classified, not reported"
 else bad "yarn1-small, warm cache (exit $rc)"; fi
 
-verify small-empty --cache empty "$here/fixtures/yarn1-small"
+verify small-empty --cache empty "$FX/yarn1-small"
 n=$(classified "from each run's own cache fill")
 if [ $rc = 0 ] && [ "${n:-0}" -gt 0 ]; then
   ok "yarn1-small, empty caches: identical; $n package files kept their own run's cache-fill time"
 else bad "yarn1-small, empty caches (exit $rc)"; fi
 
-verify script "$here/fixtures/yarn1-scriptpkg"
+verify script "$FX/yarn1-scriptpkg"
 if [ $rc = 0 ] && [ -f "$work/script/plain1/node_modules/y1-script/built.txt" ] \
   && grep -q 'written during both runs: node_modules/y1-script/built.txt' "$work/script/diff-plain.txt"; then
   ok "yarn1-scriptpkg: the install script's output is classified 'written during both runs'"
@@ -587,7 +579,7 @@ else bad "yarn1-scriptpkg (exit $rc)"; fi
 # varying run passes only when it varies the way the race does (probe_only);
 # its evidence is kept as emptyfirst-varies-<case>.txt.
 for c in empty empty-empty; do
-  if [ $c = empty ]; then verify $c "$here/fixtures/yarn1-emptyfirst"; else verify $c --cache empty "$here/fixtures/yarn1-emptyfirst"; fi
+  if [ $c = empty ]; then verify $c "$FX/yarn1-emptyfirst"; else verify $c --cache empty "$FX/yarn1-emptyfirst"; fi
   if [ $rc = 0 ]; then ok "yarn1-emptyfirst ($c), node $node_major: plain vs plain identical"
   elif [ $rc = 3 ] && [ "$node_major" -ge 22 ]; then
     cp "$work/$c/diff-plain.txt" "$work/emptyfirst-varies-$c.txt"
@@ -628,7 +620,7 @@ fi
 
 # An extra xattr on a cache file: Node's copy drops it, so plain is identical
 # (a clone would keep it; the engine removes it: its xattr case below).
-verify xattr --cache-xattr "$here/fixtures/yarn1-small"
+verify xattr --cache-xattr "$FX/yarn1-small"
 tagged=$(grep -o 'cache xattr: user.matchapack.verify on .*' "$work/out" | sed 's/.*, first //')
 pkg=${tagged#*/node_modules/}   # <name>/package.json inside the cache entry
 if [ $rc = 0 ] && [ -n "$tagged" ] && has_xattr "$work/xattr/cache/$tagged" user.matchapack.verify \
@@ -698,7 +690,7 @@ if [ -n "$other" ]; then
   g=$work/small-regrouped; rm -rf "${g:?}" "${g:?}-cache"
   cpp "$work/small/cache" "$g-cache"
   chgrp -R "$other" "$g-cache"
-  cpp "$here/fixtures/yarn1-small" "$g"
+  cpp "$FX/yarn1-small" "$g"
   s=$(python3 -c 'import time; print(time.time_ns())')
   (cd "$g" && env -u GITHUB_TOKEN YARN_DISABLE_SELF_UPDATE_CHECK=true "$node" "$yarnjs" install --frozen-lockfile --non-interactive --cache-folder "$g-cache") > "$g.log" 2>&1
   e=$(python3 -c 'import time; print(time.time_ns())')
@@ -722,16 +714,16 @@ fi
 if [ $r1 = 2 ] && [ $r2 = 2 ]; then ok "matchapack diff errors exit 2 (missing tree, bad run window)"; else bad "diff errors: exit $r1 and $r2, want 2"; fi
 # A build output that differs on every run: "plain varies", with the path.
 p=$work/varies-src; rm -rf "${p:?}"; mkdir -p "$p"
-cp "$here/fixtures/yarn1-scriptpkg/yarn.lock" "$p/"
+cp "$FX/yarn1-scriptpkg/yarn.lock" "$p/"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["scripts"]={"postinstall":"node -e \"require(\x27fs\x27).writeFileSync(\x27node_modules/random.txt\x27, String(Math.random()))\""}; json.dump(d, open(sys.argv[2],"w"), indent=2)' \
-  "$here/fixtures/yarn1-scriptpkg/package.json" "$p/package.json"
+  "$FX/yarn1-scriptpkg/package.json" "$p/package.json"
 verify varies "$p"
 if [ $rc = 3 ] && grep -q 'PLAIN VARIES' "$work/out" && grep -q 'node_modules/random.txt' "$work/out"; then ok "a build output that differs between plain runs: exit 3, PLAIN VARIES, the path shown"
 else bad "plain varies (exit $rc)"; fi
 
 fi # TEST_YARN1_PART
 
-verify engine-bogus --engine bogus "$here/fixtures/yarn1-small"
+verify engine-bogus --engine bogus "$FX/yarn1-small"
 if [ $rc = 2 ]; then ok "--engine with an unknown name is refused"; else bad "--engine bogus (exit $rc)"; fi
 
 # --- The Yarn 1 engine (`matchapack yarn`, NOTES "Yarn 1 engine") --------------
@@ -751,7 +743,7 @@ first128() { [ "$(ejson "$1" "y['first']")" = 128 ] && [ "$(copied "$1" first-co
 
 if [ "${TEST_YARN1_PART:-all}" != route ]; then
 if [ "${TEST_YARN1_PART:-all}" != commands ]; then
-everify e-many "$here/fixtures/yarn1-many"
+everify e-many "$FX/yarn1-many"
 n=$(ejson e-many "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && first128 e-many \
   && grep -q "engine: shared $n of" "$work/out"; then
@@ -773,7 +765,7 @@ else bad "npm_execpath under the engine ($(head -1 "$x" 2>/dev/null))"; fi
 # What remains is content: Yarn lists the script's outputs (with the tree's
 # path) in .yarn-integrity, which then differs between the plain runs too:
 # "differs only where plain varies" (exit 3), never ENGINE DIFFERS.
-everify e-rootpath "$here/fixtures/yarn1-rootpath"
+everify e-rootpath "$FX/yarn1-rootpath"
 raw=$("$bin" diff "$work/e-rootpath/plain1" "$work/e-rootpath/plain2" --paths 2>/dev/null | grep -c '^node_modules/y1-rootpath/built/')
 m=$work/e-rootpath/engine/node_modules/y1-rootpath/built$work/e-rootpath/engine/node_modules/y1-rootpath/marker
 want=$(printf 'content\tnode_modules/.yarn-integrity')
@@ -790,9 +782,9 @@ else bad "file named after its tree's path (exit $rc, raw plain differences ${ra
 # and `matchapack yarn` on separate copies (cp -p of one source, so files
 # outside node_modules keep the same times), one scratch cache.
 sy=$work/sync; rm -rf "${sy:?}"; mkdir -p "$sy/src/node_modules/keepme"
-cp -p "$here/fixtures/yarn1-small/yarn.lock" "$sy/src/"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["dependencies"]["y1-many"]="http://127.0.0.1:48321/y1-many-1.0.0.tgz"; json.dump(d, open(sys.argv[2],"w"), indent=2)' \
-  "$here/fixtures/yarn1-small/package.json" "$sy/src/package.json"
+cp -p "$FX/yarn1-small/yarn.lock" "$sy/src/"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["dependencies"]["y1-many"]="'"$FX_URL"'/y1-many-1.0.0.tgz"; json.dump(d, open(sys.argv[2],"w"), indent=2)' \
+  "$FX/yarn1-small/package.json" "$sy/src/package.json"
 # sync_run <name> plain|engine [yarn args]: a fresh copy $sy/<name>, one
 # install; exit status in $rc, START:END in $win, output in $sy/<name>.log.
 sync_run() {
@@ -852,7 +844,7 @@ else bad "out-of-sync --pure-lockfile (plain $rp, engine $re, diff $rd, cloned $
 # A slow answer (the server sleeps between a clone and its fix-up, longer
 # than the hook waits): later copies go to Node, but the slow request is
 # answered, never copied over while its clone is being fixed up.
-MATCHAPACK_YARN_SLOW_FIXUP_EVERY=40 MATCHAPACK_YARN_SLOW_FIXUP_MS=3000 MATCHAPACK_YARN_TIMEOUT_MS=500 everify e-slow "$here/fixtures/yarn1-many"
+MATCHAPACK_YARN_SLOW_FIXUP_EVERY=40 MATCHAPACK_YARN_SLOW_FIXUP_MS=3000 MATCHAPACK_YARN_TIMEOUT_MS=500 everify e-slow "$FX/yarn1-many"
 # (Yarn's other copies are already in flight when the first slow answer is
 # due, so usually none is left for Node: the slow ones themselves must end as
 # clones, and the tree as plain's. Copying over them instead leaves the
@@ -876,14 +868,14 @@ chmod 644 "$work/cp-locked.txt"
 if [ $r1 = 2 ] && [ $r2 = 2 ]; then ok "attribution: a missing or unreadable classes file fails (exit 2)"
 else bad "attribution on an unreadable file (exit $r1, $r2)"; fi
 # --engine-min-clones 0 means none.
-verify e-min0 --engine yarn1 --engine-min-clones 0 "$here/fixtures/yarn1-many"
+verify e-min0 --engine yarn1 --engine-min-clones 0 "$FX/yarn1-many"
 if [ $rc = 1 ] && grep -q 'expected none' "$work/out"; then ok "--engine-min-clones 0 fails a run that cloned"; else bad "--engine-min-clones 0 (exit $rc)"; fi
 # A relative --cache-dir is the caller's, not one per tree.
-(cd "$work" && "$v" --work "$work/e-rel" --cache-dir rel-cache --engine yarn1 "$here/fixtures/yarn1-many" > "$work/out" 2>&1); rc=$?
+(cd "$work" && "$v" --work "$work/e-rel" --cache-dir rel-cache --engine yarn1 "$FX/yarn1-many" > "$work/out" 2>&1); rc=$?
 if [ $rc = 0 ] && [ -d "$work/rel-cache/v6" ] && [ ! -e "$work/e-rel/plain1/rel-cache" ]; then ok "a relative --cache-dir is resolved once"; else bad "relative --cache-dir (exit $rc)"; fi
 # A --cache-dir inside the work directory is refused, never cleaned up.
 mkdir -p "$work/e-in/cache"; touch "$work/e-in/cache/keep"
-verify e-in --cache-dir "$work/e-in/cache" "$here/fixtures/yarn1-many"
+verify e-in --cache-dir "$work/e-in/cache" "$FX/yarn1-many"
 if [ $rc = 2 ] && [ -f "$work/e-in/cache/keep" ]; then ok "a --cache-dir inside --work is refused and left alone"; else bad "--cache-dir inside --work (exit $rc)"; fi
 
 # yarn1-emptyfirst at the default thread pool: plain Yarn's own race (NOTES
@@ -920,7 +912,7 @@ emptyfirst_engine_verdict() {
   verdict="the engine differs beyond the probe race ($why)"; return 1
 }
 for c in empty empty-empty; do
-  if [ $c = empty ]; then everify e-$c "$here/fixtures/yarn1-emptyfirst"; else everify e-$c --cache empty "$here/fixtures/yarn1-emptyfirst"; fi
+  if [ $c = empty ]; then everify e-$c "$FX/yarn1-emptyfirst"; else everify e-$c --cache empty "$FX/yarn1-emptyfirst"; fi
   n=$(ejson e-$c "y['cloned']")
   if emptyfirst_engine_verdict e-$c $rc && [ "${n:-0}" -gt 0 ] && first128 e-$c; then
     ok "yarn1-emptyfirst ($c), node $node_major: engine as plain ($verdict); $n files cloned, Yarn's first 128 copies left to Node"
@@ -973,7 +965,7 @@ fi
 # non-empty clone's), which the default-pool cases above cannot tell from
 # the race.
 for c in empty-uv1 empty-empty-uv1; do
-  if [ $c = empty-uv1 ]; then UV_THREADPOOL_SIZE=1 everify e-$c "$here/fixtures/yarn1-emptyfirst"; else UV_THREADPOOL_SIZE=1 everify e-$c --cache empty "$here/fixtures/yarn1-emptyfirst"; fi
+  if [ $c = empty-uv1 ]; then UV_THREADPOOL_SIZE=1 everify e-$c "$FX/yarn1-emptyfirst"; else UV_THREADPOOL_SIZE=1 everify e-$c --cache empty "$FX/yarn1-emptyfirst"; fi
   n=$(ejson e-$c "y['cloned']")
   if [ $rc = 0 ] && grep -q 'plain vs plain: IDENTICAL' "$work/out" && same && [ "${n:-0}" -gt 0 ] && first128 e-$c; then
     ok "yarn1-emptyfirst ($c), one pool thread, node $node_major: plain vs plain and plain vs engine identical, no tolerance; $n files cloned"
@@ -985,18 +977,18 @@ done
 # does the engine.
 other=$(groups_other "$work")
 if [ -n "$other" ]; then
-  everify e-group --cache-group "$other" "$here/fixtures/yarn1-many"
+  everify e-group --cache-group "$other" "$FX/yarn1-many"
   g=$(ejson e-group "y['facts']['group']")
   want=True; [ "$node_major" -ge 22 ] || want=False
   if [ $rc = 0 ] && same && [ "$g" = "$want" ]; then ok "regrouped cache, node $node_major: Node's copy takes the cache's group: $g; engine identical"
   else bad "regrouped cache engine (exit $rc, facts.group $g)"; fi
 else echo "SKIP regrouped cache: the user is in one group only"; fi
 
-everify e-xattr --cache-xattr "$here/fixtures/yarn1-many"
+everify e-xattr --cache-xattr "$FX/yarn1-many"
 if [ $rc = 0 ] && same && [ "$(ejson e-xattr "y['cloned']")" -gt 0 ]; then ok "every cache file with an extra xattr: the clones drop it as Node's copy does"
 else bad "xattr engine (exit $rc)"; fi
 
-MATCHAPACK_YARN_FAIL_EVERY=7 everify e-refuse "$here/fixtures/yarn1-many"
+MATCHAPACK_YARN_FAIL_EVERY=7 everify e-refuse "$FX/yarn1-many"
 n=$(copied e-refuse test-refused)
 if [ $rc = 0 ] && same && [ "${n:-0}" -gt 0 ]; then ok "every 7th clone refused: $n files copied by Node instead, tree identical"
 else bad "every 7th clone refused (exit $rc, refused ${n:-?})"; fi
@@ -1004,34 +996,34 @@ else bad "every 7th clone refused (exit $rc, refused ${n:-?})"; fi
 # The clone is made, then its fix-up fails (before the xattrs are removed):
 # the clone must be removed, so Node's copy, which opens and truncates what
 # is there, starts from no file (with the clone left, its xattr would stay).
-MATCHAPACK_YARN_FAIL_FIXUP_EVERY=5 everify e-fixup --cache-xattr "$here/fixtures/yarn1-many"
+MATCHAPACK_YARN_FAIL_FIXUP_EVERY=5 everify e-fixup --cache-xattr "$FX/yarn1-many"
 n=$(copied e-fixup fixup-failed)
 if [ $rc = 0 ] && same && [ "${n:-0}" -gt 0 ] && grep -q "engine: shared $(ejson e-fixup "y['cloned']") of" "$work/out"; then
   ok "clone made, fix-up failed ($n files): ends as Node's copy, tree identical, only the clones share blocks"
 else bad "fix-up failure (exit $rc, failed ${n:-?})"; fi
 
-everify e-prod "$here/fixtures/yarn1-many" --production
+everify e-prod "$FX/yarn1-many" --production
 if [ $rc = 0 ] && same && [ ! -e "$work/e-prod/engine/node_modules/y1-script" ] && [ "$(ejson e-prod "y['cloned']")" -gt 0 ]; then ok "--production: engine identical"
 else bad "--production engine (exit $rc)"; fi
 
-everify e-ws "$here/fixtures/yarn1-workspaces"
+everify e-ws "$FX/yarn1-workspaces"
 if [ $rc = 0 ] && same && [ -L "$work/e-ws/engine/node_modules/w1" ] && [ -d "$work/e-ws/engine/packages/w1/node_modules/y1-b" ] && [ "$(ejson e-ws "y['cloned']")" -gt 0 ]; then
   ok "workspaces (links, a nested node_modules in a workspace): engine identical"
 else bad "workspaces engine (exit $rc)"; fi
 
-everify e-incr --then "$here/fixtures/yarn1-many/v2" "$here/fixtures/yarn1-many"
+everify e-incr --then "$FX/yarn1-many/v2" "$FX/yarn1-many"
 if [ $rc = 0 ] && same && [ "$(ejson e-incr "y['cloned']")" -gt 0 ] && [ -f "$work/e-incr/engine/node_modules/y1-many/lib/new.js" ] && [ ! -e "$work/e-incr/engine/node_modules/y1-many/lib/d14" ]; then
   ok "incremental v1 -> v2 over the tree: engine identical; $(ejson e-incr "y['cloned']") files cloned in the second install"
 else bad "incremental engine (exit $rc)"; fi
 
 # (verify sets rc inside the subshell: pass it out)
-(umask 002; everify e-umask "$here/fixtures/yarn1-many"; exit $rc); rc=$?
+(umask 002; everify e-umask "$FX/yarn1-many"; exit $rc); rc=$?
 if [ $rc = 0 ] && same; then ok "umask 002: engine identical"; else bad "umask 002 engine (exit $rc)"; fi
 
 # The cache filled by another Node major (MATCHAPACK_YARN_PRIME_NODE): Yarn's
 # times pass through two Node versions' conversions.
 if [ -n "${MATCHAPACK_YARN_PRIME_NODE:-}" ]; then
-  everify e-cross --prime-node "$MATCHAPACK_YARN_PRIME_NODE" "$here/fixtures/yarn1-many"
+  everify e-cross --prime-node "$MATCHAPACK_YARN_PRIME_NODE" "$FX/yarn1-many"
   if [ $rc = 0 ] && same; then ok "cache filled by node $("$MATCHAPACK_YARN_PRIME_NODE" -v), installed by node $node_major: engine identical"
   else bad "cross-node engine (exit $rc)"; fi
 else echo "SKIP cache filled by another Node (set MATCHAPACK_YARN_PRIME_NODE)"; fi
@@ -1045,7 +1037,7 @@ else echo "SKIP cache filled by another Node (set MATCHAPACK_YARN_PRIME_NODE)"; 
 # `yarn install` in a workspace directory: Yarn installs at the workspace
 # root, and so does the engine (the root is the lockfile folder above).
 # As many clones as the same install run from the root (e-ws).
-everify e-wsub --subdir packages/w2 "$here/fixtures/yarn1-workspaces"
+everify e-wsub --subdir packages/w2 "$FX/yarn1-workspaces"
 n=$(ejson e-wsub "y['cloned']")
 if [ $rc = 0 ] && same && [ -f "$work/e-wsub/engine/node_modules/.yarn-integrity" ] && [ -L "$work/e-wsub/engine/node_modules/w2" ] \
   && [ "${n:-0}" -gt 0 ] && [ "$n" = "$(ejson e-ws "y['cloned']")" ] && [ "$(ejson e-wsub "r['dir']")" = "$work/e-wsub/engine/packages/w2" ]; then
@@ -1066,11 +1058,11 @@ else bad "install in a workspace directory (exit $rc, cloned ${n:-?}, from the r
 # of the directory into its cache was seen to have on a second install.
 for kind in tgz dir; do
   fsrc=$work/file-$kind-src; rm -rf "${fsrc:?}"; mkdir -p "$fsrc"
-  cp -p "$here/fixtures/yarn1-file/$kind/package.json" "$here/fixtures/yarn1-file/$kind/yarn.lock" "$fsrc/"
+  cp -p "$FX/yarn1-file/$kind/package.json" "$FX/yarn1-file/$kind/yarn.lock" "$fsrc/"
   # The tarball is kept as it is (its bytes depend on Python's zlib: CI's
   # Python wrote another sha1 than yarn.lock's); the directory is written.
-  if [ $kind = tgz ]; then cp -p "$here/fixtures/yarn1-file/tgz/local-1.0.0.tgz" "$fsrc/"
-  else python3 -I "$here/fixtures/yarn1-file/make.py" dir "$fsrc"; fi
+  if [ $kind = tgz ]; then cp -p "$FX/yarn1-file/tgz/local-1.0.0.tgz" "$fsrc/"
+  else python3 -I "$FX/yarn1-file/make.py" dir "$fsrc"; fi
   UV_THREADPOOL_SIZE=1 everify e-file-$kind "$fsrc"
   n=$(ejson e-file-$kind "y['cloned']")
   if [ $kind = tgz ]; then verdict_ok() { [ $rc = 0 ] && same; }
@@ -1084,7 +1076,7 @@ done
 # --focus in a workspace: its dependencies are installed (hoisted to the
 # root's node_modules), its sibling workspace y1-c as a copy from the
 # "registry" (the lockfile's tarball) into the workspace's own node_modules.
-everify e-focus --subdir packages/app "$here/fixtures/yarn1-focus" --focus
+everify e-focus --subdir packages/app "$FX/yarn1-focus" --focus
 n=$(ejson e-focus "y['cloned']"); fc=$work/e-focus/engine
 if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && [ -d "$fc/packages/app/node_modules/y1-c" ] && [ ! -L "$fc/packages/app/node_modules/y1-c" ] \
   && [ -f "$fc/packages/app/node_modules/y1-c/data/x.json" ] && [ -f "$fc/node_modules/y1-many/index.js" ]; then
@@ -1127,11 +1119,11 @@ refused() {
   else bad "$name (plain $rp, engine $re,$why; record $rec)"; fi
 }
 # --focus in the workspace root: Yarn refuses it.
-fr=$fl/focus-root-src; cpp "$here/fixtures/yarn1-focus" "$fr"
+fr=$fl/focus-root-src; cpp "$FX/yarn1-focus" "$fr"
 refused "--focus in the workspace root" "$fr" "can only be run inside an individual workspace" --focus
 
 # nohoist: y1-many stays in each workspace's own node_modules (two copies).
-everify e-nohoist "$here/fixtures/yarn1-nohoist"
+everify e-nohoist "$FX/yarn1-nohoist"
 n=$(ejson e-nohoist "y['cloned']"); nh=$work/e-nohoist/engine
 if [ $rc = 0 ] && same && [ "${n:-0}" -ge 400 ] && [ -f "$nh/packages/w1/node_modules/y1-many/index.js" ] && [ -f "$nh/packages/w2/node_modules/y1-many/index.js" ] \
   && [ ! -e "$nh/node_modules/y1-many" ]; then
@@ -1152,7 +1144,7 @@ for d, dirs, files in os.walk(root):
         if st.st_nlink > 1: groups.setdefault(st.st_ino, []).append(os.path.relpath(p, root))
 for g in sorted(" ".join(sorted(v)) for v in groups.values()): print(g)
 ' "$1"; }
-everify e-linkdup "$here/fixtures/yarn1-nohoist" --link-duplicates
+everify e-linkdup "$FX/yarn1-nohoist" --link-duplicates
 n=$(ejson e-linkdup "y['cloned']")
 links "$work/e-linkdup/plain1" > "$work/links-plain1.txt"; links "$work/e-linkdup/plain2" > "$work/links-plain2.txt"; links "$work/e-linkdup/engine" > "$work/links-engine.txt"
 g=$(wc -l < "$work/links-engine.txt" | tr -d ' ')
@@ -1164,25 +1156,25 @@ else bad "--link-duplicates (exit $rc, cloned ${n:-?}, link groups $g; $work/lin
 # --flat: one version per package. With resolutions for every package that
 # has two versions it installs flat; without, it asks, and with no TTY
 # (--non-interactive) Yarn fails.
-everify e-flat "$here/fixtures/yarn1-flat" --flat
+everify e-flat "$FX/yarn1-flat" --flat
 n=$(ejson e-flat "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -gt 0 ] && [ ! -e "$work/e-flat/engine/node_modules/y1-a/node_modules" ] && grep -q '"2.0.0"' "$work/e-flat/engine/node_modules/y1-b/package.json" \
-  && cmp -s "$here/fixtures/yarn1-flat/package.json" "$work/e-flat/engine/package.json"; then
+  && cmp -s "$FX/yarn1-flat/package.json" "$work/e-flat/engine/package.json"; then
   ok "--flat with resolutions: no nested node_modules, package.json rewritten with the same bytes; engine identical; $n files cloned"
 else bad "--flat with resolutions (exit $rc, cloned ${n:-?})"; fi
-refused "--flat with two versions and no resolution" "$here/fixtures/yarn1-many" "Can't answer a question unless a user TTY" --flat
+refused "--flat with two versions and no resolution" "$FX/yarn1-many" "Can't answer a question unless a user TTY" --flat
 
 # yarn1-many with @y1/scoped an optional dependency instead of a dev one
 # (the lockfile is the same).
-fo=$fl/optional-src; mkdir -p "$fo"; cp -p "$here/fixtures/yarn1-many/yarn.lock" "$fo/"
+fo=$fl/optional-src; mkdir -p "$fo"; cp -p "$FX/yarn1-many/yarn.lock" "$fo/"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["optionalDependencies"]={"@y1/scoped": d["devDependencies"].pop("@y1/scoped")}; json.dump(d, open(sys.argv[2],"w"), indent=2)' \
-  "$here/fixtures/yarn1-many/package.json" "$fo/package.json"
+  "$FX/yarn1-many/package.json" "$fo/package.json"
 everify e-noopt "$fo" --ignore-optional
 if [ $rc = 0 ] && same && [ "$(ejson e-noopt "y['cloned']")" -gt 0 ] && [ ! -e "$work/e-noopt/engine/node_modules/@y1" ] && [ -f "$work/e-noopt/engine/node_modules/y1-many/index.js" ]; then
   ok "--ignore-optional: the optional dependency left out; engine identical; $(ejson e-noopt "y['cloned']") files cloned"
 else bad "--ignore-optional (exit $rc)"; fi
 
-everify e-nobin "$here/fixtures/yarn1-many" --no-bin-links
+everify e-nobin "$FX/yarn1-many" --no-bin-links
 if [ $rc = 0 ] && same && [ "$(ejson e-nobin "y['cloned']")" -gt 0 ] && [ ! -e "$work/e-nobin/engine/node_modules/.bin" ] && [ -e "$work/e-many/engine/node_modules/.bin" ]; then
   ok "--no-bin-links: no node_modules/.bin; engine identical; $(ejson e-nobin "y['cloned']") files cloned"
 else bad "--no-bin-links (exit $rc)"; fi
@@ -1190,7 +1182,7 @@ else bad "--no-bin-links (exit $rc)"; fi
 # --check-files: a second install after part of a package was removed
 # (300 files: more than Yarn's first copies, which Node makes). Without the
 # flag Yarn's integrity check says up to date and puts nothing back.
-everify e-check --then "$here/fixtures/yarn1-many" --before-then 'rm -r node_modules/y1-many/lib' "$here/fixtures/yarn1-many" --check-files
+everify e-check --then "$FX/yarn1-many" --before-then 'rm -r node_modules/y1-many/lib' "$FX/yarn1-many" --check-files
 n=$(ejson e-check "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -gt 0 ] && [ "$(find "$work/e-check/engine/node_modules/y1-many/lib" -type f | wc -l | tr -d ' ')" = 300 ]; then
   ok "--check-files after node_modules/y1-many/lib was removed: put back; engine identical; $n files cloned in the second install"
@@ -1199,7 +1191,7 @@ else bad "--check-files (exit $rc, cloned ${n:-?})"; fi
 # --force: a second install over a complete tree. Yarn runs its link step
 # again, and skips each file whose size and mtime already match the cache
 # file (its copy queue), so nothing is copied and nothing cloned.
-verify e-force --engine yarn1 --engine-min-clones 0 --then "$here/fixtures/yarn1-many" "$here/fixtures/yarn1-many" --force
+verify e-force --engine yarn1 --engine-min-clones 0 --then "$FX/yarn1-many" "$FX/yarn1-many" --force
 if [ $rc = 0 ] && same && [ "$(ejson e-force "y['linked']")" = True ] && [ "$(ejson e-force "y['link_steps']")" -ge 1 ] && [ "$(ejson e-force "y['copied_total']")" = 0 ]; then
   ok "--force over a complete tree: Yarn links again and copies nothing; engine identical, 0 files cloned"
 else bad "--force (exit $rc, linked $(ejson e-force "y['linked']"), copied $(ejson e-force "y['copied_total']"))"; fi
@@ -1207,7 +1199,7 @@ else bad "--force (exit $rc, linked $(ejson e-force "y['linked']"), copied $(ejs
 # --offline / --prefer-offline with a warm cache (e-many's, so the prime run
 # also finds everything there).
 for f in offline prefer-offline; do
-  everify e-$f --cache-dir "$work/e-many/cache" "$here/fixtures/yarn1-many" --$f
+  everify e-$f --cache-dir "$work/e-many/cache" "$FX/yarn1-many" --$f
   if [ $rc = 0 ] && same && [ "$(ejson e-$f "y['cloned']")" -gt 0 ]; then ok "--$f, warm cache: engine identical; $(ejson e-$f "y['cloned']") files cloned"
   else bad "--$f (exit $rc)"; fi
 done
@@ -1215,22 +1207,22 @@ done
 # --ignore-engines: the project asks for node >= 999 (a root engines field,
 # which Yarn checks; "<1" would not do: Yarn reads an engines range below 1
 # as 0.10-0.13 of the running major).
-fe=$fl/engines-src; mkdir -p "$fe"; cp -p "$here/fixtures/yarn1-many/yarn.lock" "$fe/"
+fe=$fl/engines-src; mkdir -p "$fe"; cp -p "$FX/yarn1-many/yarn.lock" "$fe/"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["engines"]={"node":">=999"}; json.dump(d, open(sys.argv[2],"w"), indent=2)' \
-  "$here/fixtures/yarn1-many/package.json" "$fe/package.json"
+  "$FX/yarn1-many/package.json" "$fe/package.json"
 refused "engines: node >=999" "$fe" 'The engine "node" is incompatible with this module'
 everify e-engines "$fe" --ignore-engines
 if [ $rc = 0 ] && same && [ "$(ejson e-engines "y['cloned']")" -gt 0 ]; then ok "--ignore-engines: installs; engine identical; $(ejson e-engines "y['cloned']") files cloned"
 else bad "--ignore-engines (exit $rc)"; fi
 
 # NODE_ENV=production in the environment: as --production.
-NODE_ENV=production everify e-nodeenv "$here/fixtures/yarn1-many"
+NODE_ENV=production everify e-nodeenv "$FX/yarn1-many"
 if [ $rc = 0 ] && same && [ ! -e "$work/e-nodeenv/engine/node_modules/y1-script" ] && [ "$(ejson e-nodeenv "y['cloned']")" -gt 0 ]; then
   ok "NODE_ENV=production: no devDependencies; engine identical; $(ejson e-nodeenv "y['cloned']") files cloned"
 else bad "NODE_ENV=production (exit $rc)"; fi
 
 # A run that cloned nothing is a failure of the harness, not a pass.
-MATCHAPACK_YARN_HOOK=none everify e-nohook "$here/fixtures/yarn1-many"
+MATCHAPACK_YARN_HOOK=none everify e-nohook "$FX/yarn1-many"
 if [ $rc = 1 ] && grep -q 'engine: cloned 0 files, expected at least 1' "$work/out"; then ok "harness: an engine run that cloned nothing fails"
 else bad "harness on a run that cloned nothing (exit $rc)"; fi
 
@@ -1244,7 +1236,7 @@ fi # TEST_YARN1_PART != commands
 # the command's. yarn1-upgrade names its dependencies by range, with the
 # local tarball server as the registry (make-tarballs.py writes a registry
 # document per package).
-T=http://127.0.0.1:48321
+T=$FX_URL
 # cverify <case> '<words>' [verify-yarn1 options...] <fixture>
 cverify() { local c=$1 w=$2; shift 2; verify "$c" --engine yarn1 --command "$w" "$@"; }
 said() { grep -qF -- "$1" "$work/out"; }
@@ -1259,18 +1251,18 @@ both_changed() {
 # pj <case> <tree> <python expression over d, the tree's package.json>
 pj() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "$work/$1/$2/package.json" "$3" 2>/dev/null; }
 
-cverify c-add "add $T/y1-many-1.0.0.tgz" "$here/fixtures/yarn1-small"
+cverify c-add "add $T/y1-many-1.0.0.tgz" "$FX/yarn1-small"
 n=$(ejson c-add "y['cloned']")
 if [ $rc = 0 ] && same && both_changed package.json && [ "${n:-0}" -ge 150 ] && first128 c-add && [ "$(ejson c-add "r['command']")" = add ]; then
   ok "yarn add <a package of 302 files>: engine identical (package.json, yarn.lock, .yarn-integrity, tree); $n files cloned, Yarn's first 128 copies left to Node; logged as add"
 else bad "yarn add (exit $rc, cloned ${n:-?})"; fi
 
-cverify c-add-dev "add y1-c --dev --exact" --engine-min-clones 0 "$here/fixtures/yarn1-upgrade"
+cverify c-add-dev "add y1-c --dev --exact" --engine-min-clones 0 "$FX/yarn1-upgrade"
 if [ $rc = 0 ] && same && both_changed package.json && [ "$(pj c-add-dev engine "d['devDependencies'].get('y1-c')")" = 1.0.0 ]; then
   ok "yarn add y1-c --dev --exact (by name, from the registry document): engine identical; devDependencies y1-c 1.0.0; 3 files, all among Yarn's first copies"
 else bad "yarn add --dev --exact (exit $rc)"; fi
 
-cverify c-add-wsdir "add $T/y1-many-2.0.0.tgz" --subdir packages/w2 "$here/fixtures/yarn1-workspaces"
+cverify c-add-wsdir "add $T/y1-many-2.0.0.tgz" --subdir packages/w2 "$FX/yarn1-workspaces"
 n=$(ejson c-add-wsdir "y['cloned']")
 if [ $rc = 0 ] && same && both_changed packages/w2/package.json && [ "${n:-0}" -gt 285 ]; then
   ok "yarn add in a workspace directory: the workspace's package.json and the root's yarn.lock; engine identical; $n files cloned (Yarn moved the root's y1-many 1.0.0 too)"
@@ -1278,36 +1270,36 @@ else bad "yarn add in a workspace directory (exit $rc, cloned ${n:-?})"; fi
 
 # Yarn refuses an add in the workspace root without -W: the same status
 # and nothing changed; logged yarn_failed, no link step.
-cverify c-add-root "add $T/y1-c-1.0.0.tgz" --engine-min-clones 0 "$here/fixtures/yarn1-workspaces"
+cverify c-add-root "add $T/y1-c-1.0.0.tgz" --engine-min-clones 0 "$FX/yarn1-workspaces"
 if [ $rc = 0 ] && grep -Eq 'command: yarn .*: exit [1-9][0-9]* in every run' "$work/out" && said "command: changed package.json: none" && said "command: changed yarn.lock: no" \
   && grep -q 'Running this command will add the dependency to the workspace root' "$work/c-add-root/engine.log" \
   && [ "$(ejson c-add-root "(r['outcome'], y.get('link_steps'))")" = "('yarn_failed', 0)" ]; then
   ok "yarn add in the workspace root without -W: plain and engine both refuse ($(grep -o 'exit [0-9]* in every run' "$work/out")); nothing changed; logged yarn_failed, no link step"
 else bad "yarn add in the workspace root (exit $rc)"; fi
 
-cverify c-upgrade "upgrade" "$here/fixtures/yarn1-upgrade"
+cverify c-upgrade "upgrade" "$FX/yarn1-upgrade"
 n=$(ejson c-upgrade "y['cloned']")
 if [ $rc = 0 ] && same && said "command: changed package.json: none" && said "command: changed yarn.lock: yes" && said "command: yarn.lock byte-identical (plain1, engine): true" \
   && [ "${n:-0}" -ge 150 ] && first128 c-upgrade && grep -q '"2.0.0"' "$work/c-upgrade/engine/node_modules/y1-many/package.json"; then
   ok "yarn upgrade: y1-many 1.0.0 -> 2.0.0 within its range; yarn.lock rewritten, package.json not; engine identical; $n files cloned"
 else bad "yarn upgrade (exit $rc, cloned ${n:-?})"; fi
 
-cverify c-upgrade-latest "upgrade y1-b --latest" --engine-min-clones 0 "$here/fixtures/yarn1-upgrade"
+cverify c-upgrade-latest "upgrade y1-b --latest" --engine-min-clones 0 "$FX/yarn1-upgrade"
 if [ $rc = 0 ] && same && both_changed package.json && [ "$(pj c-upgrade-latest engine "d['devDependencies']['y1-b']")" = '^2.0.0' ]; then
   ok "yarn upgrade y1-b --latest: its range rewritten to ^2.0.0; engine identical"
 else bad "yarn upgrade --latest (exit $rc)"; fi
 
-cverify c-add-setup "add $T/y1-many-1.0.0.tgz" --command-setup engine "$here/fixtures/yarn1-small"
+cverify c-add-setup "add $T/y1-many-1.0.0.tgz" --command-setup engine "$FX/yarn1-small"
 if [ $rc = 0 ] && same && both_changed package.json && [ "$(ejson c-add-setup "y['cloned']")" -ge 150 ]; then
   ok "yarn add over a tree the engine installed: identical to the all-plain trees"
 else bad "yarn add after an engine install (exit $rc)"; fi
 
-cverify c-add-xattr "add $T/y1-many-1.0.0.tgz" --cache-xattr "$here/fixtures/yarn1-small"
+cverify c-add-xattr "add $T/y1-many-1.0.0.tgz" --cache-xattr "$FX/yarn1-small"
 if [ $rc = 0 ] && same && [ "$(ejson c-add-xattr "y['cloned']")" -ge 150 ]; then
   ok "yarn add with an extra xattr on every cache file: the add's clones drop it as Node's copy does"
 else bad "yarn add, cache with xattrs (exit $rc)"; fi
 
-cverify c-remove "remove y1-many" --engine-min-clones 0 "$here/fixtures/yarn1-many"
+cverify c-remove "remove y1-many" --engine-min-clones 0 "$FX/yarn1-many"
 if [ $rc = 0 ] && same && both_changed package.json && [ ! -e "$work/c-remove/engine/node_modules/y1-many" ]; then
   ok "yarn remove y1-many: engine identical (nothing to copy, nothing cloned)"
 else bad "yarn remove (exit $rc)"; fi
@@ -1316,7 +1308,7 @@ else bad "yarn remove (exit $rc)"; fi
 # Yarn in the workspace's directory; the hook starts it with itself and
 # relays its requests. y1-execpath records npm_execpath as that Yarn gives
 # it (its bundle, lib/cli.js), compared as file content.
-cverify c-ws-add "workspace w2 add $T/y1-many-2.0.0.tgz $T/y1-execpath-1.0.0.tgz" "$here/fixtures/yarn1-workspaces"
+cverify c-ws-add "workspace w2 add $T/y1-many-2.0.0.tgz $T/y1-execpath-1.0.0.tgz" "$FX/yarn1-workspaces"
 n=$(ejson c-ws-add "y['cloned']"); x=$work/c-ws-add/engine/node_modules/y1-execpath/execpath.txt
 if [ $rc = 0 ] && same && both_changed packages/w2/package.json && [ "${n:-0}" -gt 285 ] && first128 c-ws-add && [ "$(ejson c-ws-add "r['command']")" = "workspace add" ] \
   && [ "$(head -1 "$x" 2>/dev/null)" = "$(dirname "$(dirname "$yarnjs")")/lib/cli.js" ]; then
@@ -1327,7 +1319,7 @@ else bad "yarn workspace add (exit $rc, cloned ${n:-?}, execpath $(head -1 "$x" 
 # w1's node_modules; a fresh install from its lockfile lays it out the
 # other way): removing w2's y1-many 2.0.0 makes Yarn copy y1-many 1.0.0 to
 # the root again, 302 files (measured: new inodes). A remove that clones.
-cverify c-ws-remove "workspace w2 remove y1-many" --command-before "workspace w2 add $T/y1-many-2.0.0.tgz" "$here/fixtures/yarn1-workspaces"
+cverify c-ws-remove "workspace w2 remove y1-many" --command-before "workspace w2 add $T/y1-many-2.0.0.tgz" "$FX/yarn1-workspaces"
 n=$(ejson c-ws-remove "y['cloned']")
 if [ $rc = 0 ] && same && said ": exit 0 in every run" && said "command: package.json byte-identical (plain1, engine): true" && said "command: yarn.lock byte-identical (plain1, engine): true" \
   && [ "${n:-0}" -ge 150 ] && [ "$(ejson c-ws-remove "r['command']")" = "workspace remove" ] && [ -f "$work/c-ws-remove/engine/node_modules/y1-many/lib/d14/f00.js" ]; then
@@ -1336,7 +1328,7 @@ else bad "yarn workspace remove (exit $rc, cloned ${n:-?})"; fi
 
 # The workspace's Yarn declines (its probe only): it runs as plain Yarn in
 # that process, the command succeeds, nothing is cloned, the reason logged.
-MATCHAPACK_YARN_SIMULATE=child-copy-keeps-times cverify c-ws-decline "workspace w2 add $T/y1-many-2.0.0.tgz" --engine-min-clones 0 "$here/fixtures/yarn1-workspaces"
+MATCHAPACK_YARN_SIMULATE=child-copy-keeps-times cverify c-ws-decline "workspace w2 add $T/y1-many-2.0.0.tgz" --engine-min-clones 0 "$FX/yarn1-workspaces"
 if [ $rc = 0 ] && same && both_changed packages/w2/package.json && [ "$(ejson c-ws-decline "r['outcome']")" = installed ] \
   && ejson c-ws-decline "y.get('declined') or ''" | grep -q "in the workspace's Yarn: .*kept a non-empty file's mtime" \
   && [ "$(ejson c-ws-decline "y['unseen']")" = False ] && grep -q "matchapack: the workspace's Yarn ran as plain Yarn, without clones" "$work/c-ws-decline/engine.log" \
@@ -1347,7 +1339,7 @@ else bad "workspace child decline (exit $rc, declined $(ejson c-ws-decline "y.ge
 # The same when the workspace's hook fails outside its decline path (an
 # exception before Yarn starts: MATCHAPACK_YARN_SIMULATE=child-throw): plain
 # Yarn in that process, and the reason reaches the log (not "unseen").
-MATCHAPACK_YARN_SIMULATE=child-throw cverify c-ws-throw "workspace w2 add $T/y1-many-2.0.0.tgz" --engine-min-clones 0 "$here/fixtures/yarn1-workspaces"
+MATCHAPACK_YARN_SIMULATE=child-throw cverify c-ws-throw "workspace w2 add $T/y1-many-2.0.0.tgz" --engine-min-clones 0 "$FX/yarn1-workspaces"
 if [ $rc = 0 ] && same && both_changed packages/w2/package.json && [ "$(ejson c-ws-throw "r['outcome']")" = installed ] \
   && ejson c-ws-throw "y.get('declined') or ''" | grep -q "in the workspace's Yarn: an error before Yarn started: simulated" \
   && [ "$(ejson c-ws-throw "y['unseen']")" = False ] && grep -q "matchapack: the workspace's Yarn ran as plain Yarn, without clones" "$work/c-ws-throw/engine.log" \
@@ -1359,7 +1351,7 @@ else bad "workspace child error before Yarn (exit $rc, declined $(ejson c-ws-thr
 # one Yarn process, one link step per dependency type (y1-many in
 # dependencies, y1-b in devDependencies); Yarn's first 128 copies of the
 # process left to Node, counted once.
-cverify c-ui "upgrade-interactive --latest" --command-tty "$here/fixtures/yarn1-upgrade"
+cverify c-ui "upgrade-interactive --latest" --command-tty "$FX/yarn1-upgrade"
 n=$(ejson c-ui "y['cloned']")
 if [ $rc = 0 ] && same && both_changed package.json && [ "$(ejson c-ui "y['link_steps']")" -ge 2 ] && first128 c-ui && [ "${n:-0}" -ge 150 ] \
   && [ "$(pj c-ui engine "(d['dependencies']['y1-many'], d['devDependencies']['y1-b'])")" = "('>=2.0.0', '^2.0.0')" ]; then
@@ -1369,7 +1361,7 @@ else bad "yarn upgrade-interactive (exit $rc, cloned ${n:-?}, link steps $(ejson
 # The same in one workspace (yarn1-upgrade-ws: workspace u1 has
 # yarn1-upgrade's dependencies): `yarn workspace u1 upgrade-interactive`,
 # whose prompt is the workspace command's own Yarn's.
-cverify c-ws-ui "workspace u1 upgrade-interactive --latest" --command-tty "$here/fixtures/yarn1-upgrade-ws"
+cverify c-ws-ui "workspace u1 upgrade-interactive --latest" --command-tty "$FX/yarn1-upgrade-ws"
 n=$(ejson c-ws-ui "y['cloned']")
 if [ $rc = 0 ] && same && both_changed packages/u1/package.json && [ "$(ejson c-ws-ui "y['link_steps']")" -ge 2 ] && first128 c-ws-ui && [ "${n:-0}" -ge 150 ] \
   && [ "$(ejson c-ws-ui "r['command']")" = "workspace upgrade-interactive" ]; then
@@ -1379,7 +1371,7 @@ else bad "yarn workspace upgrade-interactive (exit $rc, cloned ${n:-?}, link ste
 # `yarn workspace u1 upgrade` (yarn1-upgrade-ws): the workspace command's
 # own Yarn upgrades within u1's ranges (y1-many 1.0.0 -> 2.0.0, hoisted to
 # the root); yarn.lock rewritten, no package.json.
-cverify c-ws-upgrade "workspace u1 upgrade" "$here/fixtures/yarn1-upgrade-ws"
+cverify c-ws-upgrade "workspace u1 upgrade" "$FX/yarn1-upgrade-ws"
 n=$(ejson c-ws-upgrade "y['cloned']")
 if [ $rc = 0 ] && same && said ": exit 0 in every run" && said "command: changed package.json: none" && said "command: changed yarn.lock: yes" && said "command: yarn.lock byte-identical (plain1, engine): true" \
   && [ "${n:-0}" -ge 150 ] && first128 c-ws-upgrade && [ "$(ejson c-ws-upgrade "r['command']")" = "workspace upgrade" ] \
@@ -1396,12 +1388,12 @@ else bad "yarn workspace upgrade (exit $rc, cloned ${n:-?}, command $(ejson c-ws
 # is the work directory) and another folder from the root. Asking
 # `yarn cache dir` with the wrong options or in the wrong directory clones
 # nothing.
-cverify c-ws-cache "--cache-folder $work/c-ws-cache-decoy workspace w2 add $T/y1-many-2.0.0.tgz" "$here/fixtures/yarn1-workspaces"
+cverify c-ws-cache "--cache-folder $work/c-ws-cache-decoy workspace w2 add $T/y1-many-2.0.0.tgz" "$FX/yarn1-workspaces"
 n=$(ejson c-ws-cache "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -gt 285 ] && [ "$(ejson c-ws-cache "y['cache']")" = "$work/c-ws-cache/cache/v6" ]; then
   ok "yarn --cache-folder <other> workspace w2 add: the cache asked is the workspace's Yarn's, not the command's; engine identical; $n files cloned"
 else bad "workspace command with its own --cache-folder (exit $rc, cloned ${n:-?}, cache $(ejson c-ws-cache "y['cache']"))"; fi
-cverify c-ws-relcache "workspace w2 add $T/y1-many-2.0.0.tgz --cache-folder ../../../cache" "$here/fixtures/yarn1-workspaces"
+cverify c-ws-relcache "workspace w2 add $T/y1-many-2.0.0.tgz --cache-folder ../../../cache" "$FX/yarn1-workspaces"
 n=$(ejson c-ws-relcache "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -gt 285 ] && [ "$(ejson c-ws-relcache "y['cache']")" = "$work/c-ws-relcache/cache/v6" ]; then
   ok "yarn workspace w2 add --cache-folder <relative>: resolved in the workspace's directory, as Yarn does; engine identical; $n files cloned"
@@ -1410,14 +1402,14 @@ else bad "workspace command with a relative --cache-folder (exit $rc, cloned ${n
 # A command with nothing to do and no link step (upgrade-interactive after
 # `upgrade --latest`: every dependency up to date, Yarn returns before its
 # Install): passes when the case expects no clone.
-cverify c-ui-noop "upgrade-interactive --latest" --command-tty --command-before "upgrade --latest" --engine-min-clones 0 "$here/fixtures/yarn1-upgrade"
+cverify c-ui-noop "upgrade-interactive --latest" --command-tty --command-before "upgrade --latest" --engine-min-clones 0 "$FX/yarn1-upgrade"
 if [ $rc = 0 ] && same && said ": exit 0 in every run" && grep -q 'All of your dependencies are up to date' "$work/c-ui-noop/engine.log" && [ "$(ejson c-ui-noop "y['link_steps']")" = 0 ]; then
   ok "yarn upgrade-interactive with nothing to upgrade: no prompt, no link step; engine identical"
 else bad "yarn upgrade-interactive with nothing to upgrade (exit $rc, link steps $(ejson c-ui-noop "y['link_steps']"))"; fi
 
 # The harness itself: a command that changes nothing reads "none" / "no",
 # so a case cannot pass because the command did nothing.
-cverify c-noop "install --force" --engine-min-clones 0 "$here/fixtures/yarn1-small"
+cverify c-noop "install --force" --engine-min-clones 0 "$FX/yarn1-small"
 if [ $rc = 0 ] && said "command: changed package.json: none" && said "command: changed yarn.lock: no"; then ok "harness: a command that changes nothing is reported as changing nothing"
 else bad "harness on a command that changes nothing (exit $rc)"; fi
 
@@ -1440,7 +1432,7 @@ myarn() {
   (cd "$d" && y1env ${vars[@]+"${vars[@]}"} "$bin" yarn install --frozen-lockfile --non-interactive --cache-folder "$work/e-many/cache" "$@") > "$work/out" 2>&1; rc=$?
 }
 lastlog() { tail -1 "$work/y1/log/log.jsonl" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
-project() { local d=$work/g-$1; rm -rf "${d:?}"; mkdir -p "$d"; cp -p "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$d/"; echo "$d"; }
+project() { local d=$work/g-$1; rm -rf "${d:?}"; mkdir -p "$d"; cp -p "$FX/yarn1-many/package.json" "$FX/yarn1-many/yarn.lock" "$d/"; echo "$d"; }
 
 # Each gate: with MATCHAPACK_NO_FALLBACK=1, exit 3, the project unchanged, the
 # reason printed and logged.
@@ -1501,8 +1493,8 @@ d=$(project keepsplain); myarn "$d" MATCHAPACK_YARN_SIMULATE=copy-keeps-times --
 if [ $rc = 0 ] && grep -q 'running plain yarn instead' "$work/out" && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "the probe's decline runs plain yarn, which installs"
 else bad "probe decline then plain yarn (exit $rc)"; fi
 # Secrets in the arguments never reach the log.
-d=$(project secret); myarn "$d" -- --otp 314159 --registry "http://u:hunter2@127.0.0.1:48321/"
-if [ $rc = 0 ] && ! grep -q '314159\|hunter2' "$work/y1/log/log.jsonl" && [ "$(lastlog 'r["args"][-1]')" = "http://***@127.0.0.1:48321/" ]; then ok "an --otp value and URL credentials are not logged"
+d=$(project secret); myarn "$d" -- --otp 314159 --registry "http://u:hunter2@127.0.0.1:$FX_PORT/"
+if [ $rc = 0 ] && ! grep -q '314159\|hunter2' "$work/y1/log/log.jsonl" && [ "$(lastlog 'r["args"][-1]')" = "http://***@127.0.0.1:$FX_PORT/" ]; then ok "an --otp value and URL credentials are not logged"
 else bad "secrets in the log (exit $rc)"; fi
 # With MATCHAPACK_YARN_JS the only Yarn there is (no yarn on PATH), every
 # path runs it: other commands, --version, the MATCHAPACK=0 bypass.
@@ -1563,7 +1555,7 @@ else
   printf "#!/usr/bin/env node\nrequire('../lib/cli')\n" > "$fk/bin/yarn.js"
   printf "const CONCURRENT_QUEUE_ITEMS = require('fs').copyFile ? 128 : 4;\nconsole.log('FAKE-YARN ' + process.argv.slice(2).join(' '))\n" > "$fk/lib/cli.js"
   export COREPACK_ENABLE_NETWORK=0 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0
-  cpsrc=$work/cp-src; rm -rf "${cpsrc:?}"; mkdir -p "$cpsrc"; cp "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$cpsrc/"
+  cpsrc=$work/cp-src; rm -rf "${cpsrc:?}"; mkdir -p "$cpsrc"; cp "$FX/yarn1-many/package.json" "$FX/yarn1-many/yarn.lock" "$cpsrc/"
   setpm "$cpsrc" "yarn@$yv"
   if [ "$(cd "$cpsrc" && COREPACK_HOME=$ch "$node" "$cpjs" --version 2>&1)" != "$yv" ]; then
     bad "corepack does not run the seeded Yarn $yv offline: $(cd "$cpsrc" && COREPACK_HOME=$ch "$node" "$cpjs" --version 2>&1 | tail -1)"
@@ -1625,7 +1617,7 @@ open(f, "w").write(s.replace(a, "\"installationMethod\": \"homebrew\""))' "$keg"
   hbjs=$keg/libexec/bin/yarn.js
   printf '#!/bin/bash\nPREFIX="%s" exec "%s"  "$@"\n' "$hbp" "$hbjs" > "$keg/bin/yarn"; chmod 0555 "$keg/bin/yarn"
   ln -s yarn "$keg/bin/yarnpkg"; ln -s "../Cellar/yarn/$yv/bin/yarn" "$hbp/bin/yarn"
-  mkdir -p "$hb/src"; cp -p "$here/fixtures/yarn1-many/package.json" "$here/fixtures/yarn1-many/yarn.lock" "$hb/src/"
+  mkdir -p "$hb/src"; cp -p "$FX/yarn1-many/package.json" "$FX/yarn1-many/yarn.lock" "$hb/src/"
   python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"require(\x27fs\x27).writeFileSync(\x27node_modules/.hb-env\x27, process.env.PREFIX + \x27\\n\x27 + process.env.npm_execpath)\""}; json.dump(d, open(p,"w"))' "$hb/src/package.json"
   # hbrun <name> plain|engine [PATH dir]: a fresh copy $hb/<name>, one install
   # with `yarn` from PATH (default the Homebrew prefix); $rc, $win, $hb/<name>.log.
@@ -1715,12 +1707,12 @@ else
   d=$(project rflag); rrun "$d" bash "$rt/bin:/usr/bin:/bin" 'yarn --frozen-lockfile'
   if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && [ -f "$d/node_modules/.yarn-integrity" ]; then ok "route (bash): yarn --frozen-lockfile → matchapack yarn"
   else bad "route (bash): yarn --frozen-lockfile (exit $rc, starts $(starts))"; fi
-  d=$(project radd); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn add http://127.0.0.1:48321/y1-c-1.0.0.tgz --non-interactive'
+  d=$(project radd); rrun "$d" zsh "$rt/bin:/usr/bin:/bin" 'yarn add '"$FX_URL"'/y1-c-1.0.0.tgz --non-interactive'
   if [ $rc = 0 ] && [ "$(starts)" = 1 ] && engine_ran && grep -q '"y1-c"' "$d/package.json" && [ "$(lastlog 'r["command"]')" = add ] \
-    && [ "$(lastlog 'r["args"]')" = "['add', 'http://127.0.0.1:48321/y1-c-1.0.0.tgz', '--non-interactive']" ]; then ok "route: yarn add x → matchapack yarn, arguments unchanged"
+    && [ "$(lastlog 'r["args"]')" = "['add', '$FX_URL/y1-c-1.0.0.tgz', '--non-interactive']" ]; then ok "route: yarn add x → matchapack yarn, arguments unchanged"
   else bad "route: yarn add (exit $rc, starts $(starts))"; fi
-  d=$work/g-rws; rm -rf "${d:?}"; cpp "$here/fixtures/yarn1-workspaces" "$d"
-  rrun "$d" bash "$rt/bin:/usr/bin:/bin" 'yarn install --frozen-lockfile --non-interactive && yarn workspace w2 add http://127.0.0.1:48321/y1-c-1.0.0.tgz --non-interactive'
+  d=$work/g-rws; rm -rf "${d:?}"; cpp "$FX/yarn1-workspaces" "$d"
+  rrun "$d" bash "$rt/bin:/usr/bin:/bin" 'yarn install --frozen-lockfile --non-interactive && yarn workspace w2 add '"$FX_URL"'/y1-c-1.0.0.tgz --non-interactive'
   if [ $rc = 0 ] && [ "$(starts)" = 2 ] && grep -q '"y1-c"' "$d/packages/w2/package.json" && [ "$(lastlog 'r["command"]')" = "workspace add" ]; then ok "route (bash): yarn workspace w2 add x → matchapack yarn"
   else bad "route: yarn workspace add (exit $rc, starts $(starts))"; fi
   # Not routed: Yarn's other commands, a workspace's other commands. A stub
@@ -1801,7 +1793,7 @@ function" ]; then ok "route fish ($("$fish" --version 2>&1)): the real init defi
       && [ "$(lastlog 'r["args"]')" = "['install', '--frozen-lockfile', '--non-interactive', '--cache-folder', \"$fc\"]" ]; then
       ok "route fish: yarn install → matchapack yarn, arguments unchanged (a cache path with a space and a quote); tree identical to plain (diff --meta); $n files cloned"
     else bad "route fish: install (prime $r0, plain $ra/$sa starts, function $rb/$sb starts, diff $rd, cloned ${n:-?}, args $(lastlog 'r["args"]' 2>/dev/null))"; grep -v '^      ' "$work/fish-diff.txt" | tail -15; fi
-    d=$(project fadd); frun "$d" "yarn add http://127.0.0.1:48321/y1-c-1.0.0.tgz --non-interactive --cache-folder \"$fc\""
+    d=$(project fadd); frun "$d" "yarn add $FX_URL/y1-c-1.0.0.tgz --non-interactive --cache-folder \"$fc\""
     if [ $rc = 0 ] && [ "$(starts)" = 1 ] && grep -q '"y1-c"' "$d/package.json" && [ "$(lastlog 'r["command"]')" = add ]; then ok "route fish: yarn add → matchapack yarn"
     else bad "route fish: yarn add (exit $rc, starts $(starts))"; fi
     d=$(project ffailplain); rootfail "$d"; frun "$d" "command yarn $yargs; echo \"status \$status\""; want=$(tail -1 "$work/out")
@@ -1820,21 +1812,21 @@ if [ "$(uname)" = Darwin ]; then
   cinstall() { local d=$1; shift; (cd "$d" && y1env "$node" "$yarnjs" install --non-interactive --ignore-scripts --cache-folder "$work/e-many/cache" "$@") > /dev/null 2>&1; }
   # cproj <name> <fixture> [root]: a copy installed by plain Yarn.
   cproj() {
-    local d=${3:-$cv}/$1; mkdir -p "$d"; cp -R "$here/fixtures/$2/." "$d/"; rm -f "$d/README.md"
+    local d=${3:-$cv}/$1; mkdir -p "$d"; cp -R "$FX/$2/." "$d/"; rm -f "$d/README.md"
     cinstall "$d" --frozen-lockfile; echo "$d"
   }
   y1=$(cproj y1 yarn1-many)
   ws=$(cproj ws yarn1-workspaces); echo keep > "$ws/packages/w1/node_modules/y1-b/SENTINEL"
   # Workspace patterns Yarn expands itself: `**` (any depth) and `{x,y}`.
   wg=$cv/wsglob; mkdir -p "$wg/group/sub/deep" "$wg/x" "$wg/y"
-  printf '{"name":"wsglob","private":true,"workspaces":["group/**","{x,y}"],"dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-2.0.0.tgz","y1-many":"http://127.0.0.1:48321/y1-many-1.0.0.tgz"}}' > "$wg/package.json"
-  printf '{"name":"deep","version":"1.0.0","dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-1.0.0.tgz"}}' > "$wg/group/sub/deep/package.json"
-  printf '{"name":"wx","version":"1.0.0","dependencies":{"y1-b":"http://127.0.0.1:48321/y1-b-1.0.0.tgz"}}' > "$wg/x/package.json"
+  printf '{"name":"wsglob","private":true,"workspaces":["group/**","{x,y}"],"dependencies":{"y1-b":"'"$FX_URL"'/y1-b-2.0.0.tgz","y1-many":"'"$FX_URL"'/y1-many-1.0.0.tgz"}}' > "$wg/package.json"
+  printf '{"name":"deep","version":"1.0.0","dependencies":{"y1-b":"'"$FX_URL"'/y1-b-1.0.0.tgz"}}' > "$wg/group/sub/deep/package.json"
+  printf '{"name":"wx","version":"1.0.0","dependencies":{"y1-b":"'"$FX_URL"'/y1-b-1.0.0.tgz"}}' > "$wg/x/package.json"
   printf '{"name":"wy","version":"1.0.0"}' > "$wg/y/package.json"
   cinstall "$wg"; echo keep > "$wg/group/sub/deep/node_modules/y1-b/SENTINEL"; echo keep > "$wg/x/node_modules/y1-b/SENTINEL"
   # `yarn link`-like: an installed package replaced by a symlink (its name
   # is in yarn.lock), plain and scoped; a package that is not in yarn.lock.
-  mkdir -p "$work/linked-src"; cp -R "$here/fixtures/yarn1-many/package.json" "$work/linked-src/"
+  mkdir -p "$work/linked-src"; cp -R "$FX/yarn1-many/package.json" "$work/linked-src/"
   lk=$(cproj linked yarn1-many); rm -rf "${lk:?}/node_modules/y1-a"; ln -s "$work/linked-src" "$lk/node_modules/y1-a"
   ls2=$(cproj linkedscoped yarn1-many); rm -rf "${ls2:?}/node_modules/@y1/scoped"; ln -s "$work/linked-src" "$ls2/node_modules/@y1/scoped"
   ex=$(cproj extra yarn1-many); mkdir -p "$ex/node_modules/manual-copy"
@@ -1843,7 +1835,7 @@ if [ "$(uname)" = Darwin ]; then
   # A backup that cannot be made (an unreadable file): nothing is removed.
   nb=$(cproj nobackup yarn1-many); echo keep > "$nb/node_modules/y1-a/UNREADABLE"; chmod 000 "$nb/node_modules/y1-a/UNREADABLE"
   # The same for an npm project (the npm path had the same unchecked backup).
-  nbn=$cv/nobackup-npm; mkdir -p "$nbn/node_modules/lodash"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$nbn/"
+  nbn=$cv/nobackup-npm; mkdir -p "$nbn/node_modules/lodash"; cp "$FX/small/package.json" "$FX/small/package-lock.json" "$nbn/"
   echo keep > "$nbn/node_modules/lodash/UNREADABLE"; chmod 000 "$nbn/node_modules/lodash/UNREADABLE"
   y4=$cv/yarn4; mkdir -p "$y4/node_modules/x"; printf '{"name":"y4","packageManager":"yarn@4.5.0"}' > "$y4/package.json"; printf '__metadata:\n  version: 8\n' > "$y4/yarn.lock"
   y1ino=$(ls -di "$y1/node_modules" | awk '{print $1}')
@@ -1983,7 +1975,7 @@ if [ "$(uname)" = Darwin ]; then
     mkdir -p "$work/fakemp"
     printf '#!/bin/sh\ncase "$1 $2" in "npm ci") rm -rf node_modules; mkdir -p node_modules/lodash; echo new > node_modules/lodash/NEW\n  echo "matchapack: added $FAKE_ADDED packages from the store in 0.1s (inject engine; npm extracted $FAKE_EXTRACTED)" >&2; exit 0 ;; esac\nexit 9\n' > "$work/fakemp/matchapack"
     chmod +x "$work/fakemp/matchapack"
-    npmproj() { local d=$1/n; mkdir -p "$d/node_modules/lodash"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo keep > "$d/node_modules/lodash/SENTINEL"; echo "$d"; }
+    npmproj() { local d=$1/n; mkdir -p "$d/node_modules/lodash"; cp "$FX/small/package.json" "$FX/small/package-lock.json" "$d/"; echo keep > "$d/node_modules/lodash/SENTINEL"; echo "$d"; }
     r=$(croot npm-some); n1=$(npmproj "$r"); CONV_PREFIX=$work/fakemp FAKE_ADDED=2 FAKE_EXTRACTED=3 conv "$r" --apply; o1=$(cat "$work/out")
     r=$(croot npm-none); n2=$(npmproj "$r"); CONV_PREFIX=$work/fakemp FAKE_ADDED=0 FAKE_EXTRACTED=5 conv "$r" --apply; o2=$(cat "$work/out")
     if printf '%s\n' "$o1" | grep -q "^CONVERTED *$n1 " && [ -f "$n1/node_modules/lodash/NEW" ] \
@@ -2047,7 +2039,7 @@ elif ! hdiutil create -quiet -ov -size 64m -fs APFS -volname mpy1 "$dmg" 2>/dev/
 elif ! { mkdir -p "$vol" && hdiutil attach -quiet -nobrowse -mountpoint "$vol" "$dmg" 2>/dev/null; }; then
   rm -f "$dmg"; echo "SKIP two volumes: the disk image could not be attached"
 else
-  verify vol --work "$vol/w" --cache-dir "$work/e-many/cache" --engine yarn1 --engine-min-clones 0 "$here/fixtures/yarn1-many"
+  verify vol --work "$vol/w" --cache-dir "$work/e-many/cache" --engine yarn1 --engine-min-clones 0 "$FX/yarn1-many"
   cp "$vol/w/engine.json" "$work/vol-engine.json" 2>/dev/null
   cache_note=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["yarn1"]["cache"])' "$work/vol-engine.json" 2>/dev/null)
   if [ $rc = 0 ] && same && [ "${cache_note#unusable: }" != "$cache_note" ]; then ok "two volumes: nothing cloned (${cache_note#unusable: }), tree identical to plain"
@@ -2055,7 +2047,7 @@ else
   hdiutil detach -quiet "$vol" || hdiutil detach -quiet -force "$vol"
   rm -f "$dmg"
 fi
-mkdir -p "$work/withnm"; cp "$here/fixtures/yarn1-small/package.json" "$here/fixtures/yarn1-small/yarn.lock" "$work/withnm/"; mkdir -p "$work/withnm/node_modules"
+mkdir -p "$work/withnm"; cp "$FX/yarn1-small/package.json" "$FX/yarn1-small/yarn.lock" "$work/withnm/"; mkdir -p "$work/withnm/node_modules"
 verify withnm "$work/withnm"
 if [ $rc = 2 ]; then ok "a source with node_modules is refused"; else bad "source with node_modules (exit $rc)"; fi
 

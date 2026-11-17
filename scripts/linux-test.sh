@@ -33,9 +33,9 @@ mkdir -p /build && cp -r /src /build/src && rm -rf /build/src/target
 bin=/build/target/release/matchapack
 mkdir -p /build/src/target/release && cp $bin /build/src/target/release/matchapack   # verify.sh looks here
 
-# Serve the optional-upward tarballs (its lockfile points at 127.0.0.1:48321).
-(cd /src/fixtures/optional-upward/tarballs && python3 -m http.server 48321 --bind 127.0.0.1 >/dev/null 2>&1 &)
-until curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; do sleep 0.3; done
+# Serve the optional-upward tarballs: a server of this run on a free port,
+# and $FX, the copy of fixtures/ whose URLs name it (fixture-server.sh).
+here=/src; . /src/scripts/fixture-server.sh; fixtures_serve /build/fx
 
 run_fs() {
   local fs=$1 mnt=/mnt/$1
@@ -48,8 +48,8 @@ run_fs() {
   mkdir -p $mnt && mount -o loop /img-$fs $mnt
   export MATCHAPACK_STORE=$mnt/store npm_config_cache=$mnt/npmcache
   local w=$mnt/work; mkdir -p $w/src-small $w/src-ou
-  cp /src/fixtures/small/package.json /src/fixtures/small/package-lock.json $w/src-small/
-  cp /src/fixtures/optional-upward/package.json /src/fixtures/optional-upward/package-lock.json $w/src-ou/
+  cp $FX/small/package.json $FX/small/package-lock.json $w/src-small/
+  cp $FX/optional-upward/package.json $FX/optional-upward/package-lock.json $w/src-ou/
   for f in small ou; do
     # npm's own npm ci, packages placed by the clone server with per-file
     # FICLONE (no directory reflink on Linux).

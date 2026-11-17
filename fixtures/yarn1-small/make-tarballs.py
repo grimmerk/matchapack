@@ -4,7 +4,8 @@ yarn1-scriptpkg, yarn1-many, yarn1-workspaces, yarn1-rootpath; y1-rootpath
 also for the npm fixture rootpath) into
 fixtures/optional-upward/tarballs, where the local tarball server
 (127.0.0.1:48321) serves from, so that the fixtures install without a
-network.
+network. That host is a placeholder: the suites rewrite it to a port of
+their own in a copy (scripts/fixture-server.py).
 
   y1-a 1.0.0      a bin (bin/cli.js, 0755), nested directories, and two
                   dependencies: y1-b 1.0.0 (nested under y1-a, since the root
