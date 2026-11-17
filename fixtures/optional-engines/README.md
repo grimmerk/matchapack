@@ -12,6 +12,8 @@ matchapack installed `lc-eng` and `lc-q` here, one reason npm 10 is not in the
 version gate (NOTES, "npm 10").
 
 The tarballs live with the optional-upward fixture (`lc-eng`'s source is in
-`../optional-upward/pkgs/lc-eng`). Serve them before running the harness:
+`../optional-upward/pkgs/lc-eng`). The suites serve them on a port of their
+own (`scripts/fixture-server.sh`); to run the harness by hand, serve them
+on the placeholder 127.0.0.1:48321:
 
     (cd ../optional-upward/tarballs && python3 -m http.server 48321 --bind 127.0.0.1)

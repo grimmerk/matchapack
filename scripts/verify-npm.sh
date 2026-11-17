@@ -52,14 +52,10 @@ else
   echo "pacote fingerprint $fp: NOT listed in src/npm-fingerprints.json; add it once this passes (NOTES \"G-lite\")"
 fi
 
-# The optional-upward fixture installs from a local tarball server.
-server=
-if ! curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; then
-  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
-  server=$!
-  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz && break; sleep 0.1; done
-fi
-trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
+# The fixtures install from this run's own tarball server, on a free port;
+# $FX is the copy of fixtures/ whose URLs name it (fixture-server.sh).
+. "$here/scripts/fixture-server.sh"; fixtures_serve "$work"
+trap '[ -n "$FX_PID" ] && kill "$FX_PID" 2>/dev/null' EXIT
 
 fail=0
 # Each case's trees go once the case is done (its log stays): on a
@@ -91,24 +87,24 @@ case_() { # name env-assignments... -- source [matchapack install args...]
 # script), also compared with --meta (times outside the runs, uid, gid,
 # xattr names).
 for f in small stale-flags optional-upward optional-engines legacy-peer bundled rootpath; do
-  case_ "$f" -- "$here/fixtures/$f"
+  case_ "$f" -- "$FX/$f"
 done
-case_ workspaces MATCHAPACK_VERIFY_META=1 -- "$here/fixtures/workspaces"
+case_ workspaces MATCHAPACK_VERIFY_META=1 -- "$FX/workspaces"
 # The root's predependencies / dependencies / postdependencies scripts,
 # which npm ci runs (the classic engine did not; NOTES "Inject engine").
-case_ dep-event -- "$here/fixtures/dep-event"
+case_ dep-event -- "$FX/dep-event"
 # A failing optional dependency script: npm ci removes the package.
-case_ optional-script-fail -- "$here/fixtures/optional-script-fail"
+case_ optional-script-fail -- "$FX/optional-script-fail"
 # The same package placed by per-file clones (the Linux placement).
-case_ small-file-clones -- "$here/fixtures/small" --clone-mode file
+case_ small-file-clones -- "$FX/small" --clone-mode file
 # Tarballs where an extractor other than pacote's can give another tree
 # (a path listed twice; .gitignore next to .npmignore): the store is
 # filled through pacote.
-case_ odd-tarballs -- "$here/fixtures/odd-tarballs"
+case_ odd-tarballs -- "$FX/odd-tarballs"
 # script-env records the npm environment scripts see; the user's flags
 # (--no-audit) reach matchapack only through the shell function.
-case_ script-env MATCHAPACK_VERIFY_VIA=wrapper -- "$here/fixtures/script-env"
-case_ legacy-peer-on npm_config_legacy_peer_deps=true -- "$here/fixtures/legacy-peer"
+case_ script-env MATCHAPACK_VERIFY_VIA=wrapper -- "$FX/script-env"
+case_ legacy-peer-on npm_config_legacy_peer_deps=true -- "$FX/legacy-peer"
 for p in "$@"; do
   case_ "project-$(basename "$p")" -- "$p"
 done
@@ -141,7 +137,7 @@ steps_() { # name source [verify-steps.sh options] -- step [-- step ...]
 # after the step must fail the run, by the tree comparison and by the line
 # that names the file.
 st=$work/steps-selftest.txt
-if MATCHAPACK_VERIFY_STEPS_CORRUPT=package-lock.json "$here/scripts/verify-steps.sh" "$here/fixtures/workspaces" "$work/steps-selftest" --start ci -- install > "$st" 2>&1; then
+if MATCHAPACK_VERIFY_STEPS_CORRUPT=package-lock.json "$here/scripts/verify-steps.sh" "$FX/workspaces" "$work/steps-selftest" --start ci -- install > "$st" 2>&1; then
   fail=1; echo "FAIL  steps self-test: a changed byte in package-lock.json was not noticed (log: $st)"
 elif grep -q 'FAIL cmp: package-lock.json differs' "$st" && grep -q 'FAIL diff:' "$st"; then
   echo "ok    steps self-test (a changed byte in package-lock.json: diff and cmp both fail)"
@@ -154,7 +150,7 @@ drop "$work/steps-selftest"
 # plain npm left alone, and two log records for one step each fail the run.
 for t in checker-dies:'the log check could not run' wrong-command:'want update' touch-b:'that plain npm left alone' extra-record:'grew by 2 records' untrust-b:'npm trusts the hidden lockfile'; do
   st=$work/steps-selftest-${t%%:*}.txt
-  if MATCHAPACK_VERIFY_STEPS_SELFTEST=${t%%:*} "$here/scripts/verify-steps.sh" "$here/fixtures/workspaces" "$work/steps-selftest-${t%%:*}" --start ci -- install > "$st" 2>&1; then
+  if MATCHAPACK_VERIFY_STEPS_SELFTEST=${t%%:*} "$here/scripts/verify-steps.sh" "$FX/workspaces" "$work/steps-selftest-${t%%:*}" --start ci -- install > "$st" 2>&1; then
     fail=1; echo "FAIL  steps self-test ${t%%:*}: the run passed (log: $st)"
   # (-a: the log is text even when GNU grep's binary detection would say
   # otherwise; no `grep -q` at the end of a pipe under pipefail, whose early
@@ -168,7 +164,7 @@ for t in checker-dies:'the log check could not run' wrong-command:'want update' 
   fi
   drop "$work/steps-selftest-${t%%:*}"
 done
-small=$here/fixtures/small; ws=$here/fixtures/workspaces
+small=$FX/small; ws=$FX/workspaces
 edit_pkg='node -e "const fs=require(\"fs\");const p=JSON.parse(fs.readFileSync(\"package.json\"));p.dependencies[\"left-pad\"]=\"1.3.0\";delete p.dependencies.lodash;fs.writeFileSync(\"package.json\",JSON.stringify(p,null,2)+\"\\n\")"'
 # Starting without node_modules.
 steps_ fresh-install         "$small" -- CLONES=some install
@@ -198,11 +194,11 @@ steps_ no-hidden-lockfile    "$small" --start ci --pre 'rm -f node_modules/.pack
 steps_ no-package-lock       "$small" --start ci -- CLONES=some install --no-package-lock left-pad@1.3.0
 # npm fails after packages were placed (an install script exits 1): the
 # same status, npm's rollback, both trees equal.
-steps_ fails-in-script       "$small" --start ci -- install left-pad@1.3.0 http://127.0.0.1:48321/lc-fail-1.0.0.tgz
+steps_ fails-in-script       "$small" --start ci -- install left-pad@1.3.0 "$FX_URL/lc-fail-1.0.0.tgz"
 # The flags the owner named (passed on to npm; each must be plain npm's).
 steps_ flag-force            "$small" --start ci -- CLONES=1 install --force left-pad@1.3.0
 steps_ flag-legacy-peer-deps "$small" --start ci -- CLONES=1 install --legacy-peer-deps left-pad@1.3.0
-steps_ legacy-peer-nolock    "$here/fixtures/legacy-peer" --start nolock -- npm_config_before=$day CLONES=some install --legacy-peer-deps
+steps_ legacy-peer-nolock    "$FX/legacy-peer" --start nolock -- npm_config_before=$day CLONES=some install --legacy-peer-deps
 steps_ flag-save-peer        "$small" --start ci -- CLONES=1 install --save-peer left-pad@1.3.0
 steps_ flag-save-optional    "$small" --start ci -- CLONES=1 install --save-optional left-pad@1.3.0
 # Workspaces (local tarballs).
@@ -271,7 +267,7 @@ steps_ hidden-lockfile-behind "$small" --start ci --pre 'node -e "const fs=requi
 # --prefix: started in a directory with its own package.json, pointing npm
 # at the project.
 steps_ prefix-elsewhere      "$small" --start ci --pre 'mkdir other && echo "{\"name\":\"other\",\"version\":\"1.0.0\"}" > other/package.json' -- @other CLONES=1 install --prefix .. left-pad@1.3.0
-steps_ bundled-reinstall     "$here/fixtures/bundled" --start ci --pre 'rm -rf node_modules/lc-bundler' -- CLONES=some install
+steps_ bundled-reinstall     "$FX/bundled" --start ci --pre 'rm -rf node_modules/lc-bundler' -- CLONES=some install
 # The hook not installed at all: the tree is npm's, and the one package
 # npm added is counted as unseen.
 steps_ hook-none-add         "$small" --start ci -- MATCHAPACK_INJECT_HOOK=none CLONES=0 UNSEEN=1 install left-pad@1.3.0
@@ -283,7 +279,7 @@ MATCHAPACK_VERIFY_META=1 steps_ meta "$ws" --start ci -- CLONES=1 install left-p
 if [ "${npm_version%%.*}" -ge 12 ]; then
   # npm 12 patchedDependencies: the patch file changed, npm install
   # re-extracts and re-patches; the store entry stays pacote's.
-  steps_ npm12-patch "$here/fixtures/npm12-patch" --start ci --pre "sed -i.bak 's/patched by gl-patch-fixture/patched again by gl-patch-fixture/' patches/is-number@7.0.0.patch && rm patches/is-number@7.0.0.patch.bak" -- install
+  steps_ npm12-patch "$FX/npm12-patch" --start ci --pre "sed -i.bak 's/patched by gl-patch-fixture/patched again by gl-patch-fixture/' patches/is-number@7.0.0.patch && rm patches/is-number@7.0.0.patch.bak" -- install
 fi
 
 # Sampled verification of real runs (scripts/verify-sample.sh, #77): a
@@ -302,7 +298,7 @@ ns_bad() { fail=1; echo "FAIL  sample: $1"; sed 's/^/      /' "$ns/out" | tail -
 # ns_project <name> <fixture> [git]: a copy of the fixture's package.json and
 # package-lock.json in $ns/<name> (a git repository with them committed).
 ns_project() {
-  local d=$ns/$1; mkdir -p "$d"; cp -p "$here/fixtures/$2/package.json" "$here/fixtures/$2/package-lock.json" "$d/"
+  local d=$ns/$1; mkdir -p "$d"; cp -p "$FX/$2/package.json" "$FX/$2/package-lock.json" "$d/"
   if [ "${3-}" = git ]; then
     git -C "$d" init -q && git -C "$d" add package.json package-lock.json \
       && git -C "$d" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m fixture
@@ -332,7 +328,7 @@ ns_alone() {
   ns_logdir=$ns/alone ns_sample -- 1
   got=$(nrec alone/verify.jsonl 'r["result"] + ": " + r.get("reason", "")')
 }
-add=http://127.0.0.1:48321/y1-c-1.0.0.tgz
+add=$FX_URL/y1-c-1.0.0.tgz
 # npm ci, the full install, replayed with its logged words.
 pc=$(ns_project ci optional-upward)
 ns_npm "$pc" ci --ignore-scripts
