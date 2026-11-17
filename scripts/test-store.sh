@@ -167,12 +167,12 @@ full_install "$p5" && grep -q 'in use by a running install' "$p5/gc.txt" && ok "
 p6=$(project p6)
 hold "$store/lock" ex
 install "$p6" & inst=$!
-for _ in $(seq 1200); do grep -q 'waiting for a `matchapack store` command' "$work/out" 2>/dev/null && break; sleep 0.05; done
+for _ in $(seq 1200); do grep -q 'waiting for a `matchapack store` or `matchapack uninstall` command' "$work/out" 2>/dev/null && break; sleep 0.05; done
 sleep 1   # time it would need to get past the lock if it did not wait
 kill -0 "$inst" 2>/dev/null && waited=yes || waited=no
 release
 wait "$inst"; rc=$?
-[ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `matchapack store` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
+[ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `matchapack store` or `matchapack uninstall` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
 
 # 12. An entry replaced by a symlink: verify reports it, --fix removes it,
 #     and an install never clones it (npm extracts that package itself
