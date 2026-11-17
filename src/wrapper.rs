@@ -137,7 +137,7 @@ fn replay_state(inject: Option<&Value>) -> serde_json::Map<String, Value> {
 /// (zsh's EXTENDED_GLOB included: `^`, `#`, `~`; fish's `%self`) gives a
 /// meaning, and it neither starts with `=` (zsh's `=cmd`) nor holds `==`
 /// (zsh's MAGIC_EQUAL_SUBST expands `--opt==cmd`); single-quoted otherwise.
-fn shell_quote(a: &str) -> String {
+pub(crate) fn shell_quote(a: &str) -> String {
     if !a.is_empty() && !a.starts_with('=') && !a.contains("==") && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_=.,/:@+".contains(&b)) {
         a.to_string()
     } else {

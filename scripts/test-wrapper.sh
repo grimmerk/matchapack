@@ -180,5 +180,12 @@ for sh in zsh bash; do
   check "init-$sh" "eval \"\$(matchapack init)\" in $sh (detected), then npm ci → matchapack" $r "$d"
 done
 
+# 25. `init --alias ls` (a command on PATH): from an rc line (stdout a pipe)
+# nothing on stderr; by hand (stdout a terminal, a pty here) the warning.
+piped=$(env PATH="$bin_dir:$PATH" matchapack init zsh --alias ls 2>&1 >/dev/null)
+tty=$(env PATH="$bin_dir:$PATH" python3 -c 'import pty, sys; pty.spawn(sys.argv[1:])' matchapack init zsh --alias ls 2>&1)
+[ -z "$piped" ] && printf '%s\n' "$tty" | grep -q 'warning: `ls` is also' && printf '%s\n' "$tty" | grep -q '^alias ls=matchapack' && r=ok || r=bad
+check init-alias-warning "init --alias ls: no warning when stdout is a pipe (an rc line), the warning on a terminal" $r "$work/none"
+
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

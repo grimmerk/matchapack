@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Store maintenance tests: project records, `store gc`, `store verify`, the
-# store lock and the tmp cleanup, end to end with the release binary.
+# store lock, the tmp cleanup and `uninstall`, end to end with the release
+# binary.
 #   test-store.sh <work-dir>
 # Uses its own store and log directory, never the real ones.
 # `store verify` extracts with the pacote of the npm on PATH.
@@ -166,12 +167,12 @@ full_install "$p5" && grep -q 'in use by a running install' "$p5/gc.txt" && ok "
 p6=$(project p6)
 hold "$store/lock" ex
 install "$p6" & inst=$!
-for _ in $(seq 1200); do grep -q 'waiting for a `matchapack store` command' "$work/out" 2>/dev/null && break; sleep 0.05; done
+for _ in $(seq 1200); do grep -q 'waiting for a `matchapack store` or `matchapack uninstall` command' "$work/out" 2>/dev/null && break; sleep 0.05; done
 sleep 1   # time it would need to get past the lock if it did not wait
 kill -0 "$inst" 2>/dev/null && waited=yes || waited=no
 release
 wait "$inst"; rc=$?
-[ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `matchapack store` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
+[ $rc = 0 ] && [ $waited = yes ] && grep -q 'waiting for a `matchapack store` or `matchapack uninstall` command' "$work/out" && [ -d "$p6/node_modules/lodash" ] && ok "lock: an install waits for a running gc, then completes" || bad "lock: install during gc (rc=$rc, still running at release: $waited)"
 
 # 12. An entry replaced by a symlink: verify reports it, --fix removes it,
 #     and an install never clones it (npm extracts that package itself
@@ -271,6 +272,56 @@ print(h.hexdigest())' "$1"; }
 else
   echo "SKIP adopt: the fixtures' tarball server does not answer ($FX_URL)"
 fi
+
+# 15. `matchapack uninstall`, on a home, store, log and settings directory
+#     of its own (every path under $work; checked before each run): the dry
+#     run changes nothing; --yes is refused while an install holds the store
+#     lock; then it removes the three directories, leaves the startup file
+#     alone (naming its line), and the project's files read the same and
+#     still load.
+#     fixtures/small comes from the registry: no tarball server needed;
+#     npm's cache is the scratch home's.
+{
+  uh=$work/uninstall-home; ust=$uh/.cache/matchapack/store
+  [ -d "$uh" ] && chmod -R u+w "$uh"
+  rm -rf "${uh:?}" "${work:?}/uninstall-project"
+  mkdir -p "$uh/.config/matchapack" "$uh/.cargo/bin"
+  printf 'export PATH="$HOME/.cargo/bin:$PATH"\ncommand -v matchapack >/dev/null && eval "$(matchapack init zsh --alias mp)"\n' > "$uh/.zshrc"
+  echo "$work" > "$uh/.config/matchapack/paths"
+  # Every location uninstall resolves, from this home only.
+  uenv() { env -u ZDOTDIR -u XDG_CONFIG_HOME -u CARGO_HOME -u MATCHAPACK_STORE -u MATCHAPACK_LOG_DIR -u MATCHAPACK_CONFIG_DIR -u MATCHAPACK_PATHS HOME="$uh" "$@"; }
+  uninstall() {
+    case $uh in "$work"/*) ;; *) echo "refusing: $uh is not under $work"; return 99 ;; esac
+    uenv "$bin" uninstall "$@" > "$work/out" 2>&1
+  }
+  snap() { find "$uh" -exec stat -f '%N %HT %z %p %m' {} + 2>/dev/null | sort; }
+  up=$(project uninstall-project)
+  # `matchapack install` writes no trial log (`npm ci` through the shell
+  # function does); a line stands in for one.
+  uenv "$bin" install "$up" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1 && [ -d "$ust/v2" ] \
+    && printf '{"outcome":"installed"}\n' > "$uh/.cache/matchapack/log.jsonl" || bad "uninstall: setup install into the scratch home"
+  usum() { (cd "$up" && find node_modules -type f -exec shasum {} + | sort | shasum); }
+  ubefore=$(usum)
+  # 15a. The dry run (the default) changes nothing.
+  s0=$(snap)
+  uninstall && [ "$(snap)" = "$s0" ] && grep -q "store: $ust (the default place): would remove" "$work/out" && grep -q "^  $uh/.zshrc:2: command -v matchapack" "$work/out" \
+    && grep -q 'recorded as used by 1 project' "$work/out" \
+    && ok "uninstall: the dry run names what it would remove and the rc line, and writes nothing" || bad "uninstall: dry run"
+  # 15a'. Without HOME: refused with a message, not a panic, nothing written.
+  env -u HOME "$bin" uninstall --yes > "$work/out" 2>&1; rc=$?
+  [ $rc != 0 ] && grep -q 'HOME is not set' "$work/out" && ! grep -q panicked "$work/out" && [ "$(snap)" = "$s0" ] \
+    && ok "uninstall without HOME: refused with a message" || bad "uninstall without HOME (rc=$rc)"
+  # 15b. Refused while an install holds the store (a shared lock, as installs take it).
+  hold "$ust/lock" sh
+  uninstall --yes; rc=$?
+  release
+  [ $rc = 1 ] && grep -q 'an install is using the store' "$work/out" && [ "$(snap)" = "$s0" ] \
+    && ok "uninstall --yes: refused while an install holds the store, nothing removed" || bad "uninstall --yes during an install (rc=$rc)"
+  # 15c. The real run.
+  uninstall --yes && [ ! -e "$uh/.cache/matchapack" ] && [ ! -e "$uh/.config/matchapack" ] && grep -q 'command -v matchapack' "$uh/.zshrc" \
+    && grep -q "free space on the store's volume" "$work/out" && [ "$(usum)" = "$ubefore" ] && (cd "$up" && node -e 'require("lodash")') \
+    && ok "uninstall --yes: store, logs and settings removed, the rc file untouched, the project's files the same and loadable" || bad "uninstall --yes"
+}
 
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

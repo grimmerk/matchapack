@@ -43,7 +43,7 @@ pub struct Report {
     pub recent: usize,
 }
 
-fn has_node_modules(dir: &Path) -> bool {
+pub fn has_node_modules(dir: &Path) -> bool {
     dir.join("node_modules").is_dir()
 }
 

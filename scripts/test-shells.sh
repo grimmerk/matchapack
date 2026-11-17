@@ -47,9 +47,14 @@ cat > "$tc/matchapack" <<'STUB'
 #!/bin/sh
 case "$1" in
   init) case "$2" in
-          fish) cat /src/shell/matchapack.fish; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.fish; exit 0 ;;
-          zsh | bash) cat /src/shell/matchapack.sh; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.sh; exit 0 ;;
-        esac ;;
+          fish) cat /src/shell/matchapack.fish; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.fish; ext=fish ;;
+          zsh | bash) cat /src/shell/matchapack.sh; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.sh; ext=sh ;;
+          *) exit 2 ;;
+        esac
+        # --alias NAME: the binary appends shell/matchapack-alias.{sh,fish}
+        # with the name in place of the placeholder (it checks the name).
+        [ "${3-}" = --alias ] && sed "s/__MATCHAPACK_ALIAS__/$4/g" "/src/shell/matchapack-alias.$ext"
+        exit 0 ;;
   npm) shift; printf 'MATCHAPACK'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; exit "${STUB_RC:-0}" ;;
   yarn) shift; printf 'MATCHAPACK-YARN'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; exit "${STUB_RC:-0}" ;;
 esac
@@ -164,8 +169,116 @@ YARN [-h] [install]" "yarn --version; yarn -v; yarn --help; yarn -h install"
   check yarn-status "MATCHAPACK-YARN [install]
 5"   "STUB_RC=5 yarn install; echo $st"
   check yarn-no-binary "YARN" "yarn" "$np:$PATH"
+
+  # The binary removed after the functions were loaded (`matchapack
+  # uninstall`, then `cargo uninstall`): npm and yarn go to plain npm and
+  # Yarn, also where the shell hashed matchapack's path on an earlier call
+  # (bash: `command -v` answers from that table).
+  rb=/tmp/stub-removable; mkdir -p "$rb"; cp "$tc/matchapack" "$rb/"
+  os=Linux
+  check removed-binary "MATCHAPACK [ci]
+NPM [ci]" "npm ci; rm -f $rb/matchapack; npm ci" "$rb:$np:$PATH"
+  cp "$tc/matchapack" "$rb/"
+  os=Darwin
+  check removed-binary-yarn "MATCHAPACK-YARN [install]
+YARN [install]" "yarn install; rm -f $rb/matchapack; yarn install" "$rb:$np:$PATH"
+  cp "$tc/matchapack" "$rb/"
+
+  # Your own shell function called matchapack (no binary on PATH): npm and
+  # yarn route to it (only a path is checked with -x).
+  plain_setup=$setup
+  case $sh in
+    fish) setup="function matchapack; $tc/matchapack \$argv; end; $plain_setup" ;;
+    *) setup="function matchapack { $tc/matchapack \"\$@\"; }; $plain_setup" ;;
+  esac
+  os=Linux
+  check own-function "MATCHAPACK [ci] [a b]" "npm ci 'a b'" "$np:$PATH"
+  os=Darwin
+  check own-function-yarn "MATCHAPACK-YARN [install]" "yarn install" "$np:$PATH"
+  setup=$plain_setup
+
+  # bash and zsh (fish has no set -e): a shell under `set -e` whose
+  # matchapack is gone runs plain npm and yarn, it does not exit; and an
+  # alias called matchapack defined after the integration is not routed to
+  # (an alias is not expanded inside the functions): plain npm and yarn.
+  if [ "$sh" != fish ]; then
+    os=Linux
+    check set-e "NPM [ci]
+after" "set -e; rm -f $rb/matchapack; npm ci; echo after" "$rb:$np:$PATH"
+    cp "$tc/matchapack" "$rb/"
+    os=Darwin
+    check set-e-yarn "YARN [install]
+after" "set -e; rm -f $rb/matchapack; yarn install; echo after" "$rb:$np:$PATH"
+    cp "$tc/matchapack" "$rb/"
+    # A relative PATH entry: `command -v` answers `bin/matchapack`, which is
+    # routed (an executable file).
+    mkdir -p /tmp/relpath/bin; cp "$tc/matchapack" /tmp/relpath/bin/
+    plain_setup=$setup
+    setup="cd /tmp/relpath; $plain_setup"
+    os=Darwin
+    check relative-path "MATCHAPACK [ci]
+MATCHAPACK-YARN [install]" "npm ci; yarn install" "bin:$np:$PATH"
+    setup=$plain_setup
+    # Two aliases: one whose text holds a path, one that does not (only a
+    # path that `command -v` prints is checked with -x); bash expands
+    # aliases with expand_aliases, as an interactive shell does.
+    ea=; [ "$sh" = bash ] && ea='shopt -s expand_aliases; '
+    check alias-later "NPM [ci]
+YARN [install]
+NPM [ci]
+YARN [install]" "${ea}rm -f $rb/matchapack; alias matchapack=/nonexistent/matchapack; npm ci; yarn install; alias matchapack=nosuchcommand; npm ci; yarn install" "$rb:$np:$PATH"
+    cp "$tc/matchapack" "$rb/"
+  fi
+
+  # `init --alias mp`: mp runs matchapack, with its arguments unchanged;
+  # without --alias no such name is defined. bash expands aliases only in
+  # interactive shells (a startup file's case) or with expand_aliases, and
+  # only in commands parsed after the definition, as typed ones are: hence
+  # the newline (bash parses a -c string line by line) and eval (zsh parses
+  # the whole string first).
+  plain_setup=$setup
+  case $sh in
+    fish) setup='type -q matchapack; and matchapack init fish --alias mp | source'; defined='type -q mp; and echo defined; or echo none' ;;
+    zsh)  setup='command -v matchapack >/dev/null && eval "$(matchapack init zsh --alias mp)"'; defined='whence -w mp >/dev/null && echo defined || echo none' ;;
+    bash) setup='shopt -s expand_aliases; command -v matchapack >/dev/null && eval "$(matchapack init bash --alias mp)"'; defined='type mp >/dev/null 2>&1 && echo defined || echo none' ;;
+  esac
+  nl='
+'
+  check alias-mac   "MATCHAPACK [ci] [a b] []
+MATCHAPACK-YARN [install] [--frozen-lockfile]
+MATCHAPACK [ci]" "${nl}eval 'mp npm ci \"a b\" \"\"'; eval 'mp yarn install --frozen-lockfile'; npm ci"
+  check alias-status "MATCHAPACK [ci]
+3" "${nl}eval 'STUB_RC=3 mp npm ci'; echo $st"
+  os=Linux
+  check alias-linux "MATCHAPACK [install] [x]
+defined" "${nl}eval 'mp npm install x'; $defined"
+  setup=$plain_setup
+  check no-alias "none" "${nl}$defined"
   unset os
 done
+
+# The names `init --alias` refuses (src/main.rs SH_WORDS, ZSH_WORDS,
+# FISH_WORDS) cover every builtin and reserved word these shells report
+# that an alias name could be (letters, digits, `-`, `_`).
+words() { awk "/^const $1: /,/^\];/" /src/src/main.rs | grep -o '"[^"]*"' | tr -d '"'; }
+aliasable() { case $1 in '' | -*) return 1 ;; esac; [ -z "$(printf %s "$1" | tr -d 'A-Za-z0-9_-')" ]; }
+sh_w=$(words SH_WORDS); zsh_w=$(words ZSH_WORDS); fish_w=$(words FISH_WORDS)
+# in_list WORD LIST: LIST one word per line (no pipe: pipefail would count a
+# writer cut short by grep -q as "not found").
+in_list() { case "
+$2
+" in *"
+$1
+"*) return 0 ;; esac; return 1; }
+missing=; set -f
+for w in $(bash -c 'compgen -k; compgen -b'); do aliasable "$w" && ! in_list "$w" "$sh_w" && missing="$missing bash:$w"; done
+for w in $(zsh -fc 'print -l ${(k)builtins} ${(k)reswords}'); do aliasable "$w" && ! in_list "$w" "$sh_w
+$zsh_w" && missing="$missing zsh:$w"; done
+for w in $(fish --no-config -c 'builtin -n'); do aliasable "$w" && ! in_list "$w" "$fish_w" && missing="$missing fish:$w"; done
+set +f
+n_sh=$(printf '%s\n' "$sh_w" | wc -l); n_fish=$(printf '%s\n' "$fish_w" | wc -l)
+if [ -z "$missing" ] && [ "$n_sh" -ge 70 ] && [ "$n_fish" -ge 50 ]; then pass=$((pass+1)); echo "PASS alias-words: every builtin and reserved word of bash, zsh and fish is refused by init --alias"
+else fail=$((fail+1)); echo "FAIL alias-words: not refused:$missing (lists read: $n_sh, $n_fish)"; fi
 fi # stub cases
 
 if [ -n "$real" ]; then
@@ -228,6 +341,15 @@ if [ -n "$real" ]; then
   rfish "$t" 'type -t npm; functions -q yarn; and echo yarn-defined; or echo no-yarn-function'
   [ "$out" = "function
 no-yarn-function" ]; rcheck "init: npm is a function, no yarn function on Linux" $? "[$out]"
+
+  # init --alias with the real binary: mp is matchapack; a builtin's name is
+  # refused (status 2) and the npm function is still defined.
+  out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish --alias mp | source; mp --version; type -t npm' 2>&1)
+  printf '%s\n' "$out" | head -1 | grep -q '^matchapack ' && [ "$(printf '%s\n' "$out" | tail -1)" = function ]
+  rcheck "init --alias mp: mp runs the real matchapack" $? "[$out]"
+  out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish --alias string | source; echo "pipestatus $pipestatus"; type -t npm' 2>&1)
+  printf '%s\n' "$out" | grep -q 'builtin or reserved word of fish' && printf '%s\n' "$out" | grep -q '^pipestatus 2 0$' && [ "$(printf '%s\n' "$out" | tail -1)" = function ]
+  rcheck "init --alias string: refused (status 2), the npm function still defined" $? "[$out]"
 
   d=$(rproj ci npm); n0=$(logn)
   rfish "$d" 'npm ci --no-audit --no-fund; echo "status $status"'
