@@ -97,7 +97,7 @@ impl Integrity {
     }
 }
 
-fn flock(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
+pub(crate) fn flock(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
     if unsafe { libc::flock(f.as_raw_fd(), op) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
@@ -111,11 +111,11 @@ fn flock_retry(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
     }
 }
 
-fn unsupported(e: &std::io::Error) -> bool {
+pub(crate) fn unsupported(e: &std::io::Error) -> bool {
     matches!(e.raw_os_error(), Some(n) if n == libc::ENOTSUP || n == libc::EOPNOTSUPP)
 }
 
-fn would_block(e: &std::io::Error) -> bool {
+pub(crate) fn would_block(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
@@ -253,7 +253,7 @@ impl Store {
     }
 
     pub fn dir_for(&self, i: &Integrity) -> PathBuf {
-        self.root.join(LAYOUT).join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
+        entry_dir(&self.root, i)
     }
 
     fn size_file(&self, i: &Integrity) -> PathBuf {
@@ -871,6 +871,11 @@ const UMASK: u32 = 0o022;
 /// v1 → v2: drop directory entries (pacote only creates parents of files) and
 /// the `.gitignore` → `.npmignore` rename.
 pub const LAYOUT: &str = "v2";
+
+/// An entry's directory in the store at `root`.
+pub fn entry_dir(root: &Path, i: &Integrity) -> PathBuf {
+    root.join(LAYOUT).join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
+}
 
 /// Tests only (the classic engine's extractor, removed in PR C2; installs
 /// and `store verify` extract with npm's own pacote). Extract like pacote (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`):
