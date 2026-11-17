@@ -38,7 +38,7 @@ function npm {
         mp=$(command -v matchapack 2>/dev/null) || mp=
       fi
       case $mp in
-        */*) [ -x "$mp" ] || mp= ;;
+        /*) [ -x "$mp" ] || mp= ;;
         matchapack) ;;
         *) mp= ;;
       esac

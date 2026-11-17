@@ -210,8 +210,14 @@ after" "set -e; rm -f $rb/matchapack; npm ci; echo after" "$rb:$np:$PATH"
     check set-e-yarn "YARN [install]
 after" "set -e; rm -f $rb/matchapack; yarn install; echo after" "$rb:$np:$PATH"
     cp "$tc/matchapack" "$rb/"
+    # Two aliases: one whose text holds a path, one that does not (only a
+    # path that `command -v` prints is checked with -x); bash expands
+    # aliases with expand_aliases, as an interactive shell does.
+    ea=; [ "$sh" = bash ] && ea='shopt -s expand_aliases; '
     check alias-later "NPM [ci]
-YARN [install]" "rm -f $rb/matchapack; alias matchapack=/nonexistent/matchapack; npm ci; yarn install" "$rb:$np:$PATH"
+YARN [install]
+NPM [ci]
+YARN [install]" "${ea}rm -f $rb/matchapack; alias matchapack=/nonexistent/matchapack; npm ci; yarn install; alias matchapack=nosuchcommand; npm ci; yarn install" "$rb:$np:$PATH"
     cp "$tc/matchapack" "$rb/"
   fi
 
