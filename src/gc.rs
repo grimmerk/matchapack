@@ -62,7 +62,20 @@ fn node_modules_state(dir: &Path) -> std::result::Result<bool, String> {
             if cfg!(target_os = "macos") && parts.next().is_some_and(|c| c.as_os_str() == "Volumes") {
                 if let Some(vol) = parts.next() {
                     let vol = Path::new("/Volumes").join(vol.as_os_str());
-                    if !vol.exists() {
+                    // Mounted when it is on another device than /Volumes
+                    // itself: an unmounted volume can leave its empty
+                    // mount-point directory behind, so existing is not
+                    // enough. The boot volume's entry is a link to / (the
+                    // same device as /Volumes): a link counts as mounted
+                    // when its target exists.
+                    use std::os::unix::fs::MetadataExt;
+                    let is_link = std::fs::symlink_metadata(&vol).is_ok_and(|m| m.file_type().is_symlink());
+                    let mounted = match (std::fs::metadata(&vol), std::fs::metadata("/Volumes")) {
+                        (Ok(_), _) if is_link => true,
+                        (Ok(v), Ok(root)) => v.dev() != root.dev(),
+                        _ => false,
+                    };
+                    if !mounted {
                         return Err(format!("{} is not mounted", vol.display()));
                     }
                 }
