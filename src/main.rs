@@ -318,13 +318,14 @@ fn init_script(shell: &str, macos: bool, alias: Option<&str>) -> String {
     s
 }
 
-/// Builtins and reserved words (bash 5.2, zsh 5.9, fish 3.6 plus 4.0's
-/// additions, read from the shells themselves): an alias or function of
+/// Builtins and reserved words (bash 5.2 `compgen -k -b`, zsh 5.9
+/// `${(k)builtins} ${(k)reswords}`, fish 3.6 `builtin -n` plus 4.0's
+/// additions; scripts/test-shells.sh checks the lists against the shells): an alias or function of
 /// such a name would shadow the shell's own, or not be callable at all.
 /// bash refuses SH_WORDS; zsh SH_WORDS and ZSH_WORDS (a few bash-only names
 /// too, kept strict for startup files shared by both); fish FISH_WORDS.
 const SH_WORDS: &[&str] = &[
-    "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command", "compgen", "complete", "compopt", "continue", "coproc", "declare", "dirs",
+    "alias", "bg", "bind", "break", "builtin", "caller", "case", "cd", "command", "compgen", "complete", "compopt", "continue", "coproc", "declare", "dirs",
     "disown", "do", "done", "echo", "elif", "else", "enable", "esac", "eval", "exec", "exit", "export", "false", "fc", "fg", "fi", "for", "function",
     "getopts", "hash", "help", "history", "if", "in", "jobs", "kill", "let", "local", "logout", "mapfile", "popd", "printf", "pushd", "pwd", "read",
     "readarray", "readonly", "return", "select", "set", "shift", "shopt", "source", "suspend", "test", "then", "time", "times", "trap", "true", "type",
@@ -470,7 +471,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Uninstall { yes } => {
-            let code = uninstall::run(&uninstall::Env::from_process(), yes, &mut std::io::stdout().lock())?;
+            let code = uninstall::run(&uninstall::Env::from_process()?, yes, &mut std::io::stdout().lock())?;
             std::process::exit(code);
         }
         Cmd::Diff { a, b, ignore, limit, paths, classes, meta, a_run, b_run, a_cache, b_cache, normalize_roots } => {
@@ -685,6 +686,10 @@ mod tests {
     #[test]
     fn init_alias() {
         for sh in ["zsh", "bash", "fish"] {
+            let kws: &[&str] = if sh == "fish" { &["case", "if", "for", "while", "function", "end", "begin", "switch"] } else { &["case", "esac", "if", "then", "fi", "for", "while", "function", "time"] };
+            for kw in kws {
+                assert!(check_alias(kw, sh).is_err(), "{sh}: reserved word {kw}");
+            }
             for ok in ["mp", "m-p", "m_p", "mp2", "MP", "x"] {
                 assert_eq!(check_alias(ok, sh), Ok(()), "{sh} {ok}");
             }

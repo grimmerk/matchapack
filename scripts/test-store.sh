@@ -304,9 +304,13 @@ fi
   ubefore=$(usum)
   # 15a. The dry run (the default) changes nothing.
   s0=$(snap)
-  uninstall && [ "$(snap)" = "$s0" ] && grep -q "store: $ust: would remove" "$work/out" && grep -q "^  $uh/.zshrc:2: command -v matchapack" "$work/out" \
+  uninstall && [ "$(snap)" = "$s0" ] && grep -q "store: $ust (the default place): would remove" "$work/out" && grep -q "^  $uh/.zshrc:2: command -v matchapack" "$work/out" \
     && grep -q 'recorded as used by 1 project' "$work/out" \
     && ok "uninstall: the dry run names what it would remove and the rc line, and writes nothing" || bad "uninstall: dry run"
+  # 15a'. Without HOME: refused with a message, not a panic, nothing written.
+  env -u HOME "$bin" uninstall --yes > "$work/out" 2>&1; rc=$?
+  [ $rc != 0 ] && grep -q 'HOME is not set' "$work/out" && ! grep -q panicked "$work/out" && [ "$(snap)" = "$s0" ] \
+    && ok "uninstall without HOME: refused with a message" || bad "uninstall without HOME (rc=$rc)"
   # 15b. Refused while an install holds the store (a shared lock, as installs take it).
   hold "$ust/lock" sh
   uninstall --yes; rc=$?

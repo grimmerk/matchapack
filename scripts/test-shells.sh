@@ -170,6 +170,20 @@ YARN [-h] [install]" "yarn --version; yarn -v; yarn --help; yarn -h install"
 5"   "STUB_RC=5 yarn install; echo $st"
   check yarn-no-binary "YARN" "yarn" "$np:$PATH"
 
+  # The binary removed after the functions were loaded (`matchapack
+  # uninstall`, then `cargo uninstall`): npm and yarn go to plain npm and
+  # Yarn, also where the shell hashed matchapack's path on an earlier call
+  # (bash: `command -v` answers from that table).
+  rb=/tmp/stub-removable; mkdir -p "$rb"; cp "$tc/matchapack" "$rb/"
+  os=Linux
+  check removed-binary "MATCHAPACK [ci]
+NPM [ci]" "npm ci; rm -f $rb/matchapack; npm ci" "$rb:$np:$PATH"
+  cp "$tc/matchapack" "$rb/"
+  os=Darwin
+  check removed-binary-yarn "MATCHAPACK-YARN [install]
+YARN [install]" "yarn install; rm -f $rb/matchapack; yarn install" "$rb:$np:$PATH"
+  cp "$tc/matchapack" "$rb/"
+
   # `init --alias mp`: mp runs matchapack, with its arguments unchanged;
   # without --alias no such name is defined. bash expands aliases only in
   # interactive shells (a startup file's case) or with expand_aliases, and
@@ -196,6 +210,29 @@ defined" "${nl}eval 'mp npm install x'; $defined"
   check no-alias "none" "${nl}$defined"
   unset os
 done
+
+# The names `init --alias` refuses (src/main.rs SH_WORDS, ZSH_WORDS,
+# FISH_WORDS) cover every builtin and reserved word these shells report
+# that an alias name could be (letters, digits, `-`, `_`).
+words() { awk "/^const $1: /,/^\];/" /src/src/main.rs | grep -o '"[^"]*"' | tr -d '"'; }
+aliasable() { case $1 in '' | -*) return 1 ;; esac; [ -z "$(printf %s "$1" | tr -d 'A-Za-z0-9_-')" ]; }
+sh_w=$(words SH_WORDS); zsh_w=$(words ZSH_WORDS); fish_w=$(words FISH_WORDS)
+# in_list WORD LIST: LIST one word per line (no pipe: pipefail would count a
+# writer cut short by grep -q as "not found").
+in_list() { case "
+$2
+" in *"
+$1
+"*) return 0 ;; esac; return 1; }
+missing=; set -f
+for w in $(bash -c 'compgen -k; compgen -b'); do aliasable "$w" && ! in_list "$w" "$sh_w" && missing="$missing bash:$w"; done
+for w in $(zsh -fc 'print -l ${(k)builtins} ${(k)reswords}'); do aliasable "$w" && ! in_list "$w" "$sh_w
+$zsh_w" && missing="$missing zsh:$w"; done
+for w in $(fish --no-config -c 'builtin -n'); do aliasable "$w" && ! in_list "$w" "$fish_w" && missing="$missing fish:$w"; done
+set +f
+n_sh=$(printf '%s\n' "$sh_w" | wc -l); n_fish=$(printf '%s\n' "$fish_w" | wc -l)
+if [ -z "$missing" ] && [ "$n_sh" -ge 70 ] && [ "$n_fish" -ge 50 ]; then pass=$((pass+1)); echo "PASS alias-words: every builtin and reserved word of bash, zsh and fish is refused by init --alias"
+else fail=$((fail+1)); echo "FAIL alias-words: not refused:$missing (lists read: $n_sh, $n_fish)"; fi
 fi # stub cases
 
 if [ -n "$real" ]; then

@@ -899,12 +899,19 @@ packages again.
   (`MATCHAPACK_STORE`, `MATCHAPACK_LOG_DIR`, `MATCHAPACK_CONFIG_DIR`, else
   `~/.cache/matchapack/store`, `~/.cache/matchapack`,
   `~/.config/matchapack`), and only the names matchapack makes in them. It
-  refuses `/`, the home directory or a parent of it, a symbolic link, a
-  store without its `v2/` layout directory, and a directory one of those
-  variables names that holds anything else; in a default directory other
-  names are left in place. Any refusal removes nothing. Refused too while an
-  install holds the store lock or a matchapack process holds a directory in
-  the store's `tmp/` (the Yarn engine's helper files). Space: removing the
+  refuses a relative path or one with `..`, `/`, the home directory or a
+  parent of it, a symbolic link, a store that is neither a store with its
+  `v2/` layout directory nor one only the Yarn engine has used (`tmp/` with
+  matchapack's run directories, `lock`, `projects`), and a directory one of
+  those variables names that holds anything else; in a default directory
+  other names are left in place. Any refusal removes nothing. Refused too
+  while an install holds the store lock or a matchapack process holds a
+  directory in the store's `tmp/` (the Yarn engine's helper files). Each
+  directory is removed through one descriptor opened without following
+  links and checked to be the directory it planned for; the store is first
+  moved aside under its lock, so an install that was waiting gets a fresh
+  store. Open shells run plain npm and Yarn once the binary is gone (a
+  shell whose function came from an older build: `hash -r`). Space: removing the
   store frees only the blocks no project shares; the dry run estimates it
   from the project records, the real run prints the volume's free space
   before and after. `~/.cache/matchapack/backup` (backups

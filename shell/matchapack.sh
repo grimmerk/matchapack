@@ -24,7 +24,9 @@ function npm {
     install | i | in | ins | inst | insta | instal | isnt | isnta | isntal | isntall | add | \
     update | up | upgrade | udpate | u | \
     uninstall | un | unlink | remove | rm | r)
-      if [ "${MATCHAPACK-1}" != 0 ] && command -v matchapack >/dev/null 2>&1; then
+      # -x on the path: bash's `command -v` answers from its hash table, so
+      # a binary removed since (`matchapack uninstall`) would still be found.
+      if [ "${MATCHAPACK-1}" != 0 ] && [ -x "$(command -v matchapack 2>/dev/null)" ]; then
         matchapack npm "$@"
         return $?
       fi

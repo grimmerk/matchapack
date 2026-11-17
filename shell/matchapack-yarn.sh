@@ -28,7 +28,8 @@ function yarn {
       esac
       ;;
   esac
-  if [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ] && command -v matchapack >/dev/null 2>&1; then
+  # -x on the path, as in shell/matchapack.sh (bash's hash table).
+  if [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ] && [ -x "$(command -v matchapack 2>/dev/null)" ]; then
     matchapack yarn "$@"
     return $?
   fi
