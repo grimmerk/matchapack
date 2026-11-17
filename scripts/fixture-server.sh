@@ -25,7 +25,7 @@ fixtures_serve() {
     FX=$MATCHAPACK_TEST_FX; FX_URL=${MATCHAPACK_TEST_FX_URL:?MATCHAPACK_TEST_FX is set without MATCHAPACK_TEST_FX_URL}; FX_PID=
   else
     mkdir -p "$dir"; dir=$(cd "$dir" && pwd -P); FX=$dir/fixtures; ready=$dir/fixture-server.port; rm -f "$ready"
-    python3 "${here:?}/scripts/fixture-server.py" "$here/fixtures" "$FX" "$ready" > "$dir/fixture-server.log" 2>&1 &
+    python3 "${here:?}/scripts/fixture-server.py" "$here/fixtures" "$FX" "$ready" "$$" > "$dir/fixture-server.log" 2>&1 &
     FX_PID=$!
     for _ in $(seq 300); do
       [ -s "$ready" ] && break

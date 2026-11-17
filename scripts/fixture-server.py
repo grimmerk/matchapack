@@ -166,7 +166,12 @@ def main():
     if sys.argv[1:] == ["--self-test"]:
         self_test()
     src, dst, ready = sys.argv[1], sys.argv[2], sys.argv[3]
-    parent = os.getppid()
+    # The suite shell's pid, given by fixture-server.sh: read here, a suite
+    # killed while Python starts would already have left this process to
+    # an adopter (launchd, init), and getppid() would name that one.
+    parent = int(sys.argv[4]) if len(sys.argv) > 4 else os.getppid()
+    if os.getppid() != parent:
+        sys.exit(f"fixture-server: the suite (pid {parent}) is already gone")
     served = os.path.join(dst, "optional-upward", "tarballs")
     handler = functools.partial(Handler, directory=served)
     httpd = pick(lambda: http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler))
