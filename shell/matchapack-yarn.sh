@@ -28,11 +28,18 @@ function yarn {
       esac
       ;;
   esac
-  # A path must still be executable, as in shell/matchapack.sh (bash's
-  # hash table); your own function or alias called matchapack is used.
+  # Routed as in shell/matchapack.sh: an executable path or a shell
+  # function named matchapack; not an alias; an `if`, for `set -e`.
   local mp=
-  [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ] && mp=$(command -v matchapack 2>/dev/null)
-  if [ -n "$mp" ] && { [ "${mp#/}" = "$mp" ] || [ -x "$mp" ]; }; then
+  if [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ]; then
+    mp=$(command -v matchapack 2>/dev/null) || mp=
+  fi
+  case $mp in
+    */*) [ -x "$mp" ] || mp= ;;
+    matchapack) ;;
+    *) mp= ;;
+  esac
+  if [ -n "$mp" ]; then
     matchapack yarn "$@"
     return $?
   fi

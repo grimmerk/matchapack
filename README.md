@@ -94,6 +94,9 @@ or declined with the reason before npm's command runs):
 - `npm u` on npm 10, where it is no command: npm prints its own error.
 
 Bypass for one command: `MATCHAPACK=0 npm install`, or `command npm install`.
+The functions route to the `matchapack` on PATH, or to a shell function of
+that name if you define one; an alias named `matchapack` is not used (an
+alias is not expanded inside a function), and then npm runs plain.
 Remove: `matchapack uninstall` lists what it would remove (the store, the
 trial logs, the settings directory), the space that frees, the lines of your
 startup files that mention matchapack (file:line; it never edits them) and
@@ -910,7 +913,9 @@ packages again.
   directory is removed through one descriptor opened without following
   links and checked to be the directory it planned for; the store is first
   moved aside under its lock, so an install that was waiting gets a fresh
-  store. Open shells run plain npm and Yarn once the binary is gone (a
+  store (a store whose parent you cannot write is refused). A
+  `.<store>.uninstall-<pid>` directory left by an interrupted uninstall is
+  listed with the command to remove it, never removed. Open shells run plain npm and Yarn once the binary is gone (a
   shell whose function came from an older build: `hash -r`). Space: removing the
   store frees only the blocks no project shares; the dry run estimates it
   from the project records, the real run prints the volume's free space

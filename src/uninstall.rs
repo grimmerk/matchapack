@@ -429,7 +429,14 @@ fn plan_one(kind: Kind, path: &Path, set: bool, env: &Env, others: &[(Id, Kind)]
                 store::LAYOUT
             )));
         }
+        if !parent_writable(&path) {
+            return target(State::Refused(format!(
+                "is in a directory you cannot write ({}): uninstall moves the store aside there before emptying it, so that an install or a Yarn run starting meanwhile never uses a store being emptied",
+                path.parent().unwrap_or(&path).display()
+            )));
+        }
     }
+    let store_name = env.store.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let (mut delete, mut kept, mut nested, mut unknown) = (vec![], vec![], vec![], vec![]);
     for n in names {
         let p = path.join(&n);
@@ -439,6 +446,10 @@ fn plan_one(kind: Kind, path: &Path, set: bool, env: &Env, others: &[(Id, Kind)]
             continue;
         }
         let s = n.to_string_lossy();
+        if is_aside_name(&s, &store_name) && is_real_dir(&p) {
+            kept.push((n, "left by an interrupted `matchapack uninstall` (below)".to_string()));
+            continue;
+        }
         let ours = match kind {
             Kind::Store => STORE_NAMES.contains(&s.as_ref()),
             Kind::Config => CONFIG_NAMES.contains(&s.as_ref()),
@@ -620,28 +631,59 @@ fn open_target(path: &Path, id: Id) -> Result<Opened, String> {
     Ok(Opened { parent, name: name.to_os_string(), dir })
 }
 
-/// Remove `delete` (names) in the opened directory; `last` goes after the
-/// others. Returns the failures.
-fn remove_names(o: &Opened, path: &Path, delete: &[(OsString, u64)], last: &str) -> Vec<String> {
+/// Remove `delete` (names) in the opened directory, then the names in
+/// `last`, in that order, and those only when nothing failed before: the
+/// store's layout directory and lock stay when anything else could not be
+/// removed, so that a later run still recognises the store. Returns the
+/// failures.
+fn remove_names(o: &Opened, path: &Path, delete: &[(OsString, u64)], last: &[&str]) -> Vec<String> {
     let mut failed = vec![];
-    let mut order: Vec<&OsString> = delete.iter().map(|d| &d.0).filter(|n| n.as_os_str() != last).collect();
-    order.extend(delete.iter().map(|d| &d.0).filter(|n| n.as_os_str() == last));
-    for n in order {
+    let is_last = |n: &OsString| last.iter().any(|l| n.as_os_str() == *l);
+    let remove = |n: &OsString, failed: &mut Vec<String>| {
         if let Err(e) = at::remove(o.dir.as_raw_fd(), n) {
             failed.push(format!("{}: {e}", path.join(n).display()));
+        }
+    };
+    for (n, _) in delete.iter().filter(|d| !is_last(&d.0)) {
+        remove(n, &mut failed);
+    }
+    for l in last {
+        if !failed.is_empty() {
+            break;
+        }
+        if let Some((n, _)) = delete.iter().find(|d| d.0.as_os_str() == *l) {
+            remove(n, &mut failed);
         }
     }
     failed
 }
 
-/// The store opened for removal and locked.
+/// The store opened for removal, locked, and moved aside in its parent.
 struct Held {
     o: Opened,
     lock: Option<std::fs::File>,
+    /// Its name in its parent now, and that path.
+    aside: OsString,
+    aside_path: PathBuf,
 }
 
-/// Open the store for removal and take its lock exclusively: Err when that
-/// is refused, before anything is removed.
+/// `.<store name>.uninstall-<pid>`: where uninstall moves the store.
+fn aside_name(store_name: &std::ffi::OsStr, pid: u32) -> OsString {
+    OsString::from(format!(".{}.uninstall-{pid}", store_name.to_string_lossy()))
+}
+
+/// Whether `name` is where an uninstall moved the store named `store_name`.
+fn is_aside_name(name: &str, store_name: &str) -> bool {
+    name.strip_prefix(&format!(".{store_name}.uninstall-")).is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Open the store for removal, take its lock exclusively, and move it aside
+/// in its parent while locked: an install waiting on the lock then finds no
+/// lock file at the store's path and opens a fresh store there
+/// (Store::open), and a Yarn run starting meanwhile (its run directory
+/// takes no store lock) makes it in that fresh store, not in the one being
+/// emptied. Err when any of this is refused, before anything is removed:
+/// a store that cannot be moved aside is not emptied in place.
 fn hold_store(t: &Target, id: Id) -> Result<Held, String> {
     #[cfg(test)]
     tests::hook(&t.path, "before-open");
@@ -653,84 +695,98 @@ fn hold_store(t: &Target, id: Id) -> Result<Held, String> {
     };
     #[cfg(test)]
     tests::hook(&t.path, "after-lock");
-    Ok(Held { o, lock })
+    let p = o.parent.as_raw_fd();
+    let aside = aside_name(&o.name, std::process::id());
+    if let Err(e) = at::rename(p, &o.name, &aside) {
+        return Err(format!(
+            "{}: cannot be moved aside in its parent ({e}); uninstall empties the store only once it is moved aside, so that nothing starting meanwhile uses it: left alone",
+            t.path.display()
+        ));
+    }
+    if at::lstat(p, &aside).ok().map(|s| s.0) != Some(id) {
+        let _ = at::rename(p, &aside, &o.name);
+        return Err(format!("{}: changed while it was moved aside: left alone", t.path.display()));
+    }
+    let aside_path = t.path.with_file_name(&aside);
+    #[cfg(test)]
+    tests::hook(&t.path, "after-move");
+    Ok(Held { o, lock, aside, aside_path })
 }
 
-/// What removing one target did: what could not be removed (exit 1), and
-/// why its directory stays, if it does (not an error by itself).
+/// What removing one target did: what could not be removed (exit 1), why
+/// its directory stays, if it does (not an error by itself), and whether it
+/// was left alone (nothing of it removed).
 #[derive(Default)]
 struct Outcome {
     failed: Vec<String>,
     stays: Option<String>,
+    left_alone: bool,
 }
 
-/// Empty the held store and remove it. It is moved aside in its parent
-/// first, still locked: an install waiting on the lock then finds no lock
-/// file at the store's path and opens a fresh store there (Store::open),
-/// and the Yarn engine's run directories (no lock) made meanwhile go into
-/// that fresh store, not into the one being emptied. Where it cannot be
-/// moved (a parent the user cannot write) it is emptied in place, under the
-/// lock; its directory then stays. Whatever is left at the end goes back to
-/// the store's name when that is free, so that no aside directory is left
-/// for a later run to stumble on.
-fn finish_store(t: &Target, id: Id, delete: &[(OsString, u64)], keep_some: bool, h: Held) -> Outcome {
-    let Held { o, lock } = h;
+/// Empty the held store (moved aside) and remove it. Whatever is left at
+/// the end goes back to the store's name when that is free, so that no
+/// aside directory is left for a later run; one that is not the store any
+/// more (swapped meanwhile) is left where it is, as a failure.
+fn finish_store(id: Id, delete: &[(OsString, u64)], keep_some: bool, h: Held) -> Outcome {
+    let Held { o, lock, aside, aside_path } = h;
     let p = o.parent.as_raw_fd();
-    let mut r = Outcome::default();
-    let aside = OsString::from(format!(".{}.uninstall-{}", o.name.to_string_lossy(), std::process::id()));
-    let (here, in_place) = match at::rename(p, &o.name, &aside) {
-        Ok(()) if at::lstat(p, &aside).ok().map(|s| s.0) == Some(id) => (aside.clone(), None),
-        Ok(()) => {
-            let _ = at::rename(p, &aside, &o.name);
-            r.failed.push(format!("{}: changed while it was moved aside: left alone", t.path.display()));
-            return r;
-        }
-        Err(e) => (o.name.clone(), Some(e)),
-    };
-    let here_path = t.path.with_file_name(&here);
-    r.failed = remove_names(&o, &here_path, delete, "lock");
+    let mut r = Outcome { failed: remove_names(&o, &aside_path, delete, &[store::LAYOUT, "lock"]), ..Default::default() };
     drop(lock);
+    let ours = |p: i32| at::lstat(p, &aside).ok().map(|s| s.0) == Some(id);
     if keep_some {
         r.stays = Some("other names are in it".into());
     } else if !r.failed.is_empty() {
         r.stays = Some("what could not be removed is in it".into());
-    } else if let Err(e) = at::rmdir(p, &here, id) {
-        r.stays = Some(format!("the directory could not be removed ({e})"));
-    }
-    if in_place.is_none() && at::lstat(p, &aside).is_ok() {
-        if at::lstat(p, &o.name).is_err() {
-            let _ = at::rename(p, &aside, &o.name);
-        } else {
-            r.stays = Some(format!("what is left of it is in {} (another store was made at its path meanwhile)", here_path.display()));
+    } else if ours(p) {
+        // A swap after this check fails rmdir's own; reported below.
+        if let Err(e) = at::rmdir(p, &aside, id) {
+            if e.kind() != std::io::ErrorKind::Other {
+                r.stays = Some(format!("the directory could not be removed ({e})"));
+            }
         }
     }
-    if let Some(e) = in_place {
-        let why = format!("it could not be moved aside ({e}), so it was emptied in place, under its lock");
-        r.stays = Some(match r.stays.take() {
-            Some(s) => format!("{why}; {s}"),
-            None => why,
-        });
+    match at::lstat(p, &aside) {
+        Err(_) => {}
+        Ok((now, _, _)) if now != id => {
+            r.failed.push(format!("{}: something else is there now (it changed while the store was being removed): left there", aside_path.display()));
+        }
+        Ok(_) => {
+            if at::lstat(p, &o.name).is_err() && at::rename(p, &aside, &o.name).is_ok() {
+                // Back at the store's name; `stays` says why.
+            } else {
+                r.stays = Some(format!(
+                    "what is left of it is in {} (something was made at the store's path meanwhile: an install that started during the removal)",
+                    aside_path.display()
+                ));
+            }
+        }
     }
     r
 }
 
-/// Remove a log or settings directory's names, then the directory.
-fn remove_plain(t: &Target, id: Id, delete: &[(OsString, u64)], keep_some: bool) -> Outcome {
+/// Remove a log or settings directory (at `path`: its own, or inside the
+/// store moved aside): its names, then the directory.
+fn remove_plain(path: &Path, id: Id, delete: &[(OsString, u64)], keep_some: bool) -> Outcome {
     let mut r = Outcome::default();
-    let o = match open_target(&t.path, id) {
+    let o = match open_target(path, id) {
         Ok(o) => o,
         Err(why) => {
-            r.failed.push(format!("{}: {why}", t.path.display()));
+            r.failed.push(format!("{}: {why}", path.display()));
+            r.left_alone = true;
             return r;
         }
     };
-    r.failed = remove_names(&o, &t.path, delete, "");
+    r.failed = remove_names(&o, path, delete, &[]);
     if keep_some {
         r.stays = Some("other names are in it".into());
     } else if !r.failed.is_empty() {
         r.stays = Some("what could not be removed is in it".into());
     } else if let Err(e) = at::rmdir(o.parent.as_raw_fd(), &o.name, id) {
-        r.stays = Some(format!("the directory could not be removed ({e})"));
+        if e.kind() == std::io::ErrorKind::Other {
+            r.failed.push(format!("{}: {e}: left there", path.display()));
+        } else {
+            r.stays = Some(format!("the directory could not be removed ({e})"));
+        }
     }
     r
 }
@@ -756,6 +812,19 @@ fn inner_first(targets: &[Target]) -> Vec<usize> {
         }
     }
     order
+}
+
+/// The directories an interrupted uninstall left beside the store
+/// (`.<store name>.uninstall-<pid>`): never removed automatically.
+fn interrupted(store: &Path) -> Vec<PathBuf> {
+    let Ok(store) = normalise(store) else { return vec![] };
+    let (Some(parent), Some(name)) = (store.parent(), store.file_name()) else { return vec![] };
+    let name = name.to_string_lossy();
+    let mut v: Vec<PathBuf> = std::fs::read_dir(parent)
+        .map(|d| d.flatten().filter(|e| is_aside_name(&e.file_name().to_string_lossy(), &name) && e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
 }
 
 /// Whether the parent of `p` can be written (so `p` itself can be removed).
@@ -819,8 +888,6 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
                 };
                 let stays = if parent_writable(&t.path) {
                     String::new()
-                } else if t.kind == Kind::Store {
-                    "; its parent cannot be written, so it is emptied in place and the directory itself stays".to_string()
                 } else {
                     "; its parent cannot be written, so the directory itself stays".to_string()
                 };
@@ -842,6 +909,15 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
             backups.display(),
             size(on_disk(&backups)),
             crate::wrapper::shell_quote(&backups.to_string_lossy())
+        )?;
+    }
+    for left in interrupted(&env.store) {
+        writeln!(
+            out,
+            "  left by an interrupted `matchapack uninstall`: {} ({} on disk): what was left of a store it was emptying; once no uninstall is running, remove it yourself: rm -rf {}",
+            left.display(),
+            size(on_disk(&left)),
+            crate::wrapper::shell_quote(&left.to_string_lossy())
         )?;
     }
     if let Some((_, delete, _)) = &store_plan {
@@ -895,24 +971,35 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
                 }
             }
         }
+        // Targets inside the store moved with it: removed through its new
+        // path (they are the same directories, by identity).
+        let inside_store: Vec<(Kind, PathBuf)> = match (&store_t.state, &held) {
+            (State::Remove { nested, .. }, Some(h)) => nested.iter().map(|(n, k)| (*k, h.aside_path.join(n))).collect(),
+            _ => vec![],
+        };
         let mut outcomes: Vec<Option<Outcome>> = targets.iter().map(|_| None).collect();
         for i in inner_first(targets) {
             let t = &targets[i];
             let State::Remove { id, delete, kept, .. } = &t.state else { continue };
             outcomes[i] = Some(if t.kind == Kind::Store {
                 match held.take() {
-                    Some(h) => finish_store(t, *id, delete, !kept.is_empty(), h),
-                    None => Outcome { failed: vec![format!("{}: not held", t.path.display())], stays: None },
+                    Some(h) => finish_store(*id, delete, !kept.is_empty(), h),
+                    None => Outcome { failed: vec![format!("{}: not held", t.path.display())], left_alone: true, ..Default::default() },
                 }
             } else {
-                remove_plain(t, *id, delete, !kept.is_empty())
+                let path = inside_store.iter().find(|(k, _)| *k == t.kind).map(|(_, p)| p.clone()).unwrap_or_else(|| t.path.clone());
+                remove_plain(&path, *id, delete, !kept.is_empty())
             });
         }
         for (t, oc) in targets.iter().zip(&outcomes) {
             let Some(oc) = oc else { continue };
-            match &oc.stays {
-                None => writeln!(out, "{}: {} removed", t.kind.label(), t.path.display())?,
-                Some(why) => writeln!(out, "{}: {}: matchapack's files removed; the directory stays: {why}", t.kind.label(), t.path.display())?,
+            let (label, path) = (t.kind.label(), t.path.display());
+            match (oc.left_alone, oc.failed.is_empty(), &oc.stays) {
+                (true, _, _) => writeln!(out, "{label}: {path}: left alone")?,
+                (false, true, None) => writeln!(out, "{label}: {path} removed")?,
+                (false, true, Some(why)) => writeln!(out, "{label}: {path}: matchapack's files removed; the directory stays: {why}")?,
+                (false, false, None) => writeln!(out, "{label}: {path}: not all removed (below)")?,
+                (false, false, Some(why)) => writeln!(out, "{label}: {path}: not all removed (below); the directory stays: {why}")?,
             }
             for f in &oc.failed {
                 writeln!(out, "  could not remove {f}")?;
@@ -1571,11 +1658,12 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// A store in a directory the user cannot write: the dry run says the
-    /// directory itself stays; --yes empties it in place, under its lock,
-    /// and says so (exit 0: matchapack's files are gone).
+    /// A store in a directory the user cannot write cannot be moved aside:
+    /// refused, in the dry run already, and nothing at all is removed (not
+    /// emptied in place: a Yarn run takes no store lock, and would make its
+    /// helper directory in a store being emptied).
     #[test]
-    fn a_store_whose_parent_cannot_be_written() {
+    fn a_store_whose_parent_cannot_be_written_is_refused() {
         use std::os::unix::fs::PermissionsExt;
         if unsafe { libc::geteuid() } == 0 {
             return; // root writes anywhere
@@ -1589,13 +1677,122 @@ mod tests {
         env.store = store.clone();
         env.store_set = true;
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+        let before = snapshot(&d);
         let (code, dry) = run_to_string(&env, false);
         let (code2, out) = run_to_string(&env, true);
+        let after = snapshot(&d);
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(code == 0 && dry.contains("its parent cannot be written, so it is emptied in place and the directory itself stays"), "{dry}");
-        assert_eq!(code2, 0, "{out}");
-        assert!(out.contains("could not be moved aside") && out.contains("emptied in place"), "{out}");
-        assert!(store.is_dir() && fs::read_dir(&store).unwrap().count() == 0, "emptied, the directory stays: {out}");
+        assert!(code == 1 && dry.contains("REFUSED: it is in a directory you cannot write"), "{dry}");
+        assert!(code2 == 1 && out.contains("nothing was removed"), "{out}");
+        assert_eq!(after, before, "nothing removed");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The settings directory swapped for a link while the store was being
+    /// removed: reported "left alone", not "removed", and the run fails.
+    #[test]
+    fn a_target_left_alone_is_reported_so() {
+        let d = scratch("uninstall-left-alone");
+        let env = setup(&d);
+        let victim = d.join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("paths"), "mine").unwrap();
+        let (config, away) = (env.config.clone(), d.join("moved-away"));
+        set_hook(
+            &env.store,
+            "after-move",
+            Box::new(move || {
+                fs::rename(&config, away).unwrap();
+                symlink(&victim, &config).unwrap();
+            }),
+        );
+        let (code, out) = run_to_string(&env, true);
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(fs::read_to_string(d.join("victim/paths")).unwrap(), "mine", "{out}");
+        assert!(out.contains(&format!("settings: {}: left alone", env.config.display())), "{out}");
+        assert!(!out.contains(&format!("settings: {} removed", env.config.display())), "{out}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The store's aside directory swapped while the store was being
+    /// emptied: the other directory is left where it is, and the run fails
+    /// with that said (not "something was made at its path").
+    #[test]
+    fn a_swapped_aside_directory_is_a_failure() {
+        let d = scratch("uninstall-aside-swap");
+        let mut env = setup(&d);
+        let store = d.join("own-store");
+        fs::rename(&env.store, &store).unwrap();
+        env.store = store.clone();
+        env.store_set = true;
+        let victim = d.join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("precious"), "mine").unwrap();
+        let (dir, v) = (d.clone(), victim.clone());
+        set_hook(
+            &store,
+            "after-move",
+            Box::new(move || {
+                let aside = fs::read_dir(&dir).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with(".own-store.uninstall-")).unwrap().path();
+                fs::rename(&aside, dir.join("real-store-moved")).unwrap();
+                fs::rename(&v, &aside).unwrap();
+            }),
+        );
+        let (code, out) = run_to_string(&env, true);
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("something else is there now") && !out.contains("something was made at the store's path"), "{out}");
+        let aside = fs::read_dir(&d).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with(".own-store.uninstall-")).unwrap().path();
+        assert_eq!(fs::read_to_string(aside.join("precious")).unwrap(), "mine", "{out}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A name that cannot be removed keeps the store recognisable: v2/ and
+    /// the lock stay, back at the store's name, and a later run removes it.
+    #[test]
+    fn a_failed_run_keeps_the_layout_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let d = scratch("uninstall-keeps-v2");
+        let mut env = setup(&d);
+        let store = d.join("own-store");
+        fs::rename(&env.store, &store).unwrap();
+        env.store = store.clone();
+        env.store_set = true;
+        let stuck = store.join("projects/stuck");
+        fs::create_dir_all(&stuck).unwrap();
+        fs::write(stuck.join("f.json"), "{}").unwrap();
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+        let (code, out) = run_to_string(&env, true);
+        let stuck_now = store.join("projects/stuck");
+        let _ = fs::set_permissions(&stuck_now, fs::Permissions::from_mode(0o755));
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains(&format!("store: {}: not all removed", store.display())), "{out}");
+        assert!(store.join(store::LAYOUT).is_dir() && store.join("lock").is_file(), "the marker and the lock stay: {out}");
+        let (code, out) = run_to_string(&env, true);
+        assert!(code == 0 && !store.exists(), "a later run removes it: {out}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// What an interrupted uninstall left beside the store is listed with
+    /// the command to remove it, never removed, and never makes a log
+    /// directory a variable names refused.
+    #[test]
+    fn an_interrupted_uninstall_is_listed_not_removed() {
+        let d = scratch("uninstall-interrupted");
+        let mut env = setup(&d);
+        env.logs_set = true;
+        let left = env.logs.join(".store.uninstall-4242");
+        fs::create_dir_all(left.join(store::LAYOUT)).unwrap();
+        fs::write(left.join(store::LAYOUT).join("f"), "x").unwrap();
+        let (code, out) = run_to_string(&env, false);
+        assert!(code == 0 && !out.contains("REFUSED"), "{out}");
+        assert!(out.contains(&format!("left by an interrupted `matchapack uninstall`: {}", left.display())) && out.contains("rm -rf"), "{out}");
+        let (code, out) = run_to_string(&env, true);
+        assert_eq!(code, 0, "{out}");
+        assert!(left.join(store::LAYOUT).join("f").is_file() && !env.store.exists(), "{out}");
+        assert!(is_aside_name(".store.uninstall-1", "store") && !is_aside_name(".store.uninstall-", "store") && !is_aside_name(".other.uninstall-1", "store"));
         let _ = fs::remove_dir_all(&d);
     }
 

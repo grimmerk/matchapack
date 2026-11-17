@@ -197,6 +197,24 @@ YARN [install]" "yarn install; rm -f $rb/matchapack; yarn install" "$rb:$np:$PAT
   check own-function-yarn "MATCHAPACK-YARN [install]" "yarn install" "$np:$PATH"
   setup=$plain_setup
 
+  # bash and zsh (fish has no set -e): a shell under `set -e` whose
+  # matchapack is gone runs plain npm and yarn, it does not exit; and an
+  # alias called matchapack defined after the integration is not routed to
+  # (an alias is not expanded inside the functions): plain npm and yarn.
+  if [ "$sh" != fish ]; then
+    os=Linux
+    check set-e "NPM [ci]
+after" "set -e; rm -f $rb/matchapack; npm ci; echo after" "$rb:$np:$PATH"
+    cp "$tc/matchapack" "$rb/"
+    os=Darwin
+    check set-e-yarn "YARN [install]
+after" "set -e; rm -f $rb/matchapack; yarn install; echo after" "$rb:$np:$PATH"
+    cp "$tc/matchapack" "$rb/"
+    check alias-later "NPM [ci]
+YARN [install]" "rm -f $rb/matchapack; alias matchapack=/nonexistent/matchapack; npm ci; yarn install" "$rb:$np:$PATH"
+    cp "$tc/matchapack" "$rb/"
+  fi
+
   # `init --alias mp`: mp runs matchapack, with its arguments unchanged;
   # without --alias no such name is defined. bash expands aliases only in
   # interactive shells (a startup file's case) or with expand_aliases, and

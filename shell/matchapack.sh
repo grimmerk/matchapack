@@ -12,6 +12,9 @@
 # Sourcing this file from a checkout works too:
 #     [ -f "$HOME/git/matchapack/shell/matchapack.sh" ] && . "$HOME/git/matchapack/shell/matchapack.sh"
 # Bypass for one command:  MATCHAPACK=0 npm install     or     command npm install
+# Routed to the matchapack on PATH (still executable) or to your own shell
+# function named matchapack; an alias of that name is not used (not
+# expanded inside a function): npm then runs plain.
 # Remove: delete that line; already installed node_modules keep working.
 # On macOS `matchapack init` also prints shell/matchapack-yarn.sh after this
 # file: a `yarn` function for Yarn 1 projects.
@@ -24,13 +27,22 @@ function npm {
     install | i | in | ins | inst | insta | instal | isnt | isnta | isntal | isntall | add | \
     update | up | upgrade | udpate | u | \
     uninstall | un | unlink | remove | rm | r)
-      # A path must still be executable: bash's `command -v` answers from
-      # its hash table, so a binary removed since (`matchapack uninstall`)
-      # would still be found. Anything else `command -v` names (your own
-      # function or alias called matchapack) is used as it is.
+      # Routed to a matchapack that `command -v` names as an executable
+      # path (bash answers from its hash table, so a binary removed since,
+      # by `matchapack uninstall`, must still be there), or as a shell
+      # function of that name. An alias is not routed: it is not expanded
+      # inside this function. The lookup is an `if` condition, so that a
+      # shell under `set -e` without matchapack goes on to plain npm.
       local mp=
-      [ "${MATCHAPACK-1}" != 0 ] && mp=$(command -v matchapack 2>/dev/null)
-      if [ -n "$mp" ] && { [ "${mp#/}" = "$mp" ] || [ -x "$mp" ]; }; then
+      if [ "${MATCHAPACK-1}" != 0 ]; then
+        mp=$(command -v matchapack 2>/dev/null) || mp=
+      fi
+      case $mp in
+        */*) [ -x "$mp" ] || mp= ;;
+        matchapack) ;;
+        *) mp= ;;
+      esac
+      if [ -n "$mp" ]; then
         matchapack npm "$@"
         return $?
       fi
