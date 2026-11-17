@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-fn cache_dir() -> PathBuf {
+/// The trial logs' directory: $MATCHAPACK_LOG_DIR, else ~/.cache/matchapack.
+pub fn cache_dir() -> PathBuf {
     std::env::var_os("MATCHAPACK_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::home().join(".cache/matchapack"))
 }
 

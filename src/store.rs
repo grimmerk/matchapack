@@ -97,7 +97,18 @@ impl Integrity {
     }
 }
 
-fn flock(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
+/// Whether the open file `f` is the file `p` names now (same device and
+/// inode). A link at `p` is followed, as opening `p` follows it: a store
+/// whose `lock` is a link locks the link's target.
+pub(crate) fn same_file(f: &fs::File, p: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (f.metadata(), fs::metadata(p)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+pub(crate) fn flock(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
     if unsafe { libc::flock(f.as_raw_fd(), op) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
@@ -111,11 +122,11 @@ fn flock_retry(f: &fs::File, op: libc::c_int) -> std::io::Result<()> {
     }
 }
 
-fn unsupported(e: &std::io::Error) -> bool {
+pub(crate) fn unsupported(e: &std::io::Error) -> bool {
     matches!(e.raw_os_error(), Some(n) if n == libc::ENOTSUP || n == libc::EOPNOTSUPP)
 }
 
-fn would_block(e: &std::io::Error) -> bool {
+pub(crate) fn would_block(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
@@ -221,39 +232,52 @@ impl Store {
     }
 
     fn open(root: PathBuf, cacache: PathBuf, exclusive: bool) -> Result<Store> {
-        fs::create_dir_all(root.join(LAYOUT))?;
-        fs::create_dir_all(root.join("tmp"))?;
-        // Read and write: NFSv4 refuses a shared lock on a file not open for
-        // reading (EBADF), an exclusive one on a file not open for writing.
-        let lf = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(root.join("lock"))?;
-        let lock = if exclusive {
-            match flock_retry(&lf, libc::LOCK_EX | libc::LOCK_NB) {
-                Ok(()) => Some(lf),
-                Err(e) if would_block(&e) => bail!("the store is in use by a running install; try again when it has finished"),
-                Err(e) => bail!("cannot lock the store ({e}); refusing to remove entries without it"),
-            }
-        } else {
-            match flock_retry(&lf, libc::LOCK_SH | libc::LOCK_NB) {
-                Ok(()) => Some(lf),
-                Err(e) if would_block(&e) => {
-                    eprintln!("matchapack: waiting for a `matchapack store` command to release the store");
-                    flock_retry(&lf, libc::LOCK_SH).context("waiting for the store lock")?;
-                    Some(lf)
+        // `matchapack uninstall` moves the store aside while it holds the
+        // lock exclusively: a process that waited on the lock then holds the
+        // lock file of a store that is gone. So after taking the lock, check
+        // that `<root>/lock` is still the file locked, and start over if not
+        // (a fresh store; a later command locks the same file).
+        for _ in 0..20 {
+            fs::create_dir_all(root.join(LAYOUT))?;
+            fs::create_dir_all(root.join("tmp"))?;
+            // Read and write: NFSv4 refuses a shared lock on a file not open for
+            // reading (EBADF), an exclusive one on a file not open for writing.
+            let lf = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(root.join("lock"))?;
+            let lock = if exclusive {
+                match flock_retry(&lf, libc::LOCK_EX | libc::LOCK_NB) {
+                    Ok(()) => Some(lf),
+                    Err(e) if would_block(&e) => bail!("the store is in use by a running install; try again when it has finished"),
+                    Err(e) => bail!("cannot lock the store ({e}); refusing to remove entries without it"),
                 }
-                // No flock on this filesystem at all: installs go on unguarded,
-                // as before, and gc / verify --fix refuse (they need the lock).
-                Err(e) if unsupported(&e) => None,
-                // Anything else may pass: refuse rather than install without
-                // the lock while a gc could get it (the install goes to npm).
-                Err(e) => bail!("cannot lock the store ({e})"),
+            } else {
+                match flock_retry(&lf, libc::LOCK_SH | libc::LOCK_NB) {
+                    Ok(()) => Some(lf),
+                    Err(e) if would_block(&e) => {
+                        eprintln!("matchapack: waiting for a `matchapack store` or `matchapack uninstall` command to release the store");
+                        flock_retry(&lf, libc::LOCK_SH).context("waiting for the store lock")?;
+                        Some(lf)
+                    }
+                    // No flock on this filesystem at all: installs go on unguarded,
+                    // as before, and gc / verify --fix refuse (they need the lock).
+                    Err(e) if unsupported(&e) => None,
+                    // Anything else may pass: refuse rather than install without
+                    // the lock while a gc could get it (the install goes to npm).
+                    Err(e) => bail!("cannot lock the store ({e})"),
+                }
+            };
+            if let Some(f) = &lock {
+                if !same_file(f, &root.join("lock")) {
+                    continue;
+                }
             }
-        };
-        clean_tmp(&root.join("tmp"))?;
-        Ok(Store { root, cacache, tmp_seq: AtomicU64::new(0), _lock: lock })
+            clean_tmp(&root.join("tmp"))?;
+            return Ok(Store { root, cacache, tmp_seq: AtomicU64::new(0), _lock: lock });
+        }
+        bail!("the store's lock file kept being replaced while waiting for it ({})", root.join("lock").display())
     }
 
     pub fn dir_for(&self, i: &Integrity) -> PathBuf {
-        self.root.join(LAYOUT).join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
+        entry_dir(&self.root, i)
     }
 
     fn size_file(&self, i: &Integrity) -> PathBuf {
@@ -872,6 +896,11 @@ const UMASK: u32 = 0o022;
 /// the `.gitignore` → `.npmignore` rename.
 pub const LAYOUT: &str = "v2";
 
+/// An entry's directory in the store at `root`.
+pub fn entry_dir(root: &Path, i: &Integrity) -> PathBuf {
+    root.join(LAYOUT).join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
+}
+
 /// Tests only (the classic engine's extractor, removed in PR C2; installs
 /// and `store verify` extract with npm's own pacote). Extract like pacote (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`):
 /// strip the first path component; keep FILE entries only (links and directory
@@ -1233,6 +1262,50 @@ pub(crate) mod tests {
         drop(install);
         let gc = Store::exclusive(d.join("store"), d.join("cacache")).unwrap();
         drop(gc);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A store whose `lock` is a link (to a file elsewhere): installs and gc
+    /// lock what it points to, and the re-check after taking the lock
+    /// follows the link (it once compared the link itself, and every
+    /// install gave up after 20 tries).
+    #[test]
+    fn a_lock_file_that_is_a_link() {
+        let d = scratch("storelocklink");
+        let root = d.join("store");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(d.join("real-lock"), "").unwrap();
+        std::os::unix::fs::symlink(d.join("real-lock"), root.join("lock")).unwrap();
+        let install = Store::new(root.clone(), d.join("cacache")).unwrap();
+        assert!(Store::exclusive(root.clone(), d.join("cacache")).is_err(), "gc refused while the install holds the lock");
+        drop(install);
+        drop(Store::exclusive(root, d.join("cacache")).unwrap());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// An install waiting on the lock while `uninstall` moves the store aside
+    /// (holding the lock exclusively) opens a fresh store at the same path,
+    /// and holds the lock file that is there now, not the one moved away.
+    #[test]
+    fn an_install_waiting_on_a_store_moved_aside_opens_a_fresh_one() {
+        let d = scratch("storemoved");
+        let root = d.join("store");
+        drop(Store::new(root.clone(), d.join("cacache")).unwrap());
+        fs::create_dir_all(root.join(LAYOUT).join("sha512/ab/cdef")).unwrap();
+        let held = fs::OpenOptions::new().read(true).write(true).open(root.join("lock")).unwrap();
+        flock(&held, libc::LOCK_EX | libc::LOCK_NB).unwrap();
+        let (r, c) = (root.clone(), d.join("cacache"));
+        let install = std::thread::spawn(move || Store::new(r, c).unwrap());
+        // Long enough for the install to open the lock file and wait on it.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(!install.is_finished(), "the install waits for the lock");
+        fs::rename(&root, d.join("aside")).unwrap();
+        drop(held);
+        let store = install.join().unwrap();
+        let lock = store._lock.as_ref().expect("locked");
+        assert!(same_file(lock, &root.join("lock")), "holds the lock file now at the store's path");
+        assert!(root.join(LAYOUT).is_dir() && !root.join(LAYOUT).join("sha512").exists(), "a fresh store");
+        drop(store);
         let _ = fs::remove_dir_all(&d);
     }
     /// A decline holds for the build that recorded it only: another build's

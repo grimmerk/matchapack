@@ -7,6 +7,7 @@ mod serve;
 mod signals;
 mod store;
 mod trial;
+mod uninstall;
 mod util;
 mod verify;
 mod wrapper;
@@ -87,10 +88,36 @@ enum Cmd {
     ///
     /// Without SHELL, the shell that runs the command (the parent process) is
     /// used; name it to be explicit.
+    ///
+    /// --alias NAME also defines NAME as a short name for matchapack (an
+    /// alias in zsh and bash, a function in fish): `--alias mp` gives
+    /// `mp npm ci`, `mp store gc`.
     #[command(verbatim_doc_comment)]
     Init {
         #[arg(value_parser = INIT_SHELLS)]
         shell: Option<String>,
+        /// Also define NAME as a short name for matchapack (letters, digits,
+        /// `-`, `_`; not a builtin or keyword of the shell, not npm, yarn or
+        /// matchapack).
+        #[arg(long, value_name = "NAME")]
+        alias: Option<String>,
+    },
+    /// Remove matchapack's own state: the store, the trial logs, the settings directory
+    ///
+    /// Without --yes, prints what it would remove and how much space that
+    /// frees, and changes nothing. It never edits shell startup files: it
+    /// prints the lines that mention matchapack (file:line) for you to
+    /// delete, and the command that removes the binary. Installed projects
+    /// keep working (their files are clones, independent of the store).
+    /// Refused while an install uses the store, and for any directory it
+    /// cannot recognise as matchapack's (`/`, the home directory or a parent
+    /// of it, a symbolic link, a store without its layout directory, or a
+    /// directory a MATCHAPACK_* variable names that holds other files).
+    #[command(verbatim_doc_comment)]
+    Uninstall {
+        /// Remove; without it, a dry run that writes nothing.
+        #[arg(long)]
+        yes: bool,
     },
     /// Compare two project trees. Exit status: 0 identical, 1 they differ, 2 an error (nothing was decided).
     Diff {
@@ -283,13 +310,88 @@ const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
 /// definition; the binary carries them so the rc line needs no checkout of
 /// this repository, and users who already have the line get the `yarn`
 /// function with the next `cargo install`.
-fn init_script(shell: &str, macos: bool) -> String {
-    let (npm, yarn) = if shell == "fish" {
-        (include_str!("../shell/matchapack.fish"), include_str!("../shell/matchapack-yarn.fish"))
+fn init_script(shell: &str, macos: bool, alias: Option<&str>) -> String {
+    let (npm, yarn, short) = if shell == "fish" {
+        (include_str!("../shell/matchapack.fish"), include_str!("../shell/matchapack-yarn.fish"), include_str!("../shell/matchapack-alias.fish"))
     } else {
-        (include_str!("../shell/matchapack.sh"), include_str!("../shell/matchapack-yarn.sh"))
+        (include_str!("../shell/matchapack.sh"), include_str!("../shell/matchapack-yarn.sh"), include_str!("../shell/matchapack-alias.sh"))
     };
-    if macos { format!("{npm}{yarn}") } else { npm.to_string() }
+    let mut s = if macos { format!("{npm}{yarn}") } else { npm.to_string() };
+    if let Some(name) = alias {
+        s.push_str(&short.replace("__MATCHAPACK_ALIAS__", name));
+    }
+    s
+}
+
+/// Builtins and reserved words (bash 5.2 `compgen -k -b`, zsh 5.9
+/// `${(k)builtins} ${(k)reswords}`, fish 3.6 `builtin -n` plus 4.0's
+/// additions; scripts/test-shells.sh checks the lists against the shells): an alias or function of
+/// such a name would shadow the shell's own, or not be callable at all.
+/// bash refuses SH_WORDS; zsh SH_WORDS and ZSH_WORDS (a few bash-only names
+/// too, kept strict for startup files shared by both); fish FISH_WORDS.
+const SH_WORDS: &[&str] = &[
+    "alias", "bg", "bind", "break", "builtin", "caller", "case", "cd", "command", "compgen", "complete", "compopt", "continue", "coproc", "declare", "dirs",
+    "disown", "do", "done", "echo", "elif", "else", "enable", "esac", "eval", "exec", "exit", "export", "false", "fc", "fg", "fi", "for", "function",
+    "getopts", "hash", "help", "history", "if", "in", "jobs", "kill", "let", "local", "logout", "mapfile", "popd", "printf", "pushd", "pwd", "read",
+    "readarray", "readonly", "return", "select", "set", "shift", "shopt", "source", "suspend", "test", "then", "time", "times", "trap", "true", "type",
+    "typeset", "ulimit", "umask", "unalias", "unset", "until", "wait", "while",
+];
+const ZSH_WORDS: &[&str] = &[
+    "autoload", "bindkey", "bye", "chdir", "compadd", "comparguments", "compcall", "compctl", "compdescribe", "compfiles", "compgroups", "compquote",
+    "compset", "comptags", "comptry", "compvalues", "disable", "echotc", "echoti", "emulate", "end", "float", "foreach", "functions", "getln", "integer",
+    "limit", "log", "noglob", "nocorrect", "print", "private", "pushln", "r", "rehash", "repeat", "sched", "setopt", "ttyctl", "unfunction", "unhash",
+    "unlimit", "unsetopt", "vared", "whence", "where", "which", "zcompile", "zformat", "zle", "zmodload", "zparseopts", "zregexparse", "zstyle",
+];
+const FISH_WORDS: &[&str] = &[
+    "_", "abbr", "and", "argparse", "begin", "bg", "bind", "block", "break", "breakpoint", "builtin", "case", "cd", "command", "commandline", "complete",
+    "contains", "continue", "count", "disown", "echo", "else", "emit", "end", "eval", "exec", "exit", "false", "fg", "fish_indent", "fish_key_reader",
+    "for", "function", "functions", "history", "if", "jobs", "math", "not", "or", "path", "printf", "pwd", "random", "read", "realpath", "return",
+    "set", "set_color", "source", "status", "string", "switch", "test", "time", "true", "type", "ulimit", "wait", "while",
+];
+
+/// Whether `name` may be `init --alias`'s name in `shell`.
+fn check_alias(name: &str, shell: &str) -> Result<(), String> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("--alias {name:?}: use letters, digits, `-` and `_` only"));
+    }
+    if name.starts_with('-') {
+        return Err(format!("--alias {name}: must not start with `-`"));
+    }
+    if ["npm", "yarn", "matchapack"].contains(&name) {
+        return Err(format!("--alias {name}: that name is matchapack's own or one it wraps; choose another (e.g. mp)"));
+    }
+    let words: Vec<&str> = match shell {
+        "fish" => FISH_WORDS.to_vec(),
+        "zsh" => SH_WORDS.iter().chain(ZSH_WORDS).copied().collect(),
+        _ => SH_WORDS.to_vec(),
+    };
+    if words.contains(&name) {
+        return Err(format!("--alias {name}: a builtin or reserved word of {shell}; choose another (e.g. mp)"));
+    }
+    Ok(())
+}
+
+/// The warning for an `--alias` name that is also a command on PATH, only
+/// when `tty` (stdout is a terminal: someone ran `matchapack init … --alias`
+/// by hand). From the rc line stdout is a pipe into eval / source, and the
+/// warning would print at every shell start.
+fn alias_warning(name: &str, shell: &str, tty: bool) -> Option<String> {
+    if !tty {
+        return None;
+    }
+    let p = on_path(name)?;
+    Some(format!(
+        "matchapack init: warning: `{name}` is also {} on PATH; the {} hides it in this shell (`command {name}` still runs it)",
+        p.display(),
+        if shell == "fish" { "function" } else { "alias" }
+    ))
+}
+
+/// The first executable named `name` in PATH, if any.
+fn on_path(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
 }
 
 /// The shell `matchapack init` was started from: its parent process. In
@@ -346,7 +448,7 @@ fn main() -> Result<()> {
             let code = yarn1::cli(args);
             signals::finish(code);
         }
-        Cmd::Init { shell } => {
+        Cmd::Init { shell, alias } => {
             let shell = match shell {
                 Some(s) => s,
                 None => parent_shell().map(String::from).with_context(|| {
@@ -358,7 +460,25 @@ fn main() -> Result<()> {
                     )
                 })?,
             };
-            print!("{}", init_script(&shell, cfg!(target_os = "macos")));
+            // A refused name still prints the integration, without the alias:
+            // the rc line's eval / source runs whatever is printed, and the
+            // npm and yarn functions must not go missing over a bad name.
+            let refused = alias.as_deref().and_then(|n| check_alias(n, &shell).err());
+            if let (Some(name), None) = (&alias, &refused) {
+                use std::io::IsTerminal;
+                if let Some(w) = alias_warning(name, &shell, std::io::stdout().is_terminal()) {
+                    eprintln!("{w}");
+                }
+            }
+            print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { alias.as_deref() }));
+            if let Some(e) = refused {
+                eprintln!("matchapack init: error: {e}; the shell integration was printed without it");
+                std::process::exit(2);
+            }
+        }
+        Cmd::Uninstall { yes } => {
+            let code = uninstall::run(&uninstall::Env::from_process()?, yes, &mut std::io::stdout().lock())?;
+            std::process::exit(code);
         }
         Cmd::Diff { a, b, ignore, limit, paths, classes, meta, a_run, b_run, a_cache, b_cache, normalize_roots } => {
             let opts = if meta {
@@ -551,7 +671,53 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{init_script, shell_from_comm};
+    use super::{alias_warning, check_alias, init_script, shell_from_comm};
+
+    /// A name on PATH (`ls`) is warned about only when stdout is a terminal;
+    /// a name on no PATH never.
+    #[test]
+    fn alias_warning_only_on_a_terminal() {
+        assert!(alias_warning("ls", "zsh", true).is_some_and(|w| w.contains("`ls` is also") && w.contains("alias hides it")));
+        assert!(alias_warning("ls", "fish", true).is_some_and(|w| w.contains("function hides it")));
+        assert_eq!(alias_warning("ls", "zsh", false), None);
+        assert_eq!(alias_warning("matchapack-no-such-command-x", "zsh", true), None);
+    }
+
+    /// `--alias`: the name is checked per shell, and the definition comes
+    /// after the functions, on both platforms, only when asked for.
+    #[test]
+    fn init_alias() {
+        for sh in ["zsh", "bash", "fish"] {
+            let kws: &[&str] = if sh == "fish" { &["case", "if", "for", "while", "function", "end", "begin", "switch"] } else { &["case", "esac", "if", "then", "fi", "for", "while", "function", "time"] };
+            for kw in kws {
+                assert!(check_alias(kw, sh).is_err(), "{sh}: reserved word {kw}");
+            }
+            for ok in ["mp", "m-p", "m_p", "mp2", "MP", "x"] {
+                assert_eq!(check_alias(ok, sh), Ok(()), "{sh} {ok}");
+            }
+            for bad in ["", "-mp", "m p", "m;p", "m$p", "m/p", "mp\n", "mp=x", "npm", "yarn", "matchapack", "cd", "echo", "command", "builtin", "set", "source", "test", "eval"] {
+                assert!(check_alias(bad, sh).is_err(), "{sh} {bad:?}");
+            }
+            for mac in [true, false] {
+                let plain = init_script(sh, mac, None);
+                let with = init_script(sh, mac, Some("mp"));
+                assert!(!plain.contains("__MATCHAPACK_ALIAS__") && !plain.contains("--wraps matchapack") && !plain.lines().any(|l| l.starts_with("alias ")), "{sh}: no alias by default");
+                assert!(with.starts_with(&plain), "{sh}: the alias comes after the functions");
+                let added = &with[plain.len()..];
+                assert!(!added.contains("__MATCHAPACK_ALIAS__"), "{sh}: placeholder replaced");
+                let def: Vec<&str> = added.lines().filter(|l| !l.starts_with('#')).collect();
+                if sh == "fish" {
+                    assert_eq!(def, ["function mp --wraps matchapack --description 'matchapack'", "    matchapack $argv", "end"]);
+                } else {
+                    assert_eq!(def, ["alias mp=matchapack"]);
+                }
+            }
+        }
+        // Per shell: zsh's own builtins are refused for zsh only, fish's for fish.
+        assert!(check_alias("zstyle", "zsh").is_err() && check_alias("zstyle", "bash").is_ok() && check_alias("zstyle", "fish").is_ok());
+        assert!(check_alias("string", "fish").is_err() && check_alias("string", "zsh").is_ok());
+        assert!(check_alias("shopt", "bash").is_err() && check_alias("shopt", "zsh").is_err());
+    }
 
     #[test]
     fn shell_names_from_ps() {
@@ -570,13 +736,13 @@ mod tests {
     #[test]
     fn init_defines_yarn_on_macos_only() {
         for sh in ["zsh", "bash", "fish"] {
-            let (mac, linux) = (init_script(sh, true), init_script(sh, false));
+            let (mac, linux) = (init_script(sh, true, None), init_script(sh, false, None));
             let has = |t: &str, f: &str| t.lines().any(|l| l.starts_with(&format!("function {f} ")));
             assert!(has(&mac, "npm") && has(&mac, "yarn"), "{sh} macOS");
             assert!(has(&linux, "npm") && !has(&linux, "yarn"), "{sh} Linux");
             assert!(mac.starts_with(&linux), "{sh}: the npm part is the same");
             assert!(mac.contains("matchapack yarn"));
-            assert_eq!(has(&init_script(sh, cfg!(target_os = "macos")), "yarn"), cfg!(target_os = "macos"));
+            assert_eq!(has(&init_script(sh, cfg!(target_os = "macos"), None), "yarn"), cfg!(target_os = "macos"));
         }
     }
 }

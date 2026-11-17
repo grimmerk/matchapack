@@ -28,7 +28,18 @@ function yarn {
       esac
       ;;
   esac
-  if [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ] && command -v matchapack >/dev/null 2>&1; then
+  # Routed as in shell/matchapack.sh: an executable path or a shell
+  # function named matchapack; not an alias; an `if`, for `set -e`.
+  local mp=
+  if [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ]; then
+    mp=$(command -v matchapack 2>/dev/null) || mp=
+  fi
+  case $mp in
+    */*) [ -x "$mp" ] || mp= ;;
+    matchapack) ;;
+    *) mp= ;;
+  esac
+  if [ -n "$mp" ]; then
     matchapack yarn "$@"
     return $?
   fi
