@@ -97,11 +97,12 @@ impl Integrity {
     }
 }
 
-/// Whether the open file `f` is the file at `p` now (same device and inode;
-/// `p` not followed if it is a link).
+/// Whether the open file `f` is the file `p` names now (same device and
+/// inode). A link at `p` is followed, as opening `p` follows it: a store
+/// whose `lock` is a link locks the link's target.
 pub(crate) fn same_file(f: &fs::File, p: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (f.metadata(), fs::symlink_metadata(p)) {
+    match (f.metadata(), fs::metadata(p)) {
         (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
         _ => false,
     }
@@ -1261,6 +1262,24 @@ pub(crate) mod tests {
         drop(install);
         let gc = Store::exclusive(d.join("store"), d.join("cacache")).unwrap();
         drop(gc);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A store whose `lock` is a link (to a file elsewhere): installs and gc
+    /// lock what it points to, and the re-check after taking the lock
+    /// follows the link (it once compared the link itself, and every
+    /// install gave up after 20 tries).
+    #[test]
+    fn a_lock_file_that_is_a_link() {
+        let d = scratch("storelocklink");
+        let root = d.join("store");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(d.join("real-lock"), "").unwrap();
+        std::os::unix::fs::symlink(d.join("real-lock"), root.join("lock")).unwrap();
+        let install = Store::new(root.clone(), d.join("cacache")).unwrap();
+        assert!(Store::exclusive(root.clone(), d.join("cacache")).is_err(), "gc refused while the install holds the lock");
+        drop(install);
+        drop(Store::exclusive(root, d.join("cacache")).unwrap());
         let _ = fs::remove_dir_all(&d);
     }
 

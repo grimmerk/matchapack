@@ -28,8 +28,11 @@ function yarn {
       esac
       ;;
   esac
-  # -x on the path, as in shell/matchapack.sh (bash's hash table).
-  if [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ] && [ -x "$(command -v matchapack 2>/dev/null)" ]; then
+  # A path must still be executable, as in shell/matchapack.sh (bash's
+  # hash table); your own function or alias called matchapack is used.
+  local mp=
+  [ -n "$route" ] && [ "${MATCHAPACK-1}" != 0 ] && mp=$(command -v matchapack 2>/dev/null)
+  if [ -n "$mp" ] && { [ "${mp#/}" = "$mp" ] || [ -x "$mp" ]; }; then
     matchapack yarn "$@"
     return $?
   fi

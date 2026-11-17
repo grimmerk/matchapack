@@ -184,6 +184,19 @@ NPM [ci]" "npm ci; rm -f $rb/matchapack; npm ci" "$rb:$np:$PATH"
 YARN [install]" "yarn install; rm -f $rb/matchapack; yarn install" "$rb:$np:$PATH"
   cp "$tc/matchapack" "$rb/"
 
+  # Your own shell function called matchapack (no binary on PATH): npm and
+  # yarn route to it (only a path is checked with -x).
+  plain_setup=$setup
+  case $sh in
+    fish) setup="function matchapack; $tc/matchapack \$argv; end; $plain_setup" ;;
+    *) setup="function matchapack { $tc/matchapack \"\$@\"; }; $plain_setup" ;;
+  esac
+  os=Linux
+  check own-function "MATCHAPACK [ci] [a b]" "npm ci 'a b'" "$np:$PATH"
+  os=Darwin
+  check own-function-yarn "MATCHAPACK-YARN [install]" "yarn install" "$np:$PATH"
+  setup=$plain_setup
+
   # `init --alias mp`: mp runs matchapack, with its arguments unchanged;
   # without --alias no such name is defined. bash expands aliases only in
   # interactive shells (a startup file's case) or with expand_aliases, and

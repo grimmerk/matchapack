@@ -901,8 +901,8 @@ packages again.
   `~/.config/matchapack`), and only the names matchapack makes in them. It
   refuses a relative path or one with `..`, `/`, the home directory or a
   parent of it, a symbolic link, a store that is neither a store with its
-  `v2/` layout directory nor one only the Yarn engine has used (`tmp/` with
-  matchapack's run directories, `lock`, `projects`), and a directory one of
+  `v2/` layout directory nor one only the Yarn engine has used (nothing but
+  a `tmp/` directory of matchapack's run directories), and a directory one of
   those variables names that holds anything else; in a default directory
   other names are left in place. Any refusal removes nothing. Refused too
   while an install holds the store lock or a matchapack process holds a

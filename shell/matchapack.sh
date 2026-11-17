@@ -24,9 +24,13 @@ function npm {
     install | i | in | ins | inst | insta | instal | isnt | isnta | isntal | isntall | add | \
     update | up | upgrade | udpate | u | \
     uninstall | un | unlink | remove | rm | r)
-      # -x on the path: bash's `command -v` answers from its hash table, so
-      # a binary removed since (`matchapack uninstall`) would still be found.
-      if [ "${MATCHAPACK-1}" != 0 ] && [ -x "$(command -v matchapack 2>/dev/null)" ]; then
+      # A path must still be executable: bash's `command -v` answers from
+      # its hash table, so a binary removed since (`matchapack uninstall`)
+      # would still be found. Anything else `command -v` names (your own
+      # function or alias called matchapack) is used as it is.
+      local mp=
+      [ "${MATCHAPACK-1}" != 0 ] && mp=$(command -v matchapack 2>/dev/null)
+      if [ -n "$mp" ] && { [ "${mp#/}" = "$mp" ] || [ -x "$mp" ]; }; then
         matchapack npm "$@"
         return $?
       fi
