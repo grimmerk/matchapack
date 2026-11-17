@@ -618,6 +618,8 @@ fn remove_store(t: &Target, id: Id, delete: &[(OsString, u64)], keep_some: bool,
         Busy::Held(why) => return Ok(Err(format!("{why}; run `matchapack uninstall` again when it has finished"))),
         Busy::Unknown(why) => return Ok(Err(format!("{why}: refusing to remove the store without its lock"))),
     };
+    #[cfg(test)]
+    tests::hook(&t.path, "after-lock");
     // Moved aside while locked: an install waiting on the lock finds no
     // lock file at the store's path once it gets the lock, and opens a
     // fresh store there (Store::open), instead of using this one while it
@@ -630,8 +632,6 @@ fn remove_store(t: &Target, id: Id, delete: &[(OsString, u64)], keep_some: bool,
         let _ = at::rename(o.parent.as_raw_fd(), &aside, &o.name);
         return Ok(Err(format!("{}: changed while it was moved aside: left alone", t.path.display())));
     }
-    #[cfg(test)]
-    tests::hook(&t.path, "after-lock");
     let aside_path = t.path.with_file_name(&aside);
     let mut failed = remove_names(&o, &aside_path, delete, "lock");
     drop(lock);
