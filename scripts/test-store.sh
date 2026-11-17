@@ -17,19 +17,16 @@ store=$work/store
 # moved-entry: left by the last case; a third run over the same work
 # directory failed on it (the `mv` into it found a non-empty directory).
 rm -rf "${store:?}" "${work:?}/logs" "${work:?}/moved-entry" "${work:?}/store-odd"
-# The odd-tarballs case installs from the fixtures' tarball server.
-server=
-if ! curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz; then
-  python3 -m http.server 48321 --bind 127.0.0.1 --directory "$here/fixtures/optional-upward/tarballs" >/dev/null 2>&1 &
-  server=$!
-  for _ in $(seq 100); do curl -sf -o /dev/null http://127.0.0.1:48321/lc-q-1.0.0.tgz && break; sleep 0.1; done
-fi
-trap '[ -n "$server" ] && kill "$server" 2>/dev/null' EXIT
+# The odd-tarballs case installs from this run's own tarball server, on a
+# free port; $FX is the copy of fixtures/ whose URLs name it
+# (fixture-server.sh).
+. "$here/scripts/fixture-server.sh"; fixtures_serve "$work"
+trap '[ -n "$FX_PID" ] && kill "$FX_PID" 2>/dev/null' EXIT
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -5; }
 
-project() { local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$d/"; echo "$d"; }
+project() { local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$FX/small/package.json" "$FX/small/package-lock.json" "$d/"; echo "$d"; }
 # install: no scripts; full_install: scripts too.
 install() { "$bin" install "$1" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1; }
 full_install() { "$bin" install "$1" -- --no-audit --no-fund > "$work/out" 2>&1; }
@@ -132,9 +129,9 @@ verify && grep -q "$n match, 0 differ" "$work/out" && ok "verify: after --fix, e
 #     lc-dup (a path listed twice) differs and is replaced; the matching one
 #     is recorded as known to this extraction code, under the key an
 #     install uses: the next install compares nothing.
-if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
+if curl -sf -o /dev/null "$FX_URL/lc-dup-1.0.0.tgz"; then
   os=$work/store-odd; rm -rf "${os:?}"
-  po=$work/odd; rm -rf "${po:?}"; mkdir -p "$po"; cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$po/"
+  po=$work/odd; rm -rf "${po:?}"; mkdir -p "$po"; cp "$FX/odd-tarballs/package.json" "$FX/odd-tarballs/package-lock.json" "$po/"
   MATCHAPACK_STORE=$os "$bin" install "$po" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1 || bad "odd-tarballs: install"
   classic_entries "$os"
   MATCHAPACK_STORE=$os "$bin" store verify > "$work/out" 2>&1; rc=$?
@@ -143,12 +140,12 @@ if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
     && ok "verify: the classic engine's entry for a path listed twice differs from npm's extraction; the other is recorded" || bad "verify odd-tarballs (rc=$rc)"
   MATCHAPACK_STORE=$os "$bin" store verify --fix > "$work/out" 2>&1 && MATCHAPACK_STORE=$os "$bin" store verify > "$work/out" 2>&1 && grep -q '2 match, 0 differ' "$work/out" \
     && ok "verify --fix: replaced by npm's extraction, then both match" || bad "verify --fix odd-tarballs"
-  po2=$work/odd2; rm -rf "${po2:?}"; mkdir -p "$po2"; cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$po2/"
+  po2=$work/odd2; rm -rf "${po2:?}"; mkdir -p "$po2"; cp "$FX/odd-tarballs/package.json" "$FX/odd-tarballs/package-lock.json" "$po2/"
   MATCHAPACK_STORE=$os MATCHAPACK_INJECT_CHECK=1000000 "$bin" install "$po2" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1 \
     && grep -q ' 0 checked against pacote' "$work/out" && grep -q 'inject: cloned 2 ' "$work/out" \
     && ok "verify then install: the install compares nothing (verify recorded the key the install uses)" || bad "verify then install: $(grep -Eo '[0-9]+ checked against pacote' "$work/out")"
 else
-  echo "SKIP verify odd-tarballs: the fixtures' tarball server is not running (127.0.0.1:48321)"
+  echo "SKIP verify odd-tarballs: the fixtures' tarball server does not answer ($FX_URL)"
 fi
 
 # 9. tmp cleanup: an old directory nobody holds goes; one a process holds stays.
@@ -198,7 +195,7 @@ plant() { printf '{"path":"%s","ts":0,"build":"test","entries":[]}\n' "$2" > "$s
 plant 0123456789abcdef0123456789abcdef "$work/elsewhere-project"
 plant fedcba9876543210fedcba9876543210 "$work/vs-other/B"
 before=$(ls "$store/projects" | sort)
-"$here/scripts/verify.sh" "$here/fixtures/small" "$vw" > "$work/out" 2>&1; rc=$?
+"$here/scripts/verify.sh" "$FX/small" "$vw" > "$work/out" 2>&1; rc=$?
 copies=$(grep -l "\"$vw/" "$store"/projects/*.json 2>/dev/null | wc -l | tr -d ' ')
 [ $rc = 0 ] && grep -q 'RESULT: IDENTICAL' "$work/out" && [ "$copies" = 0 ] && [ "$(ls "$store/projects" | sort)" = "$before" ] \
   && ok "verify.sh: no project record left for its copies; the other records kept" || bad "verify.sh records: rc=$rc, $copies left for its copies, records $(ls "$store/projects" | wc -l | tr -d ' ') (before $(echo "$before" | wc -l | tr -d ' '))"
@@ -212,15 +209,15 @@ copies=$(grep -l "\"$vw/" "$store"/projects/*.json 2>/dev/null | wc -l | tr -d '
 #     only; gc then keeps A's entries,
 #     removes B's, and B's files still read the same (clones are
 #     independent of the store entries they were cloned from).
-if curl -sf -o /dev/null http://127.0.0.1:48321/lc-dup-1.0.0.tgz; then
+if curl -sf -o /dev/null "$FX_URL/lc-dup-1.0.0.tgz"; then
   store=$work/store-adopt; export MATCHAPACK_STORE=$store MATCHAPACK_LOG_DIR=$work/logs-adopt
   ar=$work/adopt-root; ao=$work/adopt-other
   [ -d "$ar/locked" ] && chmod 755 "$ar/locked"
   [ -d "$ar/e/node_modules" ] && chmod 755 "$ar/e/node_modules"
   rm -rf "${store:?}" "${work:?}/logs-adopt" "${ar:?}" "${ao:?}"
   mkdir -p "$ar/a" "$ao/b"
-  cp "$here/fixtures/odd-tarballs/package.json" "$here/fixtures/odd-tarballs/package-lock.json" "$ar/a/"
-  cp "$here/fixtures/small/package.json" "$here/fixtures/small/package-lock.json" "$ao/b/"
+  cp "$FX/odd-tarballs/package.json" "$FX/odd-tarballs/package-lock.json" "$ar/a/"
+  cp "$FX/small/package.json" "$FX/small/package-lock.json" "$ao/b/"
   install "$ar/a" && na=$(entries) && MATCHAPACK_VERBOSE=1 install "$ao/b" && grep -q 'inject: cloned [1-9]' "$work/out" && nb=$(( $(entries) - na )) \
     || bad "adopt: setup installs"
   rm -f "$store"/projects/*.json; age_entries
@@ -272,7 +269,7 @@ print(h.hexdigest())' "$1"; }
     && ok "gc: an unadopted project's files read the same after its entries are removed (before: $shared)" || bad "gc: B's files after removal (before: $shared)"
   chmod 755 "$ar/locked"; [ -d "$ar/e/node_modules" ] && chmod 755 "$ar/e/node_modules"
 else
-  echo "SKIP adopt: the fixtures' tarball server is not running (127.0.0.1:48321)"
+  echo "SKIP adopt: the fixtures' tarball server does not answer ($FX_URL)"
 fi
 
 echo "== $pass passed, $fail failed"

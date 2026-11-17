@@ -536,11 +536,13 @@ async function helperCases () {
     // That is outside the root: set aside, not a request or a note. The
     // install itself is a request (here refused) for a destination in the
     // project; with the hook off, a note that carries the destination.
-    if (await reachable('http://127.0.0.1:48321/lc-s-1.0.0.tgz')) {
+    // The URL of this run's server (fixture-server.sh exports it).
+    const fx = process.env.MATCHAPACK_TEST_FX_URL
+    if (fx && await reachable(`${fx}/lc-s-1.0.0.tgz`)) {
       for (const hook of ['on', 'off']) {
         const d = project('url-' + hook)
         const r = await helperRun({
-          args: ['install', 'http://127.0.0.1:48321/lc-s-1.0.0.tgz'],
+          args: ['install', `${fx}/lc-s-1.0.0.tgz`],
           rootAnswer: (m) => ({ ok: true, root: m.root }),
           cwd: d,
           env: hook === 'off' ? { MATCHAPACK_INJECT_HOOK: 'off' } : {},
@@ -551,7 +553,7 @@ async function helperCases () {
           JSON.stringify([0, true, [[hook === 'on' ? 'request' : 'note', path.join(d, 'node_modules', 'lc-s')]]]))
       }
     } else {
-      console.log('SKIP helper: npm install <url> (no tarball server on 127.0.0.1:48321; test-inject.sh starts one)')
+      console.log('SKIP helper: npm install <url> (no tarball server in MATCHAPACK_TEST_FX_URL; test-inject.sh starts one)')
     }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
