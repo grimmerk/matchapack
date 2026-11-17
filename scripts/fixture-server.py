@@ -61,11 +61,11 @@ def rewrite(src, dst, port):
     files = []
     for root, _dirs, names in os.walk(dst):
         files += [os.path.join(root, n) for n in names if not os.path.islink(os.path.join(root, n))]
-    # The tarballs first: their new hashes go into the other files.
+    # The tarballs (gzip, whatever their name) first: their new hashes go
+    # into the other files.
+    gz = [p for p in files if open(p, "rb").read(2) == b"\x1f\x8b"]
     hashes = []
-    for p in files:
-        if not p.endswith(".tgz"):
-            continue
+    for p in gz:
         raw = open(p, "rb").read()
         tar = gzip.decompress(raw)
         if PLACEHOLDER not in tar:
@@ -78,7 +78,7 @@ def rewrite(src, dst, port):
         put(p, out)
         hashes += zip(digests(raw), digests(out))
     for p in files:
-        if p.endswith(".tgz"):
+        if p in gz:
             continue
         data = open(p, "rb").read()
         out = data.replace(PLACEHOLDER, new)
@@ -86,6 +86,11 @@ def rewrite(src, dst, port):
             out = out.replace(old, h)
         if out != data:
             put(p, out)
+    # Nothing in the copy may still name the placeholder: a request to it
+    # would reach whatever answers there (another run's server, or none).
+    for p in files:
+        data = open(p, "rb").read()
+        assert PLACEHOLDER not in (gzip.decompress(data) if p in gz else data), f"{p} still names the placeholder"
 
 
 def put(p, data):
