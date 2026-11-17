@@ -263,6 +263,15 @@ if [ -n "$real" ]; then
   [ "$out" = "function
 no-yarn-function" ]; rcheck "init: npm is a function, no yarn function on Linux" $? "[$out]"
 
+  # init --alias with the real binary: mp is matchapack; a builtin's name is
+  # refused (status 2) and the npm function is still defined.
+  out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish --alias mp | source; mp --version; type -t npm' 2>&1)
+  printf '%s\n' "$out" | head -1 | grep -q '^matchapack ' && [ "$(printf '%s\n' "$out" | tail -1)" = function ]
+  rcheck "init --alias mp: mp runs the real matchapack" $? "[$out]"
+  out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish --alias string | source; echo "pipestatus $pipestatus"; type -t npm' 2>&1)
+  printf '%s\n' "$out" | grep -q 'builtin or reserved word of fish' && printf '%s\n' "$out" | grep -q '^pipestatus 2 0$' && [ "$(printf '%s\n' "$out" | tail -1)" = function ]
+  rcheck "init --alias string: refused (status 2), the npm function still defined" $? "[$out]"
+
   d=$(rproj ci npm); n0=$(logn)
   rfish "$d" 'npm ci --no-audit --no-fund; echo "status $status"'
   [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"], r["args"]')" = "('installed', ['ci', '--no-audit', '--no-fund'])" ] \

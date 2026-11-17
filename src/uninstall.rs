@@ -162,11 +162,16 @@ fn on_disk(p: &Path) -> u64 {
 /// targets' paths (the default store is inside the default log directory).
 fn plan_one(kind: Kind, path: &Path, set: bool, env: &Env, others: &[&Path]) -> Target {
     let target = |state| Target { kind, path: path.to_path_buf(), set, state };
-    if std::fs::symlink_metadata(path).is_err() {
-        if path.is_absolute() || path.as_os_str().is_empty() {
-            return target(if path.as_os_str().is_empty() { State::Refused("is empty".into()) } else { State::Absent });
-        }
+    if path.as_os_str().is_empty() {
+        return target(State::Refused("is empty".into()));
+    }
+    // Before anything is looked up: a relative path would be read against
+    // whatever directory uninstall runs in.
+    if !path.is_absolute() {
         return target(State::Refused("is not an absolute path".into()));
+    }
+    if std::fs::symlink_metadata(path).is_err() {
+        return target(State::Absent);
     }
     if let Some(why) = refuse_reason(path, &env.home) {
         return target(State::Refused(why));
@@ -192,6 +197,10 @@ fn plan_one(kind: Kind, path: &Path, set: bool, env: &Env, others: &[&Path]) -> 
             Kind::Logs => {
                 if n == "backup" && p == env.backups() {
                     kept.push((p, "convert-existing.sh's backups (below)".to_string()));
+                    continue;
+                }
+                if n == "store" && p != env.store {
+                    kept.push((p, "a store at the default place, not the one MATCHAPACK_STORE names: unset MATCHAPACK_STORE and run uninstall again to remove it".to_string()));
                     continue;
                 }
                 n == "log.jsonl" || n == "verify.jsonl" || (n.starts_with("repair-") && n.ends_with(".list"))
@@ -664,6 +673,13 @@ mod tests {
         env.store = PathBuf::from("rel/store");
         env.store_set = true;
         check("relative", &env, "not an absolute path");
+        // An existing relative directory (the tests run in the checkout):
+        // refused before it is looked at, by plan and by refuse_reason.
+        let mut env = env0();
+        env.config = PathBuf::from("src");
+        env.config_set = false;
+        check("relative, existing", &env, "not an absolute path");
+        assert_eq!(refuse_reason(Path::new("src"), &env.home).as_deref(), Some("is not an absolute path"));
         let mut env = env0();
         let link = d.join("store-link");
         let _ = fs::remove_file(&link);
