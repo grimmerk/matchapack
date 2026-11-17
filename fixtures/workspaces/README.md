@@ -14,8 +14,9 @@
   `--omit=dev`.
 
 Tarballs: the existing ones in `fixtures/optional-upward/tarballs` (made by
-`fixtures/yarn1-small/make-tarballs.py`), named at the placeholder 127.0.0.1:48321 (each suite serves them on a port
-of its own, `scripts/fixture-server.sh`). Used by
+`fixtures/yarn1-small/make-tarballs.py`), named at the placeholder
+127.0.0.1:48321 (each suite serves them on a port of its own,
+`scripts/fixture-server.sh`). Used by
 `scripts/verify-npm.sh` (both engines, with `--meta`) and
 `scripts/test-inject.sh` case 14 (npm's workspace, omit and install-strategy
 flags). The lockfile was made with `npm install --package-lock-only

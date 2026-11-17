@@ -39,6 +39,11 @@ npm_major=$(npm -v | cut -d. -f1)
 # port; $FX is the copy of fixtures/ whose URLs name it (fixture-server.sh).
 . "$here/scripts/fixture-server.sh"; fixtures_serve "$work"
 trap '[ -n "$FX_PID" ] && kill "$FX_PID" 2>/dev/null' EXIT
+# Its port choice, with fake servers: 48321 itself (the placeholder, inside
+# Linux's ephemeral range) and a port without five digits are given back.
+python3 "$here/scripts/fixture-server.py" --self-test > "$work/out" 2>&1 \
+  && ok "fixture server: a free port that is the placeholder 48321 or not five digits is given back, the next one taken" \
+  || bad "fixture server port choice"
 
 project() { # name fixture [python statement on the package.json dict d]
   local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"
