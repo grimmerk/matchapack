@@ -33,7 +33,13 @@ Run `echo $0` (macOS has used zsh by default since 10.15).
 Put it after the line that puts `~/.cargo/bin` on PATH (rustup usually does
 that in `~/.zshenv` or `~/.profile`); if it comes earlier, it does nothing.
 `matchapack init` detects the shell that runs it; `matchapack init zsh` (or
-`bash`, `fish`) names it explicitly. The function comes from the binary, so no
+`bash`, `fish`) names it explicitly. For a short name, e.g. `--alias mp`
+(`eval "$(matchapack init --alias mp)"`, fish `matchapack init --alias mp |
+source`): `mp` then runs matchapack (`mp store gc`); an alias in zsh and
+bash, a function in fish. The name must not be a builtin of the shell, nor
+npm, yarn or matchapack (refused: the line still defines the npm function,
+without the alias); a command of that name on PATH is only warned about.
+The function comes from the binary, so no
 checkout of this repository is needed and it updates with `cargo install`.
 Sourcing `shell/matchapack.sh` from a checkout still works. Open a new terminal,
 then type `npm ci` as usual:
@@ -86,8 +92,13 @@ or declined with the reason before npm's command runs):
 - `npm u` on npm 10, where it is no command: npm prints its own error.
 
 Bypass for one command: `MATCHAPACK=0 npm install`, or `command npm install`.
-Remove: delete the line. Installed node_modules keep working without the store
-(clones are independent files); the store is `~/.cache/matchapack/store`.
+Remove: `matchapack uninstall` lists what it would remove (the store, the
+trial logs, the settings directory), the space that frees, the lines of your
+startup files that mention matchapack (file:line; it never edits them) and
+the command that removes the binary (`cargo uninstall matchapack`);
+`matchapack uninstall --yes` removes matchapack's state. Installed
+node_modules keep working without the store (clones are independent files),
+and a later `npm ci` or `yarn` without the line is plain npm or Yarn.
 
 On macOS the same line also routes a bare `yarn`, `yarn install`, `yarn add`,
 `upgrade`, `remove` and `upgrade-interactive` in Yarn 1 projects (see "Yarn 1
@@ -878,7 +889,24 @@ packages again.
 
 ## Other commands
 
-- `matchapack init zsh|bash|fish`: print the shell integration (see "Use").
+- `matchapack init zsh|bash|fish [--alias NAME]`: print the shell
+  integration (see "Use"); `--alias NAME` also defines NAME for matchapack.
+- `matchapack uninstall [--yes]`: remove matchapack's own state. Without
+  `--yes` a dry run that writes nothing. It removes only what it recognises
+  as matchapack's, resolved as every other command resolves it
+  (`MATCHAPACK_STORE`, `MATCHAPACK_LOG_DIR`, `MATCHAPACK_CONFIG_DIR`, else
+  `~/.cache/matchapack/store`, `~/.cache/matchapack`,
+  `~/.config/matchapack`), and only the names matchapack makes in them. It
+  refuses `/`, the home directory or a parent of it, a symbolic link, a
+  store without its `v2/` layout directory, and a directory one of those
+  variables names that holds anything else; in a default directory other
+  names are left in place. Any refusal removes nothing. Refused too while an
+  install holds the store lock or a matchapack process holds a directory in
+  the store's `tmp/` (the Yarn engine's helper files). Space: removing the
+  store frees only the blocks no project shares; the dry run estimates it
+  from the project records, the real run prints the volume's free space
+  before and after. `~/.cache/matchapack/backup` (backups
+  `scripts/convert-existing.sh` kept) is left for you to check and remove.
 - `matchapack install [dir] [--ignore-scripts] [-- npm args]`: the install
   itself, with its counts and times (same gates as `npm ci`). The classic
   engine's options (`--no-rebuild`, `--mtime`, `--npm-cache`) and `matchapack

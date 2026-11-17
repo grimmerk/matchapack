@@ -47,9 +47,14 @@ cat > "$tc/matchapack" <<'STUB'
 #!/bin/sh
 case "$1" in
   init) case "$2" in
-          fish) cat /src/shell/matchapack.fish; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.fish; exit 0 ;;
-          zsh | bash) cat /src/shell/matchapack.sh; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.sh; exit 0 ;;
-        esac ;;
+          fish) cat /src/shell/matchapack.fish; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.fish; ext=fish ;;
+          zsh | bash) cat /src/shell/matchapack.sh; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.sh; ext=sh ;;
+          *) exit 2 ;;
+        esac
+        # --alias NAME: the binary appends shell/matchapack-alias.{sh,fish}
+        # with the name in place of the placeholder (it checks the name).
+        [ "${3-}" = --alias ] && sed "s/__MATCHAPACK_ALIAS__/$4/g" "/src/shell/matchapack-alias.$ext"
+        exit 0 ;;
   npm) shift; printf 'MATCHAPACK'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; exit "${STUB_RC:-0}" ;;
   yarn) shift; printf 'MATCHAPACK-YARN'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; exit "${STUB_RC:-0}" ;;
 esac
@@ -164,6 +169,31 @@ YARN [-h] [install]" "yarn --version; yarn -v; yarn --help; yarn -h install"
   check yarn-status "MATCHAPACK-YARN [install]
 5"   "STUB_RC=5 yarn install; echo $st"
   check yarn-no-binary "YARN" "yarn" "$np:$PATH"
+
+  # `init --alias mp`: mp runs matchapack, with its arguments unchanged;
+  # without --alias no such name is defined. bash expands aliases only in
+  # interactive shells (a startup file's case) or with expand_aliases, and
+  # only in commands parsed after the definition, as typed ones are: hence
+  # the newline (bash parses a -c string line by line) and eval (zsh parses
+  # the whole string first).
+  plain_setup=$setup
+  case $sh in
+    fish) setup='type -q matchapack; and matchapack init fish --alias mp | source'; defined='type -q mp; and echo defined; or echo none' ;;
+    zsh)  setup='command -v matchapack >/dev/null && eval "$(matchapack init zsh --alias mp)"'; defined='whence -w mp >/dev/null && echo defined || echo none' ;;
+    bash) setup='shopt -s expand_aliases; command -v matchapack >/dev/null && eval "$(matchapack init bash --alias mp)"'; defined='type mp >/dev/null 2>&1 && echo defined || echo none' ;;
+  esac
+  nl='
+'
+  check alias-mac   "MATCHAPACK [ci] [a b] []
+MATCHAPACK-YARN [install] [--frozen-lockfile]
+MATCHAPACK [ci]" "${nl}eval 'mp npm ci \"a b\" \"\"'; eval 'mp yarn install --frozen-lockfile'; npm ci"
+  check alias-status "MATCHAPACK [ci]
+3" "${nl}eval 'STUB_RC=3 mp npm ci'; echo $st"
+  os=Linux
+  check alias-linux "MATCHAPACK [install] [x]
+defined" "${nl}eval 'mp npm install x'; $defined"
+  setup=$plain_setup
+  check no-alias "none" "${nl}$defined"
   unset os
 done
 fi # stub cases
