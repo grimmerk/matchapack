@@ -1387,9 +1387,11 @@ MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
 #     the registry name, not the alias (reify.js #extractOrLink). With
 #     npm ci and npm install (through the shell function): every package
 #     cloned, the tarball installed under two names one store entry, nothing
-#     extracted by npm, the tree plain npm's. Its own store.
+#     extracted by npm, the tree plain npm's. Its own store, emptied before
+#     each command, so each fills it from nothing.
 as=$work/store-alias
 for c in ci install; do
+  rm -rf "${as:?}"
   ref=$(project "ref-alias-$c" alias); (cd "$ref" && npm "$c" --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "plain npm $c on fixtures/alias"
   p=$(project "alias-$c" alias)
   (export MATCHAPACK_STORE=$as; wrapped "$p" "npm $c --no-audit --no-fund"); rc=$?

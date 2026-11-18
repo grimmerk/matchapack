@@ -1246,7 +1246,11 @@ mod tests {
                     refused += 1;
                     let t = std::time::Instant::now();
                     let f = fs::OpenOptions::new().read(true).write(true).open(env.store.join("lock")).unwrap();
-                    while store::flock(&f, libc::LOCK_EX | libc::LOCK_NB).is_err() {}
+                    while let Err(e) = store::flock(&f, libc::LOCK_EX | libc::LOCK_NB) {
+                        assert!(store::would_block(&e), "{e}");
+                        assert!(t.elapsed() < std::time::Duration::from_secs(10), "the lock stayed held for 10 s");
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
                     longest = longest.max(t.elapsed());
                 }
             }
