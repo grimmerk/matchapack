@@ -179,11 +179,11 @@ stopped() {
   local c=$1 who=$2 sig=$3 how=$4 at=$5; shift 5
   d=$(new_project "$c")
   case $at in
-    script) printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" \
+    script) printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('node_modules/.tick', '')" "fs.writeFileSync('started', '')" \
               "setInterval(() => fs.existsSync('loop') && fs.writeFileSync('node_modules/.tick', String(Date.now())), 50)" \
               "setInterval(() => fs.existsSync('loop') || process.exit(0), 50)" > "$d/loop.js" ;;
-    count) printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" "let first = true" \
-             "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => { fs.appendFileSync('sigs', s + '\\n'); if (first) { first = false; setTimeout(() => process.exit(0), 1500) } })" \
+    count) printf '%s\n' "const fs = require('fs')" "let first = true" \
+             "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => { fs.appendFileSync('sigs', s + '\\n'); if (first) { first = false; setTimeout(() => process.exit(0), 1500) } })" "fs.writeFileSync('started', '')" \
              "setInterval(() => fs.existsSync('loop') || process.exit(0), 50)" > "$d/loop.js" ;;
   esac
   touch "$d/loop"
@@ -220,11 +220,17 @@ again() { # the next npm ci in $d: the store's lock is free
 }
 not_rerun() { ! grep -q 'running npm ci to rebuild\|running plain npm' "$d.out"; }
 # To matchapack's pid: npm gets the signal from the hook. During the root
-# script (npm passes SIGTERM on to it, and ends by it once the script has),
-# and during npm's extraction (npm rolls back and exits 1). The hook's
-# signal comes 50 ms after matchapack's (src/inject.js `stopSelf`): at the
-# very end of reify that can be after npm's rollback handler has gone, as
-# for plain npm signalled 50 ms later; so the extraction step here.
+# script (npm passes SIGTERM on to it, and ends by it once the script has;
+# the script runs until stopped, so the point has no end to race; it
+# writes node_modules/.tick before it says it started, so the tree is the
+# same however soon the signal comes), and during npm's extraction. The
+# hook's signal comes 50 ms after matchapack's (src/inject.js `stopSelf`),
+# and with clones npm's reify can end within that (seen on a CI runner):
+# then npm, past its rollback handler, ends by the signal with the tree in
+# place, as plain npm signalled 50 ms later would. So during extraction
+# either ending passes, with what holds for both: nothing left running or
+# written after, the run logged interrupted with npm's status, and the
+# status npm's (1 after a rollback, 128 + the signal otherwise).
 stopped sigterm-plain plain TERM pid script; p_rc=$rc p_nm=$nm
 stopped sigterm mp TERM pid script
 [ "$rc" = 143 ] && [ "$rc" = "$p_rc" ] && [ "$nm" = "$p_nm" ] && [ -z "$alive" ] && [ -z "$newer" ] && interrupted_as SIGTERM 143 \
@@ -233,14 +239,19 @@ check sigterm "SIGTERM to matchapack's pid during the root script: exit $rc (pla
 for s in HUP INT; do
   stopped "sig$s-plain" plain "$s" pid extract; p_rc=$rc p_nm=$nm
   stopped "sig$s" mp "$s" pid extract
-  [ "$rc" = 1 ] && [ "$rc" = "$p_rc" ] && [ "$nm" = "$p_nm" ] && [ -z "$alive" ] && [ -z "$newer" ] && interrupted_as "SIG$s" 1 && not_rerun && r=ok || r=bad
-  check "sig$s" "SIG$s to matchapack's pid during npm's extraction: npm rolled back, exit $rc (plain npm $p_rc), node_modules: $nm (plain $p_nm), nothing left running (${alive:-none}) or written after (${newer:-nothing}), logged interrupted" $r "$d"
+  code=$(( 128 + $(kill -l "$s") ))
+  { { [ "$rc" = 1 ] && [ "$nm" = none ]; } || { [ "$rc" = "$code" ] && [ "$nm" != none ]; }; } && [ "$p_rc" = 1 ] && [ "$p_nm" = none ] \
+    && [ -z "$alive" ] && [ -z "$newer" ] && interrupted_as "SIG$s" "$rc" && not_rerun && r=ok || r=bad
+  check "sig$s" "SIG$s to matchapack's pid during npm's extraction: exit $rc, node_modules: $nm (plain npm: $p_rc, $p_nm; 1 and none = rolled back, $code and a tree = past reify), nothing left running (${alive:-none}) or written after (${newer:-nothing}), logged interrupted" $r "$d"
 done
-# SIGKILL of matchapack: the socket closes; npm stops (SIGTERM) and rolls
-# back after matchapack has exited.
-stopped sigkill mp KILL pid reify
-[ "$rc" = 137 ] && [ "$nm" = none ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q 'matchapack has gone; stopping npm (SIGTERM)' "$d.out" && again && r=ok || r=bad
-check sigkill "SIGKILL to matchapack during npm's reify: exit 137; npm stopped and rolled back (node_modules: $nm), nothing left running (${alive:-none}) or written after (${newer:-nothing}); the next npm ci succeeds" $r "$d"
+# SIGKILL of matchapack: the socket closes and npm stops (SIGTERM from the
+# hook), after matchapack has exited. During the root script, which runs
+# until stopped: without the hook npm would wait for it for ever (on
+# master the orphan npm and its script ran on). npm passes the SIGTERM on,
+# the script ends by it, and npm with it.
+stopped sigkill mp KILL pid script
+[ "$rc" = 137 ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q 'matchapack has gone; stopping npm (SIGTERM)' "$d.out" && again && r=ok || r=bad
+check sigkill "SIGKILL to matchapack during the root script: exit 137; npm stopped (SIGTERM from its hook), its script too, nothing left running (${alive:-none}) or written after (${newer:-nothing}); the next npm ci succeeds" $r "$d"
 # SIGTERM to matchapack's pid while a root script that survives SIGTERM runs
 # (npm passes the signal on to it and waits), then SIGKILL 2 s later, as a
 # supervisor sends them: npm is gone at once, as plain npm given the same
@@ -252,8 +263,8 @@ check sigkill "SIGKILL to matchapack during npm's reify: exit 137; npm stopped a
 # npm_alive, script_alive, sigs. TK_ENV: more VAR=value for the run.
 termkill() {
   d=$(new_project "$1")
-  printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" \
-    "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => fs.appendFileSync('sigs', s + '\\n'))" \
+  printf '%s\n' "const fs = require('fs')" \
+    "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => fs.appendFileSync('sigs', s + '\\n'))" "fs.writeFileSync('started', '')" \
     "setInterval(() => fs.existsSync('loop') || process.exit(0), 50)" > "$d/loop.js"
   python3 -c "import json;p='$d/package.json';d=json.load(open(p));d['scripts']['postinstall']='node loop.js';json.dump(d,open(p,'w'),indent=2)"
   touch "$d/loop"
@@ -324,13 +335,38 @@ stopped group-preload mp TERM group count MATCHAPACK_STOP_GRACE_MS=1000 NODE_OPT
 check group-term-preload "SIGTERM to the process group, with a preload's SIGTERM listener: the root script got [$sigs] ([$p_sigs] under plain npm), exit $rc (plain $p_rc)" $r "$d"
 # Ctrl-C: the terminal sends SIGINT to its whole foreground group. In a new
 # pseudo-terminal whose foreground job is npm ci (plain, or matchapack's),
-# ^C typed into it once the script runs; the same comparison.
+# ^C typed into it once the script runs; the same comparison. The session
+# is led by a small stand-in for a shell (the child of pty.fork): it runs
+# the command as the terminal's foreground job, in a process group of its
+# own, and stays until every process of that group has gone, as an open
+# shell stays. (When the command itself led the session, its exit hung the
+# terminal up: a SIGHUP to npm, which then died before passing the second
+# ^C on, where plain npm, leading its own session, outlived its script.)
 ctrlc_py='
 import os, pty, select, signal, sys, time
 mark, out, cmd = sys.argv[1], sys.argv[2], sys.argv[3:]
 pid, fd = pty.fork()
 if pid == 0:
-    os.execvp(cmd[0], cmd)
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    job = os.fork()
+    if job == 0:
+        os.setpgid(0, 0)
+        signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+        os.execvp(cmd[0], cmd)
+    try:
+        os.setpgid(job, job)
+    except OSError:
+        pass
+    os.tcsetpgrp(0, job)
+    open(out + ".job", "w").write(str(job))
+    _, st = os.waitpid(job, 0)
+    while True:
+        try:
+            os.killpg(job, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    os._exit(0)
 log, sent, end, done = open(out, "wb"), 0, time.monotonic() + 90, False
 times, last = int(os.environ.get("CTRLC_TIMES", "1")), 0.0
 while time.monotonic() < end:
@@ -347,17 +383,26 @@ while time.monotonic() < end:
         os.write(fd, b"\x03")
         sent, last = sent + 1, time.monotonic()
 if not done:
-    # Still running after 90 s: its whole group (the terminal session it
-    # leads) is killed and reaped, and the case fails.
-    os.killpg(pid, signal.SIGKILL)
+    # Still running after 90 s: the whole terminal session (the leader and
+    # the job) is killed and reaped, and the case fails.
+    groups = [pid]
+    try:
+        groups.append(int(open(out + ".job").read()))
+    except (OSError, ValueError):
+        pass
+    for g in groups:
+        try:
+            os.killpg(g, signal.SIGKILL)
+        except OSError:
+            pass
     os.waitpid(pid, 0)
     sys.exit("timed out")
 os.waitpid(pid, 0)
 '
 ctrlc() { # <case> <plain|mp> [times, 1 s apart]: sets sigs
   d=$(new_project "$1")
-  printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" "let first = true" \
-    "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => { fs.appendFileSync('sigs', s + '\\n'); if (first) { first = false; setTimeout(() => process.exit(0), 1500) } })" \
+  printf '%s\n' "const fs = require('fs')" "let first = true" \
+    "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => { fs.appendFileSync('sigs', s + '\\n'); if (first) { first = false; setTimeout(() => process.exit(0), 3000) } })" "fs.writeFileSync('started', '')" \
     "setInterval(() => {}, 1000)" > "$d/loop.js"
   python3 -c "import json;p='$d/package.json';d=json.load(open(p));d['scripts']['postinstall']='node loop.js';json.dump(d,open(p,'w'),indent=2)"
   local npm_cmd=(matchapack npm); [ "$2" = plain ] && npm_cmd=(env MATCHAPACK=0 "$(command -v npm)")
@@ -373,12 +418,11 @@ ctrlc ctrlc mp
 check ctrl-c "Ctrl-C in a terminal: the root script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 # Ctrl-C twice, 1 s apart: the second ends matchapack at once (its stop line
 # says so), and npm, which got both from the terminal, gets nothing more.
-# Only the SIGINTs are compared: matchapack leads this test's terminal
-# session, and its exit hangs the terminal up (SIGHUP to the rest).
-ctrlc ctrlc2-plain plain 2; p_ints=$(grep -o SIGINT <<< "$sigs" | wc -l | tr -d ' ')
-ctrlc ctrlc2 mp 2; ints=$(grep -o SIGINT <<< "$sigs" | wc -l | tr -d ' ')
-[ "$p_ints" -ge 3 ] && [ "$ints" = "$p_ints" ] && [[ "$sigs" != *"timed out"* ]] && r=ok || r=bad
-check ctrl-c-twice "Ctrl-C twice in a terminal: the root script got $ints SIGINTs ($p_ints under plain npm)" $r "$d"
+# The script stays 3 s after its first signal, so both reach it.
+ctrlc ctrlc2-plain plain 2; p_sigs=$sigs
+ctrlc ctrlc2 mp 2
+[ "$p_sigs" = "SIGINT SIGINT SIGINT SIGINT " ] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
+check ctrl-c-twice "Ctrl-C twice in a terminal: the root script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 
 # 16. the run log records installs and declines (in the test's own log dir)
 n_inst=$(grep -c '"outcome":"installed"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)
