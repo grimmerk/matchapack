@@ -1549,6 +1549,27 @@ pub fn cli(args: Vec<String>) -> i32 {
     eprintln!("matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&cwd, &root, &yarn, &args)));
     util::remove_run_dir();
+    // Stopped by a signal while Yarn ran (src/signals.rs, #64): Yarn was
+    // told to stop, or got the signal itself, and has exited; never run it
+    // again (a decline would run plain Yarn). Logged as interrupted; the
+    // status is Yarn's (main.rs ends by its signal when it died of one).
+    // Yarn finishing with 0 all the same is a normal run.
+    if let Some(sig) = crate::signals::received().filter(|_| !matches!(outcome, Ok(Ok(_)))) {
+        let (code, stats) = match &outcome {
+            Ok(Err(RunError::Yarn { code, stats })) => (Some(*code), stats.clone()),
+            _ => (None, Value::Null),
+        };
+        crate::signals::say(sig, "yarn", code);
+        let mut rec = json!({ "signal": crate::signals::name(sig), "code": code, "reason": format!("stopped by {}", crate::signals::name(sig)), "yarn1": stats,
+                              "root": root.display().to_string() });
+        match &outcome {
+            Ok(Err(RunError::Declined(why))) => rec["declined"] = json!(why),
+            Err(_) => rec["error"] = json!("internal error (panic)"),
+            _ => {}
+        }
+        log("interrupted", with(rec, chosen(&stats)));
+        return code.filter(|c| *c != 0).unwrap_or(128 + sig);
+    }
     match outcome {
         Ok(Ok(s)) => {
             let n = |k: &str| s.stats[k].as_u64().unwrap_or(0);

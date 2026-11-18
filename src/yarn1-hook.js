@@ -45,6 +45,8 @@
 //                                  child process (`wrapWorkspaceChild`)
 //       MATCHAPACK_YARN_CHILD      `1`: this hook was started by another one
 //                                  for that child (set by `wrapWorkspaceChild` only)
+//       MATCHAPACK_STOP_GRACE_MS   tests: the wait before this process stops
+//                                  itself (`stopSelf`; default 50)
 // Exit status: Yarn's. 90 before Yarn starts: the hook declined (the reason
 // is sent to matchapack and printed); matchapack then runs plain Yarn. In a
 // child (MATCHAPACK_YARN_CHILD) the hook runs plain Yarn itself instead: the
@@ -58,6 +60,107 @@ let yarnStarted = false
 // In a child (MATCHAPACK_YARN_CHILD): runs Yarn without the hook, in this
 // process, when the hook declines before Yarn has started.
 let plainFallback = null
+
+// Yarn stops when matchapack goes away (grimmerk/matchapack-private#64; src/signals.rs),
+// as src/inject.js stops npm: when the socket closes while Yarn runs, or
+// matchapack says a signal stopped it (`{"stop":"SIGINT"}`), this process
+// signals itself (`stopSelf`), so that Yarn's own handling runs as for plain
+// Yarn given that signal (SIGTERM: Yarn passes it on to the processes it
+// started, then exits 1). Never on top of the same signal this process has
+// already received (a group signal, or the one a parent Yarn passed on to a
+// workspace command's Yarn): stops and received signals are counted. Seen through process.emit (src/inject.js says
+// why): no listener of its own is added.
+const STOP_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP']
+// How many of each of STOP_SIGNALS this process has received
+// (`watchSignals`): its own (from the group, a terminal, a parent) and those
+// the hook sent itself. Compared with the stop lines of the same signal
+// (`onStop`).
+const received = { SIGTERM: 0, SIGINT: 0, SIGHUP: 0 }
+const receivedAny = () => received.SIGTERM + received.SIGINT + received.SIGHUP > 0
+function watchSignals () {
+  const emit = process.emit
+  process.emit = function (type) {
+    if (STOP_SIGNALS.includes(type)) {
+      received[type]++
+    }
+    return emit.apply(this, arguments)
+  }
+  // A listener added before this script ran (a NODE_OPTIONS --require
+  // preload: node runs preloads before its main script) made Node bind the
+  // process.emit of that moment for its signal, past this wrapper. Removed
+  // and added again, in order and as they are (rawListeners keeps `once`
+  // wrappers), they make Node bind the current process.emit: Node stops a
+  // signal's watcher at its last listener and starts it at the first.
+  for (const sig of STOP_SIGNALS) {
+    const ls = process.rawListeners(sig)
+    if (ls.length > 0) {
+      process.removeAllListeners(sig)
+      for (const l of ls) {
+        process.on(sig, l)
+      }
+    }
+  }
+}
+// After a stop line (`stops`, `lastStop`: matchapack ends right after it,
+// by a second signal) or the close (`closed`).
+let stops = 0
+const stopsOf = { SIGTERM: 0, SIGINT: 0, SIGHUP: 0 }
+let lastStop = false
+let closed = false
+function later (graceMs, fn) {
+  setTimeout(() => setImmediate(fn), graceMs)
+}
+// After the wait, this process signals itself with `sig` when `due()` still
+// holds. `say`: a line for stderr when it does stop (none when matchapack
+// said why).
+function stopSelf (sig, graceMs, say, due) {
+  later(graceMs, () => {
+    if (due()) {
+      if (say) {
+        process.stderr.write(say)
+      }
+      process.kill(process.pid, sig)
+    }
+  })
+}
+// A stop line: every signal matchapack gets while this process runs.
+// The n-th stop line of signal S: this process signals itself with S unless
+// it has already received S n times, its own and the hook's together. So
+// each of matchapack's signals reaches it once, from the group with
+// matchapack's (counted when it came) or from the hook; a signal of another
+// kind, or an earlier one, does not hide it.
+function onStop (msg, graceMs) {
+  stops++
+  if (msg.last === true) {
+    lastStop = true
+  }
+  const sig = msg.stop
+  const n = ++stopsOf[sig]
+  stopSelf(sig, graceMs, null, () => received[sig] < n)
+}
+// The socket has closed with no line after the last one. With no stop
+// before: SIGTERM (matchapack was killed or crashed), unless a signal came.
+// After one: SIGKILL, as plain npm or Yarn gets from a supervisor that sent
+// SIGTERM and then SIGKILL; such a close can only mean matchapack was killed
+// or crashed after it asked this process to stop. After matchapack's last
+// line (a second signal ended it): nothing more.
+function onClose (graceMs, what, noun) {
+  if (closed) {
+    return
+  }
+  closed = true
+  if (lastStop) {
+    return
+  }
+  if (stops === 0) {
+    stopSelf('SIGTERM', graceMs, `${what}; stopping ${noun}(SIGTERM)\n`, () => !receivedAny())
+    return
+  }
+  later(graceMs, () => {
+    process.stderr.write(`${what} after asking ${noun || 'this Yarn '}to stop; ending ${noun || 'it '}(SIGKILL)\n`)
+    process.kill(process.pid, 'SIGKILL')
+  })
+}
 
 function send (obj) {
   if (sock && !sock.destroyed && sock.writable) {
@@ -150,18 +253,20 @@ async function main () {
   const timeoutMs = Number(process.env.MATCHAPACK_YARN_TIMEOUT_MS) || 30000
   const wrapChild = process.env.MATCHAPACK_YARN_WRAP_CHILD === 'workspace'
   const isChild = process.env.MATCHAPACK_YARN_CHILD === '1'
+  const graceMs = Number(process.env.MATCHAPACK_STOP_GRACE_MS) || 50
   // Not for the scripts Yarn runs.
   for (const k of ['MATCHAPACK_YARN_FD', 'MATCHAPACK_YARN_PROBE_DIR', 'MATCHAPACK_YARN_HOOK', 'MATCHAPACK_YARN_SIMULATE', 'MATCHAPACK_YARN_TIMEOUT_MS',
-    'MATCHAPACK_YARN_LAUNCHER', 'MATCHAPACK_YARN_WRAP_CHILD', 'MATCHAPACK_YARN_CHILD']) {
+    'MATCHAPACK_YARN_LAUNCHER', 'MATCHAPACK_YARN_WRAP_CHILD', 'MATCHAPACK_YARN_CHILD', 'MATCHAPACK_STOP_GRACE_MS']) {
     delete process.env[k]
   }
+  // Before Yarn (or corepack) adds any signal listener.
+  watchSignals()
   if (isChild && target) {
     // As the workspace command would have started it: `node <target> <args>`.
     plainFallback = () => {
-      if (sock) {
-        // (end, not destroy: the reason sent just before is still written)
-        sock.end()
-      }
+      // The socket stays open, with no request sent on it: this Yarn still
+      // stops when the Yarn relaying for it goes away (`gone`; Yarn 1 passes
+      // only SIGTERM on to its children), and ends with it when it ends.
       process.argv = [process.argv[0], target, ...yarnArgs]
       require('module').runMain(target)
     }
@@ -209,14 +314,33 @@ async function main () {
       } catch {
         continue
       }
+      // matchapack was stopped by this signal (src/signals.rs): Yarn stops
+      // as if it had got it; matchapack goes on answering until it exits.
+      if (msg && STOP_SIGNALS.includes(msg.stop)) {
+        onStop(msg, graceMs)
+        continue
+      }
       settle(msg.id, msg)
     }
   })
+  // The other end has gone, and Yarn stops (`stopSelf`; SIGTERM: no signal
+  // was said). Here it is matchapack, whose end closes only when its process
+  // ends (inject.rs `run_serving`), and its workers with it: what is still
+  // asked is Node's to copy, as Yarn asked. In a workspace command's Yarn it
+  // is the Yarn that relays its requests (`relayFrom`); matchapack may still
+  // be cloning or fixing up the paths asked, so nothing is copied over them:
+  // the requests stay unanswered, and no further copy is made (`hooked`),
+  // while this Yarn stops.
   const gone = (why) => () => {
     down = down || why
-    for (const id of [...pending.keys()]) {
-      settle(id, { ok: false, reason: why })
+    if (!isChild) {
+      for (const id of [...pending.keys()]) {
+        settle(id, { ok: false, reason: why })
+      }
     }
+    onClose(graceMs, isChild
+      ? 'matchapack yarn hook: the Yarn that started this workspace command\'s Yarn has gone'
+      : 'matchapack yarn hook: matchapack has gone', isChild ? '' : 'Yarn ')
   }
   sock.on('error', gone('server-gone'))
   sock.on('close', gone('server-gone'))
@@ -308,6 +432,7 @@ async function main () {
         MATCHAPACK_YARN_CHILD: '1',
         MATCHAPACK_YARN_HOOK: hookMode,
         MATCHAPACK_YARN_TIMEOUT_MS: String(timeoutMs),
+        MATCHAPACK_STOP_GRACE_MS: String(graceMs),
       }, simulate ? { MATCHAPACK_YARN_SIMULATE: simulate } : {})
       const child = spawn.call(this, file, [__filename, ...args], Object.assign({}, options, { env, stdio: ['inherit', 'inherit', 'inherit', 'pipe'] }))
       if (child.stdio && child.stdio[3]) {
@@ -415,6 +540,10 @@ async function main () {
           !path.isAbsolute(src) || !path.isAbsolute(dest)) {
         note('not-eligible')
         return origCopyFile.apply(this, arguments)
+      }
+      if (down && isChild && sock.destroyed) {
+        // (`gone`) No copy at all: this Yarn is stopping.
+        return
       }
       if (down) {
         note(down)

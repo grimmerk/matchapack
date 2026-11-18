@@ -230,6 +230,16 @@ In detail:
   network request; `--no-audit` turns it off, as with npm).
 - npm's own errors (lockfile out of sync, a failing script) are printed once,
   by npm, with npm's exit status.
+- Stopping matchapack stops npm, however it is stopped. npm runs in
+  matchapack's process group, so Ctrl-C, `kill -- -<pgid>`, `timeout` and
+  most CI cancellations reach npm as they reach plain npm, once. A signal
+  sent to matchapack alone (`kill <pid>`, an IDE's stop button, a
+  supervisor) reaches npm through matchapack: npm stops as plain npm given
+  that signal stops (it undoes a half-done install), matchapack waits for
+  it, logs the run as `interrupted`, never starts npm a second time, and
+  exits as npm did. If matchapack is killed outright (SIGKILL, a crash),
+  npm sees it gone and stops (SIGTERM); npm's undo then finishes after
+  matchapack has exited. Details: NOTES, "Stopping".
 - Root `predependencies` / `dependencies` / `postdependencies` scripts run, as
   in `npm ci`.
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
@@ -514,6 +524,9 @@ it.
   workspace's Yarn has started.
 - Every other command runs Yarn directly; matchapack does not start. Which
   ones and why: "What stays plain Yarn" below.
+- Stopping works as for npm (above): Yarn stops as plain Yarn given the
+  same signal stops. The Yarn a `yarn workspace` command starts stops when
+  the Yarn that started it goes away (NOTES, "Stopping").
 - Git dependencies go through Yarn's cache like any package, and are
   cloned at the link step like any package (a real project with a git
   dependency came out identical to plain Yarn: `NOTES.md`, "Yarn 1 trial
@@ -642,7 +655,7 @@ own and complete).
 ## Trial: logs, checks, scope
 
 - `matchapack report [--days N]`: what happened (installed / handed to npm and
-  why / failed), install times, space not written, store size, free space.
+  why / failed / interrupted by a signal), install times, space not written, store size, free space.
   Every routed npm command that reaches matchapack appends one line to
   `~/.cache/matchapack/log.jsonl` (`MATCHAPACK_LOG=0` turns it off), with
   npm's command (`command`: ci, install, update, uninstall) and npm's install

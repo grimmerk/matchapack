@@ -291,7 +291,9 @@ pub(crate) fn threads() -> usize {
 /// exited: `stop` (drop what is still queued), shut the socket down (a
 /// process the child started may still hold its end) and wait for `serve`.
 /// The outer error: the child could not be started. Shared by the npm inject
-/// engine and the Yarn 1 engine (src/yarn1.rs).
+/// engine and the Yarn 1 engine (src/yarn1.rs). While the child runs,
+/// SIGTERM, SIGHUP and SIGINT are caught and the first is passed to the hook
+/// (src/signals.rs, #64); the caller asks `signals::received` afterwards.
 pub(crate) fn run_serving(
     cmd: &mut std::process::Command,
     ours: UnixStream,
@@ -313,15 +315,24 @@ pub(crate) fn run_serving(
             } else if libc::dup2(theirs_fd, CHILD_FD) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            crate::signals::child_defaults();
             Ok(())
         });
     }
-    let mut child = cmd.spawn()?;
+    // Armed before the start: no signal falls between the two.
+    let armed = crate::signals::arm();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            armed.disarm();
+            return Err(e);
+        }
+    };
     // Only the child holds its end now: when it exits, the server sees the
     // end of the stream.
     drop(theirs);
     let closer = ours.try_clone();
-    Ok(std::thread::scope(|s| {
+    let status = std::thread::scope(|s| {
         // MATCHAPACK_TEST_BROKE=no-server: as if the thread could not start.
         let spawned = if std::env::var("MATCHAPACK_TEST_BROKE").as_deref() == Ok("no-server") {
             Err(std::io::Error::other("MATCHAPACK_TEST_BROKE=no-server"))
@@ -341,6 +352,8 @@ pub(crate) fn run_serving(
             }
         };
         let status = child.wait();
+        // No signal is passed on any more (src/signals.rs).
+        crate::signals::end_relay();
         // The child is gone: drop what is still queued and end the stream,
         // also when a process the child started still holds the socket.
         stop();
@@ -349,7 +362,9 @@ pub(crate) fn run_serving(
         }
         let _ = serving.join();
         status
-    }))
+    });
+    armed.disarm();
+    Ok(status)
 }
 
 pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {

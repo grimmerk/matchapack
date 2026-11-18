@@ -1556,7 +1556,10 @@ impl<'a> Server<'a> {
 /// at once on the reading thread, every other line by one of `threads`
 /// workers, which write the answer lines `handle` returns. Once `stopping` is
 /// set (the node child is gone), queued lines are dropped. Returns when the
-/// stream is at its end and every started line is handled.
+/// stream is at its end and every started line is handled. A signal that
+/// stops matchapack meanwhile is passed on as one more line, under the same
+/// lock as the answers (src/signals.rs `relay_stop`, which returns when
+/// the child has exited: `end_relay`).
 pub fn serve_lines(
     stream: UnixStream,
     threads: usize,
@@ -1585,6 +1588,32 @@ pub fn serve_lines(
                 }
             });
         }
+        s.spawn(|| {
+            crate::signals::relay_stop(|b, last| {
+                if !last {
+                    let _ = writer.lock().unwrap_or_else(|e| e.into_inner()).write_all(b);
+                    return;
+                }
+                // The line before this process ends: within a bound, or
+                // not at all (src/signals.rs; the process ends either way).
+                let bound = std::time::Duration::from_millis(250);
+                let until = std::time::Instant::now() + bound;
+                loop {
+                    let mut w = match writer.try_lock() {
+                        Ok(w) => w,
+                        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => return,
+                    };
+                    let _ = w.set_write_timeout(Some(bound));
+                    let _ = w.write_all(b);
+                    return;
+                }
+            })
+        });
         for line in reader.lines() {
             match line {
                 Ok(l) => {
