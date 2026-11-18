@@ -115,6 +115,12 @@ extern "C" fn on_signal(sig: libc::c_int) {
     match FIRST.compare_exchange(0, mine, Ordering::SeqCst, Ordering::SeqCst) {
         Ok(_) => notice(sig as u8),
         Err(first) => {
+            // An end already pending (a second signal whose line is not out
+            // yet): any further one ends this process now, before the
+            // same-signal rule below could fold it into the first.
+            if DIE_SIG.load(Ordering::SeqCst) != 0 {
+                die(sig);
+            }
             let same = (first & 0xff) as libc::c_int == sig && (mine >> 8).saturating_sub(first >> 8) < SAME_STOP_US;
             if !same {
                 // A second one while the child stops: passed on as well (the

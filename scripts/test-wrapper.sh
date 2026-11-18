@@ -246,7 +246,11 @@ check sigkill "SIGKILL to matchapack during npm's reify: exit 137; npm stopped a
 # supervisor sends them: npm is gone at once, as plain npm given the same
 # two is (the script runs on in both). The hook asked npm to stop, and on
 # matchapack's end with no word ends it (SIGKILL).
-termkill() { # <case> <plain|mp> [pid|group: where the SIGTERM goes] [KILL|INT: the second, to the pid]: sets npm_alive, script_alive, sigs
+# termkill <case> <plain|mp> [pid|group: where the SIGTERM goes] [KILL|INT:
+# the second signal] [pid|group: where it goes] [seconds between the two]:
+# sets ran (yes once the script ran and both signals were delivered),
+# npm_alive, script_alive, sigs. TK_ENV: more VAR=value for the run.
+termkill() {
   d=$(new_project "$1")
   printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" \
     "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => fs.appendFileSync('sigs', s + '\\n'))" \
@@ -254,16 +258,19 @@ termkill() { # <case> <plain|mp> [pid|group: where the SIGTERM goes] [KILL|INT: 
   python3 -c "import json;p='$d/package.json';d=json.load(open(p));d['scripts']['postinstall']='node loop.js';json.dump(d,open(p,'w'),indent=2)"
   touch "$d/loop"
   local npm_cmd=(matchapack npm); [ "$2" = plain ] && npm_cmd=(env MATCHAPACK=0 "$(command -v npm)")
-  (cd "$d" && exec "${nosession[@]}" env PATH="$bin_dir:$PATH" "${npm_cmd[@]}" ci --no-audit --no-fund) > "$d.out" 2>&1 < /dev/null &
-  local m=$! _ npm_pid script_pid
+  (cd "$d" && exec "${nosession[@]}" env PATH="$bin_dir:$PATH" ${TK_ENV[@]+"${TK_ENV[@]}"} "${npm_cmd[@]}" ci --no-audit --no-fund) > "$d.out" 2>&1 < /dev/null &
+  local m=$! _ npm_pid script_pid first=no second=no
+  ran=no
   for _ in $(seq 6000); do [ -e "$d/started" ] && break; sleep 0.01; done
   sleep 0.3
   npm_pid=$m; [ "$2" = mp ] && npm_pid=$(pgrep -P "$m" | head -1)
   script_pid=$(descendants "$m" | while read -r p; do [ "$(ps -o command= -p "$p" | tr -s ' ')" = "node loop.js" ] && echo "$p"; done | head -1)
-  if [ "${3:-pid}" = group ]; then kill -TERM -- -"$m"; else kill -TERM "$m"; fi
+  if [ "${3:-pid}" = group ]; then kill -TERM -- -"$m" && first=yes; else kill -TERM "$m" && first=yes; fi
   # (Not waited for here: after a SIGINT, npm waits for the script.)
-  sleep 2; kill -"${4:-KILL}" "$m"
-  sleep 1
+  sleep "${6:-2}"
+  if [ "${5:-pid}" = group ]; then kill -"${4:-KILL}" -- -"$m" && second=yes; else kill -"${4:-KILL}" "$m" && second=yes; fi
+  sleep 1.5
+  [ -e "$d/started" ] && [ -n "$script_pid" ] && [ -n "$npm_pid" ] && [ $first = yes ] && [ $second = yes ] && ran=yes
   npm_alive=no; kill -0 "$npm_pid" 2>/dev/null && npm_alive=yes
   script_alive=no; kill -0 "$script_pid" 2>/dev/null && script_alive=yes
   rm -f "$d/loop"; sleep 0.3
@@ -271,22 +278,33 @@ termkill() { # <case> <plain|mp> [pid|group: where the SIGTERM goes] [KILL|INT: 
   wait "$m" 2>/dev/null
   sigs=$({ tr '\n' ' ' < "$d/sigs"; } 2>/dev/null)
 }
-termkill termkill-plain plain; p_npm=$npm_alive p_sigs=$sigs
+termkill termkill-plain plain; p_npm=$npm_alive p_sigs=$sigs p_ran=$ran
 termkill termkill mp
-[ "$p_npm" = no ] && [ "$npm_alive" = no ] && [ "$sigs" = "$p_sigs" ] && grep -q 'ending npm (SIGKILL)' "$d.out" && r=ok || r=bad
+[ "$p_ran" = yes ] && [ "$ran" = yes ] && [ "$p_npm" = no ] && [ "$npm_alive" = no ] && [ "$sigs" = "$p_sigs" ] && grep -q 'ending npm (SIGKILL)' "$d.out" && r=ok || r=bad
 check term-then-kill "SIGTERM then SIGKILL to matchapack's pid, a root script that survives SIGTERM running: npm gone 1 s after (alive: $npm_alive; plain npm: $p_npm), the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 # The same after a SIGTERM to the whole group (npm got its own): the
 # earlier signal npm survived does not hide the later loss of matchapack.
-termkill gtermkill-plain plain group KILL; p_npm=$npm_alive p_sigs=$sigs
+termkill gtermkill-plain plain group KILL; p_npm=$npm_alive p_sigs=$sigs p_ran=$ran
 termkill gtermkill mp group KILL
-[ "$p_npm" = no ] && [ "$npm_alive" = no ] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
+[ "$p_ran" = yes ] && [ "$ran" = yes ] && [ "$p_npm" = no ] && [ "$npm_alive" = no ] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
 check group-term-then-kill "SIGTERM to the group, then SIGKILL to matchapack's pid: npm gone 1 s after (alive: $npm_alive; plain npm: $p_npm), the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 # A SIGTERM to the group, then SIGINT to the pid: npm gets the SIGINT too
 # and passes it on to the script, as plain npm does.
-termkill gtermint-plain plain group INT; p_sigs=$sigs
+termkill gtermint-plain plain group INT; p_sigs=$sigs p_ran=$ran
 termkill gtermint mp group INT
-[ -n "$p_sigs" ] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
+[ "$p_ran" = yes ] && [ "$ran" = yes ] && [[ " $p_sigs " == *" SIGINT "* ]] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
 check group-term-then-int "SIGTERM to the group, then SIGINT to matchapack's pid: the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
+# SIGTERM to matchapack's pid, then a SIGINT to the whole group 0.2 s later,
+# inside the hook's wait (1 s here): npm gets the group's SIGINT and the
+# hook's SIGTERM, as plain npm given the same two, and never a second
+# SIGINT (the hook counts each kind of signal on its own). Compared as
+# counts: the order differs (the hook's SIGTERM comes after its wait).
+count_of() { grep -o "$1" <<< "$2" | wc -l | tr -d ' '; }
+termkill termgint-plain plain pid INT group 0.2; p_sigs=$sigs p_ran=$ran
+TK_ENV=(MATCHAPACK_STOP_GRACE_MS=1000); termkill termgint mp pid INT group 0.2; unset TK_ENV
+[ "$p_ran" = yes ] && [ "$ran" = yes ] && [ "$(count_of SIGTERM "$p_sigs")" -ge 1 ] && [ "$(count_of SIGINT "$p_sigs")" -ge 1 ] \
+  && [ "$(count_of SIGTERM "$sigs")" = "$(count_of SIGTERM "$p_sigs")" ] && [ "$(count_of SIGINT "$sigs")" = "$(count_of SIGINT "$p_sigs")" ] && r=ok || r=bad
+check term-then-group-int "SIGTERM to matchapack's pid, then SIGINT to the group: the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 # To the whole group, as `timeout`, `kill -- -<pgid>` and Ctrl-C send it:
 # npm gets the kernel's copy and no other (the hook adds none, also when
 # its own would come after npm's reify handler has gone: the wait is 1 s

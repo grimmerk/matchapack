@@ -71,15 +71,17 @@ let plainFallback = null
 // workspace command's Yarn): stops and received signals are counted. Seen through process.emit (src/inject.js says
 // why): no listener of its own is added.
 const STOP_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP']
-// How many of STOP_SIGNALS this process has received (`watchSignals`): its
-// own (from the group, a terminal, a parent) and those the hook sent itself.
-// Compared with the stop lines, one by one (`stopSelf`).
-let received = 0
+// How many of each of STOP_SIGNALS this process has received
+// (`watchSignals`): its own (from the group, a terminal, a parent) and those
+// the hook sent itself. Compared with the stop lines of the same signal
+// (`onStop`).
+const received = { SIGTERM: 0, SIGINT: 0, SIGHUP: 0 }
+const receivedAny = () => received.SIGTERM + received.SIGINT + received.SIGHUP > 0
 function watchSignals () {
   const emit = process.emit
   process.emit = function (type) {
     if (STOP_SIGNALS.includes(type)) {
-      received++
+      received[type]++
     }
     return emit.apply(this, arguments)
   }
@@ -102,20 +104,18 @@ function watchSignals () {
 // After a stop line (`stops`, `lastStop`: matchapack ends right after it,
 // by a second signal) or the close (`closed`).
 let stops = 0
+const stopsOf = { SIGTERM: 0, SIGINT: 0, SIGHUP: 0 }
 let lastStop = false
 let closed = false
 function later (graceMs, fn) {
   setTimeout(() => setImmediate(fn), graceMs)
 }
-// Stop `n` (the n-th signal matchapack got, or 1 for a close with no stop
-// before): this process signals itself unless it has already received n
-// signals, its own and the hook's together. So each of matchapack's signals
-// reaches it once: from the group with matchapack's (counted when it came),
-// or from the hook. An earlier signal of its own does not hide a later stop.
-// `say`: a line for stderr when it does stop (none when matchapack said why).
-function stopSelf (sig, n, graceMs, say) {
+// After the wait, this process signals itself with `sig` when `due()` still
+// holds. `say`: a line for stderr when it does stop (none when matchapack
+// said why).
+function stopSelf (sig, graceMs, say, due) {
   later(graceMs, () => {
-    if (received < n) {
+    if (due()) {
       if (say) {
         process.stderr.write(say)
       }
@@ -124,12 +124,19 @@ function stopSelf (sig, n, graceMs, say) {
   })
 }
 // A stop line: every signal matchapack gets while this process runs.
+// The n-th stop line of signal S: this process signals itself with S unless
+// it has already received S n times, its own and the hook's together. So
+// each of matchapack's signals reaches it once, from the group with
+// matchapack's (counted when it came) or from the hook; a signal of another
+// kind, or an earlier one, does not hide it.
 function onStop (msg, graceMs) {
   stops++
   if (msg.last === true) {
     lastStop = true
   }
-  stopSelf(msg.stop, stops, graceMs)
+  const sig = msg.stop
+  const n = ++stopsOf[sig]
+  stopSelf(sig, graceMs, null, () => received[sig] < n)
 }
 // The socket has closed with no line after the last one. With no stop
 // before: SIGTERM (matchapack was killed or crashed), unless a signal came.
@@ -146,7 +153,7 @@ function onClose (graceMs, what, noun) {
     return
   }
   if (stops === 0) {
-    stopSelf('SIGTERM', 1, graceMs, `${what}; stopping ${noun}(SIGTERM)\n`)
+    stopSelf('SIGTERM', graceMs, `${what}; stopping ${noun}(SIGTERM)\n`, () => !receivedAny())
     return
   }
   later(graceMs, () => {
