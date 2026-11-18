@@ -1159,10 +1159,111 @@ mod tests {
         v
     }
 
-    fn run_to_string(env: &Env, yes: bool) -> (i32, String) {
+    /// One run, for a test that holds a lock in the store itself.
+    fn run_holding(env: &Env, yes: bool) -> (i32, String) {
         let mut out = vec![];
         let code = run(env, yes, &mut out).unwrap();
         (code, String::from_utf8(out).unwrap())
+    }
+
+    /// Refused for a lock (the store's, or a directory's in tmp/).
+    fn refused_for_a_lock(r: &(i32, String)) -> bool {
+        r.1.contains("(it holds the store lock)") || r.1.contains("a matchapack process is running (it holds ")
+    }
+
+    /// A run, for a test that holds no lock in the store: run again while it
+    /// is refused for a lock that another test's child still holds a copy
+    /// of (`store::tests::retry_while_locked`). A refusal removes nothing;
+    /// only the "before-open" hook can have run before one (and is then
+    /// not run again).
+    fn run_to_string(env: &Env, yes: bool) -> (i32, String) {
+        store::tests::retry_while_locked(|| run_holding(env, yes), refused_for_a_lock)
+    }
+
+    /// `execute` with a plan made before, retried as `run_to_string` is.
+    fn execute_to_string(env: &Env, targets: &[Target], yes: bool) -> (i32, String) {
+        store::tests::retry_while_locked(
+            || {
+                let mut out = vec![];
+                let code = execute(env, targets, yes, &mut out).unwrap();
+                (code, String::from_utf8(out).unwrap())
+            },
+            refused_for_a_lock,
+        )
+    }
+
+    /// The cause of `run_to_string`'s retry, measured on demand (ignored:
+    /// it spawns thousands of processes): two threads start `true` (with
+    /// fork and exec, or `MATCHAPACK_STRESS=posix_spawn`, or `none`) while
+    /// uninstall runs: 500 runs once each (refusals counted, and how long
+    /// the lock stayed held), then 500 with the retry, which must all
+    /// succeed. `cargo test --release -- --ignored --nocapture
+    /// a_released_lock_held_by_a_child`.
+    #[test]
+    #[ignore]
+    fn a_released_lock_held_by_a_child_is_retried() {
+        use std::os::unix::process::CommandExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mode = std::env::var("MATCHAPACK_STRESS").unwrap_or_else(|_| "fork".into());
+        let stop = AtomicBool::new(false);
+        let d = scratch("uninstall-stress");
+        let (refused, longest) = std::thread::scope(|s| {
+            for _ in 0..2 {
+                s.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut c = std::process::Command::new("/usr/bin/true");
+                        match mode.as_str() {
+                            "none" => {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                continue;
+                            }
+                            "posix_spawn" => {}
+                            // A pre_exec makes std fork and exec.
+                            _ => unsafe {
+                                c.pre_exec(|| Ok(()));
+                            },
+                        }
+                        let _ = c.status();
+                    }
+                });
+            }
+            // The spawning ends however this ends (a failed assertion too:
+            // the scope waits for its threads).
+            struct Stop<'a>(&'a AtomicBool);
+            impl Drop for Stop<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+            let _stop = Stop(&stop);
+            // Measured: one run each, and how long the lock stays held.
+            let (mut refused, mut longest) = (0, std::time::Duration::ZERO);
+            for i in 0..500 {
+                let env = setup(&d.join(format!("once-{i}")));
+                let first = run_holding(&env, true);
+                if first.0 != 0 {
+                    assert!(refused_for_a_lock(&first), "{}", first.1);
+                    refused += 1;
+                    let t = std::time::Instant::now();
+                    let f = fs::OpenOptions::new().read(true).write(true).open(env.store.join("lock")).unwrap();
+                    while let Err(e) = store::flock(&f, libc::LOCK_EX | libc::LOCK_NB) {
+                        assert!(store::would_block(&e), "{e}");
+                        assert!(t.elapsed() < std::time::Duration::from_secs(10), "the lock stayed held for 10 s");
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    longest = longest.max(t.elapsed());
+                }
+            }
+            // Checked: every run with the retry succeeds.
+            for i in 0..500 {
+                let env = setup(&d.join(format!("retried-{i}")));
+                let (code, out) = run_to_string(&env, true);
+                assert!(code == 0 && !env.store.exists(), "{out}");
+            }
+            (refused, longest)
+        });
+        eprintln!("{mode}: {refused} of 500 runs refused for a lock; it was free again after {longest:?} at most; 500 runs with the retry all succeeded");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -1304,11 +1405,11 @@ mod tests {
         {
             let held = fs::OpenOptions::new().read(true).write(true).open(env.store.join("lock")).unwrap();
             store::flock(&held, libc::LOCK_SH | libc::LOCK_NB).unwrap();
-            let (code, out) = run_to_string(&env, true);
+            let (code, out) = run_holding(&env, true);
             assert_eq!(code, 1, "{out}");
             assert!(out.contains("an install is using the store") && out.contains("nothing was removed"), "{out}");
             assert_eq!(snapshot(&d), before);
-            let (code, out) = run_to_string(&env, false);
+            let (code, out) = run_holding(&env, false);
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("--yes refuses until then"), "{out}");
             assert_eq!(snapshot(&d), before);
@@ -1319,7 +1420,7 @@ mod tests {
             let before = snapshot(&d);
             let held = fs::File::open(&run_dir).unwrap();
             store::flock(&held, libc::LOCK_EX | libc::LOCK_NB).unwrap();
-            let (code, out) = run_to_string(&env, true);
+            let (code, out) = run_holding(&env, true);
             assert_eq!(code, 1, "{out}");
             assert!(out.contains("a matchapack process is running"), "{out}");
             assert_eq!(snapshot(&d), before);
@@ -1383,9 +1484,7 @@ mod tests {
             } else {
                 swap();
             }
-            let mut out = vec![];
-            let code = execute(&env, &targets, true, &mut out).unwrap();
-            let out = String::from_utf8(out).unwrap();
+            let (code, out) = execute_to_string(&env, &targets, true);
             let precious = if link { victim.join(store::LAYOUT).join("precious") } else { store.join(store::LAYOUT).join("precious") };
             assert_eq!(fs::read_to_string(&precious).unwrap(), "mine", "{how}: the victim's file stays:\n{out}");
             assert_eq!(code, 1, "{how}: {out}");
@@ -1409,9 +1508,7 @@ mod tests {
         let targets = plan(&env);
         fs::rename(&env.config, d.join("moved-away")).unwrap();
         symlink(&victim, &env.config).unwrap();
-        let mut out = vec![];
-        let code = execute(&env, &targets, true, &mut out).unwrap();
-        let out = String::from_utf8(out).unwrap();
+        let (code, out) = execute_to_string(&env, &targets, true);
         assert_eq!(fs::read_to_string(victim.join("paths")).unwrap(), "mine", "{out}");
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("changed since it was checked"), "{out}");
@@ -1668,7 +1765,7 @@ mod tests {
         {
             let held = fs::OpenOptions::new().read(true).write(true).open(&real).unwrap();
             store::flock(&held, libc::LOCK_SH | libc::LOCK_NB).unwrap();
-            let (code, out) = run_to_string(&env, true);
+            let (code, out) = run_holding(&env, true);
             assert!(code == 1 && out.contains("an install is using the store"), "{out}");
         }
         let (code, out) = run_to_string(&env, true);
@@ -1829,9 +1926,7 @@ mod tests {
         env.store_set = true;
         let targets = plan(&env);
         fs::write(store.join("appeared.txt"), "new").unwrap();
-        let mut out = vec![];
-        let code = execute(&env, &targets, true, &mut out).unwrap();
-        let out = String::from_utf8(out).unwrap();
+        let (code, out) = execute_to_string(&env, &targets, true);
         assert_eq!(code, 0, "{out}");
         assert_eq!(fs::read_to_string(store.join("appeared.txt")).unwrap(), "new", "{out}");
         assert!(!store.join(store::LAYOUT).exists() && no_aside_left(&d), "{out}");

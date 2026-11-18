@@ -1032,6 +1032,38 @@ pub(crate) mod tests {
         assert_eq!(Integrity::from_key("sha512-../../x"), None);
     }
 
+    /// Run `f` again while `locked` says it was refused for a lock, for up
+    /// to 10 s; for a test that holds no lock on that store itself.
+    ///
+    /// Why: tests run on parallel threads of one process, and some start
+    /// child processes. A child gets a copy of every open file of the
+    /// process, a held flock with it, and keeps it until its exec closes
+    /// the close-on-exec ones (on macOS with posix_spawn too). So a lock a
+    /// test took and released, itself or through the code it runs, can
+    /// stay held for that moment by another test's child, and a lock
+    /// attempt without waiting (`Store::exclusive`, uninstall) is refused.
+    /// Measured (NOTES "A store lock held by another test's child"): with
+    /// two threads spawning `true`, up to 5 of 500 uninstall runs refused
+    /// with posix_spawn, 15 to 29 with fork and exec, none without spawns;
+    /// the lock was free again within 2 ms. A lock a test really leaves held
+    /// stays held for the 10 s and still fails it.
+    pub(crate) fn retry_while_locked<T>(mut f: impl FnMut() -> T, locked: impl Fn(&T) -> bool) -> T {
+        let t0 = std::time::Instant::now();
+        loop {
+            let r = f();
+            if !locked(&r) || t0.elapsed() > std::time::Duration::from_secs(10) {
+                return r;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// `Store::exclusive`, retried while another test's child holds a copy
+    /// of a lock this test released (`retry_while_locked`).
+    pub(crate) fn exclusive(root: &Path, cacache: &Path) -> Result<Store> {
+        retry_while_locked(|| Store::exclusive(root.to_path_buf(), cacache.to_path_buf()), |r| matches!(r, Err(e) if e.to_string().contains("in use by a running install")))
+    }
+
     /// A fresh directory under the system temp dir, removed first if a
     /// previous run left it.
     pub fn scratch(name: &str) -> PathBuf {
@@ -1192,7 +1224,7 @@ pub(crate) mod tests {
         let gone = Integrity { algo: "sha512".into(), hex: "ab".repeat(64) };
         drop(store.entry_lock(&gone, true).unwrap());
         drop(store);
-        let store = Store::exclusive(d.join("store"), cacache).unwrap();
+        let store = exclusive(&d.join("store"), &cacache).unwrap();
         assert_eq!(store.remove_orphan_locks(), 1);
         let lock = |i: &Integrity| d.join("store/locks").join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..]);
         assert!(lock(&kept).exists() && !lock(&gone).exists());
@@ -1260,7 +1292,7 @@ pub(crate) mod tests {
         let e = Store::exclusive(d.join("store"), d.join("cacache")).err().expect("refused while an install holds the store");
         assert!(e.to_string().contains("in use"), "{e}");
         drop(install);
-        let gc = Store::exclusive(d.join("store"), d.join("cacache")).unwrap();
+        let gc = exclusive(&d.join("store"), &d.join("cacache")).unwrap();
         drop(gc);
         let _ = fs::remove_dir_all(&d);
     }
@@ -1279,7 +1311,7 @@ pub(crate) mod tests {
         let install = Store::new(root.clone(), d.join("cacache")).unwrap();
         assert!(Store::exclusive(root.clone(), d.join("cacache")).is_err(), "gc refused while the install holds the lock");
         drop(install);
-        drop(Store::exclusive(root, d.join("cacache")).unwrap());
+        drop(exclusive(&root, &d.join("cacache")).unwrap());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1293,7 +1325,8 @@ pub(crate) mod tests {
         drop(Store::new(root.clone(), d.join("cacache")).unwrap());
         fs::create_dir_all(root.join(LAYOUT).join("sha512/ab/cdef")).unwrap();
         let held = fs::OpenOptions::new().read(true).write(true).open(root.join("lock")).unwrap();
-        flock(&held, libc::LOCK_EX | libc::LOCK_NB).unwrap();
+        // The install above released it; another test's child may hold a copy.
+        retry_while_locked(|| flock(&held, libc::LOCK_EX | libc::LOCK_NB), |r| matches!(r, Err(e) if would_block(e))).unwrap();
         let (r, c) = (root.clone(), d.join("cacache"));
         let install = std::thread::spawn(move || Store::new(r, c).unwrap());
         // Long enough for the install to open the lock file and wait on it.

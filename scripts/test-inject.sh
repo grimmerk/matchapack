@@ -26,7 +26,7 @@ chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs MATCHAPACK_PATHS=$work
 unset MATCHAPACK_ENGINE MATCHAPACK_INJECT_HOOK MATCHAPACK_INJECT_THREADS MATCHAPACK
 store=$work/store
-rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/elsewhere-out" "${work:?}/not-there" "${work:?}/not-there-plain" "${work:?}/store-classic" "${work:?}/store-odd" "${work:?}/store-gid" "${work:?}/gid-projects"
+rm -rf "${store:?}" "${work:?}/logs" "${work:?}/store-miss" "${work:?}/cache-miss" "${work:?}/outside-nm" "${work:?}/elsewhere" "${work:?}/elsewhere-out" "${work:?}/not-there" "${work:?}/not-there-plain" "${work:?}/store-classic" "${work:?}/store-odd" "${work:?}/store-gid" "${work:?}/gid-projects" "${work:?}/store-alias"
 pass=0; fail=0
 ok() { pass=$((pass+1)); echo "PASS $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1"; [ -f "$work/out" ] && sed 's/^/    /' "$work/out" | tail -6; }
@@ -1380,6 +1380,27 @@ MATCHAPACK_LOG_DIR=$tr_log "$bin" report > "$work/report" 2>&1 \
   && grep -q "in 1 runs npm read an unexpected key of the hook's result, and the run stopped with the repair command" "$work/report" \
   && grep -q 'commands: ci 2, install 1' "$work/report" \
   && ok "trap during npm install: matchapack report counts it apart, and the runs per command" || bad "family trap report: $(grep -E 'runs|commands|unexpected' "$work/report")"
+
+# 17. Aliased dependencies (fixtures/alias: `"alias-a": "npm:y1-a@1.0.0"`,
+#     an alias named as its package, a scoped alias of a package also
+#     installed under its own name). Since npm 10.9.11 arborist hands pacote
+#     the registry name, not the alias (reify.js #extractOrLink). With
+#     npm ci and npm install (through the shell function): every package
+#     cloned, the tarball installed under two names one store entry, nothing
+#     extracted by npm, the tree plain npm's. Its own store, emptied before
+#     each command, so each fills it from nothing.
+as=$work/store-alias
+for c in ci install; do
+  rm -rf "${as:?}"
+  ref=$(project "ref-alias-$c" alias); (cd "$ref" && npm "$c" --no-audit --no-fund > "$work/ref.log" 2>&1) || bad "plain npm $c on fixtures/alias"
+  p=$(project "alias-$c" alias)
+  (export MATCHAPACK_STORE=$as; wrapped "$p" "npm $c --no-audit --no-fund"); rc=$?
+  [ $rc = 0 ] && grep -q '^matchapack: .*npm extracted 0' "$work/out" \
+    && [ "$(last_log "r['command'], r['outcome'], r['inject']['cloned'], r['inject']['installed'], r['inject']['unseen']")" = "$c installed 5 5 0" ] \
+    && [ "$(find "$as/v2" -mindepth 3 -maxdepth 3 -type d | wc -l | tr -d ' ')" = 4 ] && same "$ref" "$p" \
+    && ok "aliased dependencies, npm $c: all 5 packages cloned (4 entries), tree identical to plain npm $c" \
+    || bad "aliased dependencies, npm $c: rc=$rc, $(grep '^matchapack' "$work/out" | head -2), entries $(find "$as/v2" -mindepth 3 -maxdepth 3 -type d | wc -l | tr -d ' ')"
+done
 
 # Every run of the shell function above that read an unexpected key of the
 # hook's result was rebuilt by plain npm and so looks fine: it must still

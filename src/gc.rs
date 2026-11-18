@@ -432,7 +432,7 @@ fn young(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::tests::{age, cached_tarball, scratch};
+    use crate::store::tests::{age, cached_tarball, exclusive, scratch};
     use base64::Engine;
 
     #[test]
@@ -465,7 +465,7 @@ mod tests {
         std::fs::write(&log, format!("{}\n{}\n", serde_json::json!({"outcome":"installed","dir":c.join("packages/m"),"root":c}), serde_json::json!({"outcome":"declined","dir":d.join("x")}))).unwrap();
         drop(store);
 
-        let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
+        let store = exclusive(&d.join("store"), &cacache).unwrap();
         let dry = gc(&store, &log, true).unwrap();
         assert_eq!((dry.projects, dry.removed, dry.recent), ((1, 1), 2, 1));
         assert_eq!(dry.records_dropped, [d.join("proj-removed")], "the record without a project, by its path");
@@ -526,7 +526,7 @@ mod tests {
         std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
         let denied = std::fs::metadata(p.join("node_modules")).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
         drop(store);
-        let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
+        let store = exclusive(&d.join("store"), &cacache).unwrap();
         if denied {
             let r = gc(&store, &d.join("no-log"), false).unwrap();
             assert!(r.records_dropped.is_empty(), "{:?}", r.records_dropped);
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(record_of(&store, &root.join("p4")), [c.key()], "nor changes one");
 
         drop(store);
-        let store = Store::exclusive(d.join("store"), cacache.clone()).unwrap();
+        let store = exclusive(&d.join("store"), &cacache).unwrap();
         let r = adopt(&store, &[root.clone()], false).unwrap();
         assert_eq!((r.written, r.extended, r.entries), (1, 1, 2));
         assert_eq!(records(), 2, "p1 and p4 only");

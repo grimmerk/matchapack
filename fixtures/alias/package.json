@@ -1,0 +1,10 @@
+{
+  "name": "matchapack-fixture-alias",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "alias-a": "npm:y1-a@1.0.0",
+    "y1-b": "npm:y1-b@2.0.0",
+    "@my/c": "npm:y1-c@1.0.0"
+  }
+}

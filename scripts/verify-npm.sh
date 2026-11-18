@@ -105,6 +105,11 @@ case_ odd-tarballs -- "$FX/odd-tarballs"
 # (--no-audit) reach matchapack only through the shell function.
 case_ script-env MATCHAPACK_VERIFY_VIA=wrapper -- "$FX/script-env"
 case_ legacy-peer-on npm_config_legacy_peer_deps=true -- "$FX/legacy-peer"
+# Aliased dependencies (`"alias-a": "npm:y1-a@1.0.0"`, an alias named as
+# its package, a scoped alias of a package also installed under its own
+# name): since npm 10.9.11 arborist gives pacote the registry name, not the
+# alias. npm install from the same start: steps alias-install below.
+case_ alias -- "$FX/alias"
 for p in "$@"; do
   case_ "project-$(basename "$p")" -- "$p"
 done
@@ -172,11 +177,15 @@ steps_ fresh-install-noscr   "$small" -- CLONES=some install --ignore-scripts
 steps_ fresh-nolock          "$small" --start nolock -- npm_config_before=$day CLONES=some install
 steps_ fresh-nested          "$small" --start nolock -- npm_config_before=$day CLONES=some install --install-strategy=nested --ignore-scripts
 steps_ fresh-omit-dev        "$small" -- CLONES=some install --omit=dev
+steps_ alias-install         "$FX/alias" -- CLONES=some install
 # On a tree installed by npm ci (plain in A, matchapack in B).
 steps_ noop-install          "$small" --start ci -- CLONES=none install
 steps_ add                   "$small" --start ci -- CLONES=1 install left-pad@1.3.0
 steps_ add-dev-exact         "$small" --start ci -- CLONES=none install --save-dev --save-exact is-number@7.0.0
 steps_ add-no-save           "$small" --start ci -- CLONES=1 install --no-save left-pad@1.3.0
+# A package alias (lp@npm:left-pad) added from the public registry, onto
+# fixtures/alias (not the command aliases of add-two-i-alias).
+steps_ add-pkg-alias         "$FX/alias" --start ci -- CLONES=1 install lp@npm:left-pad@1.3.0
 steps_ add-two-i-alias       "$small" --start ci -- CLONES=1 i left-pad@1.3.0 is-number@7.0.0
 steps_ change-version        "$small" --start ci -- CLONES=some install semver@7.6.0
 steps_ uninstall             "$small" --start ci -- CLONES=none uninstall lodash
