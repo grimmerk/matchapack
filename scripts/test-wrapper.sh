@@ -241,6 +241,37 @@ done
 stopped sigkill mp KILL pid reify
 [ "$rc" = 137 ] && [ "$nm" = none ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q 'matchapack has gone; stopping npm (SIGTERM)' "$d.out" && again && r=ok || r=bad
 check sigkill "SIGKILL to matchapack during npm's reify: exit 137; npm stopped and rolled back (node_modules: $nm), nothing left running (${alive:-none}) or written after (${newer:-nothing}); the next npm ci succeeds" $r "$d"
+# SIGTERM to matchapack's pid while a root script that survives SIGTERM runs
+# (npm passes the signal on to it and waits), then SIGKILL 2 s later, as a
+# supervisor sends them: npm is gone at once, as plain npm given the same
+# two is (the script runs on in both). The hook asked npm to stop, and on
+# matchapack's end with no word ends it (SIGKILL).
+termkill() { # <case> <plain|mp>: sets npm_alive, script_alive, sigs
+  d=$(new_project "$1")
+  printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" \
+    "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => fs.appendFileSync('sigs', s + '\\n'))" \
+    "setInterval(() => fs.existsSync('loop') || process.exit(0), 50)" > "$d/loop.js"
+  python3 -c "import json;p='$d/package.json';d=json.load(open(p));d['scripts']['postinstall']='node loop.js';json.dump(d,open(p,'w'),indent=2)"
+  touch "$d/loop"
+  local npm_cmd=(matchapack npm); [ "$2" = plain ] && npm_cmd=(env MATCHAPACK=0 "$(command -v npm)")
+  (cd "$d" && exec "${nosession[@]}" env PATH="$bin_dir:$PATH" "${npm_cmd[@]}" ci --no-audit --no-fund) > "$d.out" 2>&1 < /dev/null &
+  local m=$! _ npm_pid script_pid
+  for _ in $(seq 6000); do [ -e "$d/started" ] && break; sleep 0.01; done
+  sleep 0.3
+  npm_pid=$m; [ "$2" = mp ] && npm_pid=$(pgrep -P "$m" | head -1)
+  script_pid=$(descendants "$m" | while read -r p; do [ "$(ps -o command= -p "$p" | tr -s ' ')" = "node loop.js" ] && echo "$p"; done | head -1)
+  kill -TERM "$m"; sleep 2; kill -KILL "$m"; wait "$m" 2>/dev/null
+  sleep 1
+  npm_alive=no; kill -0 "$npm_pid" 2>/dev/null && npm_alive=yes
+  script_alive=no; kill -0 "$script_pid" 2>/dev/null && script_alive=yes
+  rm -f "$d/loop"; sleep 0.3
+  kill -KILL "$npm_pid" "$script_pid" 2>/dev/null
+  sigs=$({ tr '\n' ' ' < "$d/sigs"; } 2>/dev/null)
+}
+termkill termkill-plain plain; p_npm=$npm_alive p_sigs=$sigs
+termkill termkill mp
+[ "$p_npm" = no ] && [ "$npm_alive" = no ] && [ "$sigs" = "$p_sigs" ] && grep -q 'ending npm (SIGKILL)' "$d.out" && r=ok || r=bad
+check term-then-kill "SIGTERM then SIGKILL to matchapack's pid, a root script that survives SIGTERM running: npm gone 1 s after (alive: $npm_alive; plain npm: $p_npm), the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 # To the whole group, as `timeout`, `kill -- -<pgid>` and Ctrl-C send it:
 # npm gets the kernel's copy and no other (the hook adds none, also when
 # its own would come after npm's reify handler has gone: the wait is 1 s
@@ -267,7 +298,8 @@ mark, out, cmd = sys.argv[1], sys.argv[2], sys.argv[3:]
 pid, fd = pty.fork()
 if pid == 0:
     os.execvp(cmd[0], cmd)
-log, sent, end, done = open(out, "wb"), False, time.monotonic() + 90, False
+log, sent, end, done = open(out, "wb"), 0, time.monotonic() + 90, False
+times, last = int(os.environ.get("CTRLC_TIMES", "1")), 0.0
 while time.monotonic() < end:
     if select.select([fd], [], [], 0.01)[0]:
         try:
@@ -278,9 +310,9 @@ while time.monotonic() < end:
             done = True
             break
         log.write(data)
-    if not sent and os.path.exists(mark):
+    if sent < times and os.path.exists(mark) and time.monotonic() - last > 1:
         os.write(fd, b"\x03")
-        sent = True
+        sent, last = sent + 1, time.monotonic()
 if not done:
     # Still running after 90 s: its whole group (the terminal session it
     # leads) is killed and reaped, and the case fails.
@@ -289,14 +321,14 @@ if not done:
     sys.exit("timed out")
 os.waitpid(pid, 0)
 '
-ctrlc() { # <case> <plain|mp>: sets sigs
+ctrlc() { # <case> <plain|mp> [times, 1 s apart]: sets sigs
   d=$(new_project "$1")
   printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" "let first = true" \
     "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => { fs.appendFileSync('sigs', s + '\\n'); if (first) { first = false; setTimeout(() => process.exit(0), 1500) } })" \
     "setInterval(() => {}, 1000)" > "$d/loop.js"
   python3 -c "import json;p='$d/package.json';d=json.load(open(p));d['scripts']['postinstall']='node loop.js';json.dump(d,open(p,'w'),indent=2)"
   local npm_cmd=(matchapack npm); [ "$2" = plain ] && npm_cmd=(env MATCHAPACK=0 "$(command -v npm)")
-  (cd "$d" && exec python3 -c "$ctrlc_py" "$d/started" "$d.out" env PATH="$bin_dir:$PATH" MATCHAPACK_STOP_GRACE_MS=1000 "${npm_cmd[@]}" ci --no-audit --no-fund) < /dev/null
+  (cd "$d" && CTRLC_TIMES=${3:-1} exec python3 -c "$ctrlc_py" "$d/started" "$d.out" env PATH="$bin_dir:$PATH" MATCHAPACK_STOP_GRACE_MS=1000 "${npm_cmd[@]}" ci --no-audit --no-fund) < /dev/null
   local timed_out=$?
   sleep 0.5
   sigs=$({ tr '\n' ' ' < "$d/sigs"; } 2>/dev/null)
@@ -306,6 +338,14 @@ ctrlc ctrlc-plain plain; p_sigs=$sigs
 ctrlc ctrlc mp
 [ -n "$p_sigs" ] && [ "$sigs" = "$p_sigs" ] && [[ "$sigs$p_sigs" != *"timed out"* ]] && r=ok || r=bad
 check ctrl-c "Ctrl-C in a terminal: the root script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
+# Ctrl-C twice, 1 s apart: the second ends matchapack at once (its stop line
+# says so), and npm, which got both from the terminal, gets nothing more.
+# Only the SIGINTs are compared: matchapack leads this test's terminal
+# session, and its exit hangs the terminal up (SIGHUP to the rest).
+ctrlc ctrlc2-plain plain 2; p_ints=$(grep -o SIGINT <<< "$sigs" | wc -l | tr -d ' ')
+ctrlc ctrlc2 mp 2; ints=$(grep -o SIGINT <<< "$sigs" | wc -l | tr -d ' ')
+[ "$p_ints" -ge 3 ] && [ "$ints" = "$p_ints" ] && [[ "$sigs" != *"timed out"* ]] && r=ok || r=bad
+check ctrl-c-twice "Ctrl-C twice in a terminal: the root script got $ints SIGINTs ($p_ints under plain npm)" $r "$d"
 
 # 16. the run log records installs and declines (in the test's own log dir)
 n_inst=$(grep -c '"outcome":"installed"' "$MATCHAPACK_LOG_DIR/log.jsonl" 2>/dev/null || echo 0)

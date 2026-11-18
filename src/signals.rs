@@ -20,12 +20,14 @@
 //! until the child exits); matchapack waits for the child, logs the run as
 //! interrupted (the store's lock released, temporary files removed) and ends
 //! as the child ended, by the same signal when it died of one (`finish`). A
-//! second signal while it waits ends matchapack at once, by that signal: the
-//! socket closes, and the child, already stopping, finishes its rollback on
-//! its own. Not the same signal again within `SAME_STOP_NS`: that is one
-//! stop sent twice (GNU `timeout` signals its command, then the command's
-//! whole group, matchapack included, microseconds apart). SIGKILL cannot be caught: the socket closes with no line, and
-//! the hook uses SIGTERM.
+//! second signal while it waits is passed on too, as the last line
+//! (`"last":true`), and then ends matchapack at once, by that signal; the
+//! child, already stopping, finishes on its own. Not the same signal again
+//! within `SAME_STOP_US`: that is one stop sent twice (GNU `timeout` signals
+//! its command, then the command's whole group, matchapack included,
+//! microseconds apart). SIGKILL cannot be caught: the socket closes with no
+//! line; the hook then uses SIGTERM, or SIGKILL when it had already been
+//! asked to stop (a supervisor's SIGTERM, then SIGKILL).
 //!
 //! An inherited "ignore" (`nohup`, a background command of a shell without
 //! job control) is overridden, as Node overrides it for plain npm.
@@ -33,18 +35,24 @@
 //! The handler is async-signal-safe: atomics, write, sigaction, raise, and
 //! errno saved and restored.
 
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
-/// The first of the three signals received since `arm` (0: none).
-static RECEIVED: AtomicI32 = AtomicI32::new(0);
-/// When it came (CLOCK_MONOTONIC, ns).
-static RECEIVED_AT: AtomicU64 = AtomicU64::new(0);
+/// The first of the three signals received since `arm` and when it came, in
+/// one word: CLOCK_MONOTONIC in µs << 8 | the signal (0: none). One atomic,
+/// so that a copy of the same signal handled on another thread meanwhile
+/// never sees the signal without its time.
+static FIRST: AtomicU64 = AtomicU64::new(0);
 /// The same signal again within this time is the same stop (module doc).
-const SAME_STOP_NS: u64 = 500_000_000;
+const SAME_STOP_US: u64 = 500_000;
 /// The pipe from the handler to `relay_stop` (-1: not armed). The handler
-/// writes the signal's number, `end_relay` a 0.
+/// writes the signal's number (| LAST for a signal after the first, which
+/// ends this process once passed on), `end_relay` a 0.
 static NOTICE_R: AtomicI32 = AtomicI32::new(-1);
 static NOTICE_W: AtomicI32 = AtomicI32::new(-1);
+const LAST: u8 = 0x80;
+/// `relay_stop` is reading the pipe: a LAST signal is ended by it, after its
+/// line; otherwise by the handler at once.
+static RELAYING: AtomicBool = AtomicBool::new(false);
 
 pub const CAUGHT: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
@@ -67,28 +75,54 @@ fn default_action(sig: libc::c_int) {
     }
 }
 
-/// CLOCK_MONOTONIC in ns (clock_gettime is async-signal-safe).
-fn now_ns() -> u64 {
+/// CLOCK_MONOTONIC in µs (clock_gettime is async-signal-safe).
+fn now_us() -> u64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+    ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1_000
+}
+
+/// One byte to `relay_stop` (async-signal-safe).
+fn notice(b: u8) {
+    let fd = NOTICE_W.load(Ordering::SeqCst);
+    if fd >= 0 {
+        unsafe { libc::write(fd, &b as *const u8 as *const libc::c_void, 1) };
+    }
+}
+
+/// End this process by `sig` now (async-signal-safe): its default action,
+/// unblocked on this thread, raised.
+fn die(sig: libc::c_int) {
+    default_action(sig);
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(sig);
+    }
 }
 
 extern "C" fn on_signal(sig: libc::c_int) {
     let saved = unsafe { *errno_ptr() };
-    let now = now_ns();
-    if RECEIVED.compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-        RECEIVED_AT.store(now, Ordering::SeqCst);
-        let fd = NOTICE_W.load(Ordering::SeqCst);
-        if fd >= 0 {
-            let b = sig as u8;
-            unsafe { libc::write(fd, &b as *const u8 as *const libc::c_void, 1) };
+    let mine = (now_us() << 8) | sig as u64;
+    match FIRST.compare_exchange(0, mine, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => notice(sig as u8),
+        Err(first) => {
+            let same = (first & 0xff) as libc::c_int == sig && (mine >> 8).saturating_sub(first >> 8) < SAME_STOP_US;
+            if !same {
+                // A second one while the child stops: passed on as well (the
+                // hook signals npm with it, as plain npm would have got it),
+                // then this process ends by it at once: by `relay_stop` once
+                // the line is written, or here when nothing relays. Written
+                // first, checked after: `relay_stop` stops relaying first and
+                // reads what is left after.
+                notice(sig as u8 | LAST);
+                if !RELAYING.load(Ordering::SeqCst) {
+                    die(sig);
+                }
+            }
         }
-    } else if !(sig == RECEIVED.load(Ordering::SeqCst) && now.saturating_sub(RECEIVED_AT.load(Ordering::SeqCst)) < SAME_STOP_NS) {
-        // A second one while the child stops: end now, by it (delivered when
-        // this handler returns and the signal is no longer blocked).
-        default_action(sig);
-        unsafe { libc::raise(sig) };
     }
     unsafe { *errno_ptr() = saved };
 }
@@ -113,7 +147,7 @@ pub fn arm() -> Armed {
 /// closes; a handler with nowhere to say the signal would leave npm running
 /// while matchapack waited for it.
 fn arm_with(fds: Option<[libc::c_int; 2]>) -> Armed {
-    RECEIVED.store(0, Ordering::SeqCst);
+    FIRST.store(0, Ordering::SeqCst);
     let Some(fds) = fds else {
         return Armed { old: Vec::new() };
     };
@@ -132,7 +166,12 @@ fn arm_with(fds: Option<[libc::c_int; 2]>) -> Armed {
         NOTICE_R.store(fds[0], Ordering::SeqCst);
         NOTICE_W.store(fds[1], Ordering::SeqCst);
     }
-    let old = CAUGHT
+    Armed { old: install() }
+}
+
+/// The handler for the three; the dispositions it replaces.
+fn install() -> Vec<(libc::c_int, libc::sigaction)> {
+    CAUGHT
         .iter()
         .map(|&sig| unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
@@ -148,8 +187,7 @@ fn arm_with(fds: Option<[libc::c_int; 2]>) -> Armed {
             libc::sigaction(sig, &sa, &mut old);
             (sig, old)
         })
-        .collect();
-    Armed { old }
+        .collect()
 }
 
 /// In the child, between fork and exec (async-signal-safe): the three
@@ -167,10 +205,27 @@ impl Armed {
     /// Without a signal the earlier handlers come back (a signal now ends
     /// this process at once, as before #64). After one, the handler stays: a
     /// second signal ends the process at once while the run is logged.
+    /// The three are blocked on this thread meanwhile (the serving threads
+    /// are gone: none can run the handler), so that none falls between the
+    /// check and the restore; one that came on another thread all the same
+    /// puts the handler back. A signal held meanwhile is delivered when they
+    /// are unblocked, with the disposition then in place.
     pub fn disarm(self) {
-        if RECEIVED.load(Ordering::SeqCst) == 0 {
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut before: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut mask);
+            for s in CAUGHT {
+                libc::sigaddset(&mut mask, s);
+            }
+            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, &mut before);
+        }
+        if FIRST.load(Ordering::SeqCst) == 0 {
             for (sig, old) in &self.old {
                 unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
+            }
+            if FIRST.load(Ordering::SeqCst) != 0 && !self.old.is_empty() {
+                install();
             }
         }
         for fd in [NOTICE_W.swap(-1, Ordering::SeqCst), NOTICE_R.swap(-1, Ordering::SeqCst)] {
@@ -178,31 +233,55 @@ impl Armed {
                 unsafe { libc::close(fd) };
             }
         }
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut()) };
     }
 }
 
 /// Run beside the server (src/serve.rs `serve_lines`) while the child runs:
-/// waits for the first signal and passes it to the hook as one line,
-/// written with `write` (under the server's writer lock). Returns at once
-/// when not armed, and when `end_relay` is called.
+/// passes every signal on to the hook as a line, `{"stop":"SIGTERM"}`, the
+/// one that ends this process with `"last":true` (then ends it by that
+/// signal), written with `write` (under the server's writer lock). Returns
+/// at once when not armed, and when `end_relay` is called.
 pub fn relay_stop(write: impl Fn(&[u8])) {
     let fd = NOTICE_R.load(Ordering::SeqCst);
     if fd < 0 {
         return;
     }
+    RELAYING.store(true, Ordering::SeqCst);
+    let pass_on = |b: u8| {
+        let sig = (b & !LAST) as libc::c_int;
+        let last = b & LAST != 0;
+        write(format!("{{\"stop\":\"{}\"{}}}\n", name(sig), if last { ",\"last\":true" } else { "" }).as_bytes());
+        if last {
+            die(sig);
+        }
+    };
     loop {
         let mut b = 0u8;
         let n = unsafe { libc::read(fd, &mut b as *mut u8 as *mut libc::c_void, 1) };
-        if n == 1 {
-            if b != 0 {
-                write(format!("{{\"stop\":\"{}\"}}\n", name(b as i32)).as_bytes());
-            }
-            return;
+        if n == 1 && b != 0 {
+            pass_on(b);
+            continue;
         }
         if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
             continue;
         }
-        return;
+        break;
+    }
+    // A last signal whose handler saw this still relaying: ended here.
+    RELAYING.store(false, Ordering::SeqCst);
+    unsafe {
+        let fl = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+    }
+    loop {
+        let mut b = 0u8;
+        if unsafe { libc::read(fd, &mut b as *mut u8 as *mut libc::c_void, 1) } != 1 {
+            break;
+        }
+        if b & LAST != 0 {
+            die((b & !LAST) as libc::c_int);
+        }
     }
 }
 
@@ -218,7 +297,7 @@ pub fn end_relay() {
 
 /// The signal that stopped this run, if one came (since the last `arm`).
 pub fn received() -> Option<i32> {
-    let s = RECEIVED.load(Ordering::SeqCst);
+    let s = (FIRST.load(Ordering::SeqCst) & 0xff) as i32;
     (s != 0).then_some(s)
 }
 

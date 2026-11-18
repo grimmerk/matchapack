@@ -71,12 +71,17 @@ let plainFallback = null
 // workspace command's Yarn). Seen through process.emit (src/inject.js says
 // why): no listener of its own is added.
 const STOP_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP']
-let signalled = null
+// How many of STOP_SIGNALS this process received (`watchSignals`), and how
+// many of them the hook sent itself (`stopSelf`): npm got one of its own
+// (from the group, a terminal, or a parent) when the first is larger.
+let received = 0
+let sent = 0
+const ownSignal = () => received > sent
 function watchSignals () {
   const emit = process.emit
   process.emit = function (type) {
-    if (signalled === null && STOP_SIGNALS.includes(type)) {
-      signalled = type
+    if (STOP_SIGNALS.includes(type)) {
+      received++
     }
     return emit.apply(this, arguments)
   }
@@ -96,20 +101,58 @@ function watchSignals () {
     }
   }
 }
-let stopAsked = false
+// After a stop line (`stops`, `lastStop`: matchapack ends right after it,
+// by a second signal) or the close (`closed`).
+let stops = 0
+let lastStop = false
+let closed = false
+function later (graceMs, fn) {
+  setTimeout(() => setImmediate(fn), graceMs)
+}
+// `say`: a line for stderr when it does stop (none when matchapack said why).
 function stopSelf (sig, graceMs, say) {
-  if (stopAsked) {
-    return
-  }
-  stopAsked = true
-  setTimeout(() => setImmediate(() => {
-    if (signalled === null) {
+  later(graceMs, () => {
+    if (!ownSignal()) {
       if (say) {
         process.stderr.write(say)
       }
+      sent++
       process.kill(process.pid, sig)
     }
-  }), graceMs)
+  })
+}
+// A stop line: every signal matchapack gets while this process runs.
+function onStop (msg, graceMs) {
+  stops++
+  if (msg.last === true) {
+    lastStop = true
+  }
+  stopSelf(msg.stop, graceMs)
+}
+// The socket has closed with no line after the last one. With no stop
+// before: SIGTERM (matchapack was killed or crashed). After one, and with no
+// signal of this process's own: SIGKILL, as plain npm or Yarn gets from a
+// supervisor that sent SIGTERM and then SIGKILL (matchapack was killed or
+// crashed after asking this process to stop, and it is still running). After
+// matchapack's last line (a second signal ended it): nothing more.
+function onClose (graceMs, what, noun) {
+  if (closed) {
+    return
+  }
+  closed = true
+  if (lastStop) {
+    return
+  }
+  if (stops === 0) {
+    stopSelf('SIGTERM', graceMs, `${what}; stopping ${noun}(SIGTERM)\n`)
+    return
+  }
+  later(graceMs, () => {
+    if (!ownSignal()) {
+      process.stderr.write(`${what} after asking ${noun || 'this Yarn '}to stop; ending ${noun || 'it '}(SIGKILL)\n`)
+      process.kill(process.pid, 'SIGKILL')
+    }
+  })
 }
 
 function send (obj) {
@@ -267,7 +310,7 @@ async function main () {
       // matchapack was stopped by this signal (src/signals.rs): Yarn stops
       // as if it had got it; matchapack goes on answering until it exits.
       if (msg && STOP_SIGNALS.includes(msg.stop)) {
-        stopSelf(msg.stop, graceMs)
+        onStop(msg, graceMs)
         continue
       }
       settle(msg.id, msg)
@@ -288,9 +331,9 @@ async function main () {
         settle(id, { ok: false, reason: why })
       }
     }
-    stopSelf('SIGTERM', graceMs, isChild
-      ? 'matchapack yarn hook: the Yarn that started this workspace command\'s Yarn has gone; stopping (SIGTERM)\n'
-      : 'matchapack yarn hook: matchapack has gone; stopping Yarn (SIGTERM)\n')
+    onClose(graceMs, isChild
+      ? 'matchapack yarn hook: the Yarn that started this workspace command\'s Yarn has gone'
+      : 'matchapack yarn hook: matchapack has gone', isChild ? '' : 'Yarn ')
   }
   sock.on('error', gone('server-gone'))
   sock.on('close', gone('server-gone'))

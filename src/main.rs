@@ -423,11 +423,24 @@ fn main() -> Result<()> {
             let o = inject::InjectOpts { dir, trial_scope: false, store: default_store(store), clone_mode: clone_mode.unwrap_or_else(default_clone_mode), npm_args };
             let r = inject::run(&o);
             util::remove_run_dir();
+            // Stopped by a signal (src/signals.rs): said, and the process
+            // ends as npm did (by its signal when it died of one), as for
+            // `matchapack npm`; a broken run's error is still printed.
+            if let (Some(sig), Err(e)) = (signals::received(), &r) {
+                let code = match e {
+                    InstallError::Npm { code, .. } | InstallError::Trap { code, .. } => Some(*code).filter(|c| *c != 0),
+                    InstallError::Broke { .. } | InstallError::Declined(_) => None,
+                };
+                signals::say(sig, "npm", code);
+                if let InstallError::Broke { error, .. } | InstallError::Trap { error, .. } = e {
+                    eprintln!("matchapack: {error:#}");
+                }
+                signals::finish(code.unwrap_or(128 + sig));
+            }
             match r {
                 Ok(_) => {}
-                // npm printed its own error; pass its status on (by the same
-                // signal when a signal stopped the run: src/signals.rs).
-                Err(InstallError::Npm { code, .. }) => signals::finish(code),
+                // npm printed its own error; pass its status on.
+                Err(InstallError::Npm { code, .. }) => std::process::exit(code),
                 Err(e) => return Err(e.into_inner()),
             }
         }
