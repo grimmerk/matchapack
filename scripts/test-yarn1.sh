@@ -29,6 +29,14 @@ set -uo pipefail
 work=${1:?usage: test-yarn1.sh <work-dir>}
 here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
+# The convert-existing interrupt cases need convert-existing.sh's INT trap,
+# which a non-interactive bash cannot set when SIGINT was ignored on entry;
+# a job started with `&` by a shell without job control has it ignored, and
+# the cases then fail as if matchapack were at fault (NOTES "Stopping").
+if python3 -c 'import signal,sys; sys.exit(0 if signal.getsignal(signal.SIGINT) is signal.SIG_IGN else 1)'; then
+  echo "SIGINT is ignored in this shell (a job started with & without job control): run the suite in the foreground or with set -m" >&2
+  exit 2
+fi
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 v=$here/scripts/verify-yarn1.sh
 node=${MATCHAPACK_YARN_NODE:-$(command -v node)}

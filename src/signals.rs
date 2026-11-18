@@ -53,6 +53,12 @@ const LAST: u8 = 0x80;
 /// `relay_stop` is reading the pipe: a LAST signal is ended by it, after its
 /// line; otherwise by the handler at once.
 static RELAYING: AtomicBool = AtomicBool::new(false);
+/// The signal that ends this process once its line is written (0: none):
+/// set by the handler, ended by `relay_stop`, or by the alarm when that is
+/// late (`on_alarm`).
+static DIE_SIG: AtomicI32 = AtomicI32::new(0);
+/// How long the last line may take before the process ends without it.
+const LAST_LINE_SECS: libc::c_uint = 1;
 
 pub const CAUGHT: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
@@ -117,14 +123,31 @@ extern "C" fn on_signal(sig: libc::c_int) {
                 // the line is written, or here when nothing relays. Written
                 // first, checked after: `relay_stop` stops relaying first and
                 // reads what is left after.
+                // Bounded: a third signal, or the alarm, ends it anyway (the
+                // relay may wait for the server's writer lock, or for a hook
+                // that does not read); the hook then sees a close after a
+                // stop, which ends npm too (SIGKILL).
                 notice(sig as u8 | LAST);
-                if !RELAYING.load(Ordering::SeqCst) {
+                if !RELAYING.load(Ordering::SeqCst) || DIE_SIG.swap(sig, Ordering::SeqCst) != 0 {
                     die(sig);
+                }
+                unsafe {
+                    let mut sa: libc::sigaction = std::mem::zeroed();
+                    sa.sa_sigaction = on_alarm as *const () as libc::sighandler_t;
+                    libc::sigemptyset(&mut sa.sa_mask);
+                    libc::sigaction(libc::SIGALRM, &sa, std::ptr::null_mut());
+                    libc::alarm(LAST_LINE_SECS);
                 }
             }
         }
     }
     unsafe { *errno_ptr() = saved };
+}
+
+/// The last line was not written in time: end by the signal that asked for it.
+extern "C" fn on_alarm(_: libc::c_int) {
+    let sig = DIE_SIG.load(Ordering::SeqCst);
+    die(if sig != 0 { sig } else { libc::SIGTERM });
 }
 
 /// The handlers of one child's run (`arm`); `disarm` when the child is gone.
@@ -148,6 +171,7 @@ pub fn arm() -> Armed {
 /// while matchapack waited for it.
 fn arm_with(fds: Option<[libc::c_int; 2]>) -> Armed {
     FIRST.store(0, Ordering::SeqCst);
+    DIE_SIG.store(0, Ordering::SeqCst);
     let Some(fds) = fds else {
         return Armed { old: Vec::new() };
     };
@@ -240,9 +264,10 @@ impl Armed {
 /// Run beside the server (src/serve.rs `serve_lines`) while the child runs:
 /// passes every signal on to the hook as a line, `{"stop":"SIGTERM"}`, the
 /// one that ends this process with `"last":true` (then ends it by that
-/// signal), written with `write` (under the server's writer lock). Returns
-/// at once when not armed, and when `end_relay` is called.
-pub fn relay_stop(write: impl Fn(&[u8])) {
+/// signal), written with `write` (under the server's writer lock; `true`:
+/// the last line, to be written within a bound or not at all). Returns at
+/// once when not armed, and when `end_relay` is called.
+pub fn relay_stop(write: impl Fn(&[u8], bool)) {
     let fd = NOTICE_R.load(Ordering::SeqCst);
     if fd < 0 {
         return;
@@ -251,7 +276,7 @@ pub fn relay_stop(write: impl Fn(&[u8])) {
     let pass_on = |b: u8| {
         let sig = (b & !LAST) as libc::c_int;
         let last = b & LAST != 0;
-        write(format!("{{\"stop\":\"{}\"{}}}\n", name(sig), if last { ",\"last\":true" } else { "" }).as_bytes());
+        write(format!("{{\"stop\":\"{}\"{}}}\n", name(sig), if last { ",\"last\":true" } else { "" }).as_bytes(), last);
         if last {
             die(sig);
         }

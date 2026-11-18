@@ -246,7 +246,7 @@ check sigkill "SIGKILL to matchapack during npm's reify: exit 137; npm stopped a
 # supervisor sends them: npm is gone at once, as plain npm given the same
 # two is (the script runs on in both). The hook asked npm to stop, and on
 # matchapack's end with no word ends it (SIGKILL).
-termkill() { # <case> <plain|mp>: sets npm_alive, script_alive, sigs
+termkill() { # <case> <plain|mp> [pid|group: where the SIGTERM goes] [KILL|INT: the second, to the pid]: sets npm_alive, script_alive, sigs
   d=$(new_project "$1")
   printf '%s\n' "const fs = require('fs')" "fs.writeFileSync('started', '')" \
     "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(s, () => fs.appendFileSync('sigs', s + '\\n'))" \
@@ -260,18 +260,33 @@ termkill() { # <case> <plain|mp>: sets npm_alive, script_alive, sigs
   sleep 0.3
   npm_pid=$m; [ "$2" = mp ] && npm_pid=$(pgrep -P "$m" | head -1)
   script_pid=$(descendants "$m" | while read -r p; do [ "$(ps -o command= -p "$p" | tr -s ' ')" = "node loop.js" ] && echo "$p"; done | head -1)
-  kill -TERM "$m"; sleep 2; kill -KILL "$m"; wait "$m" 2>/dev/null
+  if [ "${3:-pid}" = group ]; then kill -TERM -- -"$m"; else kill -TERM "$m"; fi
+  # (Not waited for here: after a SIGINT, npm waits for the script.)
+  sleep 2; kill -"${4:-KILL}" "$m"
   sleep 1
   npm_alive=no; kill -0 "$npm_pid" 2>/dev/null && npm_alive=yes
   script_alive=no; kill -0 "$script_pid" 2>/dev/null && script_alive=yes
   rm -f "$d/loop"; sleep 0.3
-  kill -KILL "$npm_pid" "$script_pid" 2>/dev/null
+  kill -KILL "$m" "$npm_pid" "$script_pid" 2>/dev/null
+  wait "$m" 2>/dev/null
   sigs=$({ tr '\n' ' ' < "$d/sigs"; } 2>/dev/null)
 }
 termkill termkill-plain plain; p_npm=$npm_alive p_sigs=$sigs
 termkill termkill mp
 [ "$p_npm" = no ] && [ "$npm_alive" = no ] && [ "$sigs" = "$p_sigs" ] && grep -q 'ending npm (SIGKILL)' "$d.out" && r=ok || r=bad
 check term-then-kill "SIGTERM then SIGKILL to matchapack's pid, a root script that survives SIGTERM running: npm gone 1 s after (alive: $npm_alive; plain npm: $p_npm), the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
+# The same after a SIGTERM to the whole group (npm got its own): the
+# earlier signal npm survived does not hide the later loss of matchapack.
+termkill gtermkill-plain plain group KILL; p_npm=$npm_alive p_sigs=$sigs
+termkill gtermkill mp group KILL
+[ "$p_npm" = no ] && [ "$npm_alive" = no ] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
+check group-term-then-kill "SIGTERM to the group, then SIGKILL to matchapack's pid: npm gone 1 s after (alive: $npm_alive; plain npm: $p_npm), the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
+# A SIGTERM to the group, then SIGINT to the pid: npm gets the SIGINT too
+# and passes it on to the script, as plain npm does.
+termkill gtermint-plain plain group INT; p_sigs=$sigs
+termkill gtermint mp group INT
+[ -n "$p_sigs" ] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
+check group-term-then-int "SIGTERM to the group, then SIGINT to matchapack's pid: the script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 # To the whole group, as `timeout`, `kill -- -<pgid>` and Ctrl-C send it:
 # npm gets the kernel's copy and no other (the hook adds none, also when
 # its own would come after npm's reify handler has gone: the wait is 1 s

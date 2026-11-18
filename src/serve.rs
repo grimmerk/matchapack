@@ -1589,8 +1589,29 @@ pub fn serve_lines(
             });
         }
         s.spawn(|| {
-            crate::signals::relay_stop(|b| {
-                let _ = writer.lock().unwrap().write_all(b);
+            crate::signals::relay_stop(|b, last| {
+                if !last {
+                    let _ = writer.lock().unwrap_or_else(|e| e.into_inner()).write_all(b);
+                    return;
+                }
+                // The line before this process ends: within a bound, or
+                // not at all (src/signals.rs; the process ends either way).
+                let bound = std::time::Duration::from_millis(250);
+                let until = std::time::Instant::now() + bound;
+                loop {
+                    let mut w = match writer.try_lock() {
+                        Ok(w) => w,
+                        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => return,
+                    };
+                    let _ = w.set_write_timeout(Some(bound));
+                    let _ = w.write_all(b);
+                    return;
+                }
             })
         });
         for line in reader.lines() {
