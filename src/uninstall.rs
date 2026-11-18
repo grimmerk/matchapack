@@ -1195,8 +1195,9 @@ mod tests {
     /// The cause of `run_to_string`'s retry, measured on demand (ignored:
     /// it spawns thousands of processes): two threads start `true` (with
     /// fork and exec, or `MATCHAPACK_STRESS=posix_spawn`, or `none`) while
-    /// uninstall runs; each first refusal is counted, and the retry must
-    /// then succeed. `cargo test --release -- --ignored --nocapture
+    /// uninstall runs: 500 runs once each (refusals counted, and how long
+    /// the lock stayed held), then 500 with the retry, which must all
+    /// succeed. `cargo test --release -- --ignored --nocapture
     /// a_released_lock_held_by_a_child`.
     #[test]
     #[ignore]
@@ -1226,23 +1227,38 @@ mod tests {
                     }
                 });
             }
+            // The spawning ends however this ends (a failed assertion too:
+            // the scope waits for its threads).
+            struct Stop<'a>(&'a AtomicBool);
+            impl Drop for Stop<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+            let _stop = Stop(&stop);
+            // Measured: one run each, and how long the lock stays held.
             let (mut refused, mut longest) = (0, std::time::Duration::ZERO);
             for i in 0..500 {
-                let env = setup(&d.join(i.to_string()));
+                let env = setup(&d.join(format!("once-{i}")));
                 let first = run_holding(&env, true);
                 if first.0 != 0 {
                     assert!(refused_for_a_lock(&first), "{}", first.1);
                     refused += 1;
                     let t = std::time::Instant::now();
-                    let (code, out) = run_to_string(&env, true);
+                    let f = fs::OpenOptions::new().read(true).write(true).open(env.store.join("lock")).unwrap();
+                    while store::flock(&f, libc::LOCK_EX | libc::LOCK_NB).is_err() {}
                     longest = longest.max(t.elapsed());
-                    assert!(code == 0 && !env.store.exists(), "{out}");
                 }
             }
-            stop.store(true, Ordering::Relaxed);
+            // Checked: every run with the retry succeeds.
+            for i in 0..500 {
+                let env = setup(&d.join(format!("retried-{i}")));
+                let (code, out) = run_to_string(&env, true);
+                assert!(code == 0 && !env.store.exists(), "{out}");
+            }
             (refused, longest)
         });
-        eprintln!("{mode}: {refused} of 500 runs refused for a lock at first; the longest retry took {longest:?}");
+        eprintln!("{mode}: {refused} of 500 runs refused for a lock; it was free again after {longest:?} at most; 500 runs with the retry all succeeded");
         let _ = fs::remove_dir_all(&d);
     }
 

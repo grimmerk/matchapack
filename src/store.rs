@@ -1043,9 +1043,9 @@ pub(crate) mod tests {
     /// stay held for that moment by another test's child, and a lock
     /// attempt without waiting (`Store::exclusive`, uninstall) is refused.
     /// Measured (NOTES "A store lock held by another test's child"): with
-    /// two threads spawning `true`, 5 of 500 uninstall runs refused with
-    /// posix_spawn, 25 of 500 with fork and exec, none without spawns; the
-    /// lock was free again within 2 ms. A lock a test really leaves held
+    /// two threads spawning `true`, up to 5 of 500 uninstall runs refused
+    /// with posix_spawn, 15 to 29 with fork and exec, none without spawns;
+    /// the lock was free again within 2 ms. A lock a test really leaves held
     /// stays held for the 10 s and still fails it.
     pub(crate) fn retry_while_locked<T>(mut f: impl FnMut() -> T, locked: impl Fn(&T) -> bool) -> T {
         let t0 = std::time::Instant::now();
