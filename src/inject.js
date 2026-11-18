@@ -77,8 +77,9 @@ const DECLINED = 90
 // once): npm's reify handler removes itself on the first one, and a second
 // would kill npm in the middle of its rollback. Received signals are seen
 // through process.emit, by which Node hands every signal to its listeners
-// (the function is bound when a signal's first listener is added, and the
-// wrapper is in place before npm adds any): no listener is added, so npm's
+// (the function is bound when a signal's first listener is added; the
+// wrapper is in place before npm adds any, and a preload's are added again
+// after it, `watchSignals`): no listener is added, so npm's
 // listener counts, and signal-exit's test "only my listeners are left" (it
 // re-raises the signal only then), are unchanged.
 const STOP_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP']
@@ -91,6 +92,21 @@ function watchSignals () {
       signalled = type
     }
     return emit.apply(this, arguments)
+  }
+  // A listener added before this script ran (a NODE_OPTIONS --require
+  // preload: node runs preloads before its main script) made Node bind the
+  // process.emit of that moment for its signal, past this wrapper. Removed
+  // and added again, in order and as they are (rawListeners keeps `once`
+  // wrappers), they make Node bind the current process.emit: Node stops a
+  // signal's watcher at its last listener and starts it at the first.
+  for (const sig of STOP_SIGNALS) {
+    const ls = process.rawListeners(sig)
+    if (ls.length > 0) {
+      process.removeAllListeners(sig)
+      for (const l of ls) {
+        process.on(sig, l)
+      }
+    }
   }
 }
 // The wait (50 ms): a group signal reaches npm at the same moment as

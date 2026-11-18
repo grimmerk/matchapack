@@ -60,9 +60,6 @@ let yarnStarted = false
 // In a child (MATCHAPACK_YARN_CHILD): runs Yarn without the hook, in this
 // process, when the hook declines before Yarn has started.
 let plainFallback = null
-// The hook closes its socket itself (a child's plain fallback): not a sign
-// that the other end has gone.
-let closing = false
 
 // Yarn stops when matchapack goes away (grimmerk/matchapack-private#64; src/signals.rs),
 // as src/inject.js stops npm: when the socket closes while Yarn runs, or
@@ -82,6 +79,21 @@ function watchSignals () {
       signalled = type
     }
     return emit.apply(this, arguments)
+  }
+  // A listener added before this script ran (a NODE_OPTIONS --require
+  // preload: node runs preloads before its main script) made Node bind the
+  // process.emit of that moment for its signal, past this wrapper. Removed
+  // and added again, in order and as they are (rawListeners keeps `once`
+  // wrappers), they make Node bind the current process.emit: Node stops a
+  // signal's watcher at its last listener and starts it at the first.
+  for (const sig of STOP_SIGNALS) {
+    const ls = process.rawListeners(sig)
+    if (ls.length > 0) {
+      process.removeAllListeners(sig)
+      for (const l of ls) {
+        process.on(sig, l)
+      }
+    }
   }
 }
 let stopAsked = false
@@ -202,11 +214,9 @@ async function main () {
   if (isChild && target) {
     // As the workspace command would have started it: `node <target> <args>`.
     plainFallback = () => {
-      if (sock) {
-        // (end, not destroy: the reason sent just before is still written)
-        closing = true
-        sock.end()
-      }
+      // The socket stays open, with no request sent on it: this Yarn still
+      // stops when the Yarn relaying for it goes away (`gone`; Yarn 1 passes
+      // only SIGTERM on to its children), and ends with it when it ends.
       process.argv = [process.argv[0], target, ...yarnArgs]
       require('module').runMain(target)
     }
@@ -272,9 +282,6 @@ async function main () {
   // the requests stay unanswered, and no further copy is made (`hooked`),
   // while this Yarn stops.
   const gone = (why) => () => {
-    if (closing) {
-      return
-    }
     down = down || why
     if (!isChild) {
       for (const id of [...pending.keys()]) {

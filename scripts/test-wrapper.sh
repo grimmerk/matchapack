@@ -250,16 +250,24 @@ stopped group-plain plain TERM group count; p_sigs=$sigs p_rc=$rc
 stopped group mp TERM group count MATCHAPACK_STOP_GRACE_MS=1000
 [ -n "$p_sigs" ] && [ "$sigs" = "$p_sigs" ] && [ "$rc" = "$p_rc" ] && [ -z "$alive" ] && r=ok || r=bad
 check group-term "SIGTERM to matchapack's process group: the root script got [$sigs] ([$p_sigs] under plain npm), exit $rc (plain $p_rc)" $r "$d"
+# The same with a SIGTERM listener that a NODE_OPTIONS --require preload
+# adds before the hook runs (node runs preloads before its main script): the
+# hook still sees npm's SIGTERM (src/inject.js `watchSignals`), and adds none.
+printf '%s\n' "process.once('SIGTERM', () => {})" > "$work/preload.js"
+stopped group-preload-plain plain TERM group count NODE_OPTIONS="--require $work/preload.js"; p_sigs=$sigs p_rc=$rc
+stopped group-preload mp TERM group count MATCHAPACK_STOP_GRACE_MS=1000 NODE_OPTIONS="--require $work/preload.js"
+[ -n "$p_sigs" ] && [ "$sigs" = "$p_sigs" ] && [ "$rc" = "$p_rc" ] && [ -z "$alive" ] && r=ok || r=bad
+check group-term-preload "SIGTERM to the process group, with a preload's SIGTERM listener: the root script got [$sigs] ([$p_sigs] under plain npm), exit $rc (plain $p_rc)" $r "$d"
 # Ctrl-C: the terminal sends SIGINT to its whole foreground group. In a new
 # pseudo-terminal whose foreground job is npm ci (plain, or matchapack's),
 # ^C typed into it once the script runs; the same comparison.
 ctrlc_py='
-import os, pty, select, sys, time
+import os, pty, select, signal, sys, time
 mark, out, cmd = sys.argv[1], sys.argv[2], sys.argv[3:]
 pid, fd = pty.fork()
 if pid == 0:
     os.execvp(cmd[0], cmd)
-log, sent, end = open(out, "wb"), False, time.monotonic() + 90
+log, sent, end, done = open(out, "wb"), False, time.monotonic() + 90, False
 while time.monotonic() < end:
     if select.select([fd], [], [], 0.01)[0]:
         try:
@@ -267,11 +275,18 @@ while time.monotonic() < end:
         except OSError:
             data = b""
         if not data:
+            done = True
             break
         log.write(data)
     if not sent and os.path.exists(mark):
         os.write(fd, b"\x03")
         sent = True
+if not done:
+    # Still running after 90 s: its whole group (the terminal session it
+    # leads) is killed and reaped, and the case fails.
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    sys.exit("timed out")
 os.waitpid(pid, 0)
 '
 ctrlc() { # <case> <plain|mp>: sets sigs
@@ -282,12 +297,14 @@ ctrlc() { # <case> <plain|mp>: sets sigs
   python3 -c "import json;p='$d/package.json';d=json.load(open(p));d['scripts']['postinstall']='node loop.js';json.dump(d,open(p,'w'),indent=2)"
   local npm_cmd=(matchapack npm); [ "$2" = plain ] && npm_cmd=(env MATCHAPACK=0 "$(command -v npm)")
   (cd "$d" && exec python3 -c "$ctrlc_py" "$d/started" "$d.out" env PATH="$bin_dir:$PATH" MATCHAPACK_STOP_GRACE_MS=1000 "${npm_cmd[@]}" ci --no-audit --no-fund) < /dev/null
+  local timed_out=$?
   sleep 0.5
   sigs=$({ tr '\n' ' ' < "$d/sigs"; } 2>/dev/null)
+  [ "$timed_out" = 0 ] || sigs="(timed out after 90 s) $sigs"
 }
 ctrlc ctrlc-plain plain; p_sigs=$sigs
 ctrlc ctrlc mp
-[ -n "$p_sigs" ] && [ "$sigs" = "$p_sigs" ] && r=ok || r=bad
+[ -n "$p_sigs" ] && [ "$sigs" = "$p_sigs" ] && [[ "$sigs$p_sigs" != *"timed out"* ]] && r=ok || r=bad
 check ctrl-c "Ctrl-C in a terminal: the root script got [$sigs] ([$p_sigs] under plain npm)" $r "$d"
 
 # 16. the run log records installs and declines (in the test's own log dir)

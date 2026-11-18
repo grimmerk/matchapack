@@ -102,9 +102,22 @@ pub struct Armed {
 /// so that none falls between the start and the handlers: one that comes
 /// before the server runs is passed on as soon as it does (`relay_stop`).
 pub fn arm() -> Armed {
-    RECEIVED.store(0, Ordering::SeqCst);
     let mut fds = [-1 as libc::c_int; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
+    let piped = unsafe { libc::pipe(fds.as_mut_ptr()) } == 0;
+    arm_with(piped.then_some(fds))
+}
+
+/// `arm` with the pipe to `relay_stop`, or without one (`pipe` failed: no
+/// descriptor left). Without it nothing is caught: a signal ends this
+/// process at once, as before #64, and the hook stops npm when the socket
+/// closes; a handler with nowhere to say the signal would leave npm running
+/// while matchapack waited for it.
+fn arm_with(fds: Option<[libc::c_int; 2]>) -> Armed {
+    RECEIVED.store(0, Ordering::SeqCst);
+    let Some(fds) = fds else {
+        return Armed { old: Vec::new() };
+    };
+    {
         for fd in fds {
             // Close-on-exec (no process this one starts inherits them); the
             // handler's write never blocks.
@@ -251,4 +264,29 @@ pub fn finish(code: i32) -> ! {
         }
     }
     std::process::exit(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handler_of(sig: libc::c_int) -> libc::sighandler_t {
+        unsafe {
+            let mut cur: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(sig, std::ptr::null(), &mut cur);
+            cur.sa_sigaction
+        }
+    }
+
+    /// Without the pipe (`pipe` failed), nothing is caught: the handlers stay
+    /// as they were (a signal ends the process, as before #64).
+    #[test]
+    fn without_the_pipe_nothing_is_caught() {
+        let before: Vec<_> = CAUGHT.iter().map(|&s| handler_of(s)).collect();
+        let armed = arm_with(None);
+        let during: Vec<_> = CAUGHT.iter().map(|&s| handler_of(s)).collect();
+        armed.disarm();
+        assert_eq!(before, during);
+        assert!(during.iter().all(|h| *h != on_signal as *const () as libc::sighandler_t));
+    }
 }

@@ -1417,10 +1417,14 @@ fi # TEST_YARN1_PART != route
 if [ "${TEST_YARN1_PART:-all}" = commands ]; then echo "passed $pass, failed $fail"; [ $fail = 0 ]; exit; fi
 
 # --- matchapack yarn run directly: gates, the hook's checks, the report -------
+# y1cmd: y1env's environment as a command prefix, in Y1CMD (for `exec`).
+y1cmd() {
+  Y1CMD=(env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK YARN_DISABLE_SELF_UPDATE_CHECK=true
+    PATH="$(dirname "$node"):$PATH" MATCHAPACK_YARN_JS="$yarnjs" MATCHAPACK_STORE="$work/y1/store"
+    MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config")
+}
 y1env() {
-  env -u GITHUB_TOKEN -u MATCHAPACK_ENGINE -u MATCHAPACK_PATHS -u MATCHAPACK YARN_DISABLE_SELF_UPDATE_CHECK=true \
-    PATH="$(dirname "$node"):$PATH" MATCHAPACK_YARN_JS="$yarnjs" MATCHAPACK_STORE="$work/y1/store" \
-    MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" "$@"
+  y1cmd; "${Y1CMD[@]}" "$@"
 }
 # myarn <dir> [VAR=value...] -- [yarn args]: matchapack yarn install in <dir>
 # with the warm cache of e-many; output in $work/out, exit in $rc.
@@ -1539,17 +1543,20 @@ ydesc() { # every descendant pid of $1
   ps -A -o pid=,ppid= | awk -v root="$1" '{ parent[$1]=$2 } END { for (p in parent) { q=p; while (q in parent && q != root && q > 1) q=parent[q]; if (q == root && p != root) print p } }'
 }
 # ystop <dir> <signal|parent> <paths that show the link step, `:`-separated>
-# -- <yarn args>: matchapack yarn in the background (job control: its own
+# [VAR=value...] -- <yarn args>: matchapack yarn (with y1env's environment)
+# in the background (job control: its own
 # process group); once one of the paths exists, the signal to matchapack's
 # pid, or (`parent`) SIGKILL to the node that runs Yarn alone (the parent
 # of a workspace command's Yarn). Sets rc, alive, newer once every process
 # it started has gone; output in $work/out.
 ystop() {
-  local d=$1 sig=$2 mark=$3; shift 4
+  local d=$1 sig=$2 mark=$3 vars=(); shift 3
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do vars+=("$1"); shift; done
+  shift
+  y1cmd
   set -m
-  (cd "$d" && exec env MATCHAPACK_YARN_SLOW_FIXUP_EVERY=1 MATCHAPACK_YARN_SLOW_FIXUP_MS=300 PATH="$(dirname "$node"):$PATH" \
-    MATCHAPACK_YARN_JS="$yarnjs" MATCHAPACK_STORE="$work/y1/store" MATCHAPACK_LOG_DIR="$work/y1/log" MATCHAPACK_CONFIG_DIR="$work/y1/config" \
-    YARN_DISABLE_SELF_UPDATE_CHECK=true "$bin" yarn "$@") > "$work/out" 2>&1 < /dev/null &
+  (cd "$d" && exec "${Y1CMD[@]}" MATCHAPACK_YARN_SLOW_FIXUP_EVERY=1 MATCHAPACK_YARN_SLOW_FIXUP_MS=300 ${vars[@]+"${vars[@]}"} \
+    "$bin" yarn "$@") > "$work/out" 2>&1 < /dev/null &
   local m=$!
   set +m
   local _ p seen=no mk
@@ -1626,6 +1633,21 @@ if [ $rc = 137 ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q "Yarn that sta
   && [ "$(lastlog '(r["outcome"], r["code"])')" = "('yarn_failed', 137)" ]; then
   ok "the parent Yarn of a workspace command killed alone during the child's link step: the child stops, nothing left running or written after"
 else bad "parent Yarn killed during the child's link step (exit $rc, alive:${alive:- none}, written after: ${newer:-nothing})"; fi
+# The workspace command's Yarn running as plain Yarn (its hook failed before
+# Yarn started: MATCHAPACK_YARN_SIMULATE=child-throw) keeps its socket to
+# the parent open: SIGINT to matchapack while that Yarn runs w2's
+# postinstall (a script that runs until stopped). The parent Yarn gets
+# SIGINT from its hook and dies of it, and Yarn 1 passes only SIGTERM on to
+# its children: the child sees its socket close and stops (SIGTERM, which
+# Yarn passes on to the script).
+wsfresh
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"node -e \"require(\x27fs\x27).writeFileSync(\x27started\x27,\x27\x27); setInterval(()=>{},1000)\""}; json.dump(d, open(p,"w"), indent=2)' "$ws/packages/w2/package.json"
+ystop "$ws" INT "$ws/packages/w2/started" MATCHAPACK_YARN_SIMULATE=child-throw -- workspace w2 add "$T/y1-many-2.0.0.tgz" --non-interactive --cache-folder "$work/sig-ws-cache"
+if [ $rc = 130 ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q "Yarn that started this workspace command's Yarn has gone; stopping (SIGTERM)" "$work/out" \
+  && grep -q "before Yarn started" "$work/out"; then
+  ok "SIGINT to matchapack while a workspace command's Yarn runs as plain Yarn: it stops when the parent Yarn goes, nothing left running or written after"
+else bad "SIGINT with the workspace's Yarn in plain fallback (exit $rc, alive:${alive:- none}, written after: ${newer:-nothing})"; fi
+wsfresh
 (cd "$ws" && y1env "$bin" yarn install --frozen-lockfile --non-interactive --cache-folder "$work/sig-ws-cache") > "$work/out" 2>&1; rc=$?
 [ $rc = 0 ] && ok "after the stopped workspace commands, an install succeeds (the store's lock is free)" || bad "install after the stopped workspace commands (exit $rc)"
 y1env "$bin" report > "$work/out" 2>&1
