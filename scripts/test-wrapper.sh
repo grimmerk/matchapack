@@ -406,7 +406,8 @@ if pid == 0:
     while True:
         try:
             os.killpg(job, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # (EPERM on macOS: only zombies are left, nothing runs.)
             break
         time.sleep(0.05)
     os._exit(0)
