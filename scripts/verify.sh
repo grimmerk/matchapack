@@ -4,6 +4,10 @@
 # Copies <source> (which must hold package.json + package-lock.json and any
 # workspace sources, but no node_modules) to <work>/A and <work>/B, runs
 # `npm ci` in A and `matchapack install` in B, then:
+# (The `matchapack install args` reach B only: A runs plain `npm ci` without
+# them. So a flag that changes the tree, such as --ignore-scripts, makes A
+# and B differ for that reason alone. To give both sides the same words, use
+# MATCHAPACK_VERIFY_ARGS_FILE below.)
 #   1. matchapack diff A B  (paths, types, modes, content hashes, symlink targets,
 #      hidden lockfile as JSON; --normalize-roots: each tree's own path, where an
 #      install script wrote it into a file name, is written <root>)

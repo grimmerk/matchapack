@@ -3,7 +3,9 @@
 #   verify-npm.sh [--no-record] <work-dir> [extra project dir...]
 # Cases: the fixtures (hidden lockfile byte-identical; rootpath writes a file
 # named after its own directory), script-env through the shell function,
-# legacy-peer with legacy-peer-deps, then each extra project (a real
+# legacy-peer with legacy-peer-deps, --ignore-scripts (the flag on npm ci and
+# npm install, npm_config_ignore_scripts, a project .npmrc: no install script
+# runs, on either side), then each extra project (a real
 # repository is worth adding: the fixtures are small). Every case must have
 # cloned something (a run in which the hook never fired would pass without
 # testing it). Then the sampled verification of real runs
@@ -105,6 +107,52 @@ case_ odd-tarballs -- "$FX/odd-tarballs"
 # (--no-audit) reach matchapack only through the shell function.
 case_ script-env MATCHAPACK_VERIFY_VIA=wrapper -- "$FX/script-env"
 case_ legacy-peer-on npm_config_legacy_peer_deps=true -- "$FX/legacy-peer"
+# --ignore-scripts and its other spellings: A (plain npm) and B (`matchapack
+# npm`, the shell function's path) run the same words, and neither may run
+# an install script. script-env (in a copy, below) has both kinds: the root's postinstall
+# writes root-env.json, the dependency lc-env's install script writes
+# node_modules/lc-env/env.json. The tree comparison alone would catch a
+# script run in B only; the markers also catch one that ran in both (and
+# the control, without the flag, shows the markers would be there).
+# noscripts_ <name> none|all <source> env-assignments... -- npm words...
+noscripts_() {
+  local name=$1 want=$2 src=$3; shift 3
+  local envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  local w=$work/$name out=$work/$name.txt args=$work/$name.args t f got= ok=1
+  : > "$args"; for a in "$@"; do printf '%s\0' "$a" >> "$args"; done
+  if env MATCHAPACK_VERIFY_BYTES=1 MATCHAPACK_VERIFY_ARGS_FILE="$args" ${envs[@]+"${envs[@]}"} "$here/scripts/verify.sh" "$src" "$w" > "$out" 2>&1; then
+    for t in A B; do
+      for f in root-env.json node_modules/lc-env/env.json; do
+        if [ -e "$w/$t/$f" ]; then got="$got $t:$f"; [ "$want" = none ] && ok=0
+        else [ "$want" = all ] && ok=0; fi
+      done
+      [ -d "$w/$t/node_modules/lc-env" ] || ok=0
+    done
+    if [ $ok = 1 ]; then echo "ok    $name (npm $*: install-script outputs:${got:- none})"
+    else fail=1; echo "FAIL  $name (npm $*: want $want install-script outputs, found:${got:- none})"; fi
+  else
+    fail=1; echo "FAIL  $name (log: $out)"; tail -15 "$out" | sed 's/^/      /'
+  fi
+  drop "$w"
+}
+# npm 12 runs a dependency's install scripts only by policy, and the
+# fixture's package.json `allowScripts` is honoured by npm 11 only (as in
+# test-inject.sh): the copy's .npmrc allows every script (older npm ignore
+# the setting), so the control shows lc-env's output on every npm line, and
+# --ignore-scripts must win over that permission.
+nsrc=$work/script-env-allowed; rm -rf "${nsrc:?}"; cp -R "$FX/script-env" "$nsrc"
+echo 'dangerously-allow-all-scripts=true' > "$nsrc/.npmrc"
+noscripts_ noscripts-control all "$nsrc" -- ci
+noscripts_ noscripts-ci none "$nsrc" -- ci --ignore-scripts
+noscripts_ noscripts-ci-env none "$nsrc" npm_config_ignore_scripts=true -- ci
+# npm install from no node_modules (the install family, A2).
+noscripts_ noscripts-install none "$nsrc" -- install --ignore-scripts
+# The project's own .npmrc.
+echo 'ignore-scripts=true' >> "$nsrc/.npmrc"
+noscripts_ noscripts-npmrc none "$nsrc" -- ci
+drop "$nsrc"
 # Aliased dependencies (`"alias-a": "npm:y1-a@1.0.0"`, an alias named as
 # its package, a scoped alias of a package also installed under its own
 # name): since npm 10.9.11 arborist gives pacote the registry name, not the
