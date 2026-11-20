@@ -18,7 +18,8 @@
 # --link-duplicates, --flat, --ignore-optional, --no-bin-links,
 # --pure-lockfile, --check-files, --force, --offline, --prefer-offline,
 # --ignore-engines, NODE_ENV=production; where plain Yarn refuses, the engine
-# must fail the same way); its gates, the start-up probe, the report,
+# must fail the same way); --ignore-scripts (the flag, a project .yarnrc,
+# yarn add: no install script runs in any tree); its gates, the start-up probe, the report,
 # two volumes (a disk image); Homebrew's yarn launcher, and (MATCHAPACK_FISH=
 # <fish>) the yarn function under fish; the sampled verification of logged
 # runs (verify-sample.sh --yarn, #77). Needs the release binary, node and Yarn 1
@@ -765,6 +766,53 @@ x=$work/e-many/engine/node_modules/y1-execpath/execpath.txt
 if [ -f "$x" ] && [ "$(head -1 "$x")" = "$yarnjs" ] && cmp -s "$x" "$work/e-many/plain1/node_modules/y1-execpath/execpath.txt"; then
   ok "lifecycle scripts get npm_execpath = Yarn's own bin/yarn.js, and it runs Yarn"
 else bad "npm_execpath under the engine ($(head -1 "$x" 2>/dev/null))"; fi
+
+# --ignore-scripts and its other spellings: plain Yarn and the engine get the
+# same words, and no tree may hold an install script's output. A copy of
+# yarn1-many whose root runs preinstall, install, postinstall and prepare
+# (each writes ev-<event>.txt at the root); its dependencies y1-script and
+# y1-execpath write built.txt and execpath.txt. The tree comparison alone
+# would catch a script run in the engine tree only; the markers also catch
+# one that ran everywhere, and the control shows they would be there.
+# rootscripts <fixture> <dir>: a copy of the fixture's manifests with those
+# root scripts.
+rootscripts() {
+  rm -rf "${2:?}"; mkdir -p "$2"; cp -p "$FX/$1/package.json" "$FX/$1/yarn.lock" "$2/"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={e: "node -e \"require(%r).writeFileSync(%r, %r)\"" % ("fs", "ev-%s.txt" % e, "x") for e in ("preinstall","install","postinstall","prepare")}; json.dump(d, open(p,"w"), indent=2)' "$2/package.json"
+}
+nsy=$work/noscripts-src; rootscripts yarn1-many "$nsy"
+nsy_rc=$work/noscripts-src-yarnrc; rm -rf "${nsy_rc:?}"; cp -p -R "$nsy" "$nsy_rc"; echo 'ignore-scripts true' > "$nsy_rc/.yarnrc"
+# script_outputs <case>: every install-script output found, "<tree>:<file>".
+script_outputs() {
+  local t f
+  for t in plain1 plain2 engine; do
+    for f in ev-preinstall.txt ev-install.txt ev-postinstall.txt ev-prepare.txt node_modules/y1-script/built.txt node_modules/y1-execpath/execpath.txt; do
+      [ -e "$work/$1/$t/$f" ] && printf ' %s:%s' "$t" "$f"
+    done
+  done
+}
+everify noscripts-control "$nsy"
+got=$(script_outputs noscripts-control)
+if [ $rc = 0 ] && same && [ "$(echo $got | wc -w | tr -d ' ')" = 18 ]; then
+  ok "--ignore-scripts control: without the flag, all 6 install-script outputs in plain1, plain2 and the engine tree"
+else bad "--ignore-scripts control (exit $rc, outputs:${got:- none})"; fi
+for c in "noscripts-install|$nsy|--ignore-scripts" "noscripts-yarnrc|$nsy_rc|"; do
+  IFS='|' read -r name src flag <<< "$c"
+  everify "$name" "$src" $flag
+  n=$(ejson "$name" "y['cloned']"); got=$(script_outputs "$name")
+  if [ $rc = 0 ] && same && [ -z "$got" ] && [ "${n:-0}" -ge 150 ] && first128 "$name" && [ -d "$work/$name/engine/node_modules/y1-script" ]; then
+    ok "$name: yarn install ${flag:-with .yarnrc ignore-scripts true}: engine identical, no install script ran in any tree; $n files cloned"
+  else bad "$name (exit $rc, cloned ${n:-?}, outputs:${got:- none})"; fi
+done
+# yarn add --ignore-scripts from no node_modules, on yarn1-small with the
+# same root scripts: neither the root's scripts nor the added packages' run
+# (y1-many brings enough files for the engine to clone some).
+nsa=$work/noscripts-src-small; rootscripts yarn1-small "$nsa"
+everify noscripts-add --command-fresh --command "add --ignore-scripts $FX_URL/y1-many-1.0.0.tgz $FX_URL/y1-script-1.0.0.tgz $FX_URL/y1-execpath-1.0.0.tgz" "$nsa"
+n=$(ejson noscripts-add "y['cloned']"); got=$(script_outputs noscripts-add)
+if [ $rc = 0 ] && same && [ -z "$got" ] && [ "${n:-0}" -ge 150 ] && [ -d "$work/noscripts-add/engine/node_modules/y1-script" ]; then
+  ok "yarn add --ignore-scripts (from no node_modules): engine identical, no install script ran in any tree; $n files cloned"
+else bad "yarn add --ignore-scripts (exit $rc, cloned ${n:-?}, outputs:${got:- none})"; fi
 
 # An install script that names a file after its own directory, as node-gyp's
 # .deps/<absolute path>/... (issue grimmerk/matchapack-private#48): each tree gets another path, so two
