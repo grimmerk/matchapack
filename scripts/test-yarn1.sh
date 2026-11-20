@@ -19,7 +19,8 @@
 # --pure-lockfile, --check-files, --force, --offline, --prefer-offline,
 # --ignore-engines, NODE_ENV=production; where plain Yarn refuses, the engine
 # must fail the same way); --ignore-scripts (the flag, a project .yarnrc,
-# yarn add: no install script runs in any tree); its gates, the start-up probe, the report,
+# yarn add: no install script runs in any tree; npm_config_ignore_scripts,
+# which Yarn 1 does not read: every script runs, as in plain Yarn); its gates, the start-up probe, the report,
 # two volumes (a disk image); Homebrew's yarn launcher, and (MATCHAPACK_FISH=
 # <fish>) the yarn function under fish; the sampled verification of logged
 # runs (verify-sample.sh --yarn, #77). Needs the release binary, node and Yarn 1
@@ -796,21 +797,29 @@ got=$(script_outputs noscripts-control)
 if [ $rc = 0 ] && same && [ "$(echo $got | wc -w | tr -d ' ')" = 18 ]; then
   ok "--ignore-scripts control: without the flag, all 6 install-script outputs in plain1, plain2 and the engine tree"
 else bad "--ignore-scripts control (exit $rc, outputs:${got:- none})"; fi
-for c in "noscripts-install|$nsy|--ignore-scripts" "noscripts-yarnrc|$nsy_rc|"; do
-  IFS='|' read -r name src flag <<< "$c"
+for c in "noscripts-install|$nsy|--ignore-scripts|the flag" "noscripts-yarnrc|$nsy_rc||.yarnrc ignore-scripts true"; do
+  IFS='|' read -r name src flag what <<< "$c"
   everify "$name" "$src" $flag
   n=$(ejson "$name" "y['cloned']"); got=$(script_outputs "$name")
   if [ $rc = 0 ] && same && [ -z "$got" ] && [ "${n:-0}" -ge 150 ] && first128 "$name" && [ -d "$work/$name/engine/node_modules/y1-script" ]; then
-    ok "$name: yarn install ${flag:-with .yarnrc ignore-scripts true}: engine identical, no install script ran in any tree; $n files cloned"
+    ok "$name: yarn install, $what: engine identical, no install script ran in any tree; $n files cloned"
   else bad "$name (exit $rc, cloned ${n:-?}, outputs:${got:- none})"; fi
 done
+# npm_config_ignore_scripts=true in the environment: plain Yarn 1 does not
+# read it (measured, Yarn 1.22.22: every script ran), so neither may the
+# engine: all 6 outputs in every tree, engine identical.
+export npm_config_ignore_scripts=true; everify noscripts-npmenv "$nsy"; unset npm_config_ignore_scripts
+got=$(script_outputs noscripts-npmenv)
+if [ $rc = 0 ] && same && [ "$(echo $got | wc -w | tr -d ' ')" = 18 ] && first128 noscripts-npmenv; then
+  ok "npm_config_ignore_scripts=true: plain Yarn 1 does not read it, and the engine runs every script as plain does (identical)"
+else bad "npm_config_ignore_scripts=true under Yarn (exit $rc, outputs:${got:- none})"; fi
 # yarn add --ignore-scripts from no node_modules, on yarn1-small with the
 # same root scripts: neither the root's scripts nor the added packages' run
 # (y1-many brings enough files for the engine to clone some).
 nsa=$work/noscripts-src-small; rootscripts yarn1-small "$nsa"
 everify noscripts-add --command-fresh --command "add --ignore-scripts $FX_URL/y1-many-1.0.0.tgz $FX_URL/y1-script-1.0.0.tgz $FX_URL/y1-execpath-1.0.0.tgz" "$nsa"
 n=$(ejson noscripts-add "y['cloned']"); got=$(script_outputs noscripts-add)
-if [ $rc = 0 ] && same && [ -z "$got" ] && [ "${n:-0}" -ge 150 ] && [ -d "$work/noscripts-add/engine/node_modules/y1-script" ]; then
+if [ $rc = 0 ] && same && [ -z "$got" ] && [ "${n:-0}" -ge 150 ] && first128 noscripts-add && [ -d "$work/noscripts-add/engine/node_modules/y1-script" ]; then
   ok "yarn add --ignore-scripts (from no node_modules): engine identical, no install script ran in any tree; $n files cloned"
 else bad "yarn add --ignore-scripts (exit $rc, cloned ${n:-?}, outputs:${got:- none})"; fi
 
