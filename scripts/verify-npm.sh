@@ -109,7 +109,7 @@ case_ script-env MATCHAPACK_VERIFY_VIA=wrapper -- "$FX/script-env"
 case_ legacy-peer-on npm_config_legacy_peer_deps=true -- "$FX/legacy-peer"
 # --ignore-scripts and its other spellings: A (plain npm) and B (`matchapack
 # npm`, the shell function's path) run the same words, and neither may run
-# an install script. script-env has both kinds: the root's postinstall
+# an install script. script-env (in a copy, below) has both kinds: the root's postinstall
 # writes root-env.json, the dependency lc-env's install script writes
 # node_modules/lc-env/env.json. The tree comparison alone would catch a
 # script run in B only; the markers also catch one that ran in both (and
@@ -137,14 +137,20 @@ noscripts_() {
   fi
   drop "$w"
 }
-noscripts_ noscripts-control all "$FX/script-env" -- ci
-noscripts_ noscripts-ci none "$FX/script-env" -- ci --ignore-scripts
-noscripts_ noscripts-ci-env none "$FX/script-env" npm_config_ignore_scripts=true -- ci
+# npm 12 runs a dependency's install scripts only by policy, and the
+# fixture's package.json `allowScripts` is honoured by npm 11 only (as in
+# test-inject.sh): the copy's .npmrc allows every script (older npm ignore
+# the setting), so the control shows lc-env's output on every npm line, and
+# --ignore-scripts must win over that permission.
+nsrc=$work/script-env-allowed; rm -rf "${nsrc:?}"; cp -R "$FX/script-env" "$nsrc"
+echo 'dangerously-allow-all-scripts=true' > "$nsrc/.npmrc"
+noscripts_ noscripts-control all "$nsrc" -- ci
+noscripts_ noscripts-ci none "$nsrc" -- ci --ignore-scripts
+noscripts_ noscripts-ci-env none "$nsrc" npm_config_ignore_scripts=true -- ci
 # npm install from no node_modules (the install family, A2).
-noscripts_ noscripts-install none "$FX/script-env" -- install --ignore-scripts
+noscripts_ noscripts-install none "$nsrc" -- install --ignore-scripts
 # The project's own .npmrc.
-nsrc=$work/script-env-npmrc; rm -rf "${nsrc:?}"; cp -R "$FX/script-env" "$nsrc"
-echo 'ignore-scripts=true' > "$nsrc/.npmrc"
+echo 'ignore-scripts=true' >> "$nsrc/.npmrc"
 noscripts_ noscripts-npmrc none "$nsrc" -- ci
 drop "$nsrc"
 # Aliased dependencies (`"alias-a": "npm:y1-a@1.0.0"`, an alias named as
