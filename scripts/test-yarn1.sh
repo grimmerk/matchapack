@@ -756,8 +756,9 @@ if [ "${TEST_YARN1_PART:-all}" != commands ]; then
 everify e-many "$FX/yarn1-many"
 n=$(ejson e-many "y['cloned']")
 if [ $rc = 0 ] && same && [ "${n:-0}" -ge 150 ] && first128 e-many \
-  && grep -q "engine: shared $n of" "$work/out"; then
-  ok "yarn1-many: engine identical to plain (mtimes, gid, xattr names included); $n files cloned and sharing blocks, Yarn's first $(ejson e-many "y['first']") copies left to Node"
+  && grep -q "engine: shared $n of" "$work/out" \
+  && grep -Eq "^matchapack: $n files cloned from Yarn's cache \(.*\), ([0-9]+ copied by Node \(128 of them |128 copied by Node \()Yarn's first copies, left to Node by design\), in " "$work/e-many/engine.log"; then
+  ok "yarn1-many: engine identical to plain (mtimes, gid, xattr names included); $n files cloned and sharing blocks, Yarn's first $(ejson e-many "y['first']") copies left to Node, which the end-of-install line says"
 else bad "yarn1-many engine (exit $rc, cloned ${n:-?})"; fi
 
 # Yarn hands its lifecycle scripts npm_execpath = its main module; under the
