@@ -39,6 +39,7 @@ on:
       - scripts/large-repo.sh
       - scripts/btrfs-scratch.sh
       - scripts/shared-blocks.py
+      - scripts/verify.sh
 concurrency:
   group: linux-large-${{ github.ref }}
   cancel-in-progress: true

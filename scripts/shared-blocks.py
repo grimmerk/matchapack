@@ -5,9 +5,15 @@
   shared-blocks.py <tree> <cache>
 
 Counts every regular file below a node_modules directory of <tree>: a file
-whose first extent (device and physical offset) is also the first extent of
-a regular file in <cache> shares it (a clone of that file). macOS reads the
-extent with fcntl F_LOG2PHYS_EXT, Linux with the FIEMAP ioctl (btrfs, XFS).
+whose first extent (filesystem and physical offset) is also the first extent
+of a regular file in <cache> shares it (a clone of that file). macOS reads
+the extent with fcntl F_LOG2PHYS_EXT, Linux with the FIEMAP ioctl (btrfs,
+XFS). The filesystem is the file's device (st_dev), except on btrfs, which
+gives each subvolume a device of its own while its physical offsets are
+addresses in the whole filesystem (a clone across subvolumes keeps the
+offset): there it is the filesystem's UUID (BTRFS_IOC_FS_INFO, which needs
+no privilege), so <tree> and <cache> may be in different subvolumes. When
+that ioctl fails, the device is used, and both must be in one subvolume.
 Empty files have no blocks and are counted apart; so are files whose data
 has no block of its own (Linux: btrfs keeps small files inline in its
 metadata, and a clone of such a file is a copy, never shared).
@@ -24,14 +30,33 @@ FIEMAP_HEAD = "=QQIIII"  # fm_start, fm_length, fm_flags, fm_mapped_extents, fm_
 FIEMAP_EXTENT = "=QQQQQIIII"  # fe_logical, fe_physical, fe_length, reserved64[2], fe_flags, reserved[3]
 # The extent's data has no block address of its own, or none yet.
 FIEMAP_EXTENT_NO_ADDRESS = 0x2 | 0x4 | 0x200  # UNKNOWN, DELALLOC, DATA_INLINE
+# _IOR(0x94, 31, struct btrfs_ioctl_fs_info_args): 1024 bytes, fsid at 16.
+BTRFS_IOC_FS_INFO = 0x8400941F
+FS_IDS = {}  # st_dev -> the filesystem's identity
 
 
 class Inline(Exception):
     pass
 
 
+def filesystem(fd, dev):
+    """The identity of the filesystem the file open as fd is on (dev: its
+    st_dev): btrfs's UUID, or the device elsewhere."""
+    if dev not in FS_IDS:
+        FS_IDS[dev] = dev
+        if sys.platform != "darwin":
+            buf = bytearray(1024)
+            try:
+                fcntl.ioctl(fd, BTRFS_IOC_FS_INFO, buf, True)
+                FS_IDS[dev] = "btrfs-" + bytes(buf[16:32]).hex()
+            except OSError:
+                pass  # not btrfs (ENOTTY)
+    return FS_IDS[dev]
+
+
 def first_block(p):
-    """(device, physical offset of the first block): offsets are per device."""
+    """(filesystem, physical offset of the first block): offsets are per
+    filesystem."""
     fd = os.open(p, os.O_RDONLY)
     try:
         dev = os.fstat(fd).st_dev
@@ -47,7 +72,7 @@ def first_block(p):
         ext = struct.unpack_from(FIEMAP_EXTENT, buf, struct.calcsize(FIEMAP_HEAD))
         if ext[5] & FIEMAP_EXTENT_NO_ADDRESS:
             raise Inline()
-        return dev, ext[1]
+        return filesystem(fd, dev), ext[1]
     finally:
         os.close(fd)
 
