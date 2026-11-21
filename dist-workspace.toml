@@ -5,8 +5,11 @@ members = ["cargo:."]
 # (it rewrites .github/workflows/release.yml) and `dist plan`; RELEASING.md
 # has the release procedure.
 [dist]
-# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.32.0"
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax). 0.34
+# builds Apple silicon on macos-15 by default (0.32 still picked the retired
+# macos-14, whose job was cancelled, so nothing was released); check the
+# runners with `dist plan --output-format=json` after an upgrade.
+cargo-dist-version = "0.34.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app. Not dist's "npm" installer: its
@@ -27,21 +30,25 @@ publish-jobs = ["homebrew", "./publish-crates", "./publish-npm"]
 github-custom-job-permissions = { "publish-crates" = { id-token = "write", contents = "read" }, "publish-npm" = { id-token = "write", contents = "read" } }
 # Target platforms to build apps for (Rust target-triple syntax)
 # No Windows: matchapack clones with clonefile(2) and the FICLONE ioctl.
-# glibc, not musl: Homebrew on Linux uses the glibc build, the rayon-parallel
-# store work runs on glibc's allocator, and the filesystems that clone
-# (Btrfs, XFS) are on glibc distributions far more than on Alpine, whose
-# containers' overlayfs cannot clone anyway (matchapack would hand over to
-# npm there).
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
-# Path that installers should place binaries in
-install-path = "CARGO_HOME"
+# Linux: static musl binaries only, one per CPU, so that every Linux runs the
+# same binary whatever its C library and its age (a glibc build needs the
+# build runner's glibc or newer: 2.35 on ubuntu-22.04, which leaves out
+# RHEL 9 and Amazon Linux 2023). linux-large.yml's libc job compares the
+# musl and the glibc build on a large install.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
+# Path that the shell installer places the binary in: ~/.local/bin, which
+# many systems already have on PATH. When it is not, the installer writes
+# ~/.config/matchapack/env.sh and env.fish (next to its receipt,
+# matchapack-receipt.json: dist 0.33+ with this one-directory layout) and
+# appends a line that loads them to ~/.profile, ~/.bashrc, ~/.zshrc and so
+# on, and writes ~/.config/fish/conf.d/matchapack.env.fish.
+install-path = "~/.local/bin"
+# Printed after the binary is in place. That PATH line is appended at the end
+# of the startup file, so matchapack's own line (which checks `command -v
+# matchapack`) must come after it. No shell syntax here: dist pastes the text
+# into a double-quoted string of the installer script.
+install-success-msg = "matchapack is installed. To route npm and Yarn through it, put the matchapack init line from the README at the END of your shell startup file (below the PATH line this installer may add there): https://github.com/grimmerk/matchapack#install"
 # Where to host releases
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-
-# GitHub retired the macos-14 runner on 2026-11-02, and cargo-dist 0.32.0
-# still picks it for Apple Silicon builds: the job is cancelled at once and
-# nothing is released. macos-15 is Apple Silicon too.
-[dist.github-custom-runners]
-aarch64-apple-darwin = "macos-15"

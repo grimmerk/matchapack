@@ -5,35 +5,38 @@ A release is a signed version tag. Pushing it runs `.github/workflows/release.ym
 | Channel | What users run | Published by |
 |---|---|---|
 | GitHub Release | archives for 4 platforms, `matchapack-installer.sh` | release.yml (`host` job) |
-| Shell installer | `curl … matchapack-installer.sh \| sh` (puts the binary in `~/.cargo/bin`) | the GitHub Release |
+| Shell installer | `curl … matchapack-installer.sh \| sh` (puts the binary in `~/.local/bin`) | the GitHub Release |
 | Homebrew | `brew install grimmerk/tap/matchapack` | release.yml (`publish-homebrew-formula`), a commit to `grimmerk/homebrew-tap` |
 | crates.io | `cargo install matchapack --locked` | `publish-crates.yml`, called by release.yml |
 | npm | `npm i -g matchapack` | `publish-npm.yml`, called by release.yml |
 
-Platforms: macOS on Apple silicon and Intel (`aarch64-apple-darwin`, `x86_64-apple-darwin`), Linux with glibc on x86_64 and arm64 (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`).
+Platforms: macOS on Apple silicon and Intel (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux on x86_64 and arm64 as static musl binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), which run on any Linux distribution whatever its C library.
 
 On a pull request, release.yml runs only its `plan` job (`dist plan` on one Linux runner), which builds and publishes nothing. Every publishing job needs a pushed version tag.
 
 ## One-time setup
 
-Done once, by the repository owner, in the public repository `grimmerk/matchapack`.
+Done once, by the repository owner, in the public repository `grimmerk/matchapack`. Publishing to crates.io or npm through trusted publishing (OIDC, no stored token) needs the package to exist first, so the first release publishes with short-lived tokens, and trusted publishing takes over from the second release.
 
 1. **Homebrew tap token.** Add the repository secret `HOMEBREW_TAP_TOKEN`: a fine-grained personal access token with read and write access to the contents of `grimmerk/homebrew-tap` only.
-2. **crates.io.** A crate must exist on crates.io before a trusted publisher can be set for it, so the first release needs a token. Either:
-   - add the repository secret `CARGO_REGISTRY_TOKEN`: a crates.io API token with the `publish-new` and `publish-update` scopes, limited to the crate name `matchapack`, expiring in a few days; or
-   - publish 0.1.0 by hand from the tagged commit (`cargo publish --locked`) before pushing the tag (the workflow then sees 0.1.0 on crates.io and skips it).
+2. **Tokens for the first release.**
+   - crates.io: the repository secret `CARGO_REGISTRY_TOKEN`, a crates.io API token with the `publish-new` and `publish-update` scopes, limited to the crate name `matchapack`, expiring in a few days. Or publish 0.1.0 by hand from the tagged commit (`cargo publish --locked`) before pushing the tag; the workflow then sees 0.1.0 on crates.io and skips it.
+   - npm: the repository secret `NPM_TOKEN`, a granular access token that can publish (read and write; "all packages", since `matchapack` does not exist yet), expiring in a few days. Two-factor authentication must be on for the npm account; allow the token to bypass it if npm requires that for publishing from CI.
+   - `publish-npm.yml` publishes with `--provenance`, which npm supports only from a public repository (the private one cannot publish at all).
+3. **Check the plan** before the first tag: `dist plan` (dist 0.34.0) must list the four archives, the installer and the formula, and `dist plan --output-format=json` the runners: `macos-15` for Apple silicon (dist 0.32 still picked the retired `macos-14`, whose job is cancelled, so nothing was released), `macos-15-intel`, `ubuntu-22.04` and `ubuntu-22.04-arm` with musl-tools.
 
-   After the first release, on crates.io open matchapack → Settings → Trusted Publishing and add a GitHub publisher: owner `grimmerk`, repository `matchapack`, workflow `release.yml` (the calling workflow, not `publish-crates.yml`), no environment. Then delete the `CARGO_REGISTRY_TOKEN` secret and revoke the token; later releases publish through OIDC alone.
-3. **npm.** The packages are `matchapack` and `@matchapack/darwin-arm64`, `@matchapack/darwin-x64`, `@matchapack/linux-arm64`, `@matchapack/linux-x64`.
-   - Create the npm organization `matchapack` (free for public packages), so the `@matchapack` scope is yours. Two-factor authentication must be on for the account.
-   - A trusted publisher can only be set for a package that exists, so the first release needs a token: add the repository secret `NPM_TOKEN`, a granular access token with read and write access to all packages and to the `matchapack` organization, expiring in a few days (allow it to bypass two-factor authentication if npm requires that for publishing from CI).
-   - After the first release, set a trusted publisher on each of the five packages: workflow `release.yml` (npm checks the calling workflow, not `publish-npm.yml`), repository `grimmerk/matchapack`, no environment. On the website: package → Settings → Trusted publishing; or with npm 11.15.0 or later, for each package: `npm trust github <package> --repo grimmerk/matchapack --file release.yml --allow-publish`. Then delete the `NPM_TOKEN` secret and revoke the token. Optionally set each package to "require two-factor authentication and disallow tokens".
-   - Provenance: `publish-npm.yml` publishes with `--provenance`, which npm supports only from a public repository.
-4. **Check the plan.** `dist plan` (dist 0.32.0, `cargo install cargo-dist --version 0.32.0 --locked` or the installer from its release page) must list the four archives, the installer and the formula. `dist plan --output-format=json` shows the runners; Apple silicon must build on `macos-15` (see the comment in `dist-workspace.toml`: dist 0.32.0 picks the retired `macos-14` otherwise, and that job is cancelled, so nothing is released).
+## After the first release: trusted publishing
+
+Once 0.1.0 is on crates.io and npm, switch both to trusted publishing. npm drops a trusted publisher that has not published within 2 days of being created, so set npm's up just before the next release, not right after the first.
+
+- **crates.io:** matchapack → Settings → Trusted Publishing → add a GitHub publisher: owner `grimmerk`, repository `matchapack`, workflow `release.yml` (the calling workflow, not `publish-crates.yml`), no environment. Then delete the `CARGO_REGISTRY_TOKEN` secret and revoke the token.
+- **npm** (within 2 days before the next release): on npmjs.com, matchapack → Settings → Trusted publishing, or with npm 11.15.0 or later `npm trust github matchapack --repo grimmerk/matchapack --file release.yml --allow-publish`: workflow `release.yml` (npm checks the calling workflow, not `publish-npm.yml`), no environment. Then delete the `NPM_TOKEN` secret and revoke the token; optionally set the package to require two-factor authentication and disallow tokens.
+
+The publish jobs work either way: they use a token secret while one is set, and OIDC once it is gone.
 
 ## Releasing a version
 
-1. **Version pull request.** On a branch: set `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, note the changes in the release notes you will paste into the GitHub Release (or a changelog, once there is one), and run `dist plan`. If you changed `dist-workspace.toml` or upgraded dist, run `dist generate` and commit the regenerated `release.yml`. Open the pull request; its `plan` job must pass. Merge it.
+1. **Version pull request.** On a branch: set `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, note the changes for the release notes, and run `dist plan`. If you changed `dist-workspace.toml` or upgraded dist, run `dist generate` and commit the regenerated `release.yml`. Open the pull request; its `plan` job must pass. Merge it.
 2. **Signed tag** on the merge commit:
 
    ```sh
@@ -43,14 +46,14 @@ Done once, by the repository owner, in the public repository `grimmerk/matchapac
    ```
 
    The tag must be `v` plus the version in `Cargo.toml`. A version with a prerelease suffix (`v0.2.0-rc.1`) makes a prerelease on GitHub and skips Homebrew, crates.io and npm.
-3. **Watch the run** (Actions → Release): plan → build (4 runners) → GitHub Release → Homebrew, crates.io, npm → announce. If a publishing job fails, fix the cause and re-run the failed jobs: the crates.io and npm jobs skip any version the registry already has (HTTP 200) and publish what is missing (404), and stop on any other answer.
+3. **Watch the run** (Actions → Release): plan → build (4 runners) → GitHub Release → Homebrew, crates.io, npm → announce. The npm job installs the package from its tarball and runs `matchapack --version` before it publishes that same tarball. If a publishing job fails, fix the cause and re-run the failed jobs: the crates.io and npm jobs skip a version the registry already has (HTTP 200) and publish a missing one (404), and stop on any other answer.
 
 ## Checking each channel after a release
 
 Every binary must print the tag's version and its commit: `matchapack 0.1.0 (<short sha>)`, without `-dirty`. A build from the crates.io package prints `(unknown)` instead of a commit.
 
 - **GitHub Release:** four `matchapack-<target>.tar.xz` archives with `.sha256` files, `matchapack-installer.sh`, `matchapack.rb`, `sha256.sum`, `source.tar.gz`.
-- **Shell installer,** into a scratch directory, without touching `PATH` or the shell files:
+- **Shell installer,** into a scratch directory, without touching `PATH`, the shell files or `~/.config/matchapack`:
 
   ```sh
   d=$(mktemp -d)
@@ -58,25 +61,23 @@ Every binary must print the tag's version and its commit: `matchapack 0.1.0 (<sh
   "$d/matchapack" --version
   ```
 
+  A normal install puts the binary in `~/.local/bin`. When that is not on `PATH`, it also writes `~/.config/matchapack/env.sh` and `env.fish`, appends a line that loads them to `~/.profile`, `~/.bashrc`, `~/.zshrc` (and the other startup files it finds), and writes `~/.config/fish/conf.d/matchapack.env.fish`; and it keeps its receipt, `~/.config/matchapack/matchapack-receipt.json`. Its last message asks the user to put matchapack's init line at the end of the startup file, below that PATH line.
 - **Homebrew:** `brew update && brew install grimmerk/tap/matchapack && matchapack --version` (and `brew upgrade matchapack` on a machine with the previous version). The formula commit is in `grimmerk/homebrew-tap`.
 - **crates.io:** `curl -s -o /dev/null -w '%{http_code}\n' -A 'matchapack-release-check' https://crates.io/api/v1/crates/matchapack/0.1.0` prints 200; `cargo install matchapack --locked --root "$(mktemp -d)"` builds.
-- **npm:** `npm view matchapack@0.1.0 optionalDependencies` lists the four platform packages at 0.1.0; each package page on npmjs.com shows the provenance badge. Install into a scratch prefix, with scripts off as users run it:
+- **npm:** `npm view matchapack@0.1.0 dist.unpackedSize bin`, and the package page on npmjs.com shows the provenance badge. Install into a scratch prefix, with scripts off as users run it:
 
   ```sh
   p=$(mktemp -d)
-  npm i -g matchapack --prefix "$p" --ignore-scripts
+  npm i -g matchapack --prefix "$p" --ignore-scripts --cache "$p/cache"
   "$p/bin/matchapack" --version
   ```
 
-  On Linux too, for example `docker run --rm node:24 sh -c 'npm i -g matchapack --ignore-scripts && matchapack --version'` (glibc; on an arm64 machine this checks the arm64 package).
+  On Linux too, for example `docker run --rm node:24 sh -c 'npm i -g matchapack --ignore-scripts && matchapack --version'`, and `node:24-alpine` for a musl system.
 
-## How the npm packages work, and why not dist's npm installer
+## How the npm package works, and why not dist's npm installer
 
 dist can build an npm package itself (the `npm` installer), but that package (dist 0.32.0, read from its generated files) downloads the binary from the GitHub Release in a `postinstall` script, and under `--ignore-scripts` at the first run instead; every run then goes through a Node wrapper (`spawnSync`). For matchapack that means: the first `eval "$(matchapack init)"` in a new shell downloads; a global install owned by root cannot be completed at run time; an offline machine or a registry mirror cannot install it; the wrapper adds a Node start to every call and does not pass signals on, and when the binary is killed by a signal the wrapper exits 0 (measured: `process.exit(spawnSync(…).status)` exits 0 for a child killed by SIGTERM), which would report an interrupted `npm ci` as a success.
 
-So the npm packages follow the layout esbuild and Biome use, without their install script. `scripts/npm-packages.js` builds them from the release's archives (checking each archive against its `.sha256`):
+So matchapack's npm package is one package with all four binaries, `native/<os>-<cpu>/matchapack`, built by `scripts/npm-packages.js` from the release's archives (each checked against its `.sha256` and its binary header). Its command, `bin/matchapack`, is a POSIX `sh` script (`npm/launcher.sh`) that picks the binary for the machine and `exec`s it: the signals and the exit status are the binary's own, nothing runs at install time and nothing downloads later. It is built to start no other program in the usual case, since it runs at every shell start and every routed `npm ci`: the platform comes from the shell's `OSTYPE` and `HOSTTYPE` where it sets them (bash, macOS's `/bin/sh`) and from one `uname -sm` otherwise, and the package from the two fixed places npm links a command from (a global install's `<prefix>/bin`, a project's `node_modules/.bin`); `readlink` only for any other link. On an Apple silicon Mac whose shell runs under Rosetta it runs the native arm64 binary.
 
-- four platform packages, `@matchapack/<os>-<cpu>`, each holding one binary, with `os`, `cpu` (and `libc: glibc` on Linux) fields, so npm installs only the one that matches;
-- `matchapack`, which lists the four as optional dependencies of the exact same version and links `bin/matchapack`, a POSIX `sh` launcher (`npm/launcher.sh`) that finds the installed platform package and `exec`s its binary: the signals and the exit status are the binary's own, and nothing runs at install time or downloads later.
-
-Each platform package is about 1.4 MB packed; a user downloads `matchapack` (6 kB) and one of them. `npm i -g matchapack --omit=optional` leaves the binary out; the launcher then says so and exits 1.
+The price is size: every install carries all four binaries (the archive size is in the npm job's `npm pack` output). Separate per-platform packages, as esbuild and Biome publish them, would download one binary, but they need an npm organization for the names, five packages to publish and to set trusted publishing on, and a launcher that can find a sibling package in every layout a package manager makes.

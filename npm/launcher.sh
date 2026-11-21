@@ -1,51 +1,75 @@
 #!/bin/sh
-# matchapack's command in the npm package (`npm i -g matchapack`): the
-# `matchapack` that npm links onto PATH is this script, which finds the native
-# binary of the platform package npm installed with it (an optional
-# dependency, @matchapack/<os>-<cpu>, picked by its "os" and "cpu" fields) and
-# execs it. No install script and no download: it works under
-# --ignore-scripts and offline, and exec leaves the signals and the exit
-# status to the binary. Built into the package by scripts/npm-packages.js.
+# The `matchapack` command of the npm package (`npm i -g matchapack`). The
+# package holds the four native binaries, native/<os>-<cpu>/matchapack; this
+# script picks the one for this machine and execs it. No install script and
+# no download: it works under --ignore-scripts and offline, and exec leaves
+# the signals and the exit status to the binary. Built into the package by
+# scripts/npm-packages.js.
+#
+# It runs at every `npm ci` routed through matchapack and at every shell
+# start (the init line), so the usual case starts no other program: the
+# platform comes from the shell's own variables where it sets them, and the
+# package from fixed paths next to npm's link to this file.
 
-# Follow the links to this file (npm links <prefix>/bin/matchapack to
-# ../lib/node_modules/matchapack/bin/matchapack), one at a time: readlink
-# without -f works on macOS and Linux alike.
+# The platform. bash (macOS's /bin/sh) sets OSTYPE and HOSTTYPE, from the
+# CPU the shell itself runs as; elsewhere (dash, busybox) one `uname -sm`.
+# shellcheck disable=SC3028 # read only where set; unset falls to uname
+case ${OSTYPE-}:${HOSTTYPE-} in
+  darwin*:arm64) sys="Darwin arm64" ;;
+  darwin*:x86_64) sys="Darwin x86_64" ;;
+  linux*:x86_64) sys="Linux x86_64" ;;
+  linux*:aarch64) sys="Linux aarch64" ;;
+  *) sys=$(uname -sm) ;;
+esac
+case $sys in
+  "Darwin arm64") plat=darwin-arm64 ;;
+  "Darwin x86_64")
+    # An Intel Mac, or an Apple silicon Mac running this shell under Rosetta
+    # (an Intel terminal or Node): Rosetta's runtime exists only on Apple
+    # silicon, and there the native binary runs, faster than the Intel one
+    # would under translation.
+    if [ -e /Library/Apple/usr/libexec/oah/libRosettaRuntime ]; then plat=darwin-arm64; else plat=darwin-x64; fi
+    ;;
+  "Linux x86_64") plat=linux-x64 ;;
+  "Linux aarch64" | "Linux arm64") plat=linux-arm64 ;;
+  *)
+    echo "matchapack: the npm package has binaries for macOS (Apple silicon, Intel) and Linux (x86_64, arm64), not for $sys." >&2
+    echo "matchapack: other ways to install, or to build it: https://github.com/grimmerk/matchapack#install" >&2
+    exit 1
+    ;;
+esac
+
+# The package: this file is <package>/bin/matchapack. npm runs it through a
+# link it made in a bin directory: <prefix>/bin for a global install (to
+# ../lib/node_modules/matchapack/bin/matchapack), node_modules/.bin for a
+# local one or npx (to ../matchapack/bin/matchapack). Those two layouts are
+# tried as fixed paths; any other link is followed with readlink.
 self=$0
-while [ -L "$self" ]; do
-  link=$(readlink "$self")
-  case $link in
-    /*) self=$link ;;
-    *) self=$(dirname "$self")/$link ;;
-  esac
-done
-pkg=$(cd "$(dirname "$self")/.." && pwd -P) || exit 1
-
-case $(uname -s) in
-  Darwin) os=darwin ;;
-  Linux) os=linux ;;
-  *) os=$(uname -s) ;;
-esac
-case $(uname -m) in
-  arm64 | aarch64) cpu=arm64 ;;
-  x86_64 | amd64) cpu=x64 ;;
-  *) cpu=$(uname -m) ;;
-esac
-# On an Apple silicon Mac an Intel Node (Rosetta) installs darwin-x64, which
-# runs there too; the native one is tried first.
-plats="$os-$cpu"
-[ "$os-$cpu" = darwin-arm64 ] && plats="$plats darwin-x64"
-
-for plat in $plats; do
-  # Nested under this package (a global install), or next to it (a local
-  # install or npx, where npm hoists it; pnpm's layout too).
-  for bin in "$pkg/node_modules/@matchapack/$plat/bin/matchapack" "$pkg/../@matchapack/$plat/bin/matchapack"; do
-    if [ -f "$bin" ] && [ -x "$bin" ]; then
-      exec "$bin" "$@"
-    fi
+case $self in */*) ;; *) self=./$self ;; esac
+bin=native/$plat/matchapack
+if [ ! -L "$self" ]; then
+  pkg=${self%/*}/..
+elif [ -f "${self%/*}/../lib/node_modules/matchapack/$bin" ]; then
+  pkg=${self%/*}/../lib/node_modules/matchapack
+elif [ -f "${self%/*}/../matchapack/$bin" ]; then
+  pkg=${self%/*}/../matchapack
+else
+  # At most 40 links, as the kernel allows, so that a loop cannot hang.
+  hops=0
+  while [ -L "$self" ] && [ "$hops" -lt 40 ]; do
+    hops=$((hops + 1))
+    link=$(readlink "$self") || break
+    case $link in
+      /*) self=$link ;;
+      *) self=${self%/*}/$link ;;
+    esac
   done
-done
+  pkg=${self%/*}/..
+fi
 
-echo "matchapack: no binary for $os-$cpu next to $pkg" >&2
-echo "matchapack: npm installs it as the optional dependency @matchapack/$os-$cpu; reinstall without --omit=optional (or --no-optional)." >&2
-echo "matchapack: builds exist for macOS (arm64, x64) and Linux with glibc (arm64, x64); elsewhere see https://github.com/grimmerk/matchapack#install" >&2
-exit 1
+if [ ! -x "$pkg/$bin" ]; then
+  echo "matchapack: no $bin next to $0 (looked in $pkg)." >&2
+  echo "matchapack: reinstall it (npm i -g matchapack); a global install is the supported way to use the npm package." >&2
+  exit 1
+fi
+exec "$pkg/$bin" "$@"

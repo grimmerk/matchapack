@@ -1,21 +1,20 @@
-# Publishes the npm packages after a release: the four platform packages
-# (@matchapack/darwin-arm64, darwin-x64, linux-arm64, linux-x64), then
-# `matchapack`, which depends on them (scripts/npm-packages.js builds them
-# from this run's archives).
+# Publishes the npm package `matchapack` after a release: one package with
+# the four binaries and a sh launcher, built by scripts/npm-packages.js from
+# this run's archives, installed once from its tarball as a smoke test, then
+# published from that same tarball.
 #
 # Called by release.yml (a dist "custom publish job", see dist-workspace.toml),
 # never on its own; a pull request runs only release.yml's plan step.
 #
-# Authentication: npm trusted publishing (OIDC), with provenance. npm checks
-# the CALLING workflow's filename, so each package's trusted publisher on
-# npmjs.com names release.yml, not this file. A package must exist before a
-# trusted publisher can be set for it, so the first release publishes with
-# the NPM_TOKEN secret (a short-lived granular token); once the trusted
-# publishers are set, delete the secret and this job uses OIDC alone.
+# Authentication: npm trusted publishing (OIDC), with provenance (npm makes
+# provenance only for a public repository). npm checks the CALLING workflow's
+# filename, so the package's trusted publisher on npmjs.com names
+# release.yml, not this file. A trusted publisher can be set only on a
+# package that exists, so the first release publishes with the NPM_TOKEN
+# secret (a short-lived granular token); RELEASING.md has the order.
 #
 # A version npm already has is skipped (200) and a missing one published
-# (404), so a re-run after a partial failure publishes only what is missing;
-# any other answer stops the job.
+# (404), so a re-run after a failure is safe; any other answer stops the job.
 name: Publish to npm
 
 on:
@@ -47,36 +46,37 @@ jobs:
           pattern: artifacts-*
           path: archives/
           merge-multiple: true
-      - name: Build the packages
+      - name: Build the package
         run: |
           set -euo pipefail
           # Trusted publishing needs npm 11.5.1 or later.
           npm --version | awk -F. '{ if ($1 < 11 || ($1 == 11 && $2 < 5) || ($1 == 11 && $2 == 5 && $3 < 1)) { print "npm " $0 " is older than 11.5.1"; exit 1 } }'
           version=$(echo "$PLAN" | jq -r '.releases[] | select(.app_name == "matchapack") | .app_version')
-          node scripts/npm-packages.js --version "$version" --archives archives --out packages | tee packages.txt
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          node scripts/npm-packages.js --version "$version" --archives archives --out out
+          npm pack ./out/matchapack --pack-destination .
+          ls -l "matchapack-$version.tgz"
+      - name: Smoke test (a global install from the tarball, scripts off)
+        run: |
+          set -euo pipefail
+          prefix=$RUNNER_TEMP/smoke
+          npm i -g "./matchapack-$VERSION.tgz" --ignore-scripts --prefix "$prefix" --cache "$RUNNER_TEMP/smoke-cache"
+          out=$("$prefix/bin/matchapack" --version)
+          echo "$out"
+          case $out in "matchapack $VERSION ("*) ;; *) echo "expected matchapack $VERSION"; exit 1 ;; esac
       - name: Publish
         env:
           # Empty once the secret is deleted: npm then authenticates with OIDC.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          version=$(echo "$PLAN" | jq -r '.releases[] | select(.app_name == "matchapack") | .app_version')
           # A prerelease must not become `latest` (dist skips this job for
           # prereleases unless publish-prereleases is set).
-          case $version in *-*) tag=next ;; *) tag=latest ;; esac
-          while read -r dir; do
-            name=$(jq -r .name "$dir/package.json")
-            status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${name/\//%2f}/$version")
-            case "$status" in
-              200)
-                echo "$name $version is already on npm; skipped"
-                continue
-                ;;
-              404) ;;
-              *)
-                echo "npm answered HTTP $status for $name $version; not publishing" >&2
-                exit 1
-                ;;
-            esac
-            npm publish "$dir" --access public --provenance --tag "$tag"
-          done < packages.txt
+          case $VERSION in *-*) tag=next ;; *) tag=latest ;; esac
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/matchapack/$VERSION")
+          case "$status" in
+            200) echo "matchapack $VERSION is already on npm; skipped"; exit 0 ;;
+            404) ;;
+            *) echo "npm answered HTTP $status for matchapack $VERSION; not publishing" >&2; exit 1 ;;
+          esac
+          npm publish "./matchapack-$VERSION.tgz" --access public --provenance --tag "$tag"
