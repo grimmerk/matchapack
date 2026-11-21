@@ -43,13 +43,21 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-d
 # tool wrote there, our installer would rewrite every `. "$HOME/.local/bin/
 # env"` line in the startup files to load matchapack's env.sh and delete
 # that file, and other tools' PATH would then hang on ours. Here the only
-# file it can migrate is ~/.matchapack/bin/env. Unless the directory is
-# already on PATH, the installer writes ~/.config/matchapack/env.sh and
+# files it can migrate are ~/.matchapack/bin/env and env.fish. But with
+# MATCHAPACK_INSTALL_DIR, CARGO_DIST_FORCE_INSTALL_DIR or
+# MATCHAPACK_UNMANAGED_INSTALL the install directory, and so the migrated
+# <dir>/env, is the one named there, and the migration runs even with
+# MATCHAPACK_NO_MODIFY_PATH=1 and in the unmanaged mode: never point those
+# at a shared directory such as ~/.local/bin (and leave them out of user
+# documentation, or document them with that warning). Unless the directory
+# is already on PATH, the installer writes ~/.config/matchapack/env.sh and
 # env.fish (next to its receipt, matchapack-receipt.json), appends
-# `. "$HOME/.config/matchapack/env.sh"` to ~/.profile, to each of ~/.bashrc,
-# ~/.bash_profile and ~/.bash_login that exists, and to ~/.zshrc (or
-# ~/.zshenv; it creates ~/.zshrc when neither exists), and writes
-# ~/.config/fish/conf.d/matchapack.env.fish.
+# `. "$HOME/.config/matchapack/env.sh"` to ~/.profile (creating it when
+# missing), to each of ~/.bashrc, ~/.bash_profile and ~/.bash_login that
+# exists, and to ~/.zshrc (or ~/.zshenv; it creates ~/.zshrc when neither
+# exists), and always writes ~/.config/fish/conf.d/matchapack.env.fish.
+# The name is sticky: a later change of install-path leaves the old binary
+# and its PATH line behind on every machine that installed with this one.
 install-path = "~/.matchapack/bin"
 # Printed after the binary is in place. That PATH line is appended at the end
 # of the startup file, so matchapack's own line (which checks `command -v
