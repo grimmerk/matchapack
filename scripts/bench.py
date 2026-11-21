@@ -649,6 +649,9 @@ class Bench:
         say(f"== {name}: {spec['repo']} @ {spec.get('commit', '(this checkout)')}")
         src = fetch_project(w, name, spec, env, setup_log)
         commit = out_of(["git", "rev-parse", "HEAD"], cwd=src)
+        if name == "small":
+            # "fixtures/small at <commit of this repository>"
+            spec["source_commit"] = out_of(["git", "log", "-1", "--format=%s"], cwd=src).split()[-1]
         runs = w.p("runs", name)
         stores = w.p("stores", name)
         os.makedirs(stores, exist_ok=True)
