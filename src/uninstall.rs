@@ -1063,7 +1063,7 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
     }
     writeln!(
         out,
-        "Shells already open keep the npm (and yarn) function until they exit; once the binary is gone it runs plain npm (and Yarn). A bash or zsh shell whose function came from a matchapack older than this one may keep calling the removed binary: run `hash -r` there, or open a new shell."
+        "Shells already open keep the npm (and yarn) function, and the short name `mp` if init defined it, until they exit; once the binary is gone npm runs plain npm (and Yarn), and `mp` finds no matchapack. A bash or zsh shell whose function came from a matchapack older than this one may keep calling the removed binary: run `hash -r` there, or open a new shell."
     )?;
 
     writeln!(out)?;
