@@ -51,9 +51,12 @@ case "$1" in
           zsh | bash) cat /src/shell/matchapack.sh; [ "${STUB_OS-}" = Darwin ] && cat /src/shell/matchapack-yarn.sh; ext=sh ;;
           *) exit 2 ;;
         esac
-        # --alias NAME: the binary appends shell/matchapack-alias.{sh,fish}
-        # with the name in place of the placeholder (it checks the name).
-        [ "${3-}" = --alias ] && sed "s/__MATCHAPACK_ALIAS__/$4/g" "/src/shell/matchapack-alias.$ext"
+        # The short name: the binary appends shell/matchapack-alias.{sh,fish}
+        # with the name in place of the placeholder: `mp`, NAME with --alias
+        # NAME, none with --no-alias. The binary checks the name; this stub
+        # does not, so a builtin's name tests the shell-side guard.
+        name=mp; [ "${3-}" = --alias ] && name=$4; [ "${3-}" = --no-alias ] && name=
+        [ -n "$name" ] && sed "s/__MATCHAPACK_ALIAS__/$name/g" "/src/shell/matchapack-alias.$ext"
         exit 0 ;;
   npm) shift; printf 'MATCHAPACK'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; exit "${STUB_RC:-0}" ;;
   yarn) shift; printf 'MATCHAPACK-YARN'; for a in "$@"; do printf ' [%s]' "$a"; done; echo; exit "${STUB_RC:-0}" ;;
@@ -230,20 +233,34 @@ YARN [install]" "${ea}rm -f $rb/matchapack; alias matchapack=/nonexistent/matcha
     cp "$tc/matchapack" "$rb/"
   fi
 
-  # `init --alias mp`: mp runs matchapack, with its arguments unchanged;
-  # without --alias no such name is defined. bash expands aliases only in
-  # interactive shells (a startup file's case) or with expand_aliases, and
-  # only in commands parsed after the definition, as typed ones are: hence
-  # the newline (bash parses a -c string line by line) and eval (zsh parses
-  # the whole string first).
+  # The short name: `mp` by default, NAME with --alias NAME, none with
+  # --no-alias, and only when nothing of that name exists when the line
+  # runs (the guard in shell/matchapack-alias.*). bash expands aliases only
+  # in interactive shells (a startup file's case) or with expand_aliases,
+  # and only in commands parsed after the definition, as typed ones are:
+  # hence the newline (bash parses a -c string line by line) and eval (zsh
+  # parses the whole string first).
   plain_setup=$setup
+  ea=; [ "$sh" = bash ] && ea='shopt -s expand_aliases; '
+  # init_line <init arguments>: the README's rc line with them.
+  init_line() {
+    case $sh in
+      fish) echo "type -q matchapack; and matchapack init fish $1 | source" ;;
+      *) echo "${ea}command -v matchapack >/dev/null && eval \"\$(matchapack init $sh $1)\"" ;;
+    esac
+  }
   case $sh in
-    fish) setup='type -q matchapack; and matchapack init fish --alias mp | source'; defined='type -q mp; and echo defined; or echo none' ;;
-    zsh)  setup='command -v matchapack >/dev/null && eval "$(matchapack init zsh --alias mp)"'; defined='whence -w mp >/dev/null && echo defined || echo none' ;;
-    bash) setup='shopt -s expand_aliases; command -v matchapack >/dev/null && eval "$(matchapack init bash --alias mp)"'; defined='type mp >/dev/null 2>&1 && echo defined || echo none' ;;
+    fish) defined='type -q mp; and echo defined; or echo none'
+          own_alias="alias mp 'echo MINE'"; own_function='function mp; echo FUNC $argv; end' ;;
+    zsh)  defined='whence -w mp >/dev/null && echo defined || echo none'
+          own_alias="alias mp='echo MINE'"; own_function='mp() { echo FUNC "$@"; }' ;;
+    bash) defined='type mp >/dev/null 2>&1 && echo defined || echo none'
+          own_alias="${ea}alias mp='echo MINE'"; own_function='mp() { echo FUNC "$@"; }' ;;
   esac
   nl='
 '
+  setup=$(init_line '')
+  os=Darwin
   check alias-mac   "MATCHAPACK [ci] [a b] []
 MATCHAPACK-YARN [install] [--frozen-lockfile]
 MATCHAPACK [ci]" "${nl}eval 'mp npm ci \"a b\" \"\"'; eval 'mp yarn install --frozen-lockfile'; npm ci"
@@ -252,8 +269,26 @@ MATCHAPACK [ci]" "${nl}eval 'mp npm ci \"a b\" \"\"'; eval 'mp yarn install --fr
   os=Linux
   check alias-linux "MATCHAPACK [install] [x]
 defined" "${nl}eval 'mp npm install x'; $defined"
+  # The name taken before the line runs: theirs stays, ours is not defined.
+  setup="$own_alias; $(init_line '')"
+  check alias-taken-alias "MINE x" "${nl}eval 'mp x'"
+  setup="$own_function; $(init_line '')"
+  check alias-taken-function "FUNC x" "${nl}eval 'mp x'"
+  mkdir -p /tmp/stub-mp; printf '#!/bin/sh\necho MP-ON-PATH "$@"\n' > /tmp/stub-mp/mp; chmod +x /tmp/stub-mp/mp
+  setup=$(init_line '')
+  check alias-taken-path "MP-ON-PATH x" "${nl}eval 'mp x'" "$tc:$np:/tmp/stub-mp:$PATH"
+  # A builtin (the real binary refuses this name; the stub does not, so this
+  # reaches the guard): echo stays the shell's.
+  setup=$(init_line '--alias echo')
+  check alias-taken-builtin "hi" "${nl}eval 'echo hi'"
+  # --alias other: `other` runs matchapack, no `mp`; --no-alias: no `mp`.
+  setup=$(init_line '--alias other')
+  check alias-other "MATCHAPACK [ci]
+none" "${nl}eval 'other npm ci'; $defined"
+  setup=$(init_line '--no-alias')
+  check no-alias "none
+MATCHAPACK [ci]" "${nl}$defined; npm ci"
   setup=$plain_setup
-  check no-alias "none" "${nl}$defined"
   unset os
 done
 
@@ -342,11 +377,20 @@ if [ -n "$real" ]; then
   [ "$out" = "function
 no-yarn-function" ]; rcheck "init: npm is a function, no yarn function on Linux" $? "[$out]"
 
-  # init --alias with the real binary: mp is matchapack; a builtin's name is
-  # refused (status 2) and the npm function is still defined.
-  out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish --alias mp | source; mp --version; type -t npm' 2>&1)
+  # The short name with the real binary: by default mp is matchapack; a
+  # function mp of the user's own, defined first, stays theirs; --no-alias
+  # defines none; a builtin's name is refused (status 2) and the npm
+  # function is still defined.
+  out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish | source; mp --version; type -t npm' 2>&1)
   printf '%s\n' "$out" | head -1 | grep -q '^matchapack ' && [ "$(printf '%s\n' "$out" | tail -1)" = function ]
-  rcheck "init --alias mp: mp runs the real matchapack" $? "[$out]"
+  rcheck "init: mp runs the real matchapack" $? "[$out]"
+  out=$(PATH="$rb:$PATH" fish --no-config -c 'function mp; echo MINE $argv; end; matchapack init fish | source; mp x; functions -e mp; matchapack init fish --no-alias | source; type -q mp; and echo defined; or echo none' 2>&1)
+  [ "$out" = "MINE x
+none" ]
+  rcheck "init: a function mp of the user's own stays theirs; --no-alias defines none" $? "[$out]"
+  out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish --alias other | source; other --version; type -q mp; and echo defined; or echo none' 2>&1)
+  printf '%s\n' "$out" | head -1 | grep -q '^matchapack ' && [ "$(printf '%s\n' "$out" | tail -1)" = none ]
+  rcheck "init --alias other: other runs the real matchapack, no mp" $? "[$out]"
   out=$(PATH="$rb:$PATH" fish --no-config -c 'matchapack init fish --alias string | source; echo "pipestatus $pipestatus"; type -t npm' 2>&1)
   printf '%s\n' "$out" | grep -q 'builtin or reserved word of fish' && printf '%s\n' "$out" | grep -q '^pipestatus 2 0$' && [ "$(printf '%s\n' "$out" | tail -1)" = function ]
   rcheck "init --alias string: refused (status 2), the npm function still defined" $? "[$out]"
