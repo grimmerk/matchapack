@@ -1,0 +1,47 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (cargo-dist). After a change here, run `dist generate`
+# (it rewrites .github/workflows/release.yml) and `dist plan`; RELEASING.md
+# has the release procedure.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app. Not dist's "npm" installer: its
+# package downloads the binary from the GitHub Release in an install script,
+# or at the first run under --ignore-scripts, through a Node wrapper. The npm
+# packages are built by scripts/npm-packages.js and published by
+# .github/workflows/publish-npm.yml instead (RELEASING.md says why).
+installers = ["shell", "homebrew"]
+# The Homebrew tap the formula is pushed to (`brew install grimmerk/tap/matchapack`);
+# needs the HOMEBREW_TAP_TOKEN secret (write access to that repository)
+tap = "grimmerk/homebrew-tap"
+# Jobs that run after the GitHub Release: the formula to the tap, the crate to
+# crates.io and the packages to npm, both through trusted publishing (see
+# .github/workflows/publish-crates.yml and publish-npm.yml)
+publish-jobs = ["homebrew", "./publish-crates", "./publish-npm"]
+# The reusable workflows are called from release.yml, so they get an OIDC
+# token only if the calling job grants it
+github-custom-job-permissions = { "publish-crates" = { id-token = "write", contents = "read" }, "publish-npm" = { id-token = "write", contents = "read" } }
+# Target platforms to build apps for (Rust target-triple syntax)
+# No Windows: matchapack clones with clonefile(2) and the FICLONE ioctl.
+# glibc, not musl: Homebrew on Linux uses the glibc build, the rayon-parallel
+# store work runs on glibc's allocator, and the filesystems that clone
+# (Btrfs, XFS) are on glibc distributions far more than on Alpine, whose
+# containers' overlayfs cannot clone anyway (matchapack would hand over to
+# npm there).
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+
+# GitHub retired the macos-14 runner on 2026-11-02, and cargo-dist 0.32.0
+# still picks it for Apple Silicon builds: the job is cancelled at once and
+# nothing is released. macos-15 is Apple Silicon too.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
