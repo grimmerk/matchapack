@@ -116,7 +116,9 @@ jobs:
       - name: build
         env:
           RUSTFLAGS: -D warnings
-          LIBC: ${{ matrix.libc }}
+          # Not LIBC: node-gyp-build reads that name to pick a prebuilt
+          # addon, so the install's own scripts would see it.
+          LARGE_BUILDS: ${{ matrix.libc }}
         # Each build is kept as $RUNNER_TEMP/bin/<libc>; the runs copy it to
         # target/release/matchapack, where large-repo.sh and verify.sh look.
         # musl as the release builds it: static, the musl-tools C compiler
@@ -125,15 +127,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           cargo build --release
           cp target/release/matchapack "$RUNNER_TEMP/bin/glibc"
-          if [[ $LIBC == *musl* ]]; then
+          if [[ $LARGE_BUILDS == *musl* ]]; then
             sudo apt-get install -y -qq musl-tools >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools >/dev/null; }
             cargo build --release --target x86_64-unknown-linux-musl
             cp target/x86_64-unknown-linux-musl/release/matchapack "$RUNNER_TEMP/bin/musl"
           fi
           for b in "$RUNNER_TEMP"/bin/*; do
             link=$(file -b "$b" | grep -o 'static-pie linked\|statically linked\|dynamically linked' || echo '?')
-            echo "$(basename "$b"): $(file -b "$b")"
-            echo "- build $(basename "$b"): $(stat -c %s "$b") bytes ($(gzip -9c "$b" | wc -c) gzipped), $link; $("$b" --version)" >> "$GITHUB_STEP_SUMMARY"
+            line="build $(basename "$b"): $(stat -c %s "$b") bytes ($(gzip -9c "$b" | wc -c) gzipped), $link; $("$b" --version)"
+            echo "$line; $(file -b "$b")"
+            echo "- $line" >> "$GITHUB_STEP_SUMMARY"
             case $(basename "$b"):$link in
               glibc:dynamically*|musl:stat*) ;;
               *) echo "$(basename "$b") is $link"; exit 1 ;;
@@ -149,17 +152,17 @@ jobs:
           du -sh "$MNT/src"
       - name: plain npm ci vs matchapack, empty store then warm store (large-repo.sh)
         env:
-          FS: ${{ matrix.fs }}
-          LIBC: ${{ matrix.libc }}
-        # One large-repo.sh run per build named in LIBC, each in its own
+          LARGE_FS: ${{ matrix.fs }}
+          LARGE_BUILDS: ${{ matrix.libc }}
+        # One large-repo.sh run per build named in LARGE_BUILDS, each in its own
         # work directory (its own npm cache and store). With more than one,
         # a table of the matchapack side of every run follows.
         run: |
           n=0; failed=0
-          for libc in $LIBC; do
+          for libc in $LARGE_BUILDS; do
             n=$((n + 1))
             cp "$RUNNER_TEMP/bin/$libc" target/release/matchapack
-            LARGE_LABEL="$FS, $libc" LARGE_NAME="$REPO@${COMMIT:0:12} ($PROJECT_DIR)" scripts/large-repo.sh "$MNT/w$n" "$PROJECT" || failed=1
+            LARGE_LABEL="$LARGE_FS, $libc" LARGE_NAME="$REPO@${COMMIT:0:12} ($PROJECT_DIR)" scripts/large-repo.sh "$MNT/w$n" "$PROJECT" || failed=1
           done
           # Leave cargo's own build in place (the cache keeps target/).
           cp "$RUNNER_TEMP/bin/glibc" target/release/matchapack
@@ -170,7 +173,7 @@ jobs:
               echo "| # | build | store | plain npm ci: wall / CPU | matchapack: wall / CPU |"
               echo "|---|---|---|---|---|"
               i=0
-              for libc in $LIBC; do
+              for libc in $LARGE_BUILDS; do
                 i=$((i + 1))
                 awk -F'|' -v i="$i" -v libc="$libc" '$3 ~ /store\)/ { printf "| %s | %s |%s|%s|%s|\n", i, libc, $3, $4, $5 }' "$MNT/w$i/summary.md"
               done
