@@ -316,7 +316,7 @@ const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
 /// `yarn` function is defined there). The files in shell/ are the one
 /// definition; the binary carries them so the rc line needs no checkout of
 /// this repository, and users who already have the line get the `yarn`
-/// function with the next `cargo install`. Then the short name `alias`
+/// function with the next update of the binary. Then the short name `alias`
 /// (`mp` unless --alias or --no-alias), guarded so that it is defined only
 /// when the name is free in the shell that runs it.
 fn init_script(shell: &str, macos: bool, alias: Option<&str>) -> String {

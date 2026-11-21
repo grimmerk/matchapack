@@ -537,7 +537,7 @@ with the next update of the binary, in a new terminal. Then type `yarn` as usual
 $ yarn install --frozen-lockfile
 matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)
 …Yarn's own output…
-matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node, in 25.2s
+matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node (Yarn's first copies, left to Node by design), in 25.2s
 ```
 
 `matchapack yarn <args>` does the same without the function. Sourcing
