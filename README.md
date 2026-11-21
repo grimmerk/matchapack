@@ -33,18 +33,24 @@ Run `echo $0` (macOS has used zsh by default since 10.15).
 Put it after the line that puts `~/.cargo/bin` on PATH (rustup usually does
 that in `~/.zshenv` or `~/.profile`); if it comes earlier, it does nothing.
 `matchapack init` detects the shell that runs it; `matchapack init zsh` (or
-`bash`, `fish`) names it explicitly. For a short name, e.g. `--alias mp`
-(`eval "$(matchapack init --alias mp)"`, fish `matchapack init --alias mp |
-source`): `mp` then runs matchapack (`mp store gc`); an alias in zsh and
-bash, a function in fish. The name must not be a builtin of the shell, nor
-npm, yarn or matchapack (refused: the line still defines the npm function,
-without the alias); a command of that name on PATH is only warned about,
-and only when you run `matchapack init … --alias` by hand (not from the
-startup file, where it would print at every shell start).
-The function comes from the binary, so no
-checkout of this repository is needed and it updates with `cargo install`.
-Sourcing `shell/matchapack.sh` from a checkout still works. Open a new terminal,
-then type `npm ci` as usual:
+`bash`, `fish`) names it explicitly. The function comes from the binary, so
+no checkout of this repository is needed and it updates with `cargo
+install`. Sourcing `shell/matchapack.sh` from a checkout still works.
+
+`mp` is a short name for `matchapack` when that name is free (`mp store
+gc`); if `mp` is something else on your machine, use `matchapack`. The line
+defines `mp` (a shell function) only when nothing named `mp` exists when it
+runs: no alias, function, builtin or command on PATH. An `mp` defined later
+in the startup file replaces it, and since the check runs at every shell
+start, a tool named `mp` installed later takes the name from the next new
+shell on. Run `matchapack init` by hand to see whether `mp` would be
+defined, and why not. `--alias NAME` picks another
+name (`eval "$(matchapack init --alias NAME)"`, fish `matchapack init
+--alias NAME | source`; not a builtin of the shell, nor npm, yarn or
+matchapack: refused, the line still defines the npm function), and
+`--no-alias` defines none.
+
+Open a new terminal, then type `npm ci` as usual:
 
 ```
 $ npm ci
@@ -943,8 +949,10 @@ packages again.
 
 ## Other commands
 
-- `matchapack init zsh|bash|fish [--alias NAME]`: print the shell
-  integration (see "Use"); `--alias NAME` also defines NAME for matchapack.
+- `matchapack init zsh|bash|fish [--alias NAME | --no-alias]`: print the
+  shell integration (see "Use"), with the short name `mp` for matchapack
+  when that name is free; `--alias NAME` picks another name, `--no-alias`
+  none.
 - `matchapack uninstall [--yes]`: remove matchapack's own state. Without
   `--yes` a dry run that writes nothing. It removes only what it recognises
   as matchapack's, resolved as every other command resolves it

@@ -89,18 +89,24 @@ enum Cmd {
     /// Without SHELL, the shell that runs the command (the parent process) is
     /// used; name it to be explicit.
     ///
-    /// --alias NAME also defines NAME as a short name for matchapack (an
-    /// alias in zsh and bash, a function in fish): `--alias mp` gives
-    /// `mp npm ci`, `mp store gc`.
+    /// It also defines `mp` as a short name for matchapack (a shell
+    /// function: `mp npm ci`, `mp store gc`), but only
+    /// when nothing of that name exists yet (an alias, function, builtin or
+    /// command on PATH), checked at every shell start. --alias NAME picks
+    /// another name, --no-alias none. Run by hand on a terminal, it says
+    /// whether the name would be defined.
     #[command(verbatim_doc_comment)]
     Init {
         #[arg(value_parser = INIT_SHELLS)]
         shell: Option<String>,
-        /// Also define NAME as a short name for matchapack (letters, digits,
+        /// The short name for matchapack instead of `mp` (letters, digits,
         /// `-`, `_`; not a builtin or keyword of the shell, not npm, yarn or
-        /// matchapack).
+        /// matchapack); defined only when the name is free.
         #[arg(long, value_name = "NAME")]
         alias: Option<String>,
+        /// Define no short name for matchapack.
+        #[arg(long, conflicts_with = "alias")]
+        no_alias: bool,
     },
     /// Remove matchapack's own state: the store, the trial logs, the settings directory
     ///
@@ -309,7 +315,9 @@ const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
 /// `yarn` function is defined there). The files in shell/ are the one
 /// definition; the binary carries them so the rc line needs no checkout of
 /// this repository, and users who already have the line get the `yarn`
-/// function with the next `cargo install`.
+/// function with the next `cargo install`. Then the short name `alias`
+/// (`mp` unless --alias or --no-alias), guarded so that it is defined only
+/// when the name is free in the shell that runs it.
 fn init_script(shell: &str, macos: bool, alias: Option<&str>) -> String {
     let (npm, yarn, short) = if shell == "fish" {
         (include_str!("../shell/matchapack.fish"), include_str!("../shell/matchapack-yarn.fish"), include_str!("../shell/matchapack-alias.fish"))
@@ -371,20 +379,32 @@ fn check_alias(name: &str, shell: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The warning for an `--alias` name that is also a command on PATH, only
-/// when `tty` (stdout is a terminal: someone ran `matchapack init … --alias`
-/// by hand). From the rc line stdout is a pipe into eval / source, and the
-/// warning would print at every shell start.
-fn alias_warning(name: &str, shell: &str, tty: bool) -> Option<String> {
+/// The short name `matchapack init` defines without --alias or --no-alias.
+const DEFAULT_ALIAS: &str = "mp";
+
+/// What `init` says about the short name, only when `tty` (stdout is a
+/// terminal: someone ran `matchapack init` by hand). From the rc line stdout
+/// is a pipe into eval / source, and the note would print at every shell
+/// start. The printed integration defines the name only when nothing of
+/// that name exists when it runs; of those, matchapack can see a command on
+/// PATH, not the shell's own aliases and functions, so for those it names
+/// the command that shows them.
+fn alias_report(name: Option<&str>, tty: bool) -> Option<String> {
     if !tty {
         return None;
     }
-    let p = on_path(name)?;
-    Some(format!(
-        "matchapack init: warning: `{name}` is also {} on PATH; the {} hides it in this shell (`command {name}` still runs it)",
-        p.display(),
-        if shell == "fish" { "function" } else { "alias" }
-    ))
+    let Some(name) = name else {
+        return Some("matchapack init: no short name for matchapack (--no-alias); run it as `matchapack`".to_string());
+    };
+    Some(match on_path(name) {
+        Some(p) => format!(
+            "matchapack init: `{name}` will NOT be defined: `{name}` is already {} on PATH, and the short name is defined only when the name is free. Run matchapack as `matchapack`, or pick another name with --alias NAME.",
+            p.display()
+        ),
+        None => format!(
+            "matchapack init: `{name}` will be a short name for matchapack (a shell function: `{name} npm ci`, `{name} store gc`), unless an alias or function named `{name}` already exists when this line runs; `type {name}` shows what `{name}` is now."
+        ),
+    })
 }
 
 /// The first executable named `name` in PATH, if any.
@@ -461,7 +481,7 @@ fn main() -> Result<()> {
             let code = yarn1::cli(args);
             signals::finish(code);
         }
-        Cmd::Init { shell, alias } => {
+        Cmd::Init { shell, alias, no_alias } => {
             let shell = match shell {
                 Some(s) => s,
                 None => parent_shell().map(String::from).with_context(|| {
@@ -476,14 +496,15 @@ fn main() -> Result<()> {
             // A refused name still prints the integration, without the alias:
             // the rc line's eval / source runs whatever is printed, and the
             // npm and yarn functions must not go missing over a bad name.
-            let refused = alias.as_deref().and_then(|n| check_alias(n, &shell).err());
-            if let (Some(name), None) = (&alias, &refused) {
+            let name = if no_alias { None } else { Some(alias.unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
+            let refused = name.as_deref().and_then(|n| check_alias(n, &shell).err());
+            if refused.is_none() {
                 use std::io::IsTerminal;
-                if let Some(w) = alias_warning(name, &shell, std::io::stdout().is_terminal()) {
-                    eprintln!("{w}");
+                if let Some(r) = alias_report(name.as_deref(), std::io::stdout().is_terminal()) {
+                    eprintln!("{r}");
                 }
             }
-            print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { alias.as_deref() }));
+            print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { name.as_deref() }));
             if let Some(e) = refused {
                 eprintln!("matchapack init: error: {e}; the shell integration was printed without it");
                 std::process::exit(2);
@@ -684,20 +705,25 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alias_warning, check_alias, init_script, shell_from_comm};
+    use super::{alias_report, check_alias, init_script, shell_from_comm, DEFAULT_ALIAS};
 
-    /// A name on PATH (`ls`) is warned about only when stdout is a terminal;
-    /// a name on no PATH never.
+    /// The by-hand report: only when stdout is a terminal; a name on PATH
+    /// (`ls`) is reported as not defined, a free one as defined unless the
+    /// shell has its own; --no-alias says so.
     #[test]
-    fn alias_warning_only_on_a_terminal() {
-        assert!(alias_warning("ls", "zsh", true).is_some_and(|w| w.contains("`ls` is also") && w.contains("alias hides it")));
-        assert!(alias_warning("ls", "fish", true).is_some_and(|w| w.contains("function hides it")));
-        assert_eq!(alias_warning("ls", "zsh", false), None);
-        assert_eq!(alias_warning("matchapack-no-such-command-x", "zsh", true), None);
+    fn alias_report_only_on_a_terminal() {
+        assert!(alias_report(Some("ls"), true).is_some_and(|w| w.contains("`ls` will NOT be defined") && w.contains("/ls on PATH")));
+        let free = alias_report(Some("matchapack-no-such-command-x"), true).unwrap();
+        assert!(free.contains("will be a short name for matchapack (a shell function:") && free.contains("`type matchapack-no-such-command-x`"), "{free}");
+        assert!(alias_report(None, true).is_some_and(|w| w.contains("--no-alias")));
+        assert_eq!(alias_report(Some("ls"), false), None);
+        assert_eq!(alias_report(None, false), None);
+        assert_eq!(DEFAULT_ALIAS, "mp");
     }
 
-    /// `--alias`: the name is checked per shell, and the definition comes
-    /// after the functions, on both platforms, only when asked for.
+    /// The short name: the name is checked per shell, and the definition
+    /// comes after the functions, on both platforms, guarded by a check that
+    /// the name is free; `None` (--no-alias) prints none.
     #[test]
     fn init_alias() {
         for sh in ["zsh", "bash", "fish"] {
@@ -714,15 +740,18 @@ mod tests {
             for mac in [true, false] {
                 let plain = init_script(sh, mac, None);
                 let with = init_script(sh, mac, Some("mp"));
-                assert!(!plain.contains("__MATCHAPACK_ALIAS__") && !plain.contains("--wraps matchapack") && !plain.lines().any(|l| l.starts_with("alias ")), "{sh}: no alias by default");
+                assert!(!plain.contains("__MATCHAPACK_ALIAS__") && !plain.contains("--wraps matchapack") && !plain.lines().any(|l| l.starts_with("alias ")) && !plain.contains("alias mp") && !plain.contains("function mp"), "{sh}: no alias with --no-alias");
                 assert!(with.starts_with(&plain), "{sh}: the alias comes after the functions");
                 let added = &with[plain.len()..];
                 assert!(!added.contains("__MATCHAPACK_ALIAS__"), "{sh}: placeholder replaced");
                 let def: Vec<&str> = added.lines().filter(|l| !l.starts_with('#')).collect();
                 if sh == "fish" {
-                    assert_eq!(def, ["function mp --wraps matchapack --description 'matchapack'", "    matchapack $argv", "end"]);
+                    // Defined only when the name is free (`type -q`: function, builtin, command).
+                    assert_eq!(def, ["type -q mp; or function mp --wraps matchapack --description 'matchapack'", "    matchapack $argv", "end"]);
                 } else {
-                    assert_eq!(def, ["alias mp=matchapack"]);
+                    // Defined only when the name is free (`command -v`: alias, function, builtin, command);
+                    // a function, with the `function` keyword (see shell/matchapack-alias.sh).
+                    assert_eq!(def, ["command -v mp >/dev/null 2>&1 || function mp { matchapack \"$@\"; }"]);
                 }
             }
         }
