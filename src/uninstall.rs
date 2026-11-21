@@ -693,10 +693,15 @@ fn binary_advice(real: &Path, ch: &Channel, cargo_home: &Path) -> String {
             } else {
                 format!(" (as the user who can write {}, which you cannot)", prefix.join("lib/node_modules").display())
             };
+            // With the prefix the binary is in: a plain `npm uninstall -g`
+            // acts on the global directory of the npm on PATH now, which
+            // is another one after `npm i -g --prefix …` or with another
+            // Node version active.
+            let npm = format!("npm uninstall -g --prefix {} matchapack{owner}", quoted(prefix));
             match manager {
-                None => format!("Last, the binary: {at} is in the npm package installed globally in {}: npm uninstall -g matchapack{owner}", prefix.display()),
+                None => format!("Last, the binary: {at} is in the npm package installed globally in {}: {npm}", prefix.display()),
                 Some((m, v)) => format!(
-                    "Last, the binary: {at} is in the npm package installed globally in Node {v} of {} ({}): npm uninstall -g matchapack{owner}, once in each Node version you installed it in (a global package belongs to one Node version){}",
+                    "Last, the binary: {at} is in the npm package installed globally in Node {v} of {} ({}): {npm}; a global package belongs to one Node version, so also remove it from each other Node version you installed it in (`npm uninstall -g matchapack` with that version active){}",
                     m.name(),
                     prefix.display(),
                     if *m == NodeManager::Nvm { "; and delete matchapack from $NVM_DIR/default-packages if you added it there" } else { "" }
@@ -1638,10 +1643,17 @@ mod tests {
         assert!(last(&env).ends_with("is Homebrew's: brew uninstall matchapack"), "{}", last(&env));
         place(&mut env, "home/.nvm/versions/node/v22.11.0/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
         let l = last(&env);
-        assert!(l.contains("Node v22.11.0 of nvm") && l.contains(": npm uninstall -g matchapack, once in each Node version") && l.contains("default-packages") && !l.contains(" rm "), "{l}");
+        let nvm = d.join("home/.nvm/versions/node/v22.11.0");
+        assert!(l.contains(&format!("Node v22.11.0 of nvm ({}): npm uninstall -g --prefix {} matchapack; a global package belongs to one Node version", nvm.display(), quoted(&nvm))) && l.contains("each other Node version") && l.contains("default-packages") && !l.contains(" rm "), "{l}");
         place(&mut env, "usr/local/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
         let l = last(&env);
-        assert!(l.contains(&format!("installed globally in {}: npm uninstall -g matchapack", d.join("usr/local").display())) && !l.contains("Node version"), "{l}");
+        assert!(l.ends_with(&format!("installed globally in {}: npm uninstall -g --prefix {} matchapack", d.join("usr/local").display(), quoted(&d.join("usr/local")))) && !l.contains("Node version"), "{l}");
+        // `npm i -g --prefix "$HOME/my tools"`: that prefix, quoted (a plain
+        // `npm uninstall -g` would look in npm's current global directory).
+        place(&mut env, "home/my tools/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
+        let l = last(&env);
+        let tools = d.join("home/my tools");
+        assert!(quoted(&tools).starts_with('\'') && l.ends_with(&format!("installed globally in {}: npm uninstall -g --prefix {} matchapack", tools.display(), quoted(&tools))), "{l}");
         place(&mut env, "app/node_modules/matchapack/native/darwin-arm64/matchapack");
         let l = last(&env);
         assert!(l.contains("inside the package") && l.contains("npm uninstall matchapack") && !l.contains(" rm "), "{l}");

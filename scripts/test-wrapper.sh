@@ -618,7 +618,7 @@ script=$(last_line "$uh" "$uh/.local/bin/matchapack"); script_all=$(cat "$work/u
 plain=$(last_line "$uh" "$uh/bin/matchapack")
 after=$(snap)
 [ "$brew" = "Last, the binary: $uh/brew/Cellar/matchapack/0.1.0/bin/matchapack is Homebrew's: brew uninstall matchapack" ] \
-  && printf '%s\n' "$npm_nvm" | grep -q "installed globally in Node v22.11.0 of nvm ($nvm_prefix): npm uninstall -g matchapack, once in each Node version" \
+  && printf '%s\n' "$npm_nvm" | grep -qF "installed globally in Node v22.11.0 of nvm ($nvm_prefix): npm uninstall -g --prefix $nvm_prefix matchapack; a global package belongs to one Node version" \
   && [ "$cargo" = "Last, the binary: $uh/.cargo/bin/matchapack was installed by cargo install: cargo uninstall matchapack" ] \
   && [ "$script" = "Last, the binary: $uh/.local/bin/matchapack was put there by the install script: rm $uh/.local/bin/matchapack $uh/.config/matchapack/matchapack-receipt.json (the binary, and the script's receipt)" ] \
   && printf '%s\n' "$script_all" | grep -qF "$uh/.zshrc:2: . \"\$HOME/.config/matchapack/env.sh\"   <- the install script's PATH line" \
