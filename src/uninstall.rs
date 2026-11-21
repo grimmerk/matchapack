@@ -1,7 +1,16 @@
 //! `matchapack uninstall`: remove matchapack's own state (the store, the
 //! trial logs, the settings directory), and say what else to remove by hand
-//! (the shell integration line, the binary). Without `--yes` it only prints
-//! what it would do and writes nothing.
+//! (the shell integration line; the binary, the way it was installed:
+//! `channel`; the install script's PATH setup). Without `--yes` it only
+//! prints what it would do and writes nothing.
+//!
+//! The install script's files in its directory (`env.sh`, `env.fish`, its
+//! receipt), which is the default settings directory when XDG_CONFIG_HOME is
+//! unset, are never removed: a line the script appended to the startup files
+//! loads env.sh, so removing it while that line is there would print an
+//! error at every shell start, and the PATH entry it adds serves every
+//! program in that directory, not only matchapack. uninstall lists them, the
+//! lines that load them and the other programs there, and leaves the choice.
 //!
 //! It deletes directories, so it deletes only what it can recognise as
 //! matchapack's:
@@ -34,6 +43,7 @@
 //!
 //! Any refusal found before the removal starts removes nothing at all.
 
+use crate::channel::{self, Channel, NodeManager};
 use crate::store::{self, Integrity};
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -209,9 +219,14 @@ pub struct Env {
     pub config_set: bool,
     /// Shell startup files to search for matchapack's lines.
     pub rc_files: Vec<PathBuf>,
-    /// The running binary, and cargo's bin directory.
+    /// The running binary, and cargo's home (where a plain `cargo install`
+    /// keeps its records).
     pub exe: Option<PathBuf>,
-    pub cargo_bin: PathBuf,
+    pub cargo_home: PathBuf,
+    /// The install script's directory, `${XDG_CONFIG_HOME:-~/.config}/matchapack`:
+    /// its receipt and PATH scripts (channel::RECEIPT, channel::ENV_SCRIPTS).
+    /// The settings directory too when XDG_CONFIG_HOME is unset.
+    pub receipt_home: PathBuf,
 }
 
 impl Env {
@@ -238,6 +253,9 @@ impl Env {
         rc_files.extend(confd);
         // fish's universal variables (`set -U MATCHAPACK_…`).
         rc_files.push(xdg.join("fish/fish_variables"));
+        // The install script's fish file: under ~/.config whatever
+        // XDG_CONFIG_HOME says.
+        rc_files.push(home.join(crate::channel::FISH_CONF_D));
         let mut seen = HashSet::new();
         rc_files.retain(|f| seen.insert(f.clone()));
         Ok(Env {
@@ -249,7 +267,8 @@ impl Env {
             config_set: std::env::var_os("MATCHAPACK_CONFIG_DIR").is_some(),
             rc_files,
             exe: std::env::current_exe().ok(),
-            cargo_bin: var("CARGO_HOME").unwrap_or_else(|| home.join(".cargo")).join("bin"),
+            cargo_home: var("CARGO_HOME").unwrap_or_else(|| home.join(".cargo")),
+            receipt_home: xdg.join("matchapack"),
             home,
         })
     }
@@ -437,6 +456,9 @@ fn plan_one(kind: Kind, path: &Path, set: bool, env: &Env, others: &[(Id, Kind)]
         }
     }
     let store_name = env.store.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // The settings directory is also the install script's (the default
+    // place with XDG_CONFIG_HOME unset): its files there stay.
+    let installers = kind == Kind::Config && normalise(&env.receipt_home).ok().and_then(|r| lid(&r)) == Some(id);
     let (mut delete, mut kept, mut nested, mut unknown) = (vec![], vec![], vec![], vec![]);
     for n in names {
         let p = path.join(&n);
@@ -448,6 +470,11 @@ fn plan_one(kind: Kind, path: &Path, set: bool, env: &Env, others: &[(Id, Kind)]
         let s = n.to_string_lossy();
         if is_aside_name(&s, &store_name) && is_real_dir(&p) {
             kept.push((n, "left by an interrupted `matchapack uninstall` (below)".to_string()));
+            continue;
+        }
+        if installers && is_installer_file(&s) {
+            let what = if s == channel::RECEIPT { "receipt" } else { "PATH setup" };
+            kept.push((n, format!("the install script's {what} (below)")));
             continue;
         }
         let ours = match kind {
@@ -627,6 +654,109 @@ pub fn rc_lines(files: &[PathBuf]) -> Vec<(PathBuf, usize, String)> {
         }
     }
     out
+}
+
+/// A name the install script writes in its directory.
+fn is_installer_file(name: &str) -> bool {
+    name == channel::RECEIPT || channel::ENV_SCRIPTS.contains(&name)
+}
+
+/// Whether a startup file's line is the one the install script appends:
+/// `. "<its directory>/env.sh"` (sh, bash, zsh) or `source "…/env.fish"`.
+fn is_installer_line(line: &str) -> bool {
+    let l = line.trim();
+    let Some(p) = l.strip_prefix(". \"").or_else(|| l.strip_prefix("source \"")).and_then(|r| r.strip_suffix('"')) else { return false };
+    p.ends_with("matchapack/env.sh") || p.ends_with("matchapack/env.fish")
+}
+
+/// The install script's files that are there: its PATH scripts and receipt
+/// in its directory, and its fish file.
+fn installer_files(env: &Env) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = channel::ENV_SCRIPTS.iter().chain([&channel::RECEIPT]).map(|n| env.receipt_home.join(n)).collect();
+    v.push(env.home.join(channel::FISH_CONF_D));
+    v.retain(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()));
+    v
+}
+
+fn quoted(p: &Path) -> String {
+    crate::wrapper::shell_quote(&p.to_string_lossy())
+}
+
+/// How to remove the binary at `real`, installed through `ch`.
+fn binary_advice(real: &Path, ch: &Channel, cargo_home: &Path) -> String {
+    let at = real.display();
+    match ch {
+        Channel::Homebrew => format!("Last, the binary: {at} is Homebrew's: brew uninstall matchapack"),
+        Channel::NpmGlobal { prefix, manager } => {
+            let owner = if parent_writable(&prefix.join("lib/node_modules/matchapack")) {
+                String::new()
+            } else {
+                format!(" (as the user who can write {}, which you cannot)", prefix.join("lib/node_modules").display())
+            };
+            match manager {
+                None => format!("Last, the binary: {at} is in the npm package installed globally in {}: npm uninstall -g matchapack{owner}", prefix.display()),
+                Some((m, v)) => format!(
+                    "Last, the binary: {at} is in the npm package installed globally in Node {v} of {} ({}): npm uninstall -g matchapack{owner}, once in each Node version you installed it in (a global package belongs to one Node version){}",
+                    m.name(),
+                    prefix.display(),
+                    if *m == NodeManager::Nvm { "; and delete matchapack from $NVM_DIR/default-packages if you added it there" } else { "" }
+                ),
+            }
+        }
+        Channel::MiseNpm => format!(
+            "Last, the binary: {at} was installed by mise (npm:matchapack): mise uninstall --all npm:matchapack, and delete npm:matchapack from the mise config that names it (`mise use -g` writes ~/.config/mise/config.toml)"
+        ),
+        Channel::Volta => format!("Last, the binary: {at} is a Volta package: volta uninstall matchapack"),
+        Channel::OtherPackage { dir } => format!(
+            "Last, the binary: {at} is inside the package {}, which a package manager installed there (not a global npm install): remove it with that package manager (in a project: `npm uninstall matchapack` there; a global pnpm, Yarn or Bun install: its own global remove), not by deleting files in node_modules",
+            dir.display()
+        ),
+        Channel::Cargo { root } if root == cargo_home => format!("Last, the binary: {at} was installed by cargo install: cargo uninstall matchapack"),
+        Channel::Cargo { root } => format!("Last, the binary: {at} was installed by cargo install into {}: cargo uninstall --root {} matchapack", root.display(), quoted(root)),
+        Channel::Installer { receipt } => {
+            format!("Last, the binary: {at} was put there by the install script: rm {} {} (the binary, and the script's receipt)", quoted(real), quoted(receipt))
+        }
+        Channel::Plain => format!("Last, the binary: rm {}", quoted(real)),
+    }
+}
+
+/// What to do with the install script's files (`files`, from
+/// `installer_files`), left in place; None when there is nothing to say.
+/// `receipt_named`: the binary's line already names the receipt; `marked`:
+/// the startup files' lines above include the script's line.
+fn installer_advice(env: &Env, files: &[PathBuf], receipt_named: bool, marked: bool) -> Option<String> {
+    let receipt = env.receipt_home.join(channel::RECEIPT);
+    let path_files: Vec<&PathBuf> = files.iter().filter(|f| **f != receipt).collect();
+    let receipt_left = files.contains(&receipt) && !receipt_named;
+    if path_files.is_empty() {
+        // Only its receipt (installed with ~/.local/bin already on PATH).
+        return receipt_left.then(|| format!("The install script's receipt, left in place: {}; nothing loads it: rm {}", receipt.display(), quoted(&receipt)));
+    }
+    let dir = channel::receipt_dir(&receipt, "matchapack");
+    let list = files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ");
+    let others = dir.as_ref().map(|d| {
+        let mut names: Vec<String> = std::fs::read_dir(d)
+            .map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != "matchapack" && !n.starts_with('.')).collect())
+            .unwrap_or_default();
+        names.sort();
+        match names.len() {
+            0 => format!("; nothing else is in {} now", d.display()),
+            n if n > 6 => format!("; that PATH entry also serves the other programs in {} ({} and {} more)", d.display(), names[..6].join(", "), n - 6),
+            _ => format!("; that PATH entry also serves the other programs in {} ({})", d.display(), names.join(", ")),
+        }
+    });
+    let rm: Vec<String> = path_files.iter().copied().chain(receipt_left.then_some(&receipt)).map(|f| quoted(f)).collect();
+    let put = dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "the install script's directory".to_string());
+    let (loaded, first) = if marked {
+        ("marked above", "delete the marked lines first, then")
+    } else {
+        ("none of the files searched has it now; check any other file your shell reads", "make sure no startup file loads them, then")
+    };
+    Some(format!(
+        "The install script's files, left in place: {list}. They put {put} on PATH, loaded by a line the script appended to your startup files ({loaded}). uninstall removes none of them: a file removed while a startup file still loads it prints an error at every shell start{}. If you no longer want {put} on PATH through them: {first}: rm {}",
+        others.unwrap_or_default(),
+        rm.join(" ")
+    ))
 }
 
 /// A target opened for removal: its parent, its name there, and itself,
@@ -1056,9 +1186,13 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
             if read.is_empty() { "your shell startup files (none found)".to_string() } else { read.join(", ") }
         )?;
     } else {
-        writeln!(out, "Shell integration: uninstall never edits these files. Delete the lines that are matchapack's (the `matchapack init` line; any MATCHAPACK_* setting):")?;
+        writeln!(
+            out,
+            "Shell integration: uninstall never edits these files. Delete the lines that are matchapack's (the `matchapack init` line; any MATCHAPACK_* setting); a line marked as the install script's puts a directory on PATH (see the end):"
+        )?;
         for (f, n, l) in &lines {
-            writeln!(out, "  {}:{n}: {l}", f.display())?;
+            let mark = if is_installer_line(l) { "   <- the install script's PATH line" } else { "" };
+            writeln!(out, "  {}:{n}: {l}{mark}", f.display())?;
         }
     }
     writeln!(
@@ -1067,17 +1201,25 @@ pub fn execute(env: &Env, targets: &[Target], yes: bool, out: &mut dyn Write) ->
     )?;
 
     writeln!(out)?;
+    // How it was installed: from where the binary really is and the records
+    // next to it (src/channel.rs). Never a plain `rm` of a file a package
+    // manager owns.
+    let mut receipt_named = false;
     match &env.exe {
-        Some(exe) if is_cargo_install(exe, &env.cargo_bin) => writeln!(out, "Last, the binary ({}), installed by cargo install: cargo uninstall matchapack", exe.display())?,
-        Some(exe) => writeln!(out, "Last, the binary: rm {}", crate::wrapper::shell_quote(&exe.to_string_lossy()))?,
-        None => writeln!(out, "Last, the binary: `cargo uninstall matchapack` if cargo installed it, otherwise delete the file `command -v matchapack` names")?,
+        Some(exe) => {
+            let (real, ch) = channel::detect(exe, &env.cargo_home, &env.receipt_home);
+            receipt_named = matches!(ch, Channel::Installer { .. });
+            writeln!(out, "{}", binary_advice(&real, &ch, &env.cargo_home))?;
+        }
+        None => writeln!(out, "Last, the binary: remove it the way you installed it (brew uninstall, npm uninstall -g, cargo uninstall), or delete the file `command -v matchapack` names")?,
+    }
+    let files = installer_files(env);
+    let marked = lines.iter().any(|(_, _, l)| is_installer_line(l));
+    if let Some(a) = installer_advice(env, &files, receipt_named, marked) {
+        writeln!(out)?;
+        writeln!(out, "{a}")?;
     }
     Ok(code)
-}
-
-fn is_cargo_install(exe: &Path, cargo_bin: &Path) -> bool {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    exe.parent().is_some_and(|d| canon(d) == canon(cargo_bin))
 }
 
 #[cfg(test)]
@@ -1131,18 +1273,58 @@ mod tests {
         fs::write(home.join(".zshrc"), "export PATH=$HOME/.cargo/bin:$PATH\ncommand -v matchapack >/dev/null && eval \"$(matchapack init zsh --alias mp)\"\n").unwrap();
         fs::create_dir_all(home.join(".config/fish")).unwrap();
         fs::write(home.join(".config/fish/config.fish"), "set -x MATCHAPACK_PATHS /x\n").unwrap();
+        // `cargo install matchapack` recorded it.
+        fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        fs::write(home.join(".cargo/.crates2.json"), r#"{"installs":{"matchapack 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)":{"bins":["matchapack"]}}}"#).unwrap();
         Env {
             store,
             store_set: false,
             logs,
             logs_set: false,
+            receipt_home: config.clone(),
             config,
             config_set: false,
-            rc_files: vec![home.join(".zshrc"), home.join(".bashrc"), home.join(".config/fish/config.fish")],
+            rc_files: vec![home.join(".zshrc"), home.join(".bashrc"), home.join(".config/fish/config.fish"), home.join(channel::FISH_CONF_D)],
             exe: Some(home.join(".cargo/bin/matchapack")),
-            cargo_bin: home.join(".cargo/bin"),
+            cargo_home: home.join(".cargo"),
             home,
         }
+    }
+
+    /// The install script's files in `env` (its directory: env.receipt_home):
+    /// the binary in `home/.local/bin` with `others` beside it, the receipt
+    /// naming that directory, env.sh and env.fish, the line loading env.sh
+    /// at the end of .zshrc and the fish file. Returns them.
+    fn install_script(env: &mut Env, others: &[&str]) -> Vec<PathBuf> {
+        let bin = env.home.join(".local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        for p in std::iter::once(&"matchapack").chain(others) {
+            fs::write(bin.join(p), "bin").unwrap();
+        }
+        env.exe = Some(bin.join("matchapack"));
+        fs::create_dir_all(&env.receipt_home).unwrap();
+        let receipt = env.receipt_home.join(channel::RECEIPT);
+        fs::write(
+            &receipt,
+            format!(
+                r#"{{"install_prefix":"{}","install_layout":"flat","binaries":["matchapack"],"cdylibs":[],"cstaticlibs":[],"source":{{"release_type":"github","owner":"grimmerk","name":"matchapack","app_name":"matchapack"}},"version":"0.1.0","provider":{{"source":"cargo-dist","version":"0.34.0"}},"binary_aliases":{{}},"modify_path":true}}"#,
+                bin.display()
+            ),
+        )
+        .unwrap();
+        fs::write(env.receipt_home.join("env.sh"), "#!/bin/sh\ncase \":${PATH}:\" in\n    *:\"$HOME/.local/bin\":*)\n        ;;\n    *)\n        export PATH=\"$HOME/.local/bin:$PATH\"\n        ;;\nesac\n").unwrap();
+        fs::write(env.receipt_home.join("env.fish"), "if not contains \"$HOME/.local/bin\" $PATH\n    set -x PATH \"$HOME/.local/bin\" $PATH\nend\n").unwrap();
+        let zshrc = fs::read_to_string(env.home.join(".zshrc")).unwrap();
+        fs::write(env.home.join(".zshrc"), format!("{zshrc}\n. \"$HOME/.config/matchapack/env.sh\"\n")).unwrap();
+        let fish = env.home.join(channel::FISH_CONF_D);
+        fs::create_dir_all(fish.parent().unwrap()).unwrap();
+        fs::write(&fish, "\nsource \"$HOME/.config/matchapack/env.fish\"\n").unwrap();
+        vec![env.receipt_home.join("env.sh"), env.receipt_home.join("env.fish"), receipt, fish]
+    }
+
+    /// The line of `out` that starts with `prefix`.
+    fn line_of<'a>(out: &'a str, prefix: &str) -> &'a str {
+        out.lines().find(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("no line {prefix:?} in\n{out}"))
     }
 
     /// Every path under `d` with its type, size, mode and mtime.
@@ -1432,17 +1614,143 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// The binary's line per channel (src/channel.rs decides): never a plain
+    /// `rm` of a file in Homebrew's Cellar or in node_modules.
     #[test]
     fn binary_channel() {
-        let d = scratch("uninstall-bin");
+        let d = fs::canonicalize(scratch("uninstall-bin")).unwrap();
         let mut env = setup(&d);
-        fs::create_dir_all(&env.cargo_bin).unwrap();
-        assert!(run_to_string(&env, false).1.contains("installed by cargo install: cargo uninstall matchapack"));
-        env.exe = Some(d.join("bin/matchapack"));
-        let out = run_to_string(&env, false).1;
-        let want = format!("Last, the binary: rm {}", crate::wrapper::shell_quote(&d.join("bin/matchapack").to_string_lossy()));
-        assert!(out.contains(&want) && !out.contains("cargo uninstall"), "{out}");
+        let last = |env: &Env| line_of(&run_to_string(env, false).1, "Last, the binary").to_string();
+        assert!(last(&env).contains("installed by cargo install: cargo uninstall matchapack"), "{}", last(&env));
+        // In ~/.cargo/bin but not in cargo's records: the file itself.
+        fs::remove_file(env.home.join(".cargo/.crates2.json")).unwrap();
+        assert_eq!(last(&env), format!("Last, the binary: rm {}", quoted(&env.home.join(".cargo/bin/matchapack"))));
+        let place = |env: &mut Env, rel: &str| {
+            let p = d.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "bin").unwrap();
+            env.exe = Some(p);
+        };
+        place(&mut env, "bin/matchapack");
+        let want = format!("Last, the binary: rm {}", quoted(&d.join("bin/matchapack")));
+        assert!(last(&env) == want, "{}", last(&env));
+        place(&mut env, "opt/homebrew/Cellar/matchapack/0.1.0/bin/matchapack");
+        assert!(last(&env).ends_with("is Homebrew's: brew uninstall matchapack"), "{}", last(&env));
+        place(&mut env, "home/.nvm/versions/node/v22.11.0/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
+        let l = last(&env);
+        assert!(l.contains("Node v22.11.0 of nvm") && l.contains(": npm uninstall -g matchapack, once in each Node version") && l.contains("default-packages") && !l.contains(" rm "), "{l}");
+        place(&mut env, "usr/local/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
+        let l = last(&env);
+        assert!(l.contains(&format!("installed globally in {}: npm uninstall -g matchapack", d.join("usr/local").display())) && !l.contains("Node version"), "{l}");
+        place(&mut env, "app/node_modules/matchapack/native/darwin-arm64/matchapack");
+        let l = last(&env);
+        assert!(l.contains("inside the package") && l.contains("npm uninstall matchapack") && !l.contains(" rm "), "{l}");
+        place(&mut env, "mise/installs/npm-matchapack/0.1.0/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
+        assert!(last(&env).contains("mise uninstall --all npm:matchapack"), "{}", last(&env));
+        place(&mut env, ".volta/tools/image/packages/matchapack/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
+        assert!(last(&env).ends_with("is a Volta package: volta uninstall matchapack"), "{}", last(&env));
+        // The install script's: the binary and its receipt.
+        install_script(&mut env, &[]);
+        let want = format!("rm {} {} (the binary, and the script's receipt)", quoted(&env.home.join(".local/bin/matchapack")), quoted(&env.receipt_home.join(channel::RECEIPT)));
+        assert!(last(&env).ends_with(&want), "{}", last(&env));
+        env.exe = None;
+        assert!(last(&env).contains("the way you installed it"), "{}", last(&env));
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The install script's files are never removed, whichever channel the
+    /// binary came from: env.sh (a startup file loads it), env.fish, the
+    /// receipt and the fish file stay; uninstall marks the lines loading
+    /// them, names the other programs their PATH entry serves, and says how
+    /// to remove them. They do not make the settings directory refused when
+    /// MATCHAPACK_CONFIG_DIR names the script's directory; a directory inside
+    /// the store is still refused, with them in it.
+    #[test]
+    fn the_install_scripts_files_are_left_with_their_lines() {
+        let d = fs::canonicalize(scratch("uninstall-installer")).unwrap();
+        let mut env = setup(&d);
+        let files = install_script(&mut env, &["uv", "uvx"]);
+        let before = snapshot(&d);
+        let (code, out) = run_to_string(&env, false);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(snapshot(&d), before, "a dry run changes nothing");
+        for f in &files[..3] {
+            assert!(out.contains(&format!("kept: {}: the install script's", f.display())), "{f:?}:\n{out}");
+        }
+        assert!(out.contains(&format!("{}:4: . \"$HOME/.config/matchapack/env.sh\"   <- the install script's PATH line", env.home.join(".zshrc").display())), "{out}");
+        assert!(out.contains(&format!("{}:2: source \"$HOME/.config/matchapack/env.fish\"   <- the install script's PATH line", files[3].display())), "{out}");
+        assert!(!line_of(&out, &format!("  {}:2: command -v", env.home.join(".zshrc").display())).contains("<-"), "the init line is not the script's");
+        let advice = line_of(&out, "The install script's files, left in place:");
+        let bin_dir = env.home.join(".local/bin");
+        assert!(advice.contains(&format!("They put {} on PATH", bin_dir.display())) && advice.contains(&format!("also serves the other programs in {} (uv, uvx)", bin_dir.display())), "{advice}");
+        // The receipt is on the binary's line; the rest here.
+        let rm = format!("rm {} {} {}", quoted(&files[0]), quoted(&files[1]), quoted(&files[3]));
+        assert!(advice.ends_with(&format!("delete the marked lines first, then: {rm}")), "{advice}");
+        // --yes: matchapack's `paths` goes, the script's files stay, with
+        // the directory; the startup files are untouched.
+        let zshrc = fs::read(env.home.join(".zshrc")).unwrap();
+        let (code, out) = run_to_string(&env, true);
+        assert_eq!(code, 0, "{out}");
+        assert!(!env.config.join("paths").exists() && !env.store.exists(), "{out}");
+        for f in &files {
+            assert!(f.is_file(), "{f:?} stays:\n{out}");
+        }
+        assert_eq!(fs::read(env.home.join(".zshrc")).unwrap(), zshrc);
+        assert!(out.contains(&format!("settings: {}: matchapack's files removed; the directory stays", env.config.display())), "{out}");
+        // Nothing else in the directory, the binary already gone (another
+        // channel now): the receipt joins the files to remove.
+        fs::remove_file(bin_dir.join("uv")).unwrap();
+        fs::remove_file(bin_dir.join("uvx")).unwrap();
+        env.exe = Some(d.join("bin/matchapack"));
+        let (_, out) = run_to_string(&env, false);
+        let advice = line_of(&out, "The install script's files, left in place:");
+        assert!(advice.contains(&format!("nothing else is in {} now", bin_dir.display())) && advice.ends_with(&format!("{} {}", quoted(&files[3]), quoted(&files[2]))), "{advice}");
+        // No startup file searched loads them any more: said so, not "marked above".
+        let zshrc = fs::read_to_string(env.home.join(".zshrc")).unwrap().replace(". \"$HOME/.config/matchapack/env.sh\"\n", "");
+        fs::write(env.home.join(".zshrc"), zshrc).unwrap();
+        let rc = std::mem::replace(&mut env.rc_files, vec![env.home.join(".zshrc")]);
+        let (_, out) = run_to_string(&env, false);
+        let advice = line_of(&out, "The install script's files, left in place:");
+        assert!(advice.contains("(none of the files searched has it now;") && advice.contains("make sure no startup file loads them, then: rm ") && !advice.contains("marked"), "{advice}");
+        env.rc_files = rc;
+        // Only the receipt (installed with the directory already on PATH).
+        for f in [&files[0], &files[1], &files[3]] {
+            fs::remove_file(f).unwrap();
+        }
+        let (_, out) = run_to_string(&env, false);
+        assert!(line_of(&out, "The install script's receipt, left in place:").ends_with(&format!("nothing loads it: rm {}", quoted(&files[2]))), "{out}");
+        // MATCHAPACK_CONFIG_DIR naming the script's directory: kept, not refused.
+        let d2 = fs::canonicalize(scratch("uninstall-installer-set")).unwrap();
+        let mut env = setup(&d2);
+        let files = install_script(&mut env, &[]);
+        env.config_set = true;
+        let (code, out) = run_to_string(&env, true);
+        assert!(code == 0 && !out.contains("REFUSED") && files.iter().all(|f| f.is_file()), "{out}");
+        // Another directory a variable names, holding an env.sh: as before,
+        // not recognisable as matchapack's.
+        let mut env = setup(&d2);
+        let other = d2.join("other-settings");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("paths"), "/x\n").unwrap();
+        fs::write(other.join("env.sh"), "mine").unwrap();
+        env.config = other.clone();
+        env.config_set = true;
+        let (code, out) = run_to_string(&env, true);
+        assert!(code == 1 && out.contains("holds names matchapack does not make (env.sh)") && other.join("paths").exists(), "{out}");
+        // Inside the store, with the script's files: still refused.
+        let mut env = setup(&d2);
+        let inside = env.store.join("settings");
+        env.receipt_home = inside.clone();
+        install_script(&mut env, &[]);
+        fs::write(inside.join("paths"), "/x\n").unwrap();
+        env.config = inside.clone();
+        env.config_set = true;
+        let before = snapshot(&d2);
+        let (code, out) = run_to_string(&env, true);
+        assert!(code == 1 && out.contains("REFUSED: it is inside the store"), "{out}");
+        assert_eq!(snapshot(&d2), before, "nothing removed");
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d2);
     }
 
     /// The store swapped after the plan, for a link to another directory or

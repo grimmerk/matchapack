@@ -1,3 +1,4 @@
+mod channel;
 mod clone;
 mod diff;
 mod gc;
@@ -498,11 +499,17 @@ fn main() -> Result<()> {
             // npm and yarn functions must not go missing over a bad name.
             let name = if no_alias { None } else { Some(alias.unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
             let refused = name.as_deref().and_then(|n| check_alias(n, &shell).err());
+            use std::io::IsTerminal;
+            let tty = std::io::stdout().is_terminal();
             if refused.is_none() {
-                use std::io::IsTerminal;
-                if let Some(r) = alias_report(name.as_deref(), std::io::stdout().is_terminal()) {
+                if let Some(r) = alias_report(name.as_deref(), tty) {
                     eprintln!("{r}");
                 }
+            }
+            // By hand only, as the report above: a global npm package of one
+            // Node version is lost when the version changes.
+            if let Some(n) = channel::init_note(std::env::current_exe().ok().as_deref(), tty) {
+                eprintln!("{n}");
             }
             print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { name.as_deref() }));
             if let Some(e) = refused {
