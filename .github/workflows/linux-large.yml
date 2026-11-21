@@ -70,8 +70,10 @@ jobs:
           echo "$REPO@$COMMIT, project in $PROJECT_DIR"
       - name: free disk, and the image size
         # The image goes on the filesystem with the most free space (the
-        # runner's root, or its temporary disk at /mnt), with 4 GiB left for
-        # the build and the system. Sparse: blocks are used as written.
+        # runner's root, or a temporary disk at /mnt where the runner has
+        # one), with 4 GiB left for the system. Sparse: blocks are used as
+        # written. Measured 2026-11-21: / 72 GB with 15 GiB free, /mnt on
+        # the same disk, so a 10 GiB image (peak use about 1.1 GiB).
         run: |
           df -h / /mnt "$RUNNER_TEMP" || true
           nproc; free -h
@@ -109,7 +111,7 @@ jobs:
       - name: plain npm ci vs matchapack, empty store then warm store (large-repo.sh)
         env:
           LARGE_LABEL: ${{ matrix.fs }}
-        run: scripts/large-repo.sh "$MNT/w" "$PROJECT"
+        run: LARGE_NAME="$REPO@${COMMIT:0:12} ($PROJECT_DIR)" scripts/large-repo.sh "$MNT/w" "$PROJECT"
       - name: free space left
         if: always()
         run: df -h "$MNT" / /mnt || true

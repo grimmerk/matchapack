@@ -19,7 +19,8 @@
 # (scripts/shared-blocks.py), btrfs's own count (btrfs filesystem du), and
 # the disk each tree takes (free space before and after removing it).
 # A table goes to $GITHUB_STEP_SUMMARY when it is set, and to the output.
-# LARGE_LABEL names the run in the table (default: the filesystem type).
+# LARGE_LABEL names the run in the table (default: the filesystem type),
+# LARGE_NAME the project (default: the project directory's name).
 # Exit status 1 when a verify.sh run failed; the table is written anyway.
 set -uo pipefail
 work=${1:?usage: large-repo.sh <work-dir> <project-dir>}; src=${2:?usage: large-repo.sh <work-dir> <project-dir>}
@@ -100,7 +101,7 @@ for run in 1 2; do
 done
 
 {
-  echo "### $label: $(basename "$src") ($(node -v), npm $(npm -v))"
+  echo "### $label: ${LARGE_NAME:-$(basename "$src")} ($(node -v), npm $(npm -v))"
   echo
   echo "npm's cache filled first by a plain \`npm ci --ignore-scripts\` (network): ${prime_secs}s. Both sides then install from that cache."
   echo
@@ -108,7 +109,7 @@ done
   echo "|---|---|---|---|---|---|---|---|"
   printf '%s\n' "${rows[@]}"
   echo
-  echo "CPU is user + sys of the install and every process under it. Disk is the free space regained by removing the tree (df), after the run."
+  echo "CPU is user + sys of the install and every process under it. Disk is the free space regained by removing the tree (df), after the run; on btrfs it misses small files kept inline in the metadata (see btrfs filesystem du in the log)."
 } > "$work/summary.md"
 cat "$work/summary.md"
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$work/summary.md" >> "$GITHUB_STEP_SUMMARY"
