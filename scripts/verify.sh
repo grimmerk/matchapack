@@ -99,10 +99,16 @@ echo "== npm ${npm_args[*]} (A)"
 # logged run's: the boundaries between words included).
 python3 -c 'import json,sys; print("npm words:", json.dumps(sys.argv[1:]))' "${npm_args[@]}"
 t0=$(python3 -c 'import time;print(time.time_ns())')
+# CPU time too: `times` prints the user and system time of the children this
+# shell has waited for (each install's subshell, with npm, matchapack and
+# every install script below it). Written to a file by this shell itself:
+# in a command substitution it would be the subshell's own, zero.
+times > "$work/.cpu0"
 (cd "$work/A" && npm "${npm_args[@]}" --no-audit --no-fund > "$work/A.log" 2>&1) || { tail -30 "$work/A.log"; exit 1; }
 if [ "$base" != ci ] && ! cmp -s "$src/package-lock.json" "$work/A/package-lock.json"; then
   echo "NOTE: npm $base rewrote package-lock.json"
 fi
+times > "$work/.cpu1"
 t1=$(python3 -c 'import time;print(time.time_ns())')
 echo "== matchapack install (B)"
 if [ -n "${MATCHAPACK_VERIFY_ARGS_FILE:-}" ]; then
@@ -118,9 +124,21 @@ else
   # matchapack runs npm's own `npm ci`: give it A's flags.
   (cd "$work/B" && "$bin" install . "$@" -- --no-audit --no-fund > "$work/B.log" 2>&1) || { tail -30 "$work/B.log"; exit 1; }
 fi
+times > "$work/.cpu2"
 t2=$(python3 -c 'import time;print(time.time_ns())')
 grep '^\[matchapack\]\|^matchapack:' "$work/B.log" | grep -v '\] skip ' || true
 python3 -c "print(f'npm ${npm_args[0]}: {($t1-$t0)/1e9:.2f}s   matchapack: {($t2-$t1)/1e9:.2f}s')" 2>/dev/null || true
+# The second line of each `times` output: the children's user and system
+# time, as 1m2.345s (a comma where the locale has one).
+python3 - "$work" "${npm_args[0]}" <<'EOF' 2>/dev/null || true
+import re, sys
+w, cmd = sys.argv[1:3]
+def cpu(n):
+    f = open(f"{w}/.cpu{n}").read().splitlines()[1].replace(",", ".").split()
+    return sum(int(m) * 60 + float(s) for m, s in (re.fullmatch(r"(\d+)m([\d.]+)s", x).groups() for x in f))
+c0, c1, c2 = cpu(0), cpu(1), cpu(2)
+print(f"cpu (user+sys): npm {cmd} {c1 - c0:.2f}s   matchapack {c2 - c1:.2f}s")
+EOF
 if [ -n "${MATCHAPACK_VERIFY_NPM_DAMAGE:-}" ]; then
   (cd "$work/B" && sh -c "$MATCHAPACK_VERIFY_NPM_DAMAGE") || { echo "MATCHAPACK_VERIFY_NPM_DAMAGE failed"; exit 1; }
   echo "B damaged on purpose (MATCHAPACK_VERIFY_NPM_DAMAGE)"

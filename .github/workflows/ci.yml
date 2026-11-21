@@ -44,6 +44,22 @@ jobs:
         run: |
           sudo apt-get install -y -qq fish zsh >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq fish zsh >/dev/null; }
           MATCHAPACK_BIN=target/release/matchapack bash scripts/test-shells.sh --real
+      - name: hand-over to npm where nothing can be cloned (the runner's ext4; the store on another filesystem)
+        # fixtures/small, `matchapack npm ci` against plain npm ci
+        # (scripts/handover-test.sh): store and projects on ext4 (no
+        # reflinks); then the store on a small loop-mounted btrfs and the
+        # projects on ext4 (EXDEV), empty and then filled from a project on
+        # that btrfs.
+        env:
+          npm_config_cache: ${{ runner.temp }}/handover/npm-cache
+        run: |
+          h=$RUNNER_TEMP/handover
+          scripts/btrfs-scratch.sh "$h/btrfs" 2G
+          echo "::group::store and projects on ext4"; s1=0; scripts/handover-test.sh "$h/ext4" "$h/ext4-store" || s1=$?; echo "::endgroup::"
+          echo "::group::store on btrfs (empty), projects on ext4"; s2=0; scripts/handover-test.sh "$h/exdev" "$h/btrfs/store" || s2=$?; echo "::endgroup::"
+          echo "::group::store on btrfs (filled there first), projects on ext4"; s3=0; scripts/handover-test.sh "$h/exdev-warm" "$h/btrfs/store-warm" "$h/btrfs/fill" || s3=$?; echo "::endgroup::"
+          echo "ext4: $s1, EXDEV with an empty store: $s2, EXDEV with a filled store: $s3"
+          [ "$s1$s2$s3" = 000 ]
 
   linux-npm:
     # The npm suites on Linux, one pinned npm per supported line, with the

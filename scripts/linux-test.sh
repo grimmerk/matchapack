@@ -81,22 +81,16 @@ run_fs xfs
 
 # Where the filesystem cannot clone, the first refused clone stops cloning
 # (clone-unsupported) and npm extracts every package itself: the install
-# succeeds, says so, and the tree is npm ci's (verify.sh, no clones expected).
+# succeeds, says so, and the tree is npm ci's; an existing node_modules is
+# npm's to replace (scripts/handover-test.sh, which PR CI also runs on the
+# runner's ext4).
 neg() { # name store
-  local out rc=0
-  mkdir -p /neg/src-$1 && cp /src/fixtures/small/package.json /src/fixtures/small/package-lock.json /neg/src-$1/
-  out=$(env -u MATCHAPACK_ENGINE MATCHAPACK_STORE=$2 npm_config_cache=/mnt/btrfs/npmcache MATCHAPACK_VERIFY_CLONES=none \
-    /build/src/scripts/verify.sh /neg/src-$1 /neg/v-$1 2>&1) || rc=$?
-  grep -E 'RESULT|no clones from the store|inject:|cloned' <<<"$out" || true
-  if [ $rc = 0 ] && grep -q 'no clones from the store here, npm extracted the packages itself (clone-unsupported' <<<"$out"; then
-    echo "npm extracted every package, as expected; files: $(find /neg/v-$1/B/node_modules -type f | wc -l)"
-  else
-    echo "NEGATIVE TEST FAILED ($1, status $rc)"; failures=$((failures+1))
-  fi
+  filtered 'PASS|FAIL|RESULT|no clones from the store|projects:' \
+    env npm_config_cache=/mnt/btrfs/npmcache /build/src/scripts/handover-test.sh "/neg/$1" "$2"
 }
 log "negative: store and project on overlayfs (no reflink): npm extracts, the tree is npm ci's"
 neg overlay /neg/store
-log "negative: store on btrfs, project on overlayfs (cross-device): npm extracts, the tree is npm ci's"
+log "negative: store on btrfs (filled above), project on overlayfs (cross-device): npm extracts, the tree is npm ci's"
 neg crossdev /mnt/btrfs/store
 log "checks failed: $failures"
 [ "$failures" -eq 0 ]
