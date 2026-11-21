@@ -30,6 +30,12 @@ npm i -g matchapack
 cargo install matchapack --locked
 ```
 
+The install script appends its PATH line to the end of your startup files.
+If one of them already has matchapack's init line (from a Homebrew, npm or
+cargo install), move that line below the one the script added: otherwise,
+once that other install is gone, it runs before `~/.matchapack/bin` is on
+PATH, and matchapack silently stops routing npm and Yarn.
+
 With nvm or fnm, a global npm package belongs to the Node version that was
 active: after you switch versions, `matchapack` is not on PATH until you
 install it there too (Homebrew and the install script do not depend on the
