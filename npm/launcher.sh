@@ -43,15 +43,19 @@ esac
 # link it made in a bin directory: <prefix>/bin for a global install (to
 # ../lib/node_modules/matchapack/bin/matchapack), node_modules/.bin for a
 # local one or npx (to ../matchapack/bin/matchapack). Those two layouts are
-# tried as fixed paths; any other link is followed with readlink.
+# tried as fixed paths, each only when the link really leads to that
+# package's launcher (`-ef`: the same file, in the test builtin of bash, dash
+# and busybox), so a link to another install, a newer one elsewhere, never
+# runs a package that merely sits next to it. Any other link is followed
+# with readlink.
 self=$0
 case $self in */*) ;; *) self=./$self ;; esac
 bin=native/$plat/matchapack
 if [ ! -L "$self" ]; then
   pkg=${self%/*}/..
-elif [ -f "${self%/*}/../lib/node_modules/matchapack/$bin" ]; then
+elif [ "$self" -ef "${self%/*}/../lib/node_modules/matchapack/bin/matchapack" ]; then
   pkg=${self%/*}/../lib/node_modules/matchapack
-elif [ -f "${self%/*}/../matchapack/$bin" ]; then
+elif [ "$self" -ef "${self%/*}/../matchapack/bin/matchapack" ]; then
   pkg=${self%/*}/../matchapack
 else
   # At most 40 links, as the kernel allows, so that a loop cannot hang.
