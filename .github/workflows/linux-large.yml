@@ -1,0 +1,129 @@
+# A large real repository on Linux (#17, #52): plain `npm ci` against
+# matchapack on btrfs and on XFS (reflink=1), each on a loop-mounted image
+# as large as the runner's free disk allows. scripts/large-repo.sh runs
+# scripts/verify.sh twice (an empty store, then the warm store into fresh
+# copies: one more worktree) and writes a table to the run's summary: wall
+# and CPU time of both sides, the tree checks, the files sharing blocks
+# with the store, and the disk each tree takes.
+#
+# The project: zwave-js/zwave-js-ui (MIT) at a pinned commit, the whole
+# source tree from GitHub's tarball. Root package-lock.json, lockfileVersion
+# 3, 1,686 entries (about 1,600 apply to linux-x64); a native addon with an
+# install script (@serialport/bindings-cpp: node-gyp-build loads its
+# bundled prebuild), esbuild's and docsify's postinstall; no root install
+# scripts, no workspaces, no .npmrc. Another repository or commit can be
+# given when the workflow is started by hand.
+#
+# Minutes: several per filesystem (Linux only; never macOS, which bills 10x
+# on this private repository). So it runs by hand, and on a pull request
+# only when this file, the script or the helpers it relies on change.
+name: linux-large
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "GitHub repository (owner/name); default zwave-js/zwave-js-ui"
+        required: false
+        default: ""
+      commit:
+        description: "Full commit SHA in that repository; default the pinned one"
+        required: false
+        default: ""
+      dir:
+        description: "Directory of the project inside the repository (holds package-lock.json)"
+        required: false
+        default: "."
+  pull_request:
+    paths:
+      - .github/workflows/linux-large.yml
+      - scripts/large-repo.sh
+      - scripts/btrfs-scratch.sh
+      - scripts/shared-blocks.py
+concurrency:
+  group: linux-large-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+
+jobs:
+  large:
+    name: linux-large (${{ matrix.fs }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [btrfs, xfs]
+    env:
+      # Inputs reach the shell through the environment, never spliced into
+      # the script text; they are checked before use.
+      REPO: ${{ inputs.repo || 'zwave-js/zwave-js-ui' }}
+      COMMIT: ${{ inputs.commit || '7af2ab653895641744179323c7ee1c5707fd4363' }}
+      PROJECT_DIR: ${{ inputs.dir || '.' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: inputs
+        run: |
+          [[ $REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "not a repository: $REPO"; exit 1; }
+          [[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || { echo "not a full commit SHA: $COMMIT"; exit 1; }
+          [[ $PROJECT_DIR =~ ^[A-Za-z0-9_./-]+$ && ! $PROJECT_DIR =~ (^|/)\.\.(/|$) ]] || { echo "not a directory inside the repository: $PROJECT_DIR"; exit 1; }
+          echo "$REPO@$COMMIT, project in $PROJECT_DIR"
+      - name: free disk, and the image size
+        # The image goes on the filesystem with the most free space (the
+        # runner's root, or its temporary disk at /mnt), with 4 GiB left for
+        # the build and the system. Sparse: blocks are used as written.
+        run: |
+          df -h / /mnt "$RUNNER_TEMP" || true
+          nproc; free -h
+          best=; best_kb=0
+          for d in "$RUNNER_TEMP" /mnt; do
+            kb=$(df -Pk "$d" 2>/dev/null | awk 'NR==2 {print $4}') || continue
+            [ -n "$kb" ] && [ "$kb" -gt "$best_kb" ] && { best=$d; best_kb=$kb; }
+          done
+          gib=$(( best_kb / 1048576 - 4 ))
+          [ "$gib" -ge 8 ] || { echo "only $(( best_kb / 1048576 )) GiB free on $best"; exit 1; }
+          if [ "$best" = /mnt ]; then sudo mkdir -p /mnt/matchapack && sudo chown "$(id -u):$(id -g)" /mnt/matchapack; base=/mnt/matchapack; else base=$RUNNER_TEMP; fi
+          echo "image: ${gib} GiB on $best ($(( best_kb / 1048576 )) GiB free)"
+          echo "IMG_GIB=$gib" >> "$GITHUB_ENV"
+          echo "MNT=$base/large-${{ matrix.fs }}" >> "$GITHUB_ENV"
+          echo "- runner disk: $(( best_kb / 1048576 )) GiB free on $best; ${{ matrix.fs }} image ${gib} GiB" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          # As ci.yml; npm is the one bundled with this Node (the project
+          # names no npm version).
+          node-version: 24.22.1
+      - name: build
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo build --release
+      - name: ${{ matrix.fs }} on a loop device
+        run: scripts/btrfs-scratch.sh "$MNT" "${IMG_GIB}G" "${{ matrix.fs }}"
+      - name: the project's source at the pinned commit
+        run: |
+          mkdir -p "$MNT/src"
+          curl -fsSL --retry 3 "https://codeload.github.com/$REPO/tar.gz/$COMMIT" | tar -xz -C "$MNT/src" --strip-components=1
+          echo "PROJECT=$MNT/src/$PROJECT_DIR" >> "$GITHUB_ENV"
+          du -sh "$MNT/src"
+      - name: plain npm ci vs matchapack, empty store then warm store (large-repo.sh)
+        env:
+          LARGE_LABEL: ${{ matrix.fs }}
+        run: scripts/large-repo.sh "$MNT/w" "$PROJECT"
+      - name: free space left
+        if: always()
+        run: df -h "$MNT" / /mnt || true
+      - name: logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-large-${{ matrix.fs }}-logs
+          path: |
+            ${{ env.MNT }}/w/*.out
+            ${{ env.MNT }}/w/*.log
+            ${{ env.MNT }}/w/run*/*.log
+            ${{ env.MNT }}/w/run*/diff.txt
+            ${{ env.MNT }}/w/run*/meta.txt
+            ${{ env.MNT }}/w/run*/logs/
+          if-no-files-found: ignore
+          retention-days: 7
