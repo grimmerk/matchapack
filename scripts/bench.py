@@ -47,7 +47,7 @@ PROJECTS = {
         "commit": "7af2ab653895641744179323c7ee1c5707fd4363",
         "dir": ".",
         "about": "one package, 1,686 lockfile entries; the project of the Linux CI job (linux-large.yml)",
-        "est_gib": 6.0,
+        "est_gib": 5.0,
     },
     "large": {
         "kind": "npm",
@@ -55,7 +55,7 @@ PROJECTS = {
         "commit": "90cf89255c213c9acdafc0a00d458eff989a9470",
         "dir": "superset-frontend",
         "about": "an npm workspaces monorepo, 2,921 lockfile entries",
-        "est_gib": 12.0,
+        "est_gib": 14.0,
     },
     "yarn": {
         "kind": "yarn",
@@ -368,14 +368,60 @@ def sentinels():
     return out
 
 
-def sentinel_changes(a, b):
-    return [f"{k}: newest entry now {b[k]['path'] if b[k] else '(gone)'} at "
-            f"{datetime.datetime.fromtimestamp(b[k]['mtime']).isoformat(timespec='seconds') if b[k] else '-'}"
-            for k in a if a[k] != b.get(k)]
+def sentinel_changes(a, b, since):
+    """What changed, with up to 10 of the entries written since `since`
+    (another process may have written them: the times tell)."""
+    out = []
+    for k in a:
+        if a[k] == b.get(k):
+            continue
+        if not b.get(k):
+            out.append(f"{k}: gone")
+            continue
+        root = os.path.expanduser(k)
+        newer = []
+        for d, dirs, names in os.walk(root):
+            for x in dirs + names:
+                p = os.path.join(d, x)
+                try:
+                    m = os.lstat(p).st_mtime
+                except OSError:
+                    continue
+                if m > since:
+                    newer.append((m, p))
+            if len(newer) > 200:
+                break
+        newer.sort()
+        listed = ", ".join(f"{p} ({datetime.datetime.fromtimestamp(m).isoformat(timespec='seconds')})" for m, p in newer[:10])
+        out.append(f"{k}: {len(newer)}{'+' if len(newer) > 200 else ''} entries written since the start: {listed}")
+    return out
 
 
 def top_cpu():
     return out_of(["/bin/ps", "-Ao", "pcpu,comm", "-r"]).splitlines()[:11]
+
+
+SPOTLIGHT = ("mds", "mds_stores", "mdworker", "mdworker_shared", "mdsync", "corespotlightd")
+
+
+def noise():
+    """CPU of other processes when a run starts (ps's %CPU, a recent
+    average): Spotlight's indexers, a virtual machine, the top five."""
+    rows = []
+    for line in out_of(["/bin/ps", "-Ao", "pcpu,comm"]).splitlines()[1:]:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            rows.append((float(parts[0]), os.path.basename(parts[1])))
+        except ValueError:
+            continue
+    rows.sort(reverse=True)
+    return {
+        "spotlight_pcpu": round(sum(pc for pc, c in rows if c in SPOTLIGHT), 1),
+        "vm_pcpu": round(sum(pc for pc, c in rows if "Virtualization.VirtualMachine" in c), 1),
+        "top": [f"{pc:.1f} {c}" for pc, c in rows[:5]],
+    }
 
 
 def free_bytes(path):
@@ -527,12 +573,15 @@ class Bench:
         if self.a.settle:
             time.sleep(self.a.settle)
         waited = 0.0
-        while os.getloadavg()[0] > self.a.load_max and waited < self.a.load_wait:
+        # Up to --load-wait seconds for the load to fall and Spotlight to
+        # go quiet; then the run starts anyway and is flagged.
+        while waited < self.a.load_wait and (os.getloadavg()[0] > self.a.load_max or noise()["spotlight_pcpu"] >= 25):
             time.sleep(5)
             waited += 5
         log = self.log(project, case, f"r{rnd}", side)
         mplog = self.w.p("mp", "log", "log.jsonl")
         mp_before = os.path.getsize(mplog) if os.path.exists(mplog) else 0
+        busy = noise()
         load0 = os.getloadavg()
         r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
         t0 = time.monotonic()
@@ -545,7 +594,7 @@ class Bench:
             "side": side, "order": order, "wall_s": round(t1 - t0, 3),
             "cpu_user_s": round(r1.ru_utime - r0.ru_utime, 3), "cpu_sys_s": round(r1.ru_stime - r0.ru_stime, 3),
             "load_start": [round(x, 2) for x in load0], "load_end": [round(x, 2) for x in load1],
-            "load_flag": load0[0] > self.a.load_max, "load_waited_s": waited, "exit": rc,
+            "load_flag": load0[0] > self.a.load_max, "load_waited_s": waited, "exit": rc, "noise": busy,
             "cmd": cmd, "log": os.path.relpath(log, self.w.root),
         }
         if side == "matchapack":
@@ -560,8 +609,9 @@ class Bench:
         m = rec.get("mp_log") or {}
         if m:
             clones = f" [{m.get('outcome')}, cloned {m.get('cloned')}]"
+        spot = f" spotlight {busy['spotlight_pcpu']:.0f}%" if busy["spotlight_pcpu"] >= 25 else ""
         say(f"  {case} r{rnd} {side}: {rec['wall_s']:.2f}s wall, cpu {rec['cpu_user_s']:.1f}+{rec['cpu_sys_s']:.1f}s, "
-            f"load {load0[0]:.1f}->{load1[0]:.1f}{flag}{bad}{clones}")
+            f"load {load0[0]:.1f}->{load1[0]:.1f}{flag}{spot}{bad}{clones}")
         if rc != 0:
             self.failures += 1
         return rec
@@ -909,7 +959,19 @@ def summary(w, bench_id, fill_npm, smoke):
                      f"(about {n:.0f} worktrees for the disk of one plain copy). 10 worktrees: plain {human(10 * p)}; "
                      f"matchapack {human(10 * q)} plus the {'store' if projects[pname]['kind'] == 'npm' else 'Yarn cache'} once ({human(src)}).")
     L.append("")
-    L += ["## Machine noise", "", "Top CPU users at the start (`ps -Ao pcpu,comm -r`; nothing was stopped):", "", "```"]
+    L += ["## Machine noise", "",
+          "Per run, at its start (`ps` %CPU, a recent average): Spotlight's indexers (mds, mds_stores, mdworker, ...) and a virtual "
+          "machine (com.apple.Virtualization.VirtualMachine); every run's top five are in runs.jsonl (`noise`).", "",
+          "| Project | Case | Runs | Load above the limit | Spotlight ≥ 25 % | Spotlight %, median (max) | VM %, median (max) |",
+          "|---|---|---|---|---|---|---|"]
+    for pname, case in keys:
+        rs = [r for r in runs if r["project"] == pname and r["case"] == case]
+        sp = [r.get("noise", {}).get("spotlight_pcpu", 0.0) for r in rs]
+        vm = [r.get("noise", {}).get("vm_pcpu", 0.0) for r in rs]
+        if rs:
+            L.append(f"| {pname} | {case} | {len(rs)} | {sum(1 for r in rs if r.get('load_flag'))} | {sum(1 for x in sp if x >= 25)} | "
+                     f"{statistics.median(sp):.0f} ({max(sp):.0f}) | {statistics.median(vm):.0f} ({max(vm):.0f}) |")
+    L += ["", "Top CPU users at the start of the benchmark (`ps -Ao pcpu,comm -r`; nothing was stopped):", "", "```"]
     L += (metas[0].get("top_cpu", []) if metas else []) + ["```", ""]
     sent = [r for r in read_lines(w.p("results", "sentinels.jsonl")) if r.get("bench_id") == bench_id]
     if sent:
@@ -932,7 +994,10 @@ def main():
     ap.add_argument("--load-wait", type=float, default=60, help="seconds to wait for the load to fall below --load-max before a run (then it runs anyway)")
     ap.add_argument("--settle", type=float, default=10, help="seconds to wait before each timed run")
     ap.add_argument("--timeout", type=float, default=1800, help="seconds per install before it is killed")
-    ap.add_argument("--fill-npm", default="10.9.10", help="the npm that fills the store of the first-use case")
+    # 11.10.1: another extraction code than 11.19 (pacote 21.3.1, its own
+    # fingerprint), and an npm 11 accepts the large project's lockfile
+    # (npm 10.9.10 refuses it as out of sync).
+    ap.add_argument("--fill-npm", default="11.10.1", help="the npm that fills the store of the first-use case")
     ap.add_argument("--margin-gib", type=float, default=20, help="free space to keep beyond the estimate")
     ap.add_argument("--bench-id", default=None, help="name of this benchmark; the same name resumes it (default: a new one)")
     ap.add_argument("--smoke", action="store_true", help="mark the summary as a smoke test")
@@ -1008,6 +1073,7 @@ def main():
         die(f"yarn on PATH is {m['yarn']}, not Yarn 1")
     if not root.endswith(".noindex"):
         say("note: a work directory whose name ends in .noindex is not indexed by Spotlight (less noise)")
+    started = time.time()
     s0 = sentinels()
     top = top_cpu()
     say(f"bench {a.bench_id} in {root}")
@@ -1042,7 +1108,7 @@ def main():
         interrupted = str(e) or "interrupted"
         say(f"stopped ({interrupted}); runs recorded so far are kept; the same --bench-id {a.bench_id} resumes")
     s1 = sentinels()
-    changed = sentinel_changes(s0, s1)
+    changed = sentinel_changes(s0, s1, started)
     append_line(w.p("results", "sentinels.jsonl"), {"bench_id": a.bench_id, "when": "end", "ts": time.time(), "state": s1, "changed": changed})
     write_atomic(w.p("results", "summary.md"), summary(w, a.bench_id, a.fill_npm, a.smoke))
     say(f"elapsed {(time.monotonic() - t0) / 3600:.2f} h; results in {w.p('results')} (summary.md, runs.jsonl)")

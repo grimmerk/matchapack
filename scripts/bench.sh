@@ -13,7 +13,7 @@
 # large = apache/superset's superset-frontend (npm workspaces); yarn =
 # cornerstonejs/cornerstone3D (Yarn 1 workspaces, --ignore-scripts).
 # npm cases: empty store; first use per npm version (store filled by
-# another npm, --fill-npm, default 10.9.10); a fresh worktree with a warm
+# another npm, --fill-npm, default 11.10.1); a fresh worktree with a warm
 # store; a reinstall over node_modules. Yarn 1 cases: empty Yarn cache; a
 # fresh worktree with a warm cache; already installed; an incremental
 # install after a real lockfile bump.
@@ -29,9 +29,14 @@
 # ~/.cache/matchapack, ~/.config/matchapack, ~/.npm and Yarn's cache are
 # checked before and after (exit 4 when changed).
 #
-# Unattended: runs under `caffeinate -i` (no idle sleep while it runs; the
-# lid must stay open). --ac uses `caffeinate -s` instead, which keeps the
-# Mac awake with the lid closed too, but only on AC power. A timeout per
+# Unattended: runs under `caffeinate -i` (no idle sleep while it runs).
+# --ac uses `caffeinate -s` instead (no system sleep, on AC power only).
+# Neither keeps a MacBook awake with its lid closed (no external display):
+# leave the lid open. Noise: each run records the load average and the CPU
+# of Spotlight's indexers and of a virtual machine at its start, and waits
+# (--load-wait, default 60 s) for the load to fall below --load-max and
+# Spotlight to go quiet; a run that starts anyway is flagged. A DIR whose
+# name ends in .noindex is not indexed by Spotlight. A timeout per
 # install (--timeout, default 1800 s); every timed run is one JSON line,
 # written whole; the same --bench-id resumes an interrupted run. While it
 # runs, /tmp/matchapack-bench-running holds its pid, for other agents on
