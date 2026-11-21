@@ -249,7 +249,11 @@ In detail:
 - Root `predependencies` / `dependencies` / `postdependencies` scripts run, as
   in `npm ci`.
 - Linux works the same way, with per-file clones (checked on btrfs and XFS in
-  Docker, `scripts/linux-test.sh`).
+  Docker, `scripts/linux-test.sh`; on a GitHub runner, a 1,686-package
+  repository on both, `.github/workflows/linux-large.yml`). Where nothing
+  can be cloned (ext4, or store and project on two filesystems) npm
+  extracts every package itself and matchapack says so (`ci.yml`,
+  `scripts/handover-test.sh`).
 
 `npm install`, `npm update` and `npm uninstall` run through the same engine
 (NOTES, "The install family"): npm decides what to add, change or remove,
