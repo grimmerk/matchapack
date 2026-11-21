@@ -524,17 +524,22 @@ free_tty=$(tty_init "$free_path")
 taken_tty=$(tty_init "$work/mp-on-path:$free_path")
 none_tty=$(tty_init "$free_path" --no-alias)
 [ -z "$piped" ] && printf '%s\n' "$ls_tty" | grep -q '`ls` will NOT be defined: `ls` is already .* on PATH' \
-  && printf '%s\n' "$ls_tty" | grep -q '^command -v ls >/dev/null 2>&1 || alias ls=matchapack' \
+  && printf '%s\n' "$ls_tty" | grep -qF 'command -v ls >/dev/null 2>&1 || function ls { matchapack "$@"; }' \
   && printf '%s\n' "$free_tty" | grep -q '`mp` will be a short name for matchapack' \
   && printf '%s\n' "$taken_tty" | grep -q "\`mp\` will NOT be defined: \`mp\` is already $work/mp-on-path/mp on PATH" \
-  && printf '%s\n' "$none_tty" | grep -q 'no short name for matchapack (--no-alias)' && ! printf '%s\n' "$none_tty" | grep -q 'alias mp' && r=ok || r=bad
+  && printf '%s\n' "$none_tty" | grep -q 'no short name for matchapack (--no-alias)' && ! printf '%s\n' "$none_tty" | grep -q 'function mp' && r=ok || r=bad
 check init-alias-report "init: nothing on stderr from an rc line; by hand, whether the short name will be defined (ls and mp on PATH: no; mp free: yes; --no-alias)" $r "$work/none"
 
 # 26. The short name in zsh and bash with the real binary, from the README's
 # rc line: `mp` runs matchapack when the name is free; an `mp` on PATH, or
 # an alias or function of the user's own defined before the line, stays
-# theirs; --alias other defines `other` and no `mp`; --no-alias none. bash
-# expands aliases in interactive shells or with expand_aliases, and only in
+# theirs; --alias other defines `other` and no `mp`; --no-alias none. A
+# startup file that defines `mp() { … }` AFTER the line: no error, the rest
+# of the file runs, `mp` is the user's, `matchapack` still the command (with
+# an alias `mp`, zsh stopped the file at a parse error and bash defined a
+# function called matchapack). That case sources a real file: zsh parses a
+# whole -c string before running it, a file line by line. bash expands
+# aliases in interactive shells or with expand_aliases, and only in
 # commands parsed after the definition (hence the newline and eval).
 for sh in zsh bash; do
   ea=; [ "$sh" = bash ] && ea='shopt -s expand_aliases; '
@@ -550,11 +555,18 @@ $3" 2>&1; fi; }
   own_func=$(short "$free_path" "mp() { echo FUNC \"\$@\"; }; $(line)" "eval 'mp x'")
   other=$(short "$free_path" "$(line --alias other)" "eval 'other --version'; $isdef")
   none=$(short "$free_path" "$(line --no-alias)" "$isdef")
+  rcfile=$work/short-name-later.$sh; printf '%s\nmp() { echo mine; }\necho MARKER\n' "$(line)" > "$rcfile"
+  if [ "$sh" = zsh ]; then later=$(short "$free_path" "source '$rcfile'" "mp; whence -w matchapack"); want_later="MARKER
+mine
+matchapack: command"
+  else later=$(short "$free_path" "source '$rcfile'" "mp; type -t matchapack"); want_later="MARKER
+mine
+file"; fi
   case $free in "matchapack "*) ;; *) free=bad ;; esac
   [ "$free" != bad ] && [ "$path" = "MP-ON-PATH x" ] && [ "$own_alias" = "MINE x" ] && [ "$own_func" = "FUNC x" ] \
-    && printf '%s\n' "$other" | head -1 | grep -q '^matchapack ' && [ "$(printf '%s\n' "$other" | tail -1)" = none ] && [ "$none" = none ] && r=ok || r=bad
-  [ "$r" = ok ] || printf '    free [%s] path [%s] alias [%s] function [%s] other [%s] none [%s]\n' "$free" "$path" "$own_alias" "$own_func" "$other" "$none"
-  check "init-short-name-$sh" "$sh: mp is matchapack when free; an mp on PATH, an alias or a function of the user's own stays theirs; --alias other; --no-alias" $r "$work/none"
+    && printf '%s\n' "$other" | head -1 | grep -q '^matchapack ' && [ "$(printf '%s\n' "$other" | tail -1)" = none ] && [ "$none" = none ] && [ "$later" = "$want_later" ] && r=ok || r=bad
+  [ "$r" = ok ] || printf '    free [%s] path [%s] alias [%s] function [%s] other [%s] none [%s] later [%s]\n' "$free" "$path" "$own_alias" "$own_func" "$other" "$none" "$later"
+  check "init-short-name-$sh" "$sh: mp is matchapack when free; an mp on PATH, an alias or a function of the user's own stays theirs; a later mp() replaces ours without error; --alias other; --no-alias" $r "$work/none"
 done
 
 echo "== $pass passed, $fail failed"

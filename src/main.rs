@@ -89,8 +89,8 @@ enum Cmd {
     /// Without SHELL, the shell that runs the command (the parent process) is
     /// used; name it to be explicit.
     ///
-    /// It also defines `mp` as a short name for matchapack (an alias in zsh
-    /// and bash, a function in fish: `mp npm ci`, `mp store gc`), but only
+    /// It also defines `mp` as a short name for matchapack (a shell
+    /// function: `mp npm ci`, `mp store gc`), but only
     /// when nothing of that name exists yet (an alias, function, builtin or
     /// command on PATH), checked at every shell start. --alias NAME picks
     /// another name, --no-alias none. Run by hand on a terminal, it says
@@ -389,21 +389,20 @@ const DEFAULT_ALIAS: &str = "mp";
 /// that name exists when it runs; of those, matchapack can see a command on
 /// PATH, not the shell's own aliases and functions, so for those it names
 /// the command that shows them.
-fn alias_report(name: Option<&str>, shell: &str, tty: bool) -> Option<String> {
+fn alias_report(name: Option<&str>, tty: bool) -> Option<String> {
     if !tty {
         return None;
     }
     let Some(name) = name else {
         return Some("matchapack init: no short name for matchapack (--no-alias); run it as `matchapack`".to_string());
     };
-    let kind = if shell == "fish" { "function" } else { "alias" };
     Some(match on_path(name) {
         Some(p) => format!(
             "matchapack init: `{name}` will NOT be defined: `{name}` is already {} on PATH, and the short name is defined only when the name is free. Run matchapack as `matchapack`, or pick another name with --alias NAME.",
             p.display()
         ),
         None => format!(
-            "matchapack init: `{name}` will be a short name for matchapack ({kind}; `{name} npm ci`, `{name} store gc`), unless an alias or function named `{name}` already exists when this line runs; `type {name}` shows what `{name}` is now."
+            "matchapack init: `{name}` will be a short name for matchapack (a shell function: `{name} npm ci`, `{name} store gc`), unless an alias or function named `{name}` already exists when this line runs; `type {name}` shows what `{name}` is now."
         ),
     })
 }
@@ -501,7 +500,7 @@ fn main() -> Result<()> {
             let refused = name.as_deref().and_then(|n| check_alias(n, &shell).err());
             if refused.is_none() {
                 use std::io::IsTerminal;
-                if let Some(r) = alias_report(name.as_deref(), &shell, std::io::stdout().is_terminal()) {
+                if let Some(r) = alias_report(name.as_deref(), std::io::stdout().is_terminal()) {
                     eprintln!("{r}");
                 }
             }
@@ -713,13 +712,12 @@ mod tests {
     /// shell has its own; --no-alias says so.
     #[test]
     fn alias_report_only_on_a_terminal() {
-        assert!(alias_report(Some("ls"), "zsh", true).is_some_and(|w| w.contains("`ls` will NOT be defined") && w.contains("/ls on PATH")));
-        let free = alias_report(Some("matchapack-no-such-command-x"), "fish", true).unwrap();
-        assert!(free.contains("will be a short name") && free.contains("(function;") && free.contains("`type matchapack-no-such-command-x`"), "{free}");
-        assert!(alias_report(Some("matchapack-no-such-command-x"), "bash", true).is_some_and(|w| w.contains("(alias;")));
-        assert!(alias_report(None, "zsh", true).is_some_and(|w| w.contains("--no-alias")));
-        assert_eq!(alias_report(Some("ls"), "zsh", false), None);
-        assert_eq!(alias_report(None, "zsh", false), None);
+        assert!(alias_report(Some("ls"), true).is_some_and(|w| w.contains("`ls` will NOT be defined") && w.contains("/ls on PATH")));
+        let free = alias_report(Some("matchapack-no-such-command-x"), true).unwrap();
+        assert!(free.contains("will be a short name for matchapack (a shell function:") && free.contains("`type matchapack-no-such-command-x`"), "{free}");
+        assert!(alias_report(None, true).is_some_and(|w| w.contains("--no-alias")));
+        assert_eq!(alias_report(Some("ls"), false), None);
+        assert_eq!(alias_report(None, false), None);
         assert_eq!(DEFAULT_ALIAS, "mp");
     }
 
@@ -742,7 +740,7 @@ mod tests {
             for mac in [true, false] {
                 let plain = init_script(sh, mac, None);
                 let with = init_script(sh, mac, Some("mp"));
-                assert!(!plain.contains("__MATCHAPACK_ALIAS__") && !plain.contains("--wraps matchapack") && !plain.lines().any(|l| l.starts_with("alias ")) && !plain.contains("alias mp"), "{sh}: no alias with --no-alias");
+                assert!(!plain.contains("__MATCHAPACK_ALIAS__") && !plain.contains("--wraps matchapack") && !plain.lines().any(|l| l.starts_with("alias ")) && !plain.contains("alias mp") && !plain.contains("function mp"), "{sh}: no alias with --no-alias");
                 assert!(with.starts_with(&plain), "{sh}: the alias comes after the functions");
                 let added = &with[plain.len()..];
                 assert!(!added.contains("__MATCHAPACK_ALIAS__"), "{sh}: placeholder replaced");
@@ -751,8 +749,9 @@ mod tests {
                     // Defined only when the name is free (`type -q`: function, builtin, command).
                     assert_eq!(def, ["type -q mp; or function mp --wraps matchapack --description 'matchapack'", "    matchapack $argv", "end"]);
                 } else {
-                    // Defined only when the name is free (`command -v`: alias, function, builtin, command).
-                    assert_eq!(def, ["command -v mp >/dev/null 2>&1 || alias mp=matchapack"]);
+                    // Defined only when the name is free (`command -v`: alias, function, builtin, command);
+                    // a function, with the `function` keyword (see shell/matchapack-alias.sh).
+                    assert_eq!(def, ["command -v mp >/dev/null 2>&1 || function mp { matchapack \"$@\"; }"]);
                 }
             }
         }
