@@ -5,7 +5,7 @@ A release is a signed version tag. Pushing it runs `.github/workflows/release.ym
 | Channel | What users run | Published by |
 |---|---|---|
 | GitHub Release | archives for 4 platforms, `matchapack-installer.sh` | release.yml (`host` job) |
-| Shell installer | `curl … matchapack-installer.sh \| sh` (puts the binary in `~/.local/bin`) | the GitHub Release |
+| Shell installer | `curl … matchapack-installer.sh \| sh` (puts the binary in `~/.matchapack/bin`) | the GitHub Release |
 | Homebrew | `brew install grimmerk/tap/matchapack` | release.yml (`publish-homebrew-formula`), a commit to `grimmerk/homebrew-tap` |
 | crates.io | `cargo install matchapack --locked` | `publish-crates.yml`, called by release.yml |
 | npm | `npm i -g matchapack` | `publish-npm.yml`, called by release.yml |
@@ -62,7 +62,7 @@ Every binary must print the tag's version and its commit: `matchapack 0.1.0 (<sh
   "$d/matchapack" --version
   ```
 
-  A normal install puts the binary in `~/.local/bin`. When that is not on `PATH`, it also writes `~/.config/matchapack/env.sh` and `env.fish`, appends a line that loads them to `~/.profile`, `~/.bashrc`, `~/.zshrc` (and the other startup files it finds), and writes `~/.config/fish/conf.d/matchapack.env.fish`; and it keeps its receipt, `~/.config/matchapack/matchapack-receipt.json`. Its last message asks the user to put matchapack's init line at the end of the startup file, below that PATH line.
+  A normal install puts the binary in `~/.matchapack/bin`, a directory of its own (not `~/.local/bin`: dist 0.33+ migrates an old dist `env` script found in the install directory, and in a shared directory that could be another tool's, whose source lines in the startup files it would then rewrite to load matchapack's script). Unless that directory is already on `PATH`, it also writes `~/.config/matchapack/env.sh` and `env.fish`, appends `. "$HOME/.config/matchapack/env.sh"` to `~/.profile`, to each of `~/.bashrc`, `~/.bash_profile` and `~/.bash_login` that exists, and to `~/.zshrc` (or `~/.zshenv`; it creates `~/.zshrc` when neither exists), and writes `~/.config/fish/conf.d/matchapack.env.fish`. It keeps its receipt in `~/.config/matchapack/matchapack-receipt.json`. Its last message asks the user to put matchapack's init line at the end of the startup file, below that PATH line.
 - **Homebrew:** `brew update && brew install grimmerk/tap/matchapack && matchapack --version` (and `brew upgrade matchapack` on a machine with the previous version). The formula commit is in `grimmerk/homebrew-tap`.
 - **crates.io:** `curl -s -o /dev/null -w '%{http_code}\n' -A 'matchapack-release-check' https://crates.io/api/v1/crates/matchapack/0.1.0` prints 200; `cargo install matchapack --locked --root "$(mktemp -d)"` builds.
 - **npm:** `npm view matchapack@0.1.0 dist.unpackedSize bin`, and the package page on npmjs.com shows the provenance badge. Install into a scratch prefix, with scripts off as users run it:

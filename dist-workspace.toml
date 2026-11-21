@@ -36,13 +36,21 @@ github-custom-job-permissions = { "publish-crates" = { id-token = "write", conte
 # RHEL 9 and Amazon Linux 2023). linux-large.yml's libc job compares the
 # musl and the glibc build on a large install.
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
-# Path that the shell installer places the binary in: ~/.local/bin, which
-# many systems already have on PATH. When it is not, the installer writes
-# ~/.config/matchapack/env.sh and env.fish (next to its receipt,
-# matchapack-receipt.json: dist 0.33+ with this one-directory layout) and
-# appends a line that loads them to ~/.profile, ~/.bashrc, ~/.zshrc and so
-# on, and writes ~/.config/fish/conf.d/matchapack.env.fish.
-install-path = "~/.local/bin"
+# Path that the shell installer places the binary in: a directory of its
+# own, ~/.matchapack/bin (dist's one-directory "flat" layout). Not
+# ~/.local/bin: dist 0.33+ migrates an old dist env script in the install
+# directory, so if ~/.local/bin/env were byte-identical to one another dist
+# tool wrote there, our installer would rewrite every `. "$HOME/.local/bin/
+# env"` line in the startup files to load matchapack's env.sh and delete
+# that file, and other tools' PATH would then hang on ours. Here the only
+# file it can migrate is ~/.matchapack/bin/env. Unless the directory is
+# already on PATH, the installer writes ~/.config/matchapack/env.sh and
+# env.fish (next to its receipt, matchapack-receipt.json), appends
+# `. "$HOME/.config/matchapack/env.sh"` to ~/.profile, to each of ~/.bashrc,
+# ~/.bash_profile and ~/.bash_login that exists, and to ~/.zshrc (or
+# ~/.zshenv; it creates ~/.zshrc when neither exists), and writes
+# ~/.config/fish/conf.d/matchapack.env.fish.
+install-path = "~/.matchapack/bin"
 # Printed after the binary is in place. That PATH line is appended at the end
 # of the startup file, so matchapack's own line (which checks `command -v
 # matchapack`) must come after it. No shell syntax here: dist pastes the text
