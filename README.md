@@ -22,7 +22,7 @@ One of these (macOS on Apple silicon or Intel; Linux on x86_64 or arm64):
 ```sh
 # Homebrew
 brew install grimmerk/tap/matchapack
-# the install script (puts it in ~/.local/bin)
+# the install script (puts it in ~/.matchapack/bin and that on PATH)
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | sh
 # npm
 npm i -g matchapack
@@ -45,9 +45,11 @@ shell you use? Run `echo $0` (macOS has used zsh by default since 10.15).
 | fish | `~/.config/fish/config.fish` | `type -q matchapack; and matchapack init \| source` |
 
 It must come after the line that puts matchapack on PATH, so put it at the
-end of the file: the install script appends its PATH line at the end of the
-file, and Homebrew's `brew shellenv`, rustup's and a Node version manager's
-lines must run first too. If it comes earlier, it does nothing.
+end of the file: the install script appends its PATH line,
+`. "$HOME/.config/matchapack/env.sh"` (fish: a file in
+`~/.config/fish/conf.d`), at the end of the file, and Homebrew's `brew
+shellenv`, rustup's and a Node version manager's lines must run first too.
+If it comes earlier, it does nothing.
 `matchapack init` detects the shell that runs it; `matchapack init zsh` (or
 `bash`, `fish`) names it explicitly. The function comes from the binary, so
 no checkout of this repository is needed and it updates with the binary.
@@ -1004,9 +1006,12 @@ packages again.
   before and after. `~/.cache/matchapack/backup` (backups
   `scripts/convert-existing.sh` kept) is left for you to check and remove,
   and so are the install script's files (`env.sh`, `env.fish` and its
-  receipt in `${XDG_CONFIG_HOME:-~/.config}/matchapack`): a line in your
-  startup files loads `env.sh`, and the PATH entry it adds serves every
-  program in `~/.local/bin`. The last line says how to remove the binary,
+  receipt in `${XDG_CONFIG_HOME:-~/.config}/matchapack`, and
+  `~/.config/fish/conf.d/matchapack.env.fish`): a line the script appended
+  to your startup files loads `env.sh`, which puts `~/.matchapack/bin` on
+  PATH, and removing a file a startup file still loads prints an error at
+  every shell start. uninstall marks those lines and gives the commands to
+  remove the files once they are gone. The last line says how to remove the binary,
   from where it really is: Homebrew's Cellar, an npm package (and whether it
   belongs to one Node version), cargo's install records, the install
   script's receipt, or a plain file.

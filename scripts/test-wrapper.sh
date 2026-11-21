@@ -598,10 +598,10 @@ last_line() { env -u MATCHAPACK_STORE -u MATCHAPACK_LOG_DIR -u MATCHAPACK_CONFIG
 place "$uh/brew/Cellar/matchapack/0.1.0/bin/matchapack"; mkdir -p "$uh/brew/bin"; ln -sf ../Cellar/matchapack/0.1.0/bin/matchapack "$uh/brew/bin/matchapack"
 place "$uh/.cargo/bin/matchapack"
 printf '{"installs":{"matchapack 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)":{"bins":["matchapack"]}}}\n' > "$uh/.cargo/.crates2.json"
-place "$uh/.local/bin/matchapack"; : > "$uh/.local/bin/other-tool"
+place "$uh/.matchapack/bin/matchapack"; : > "$uh/.matchapack/bin/other-tool"
 mkdir -p "$uh/.config/matchapack"
-printf '{"install_prefix":"%s","install_layout":"flat","binaries":["matchapack"],"modify_path":true}\n' "$uh/.local/bin" > "$uh/.config/matchapack/matchapack-receipt.json"
-printf 'export PATH="$HOME/.local/bin:$PATH"\n' > "$uh/.config/matchapack/env.sh"
+printf '{"install_prefix":"%s","install_layout":"flat","binaries":["matchapack"],"modify_path":true}\n' "$uh/.matchapack/bin" > "$uh/.config/matchapack/matchapack-receipt.json"
+printf 'export PATH="$HOME/.matchapack/bin:$PATH"\n' > "$uh/.config/matchapack/env.sh"
 printf '\n. "$HOME/.config/matchapack/env.sh"\n' > "$uh/.zshrc"
 place "$uh/bin/matchapack"
 # Every path below the two homes with its size and mtime (ns).
@@ -614,15 +614,15 @@ before=$(snap)
 brew=$(last_line "$uh" "$uh/brew/bin/matchapack")
 npm_nvm=$(last_line "$work/nvm-home" "$nvm_prefix/bin/matchapack")
 cargo=$(last_line "$uh" "$uh/.cargo/bin/matchapack")
-script=$(last_line "$uh" "$uh/.local/bin/matchapack"); script_all=$(cat "$work/un.out")
+script=$(last_line "$uh" "$uh/.matchapack/bin/matchapack"); script_all=$(cat "$work/un.out")
 plain=$(last_line "$uh" "$uh/bin/matchapack")
 after=$(snap)
 [ "$brew" = "Last, the binary: $uh/brew/Cellar/matchapack/0.1.0/bin/matchapack is Homebrew's: brew uninstall matchapack" ] \
   && printf '%s\n' "$npm_nvm" | grep -qF "installed globally in Node v22.11.0 of nvm ($nvm_prefix): npm uninstall -g --prefix $nvm_prefix matchapack; a global package belongs to one Node version" \
   && [ "$cargo" = "Last, the binary: $uh/.cargo/bin/matchapack was installed by cargo install: cargo uninstall matchapack" ] \
-  && [ "$script" = "Last, the binary: $uh/.local/bin/matchapack was put there by the install script: rm $uh/.local/bin/matchapack $uh/.config/matchapack/matchapack-receipt.json (the binary, and the script's receipt)" ] \
+  && [ "$script" = "Last, the binary: $uh/.matchapack/bin/matchapack was put there by the install script: rm $uh/.matchapack/bin/matchapack $uh/.config/matchapack/matchapack-receipt.json (the binary, and the script's receipt)" ] \
   && printf '%s\n' "$script_all" | grep -qF "$uh/.zshrc:2: . \"\$HOME/.config/matchapack/env.sh\"   <- the install script's PATH line" \
-  && printf '%s\n' "$script_all" | grep -qF "also serves the other programs in $uh/.local/bin (other-tool). If you no longer want $uh/.local/bin on PATH through them: delete the marked lines first, then: rm $uh/.config/matchapack/env.sh" \
+  && printf '%s\n' "$script_all" | grep -qF "also serves the other programs in $uh/.matchapack/bin (other-tool). If you no longer want $uh/.matchapack/bin on PATH through them: delete the marked lines first, then: rm $uh/.config/matchapack/env.sh" \
   && [ "$plain" = "Last, the binary: rm $uh/bin/matchapack" ] && [ "$before" = "$after" ] && r=ok || r=bad
 [ "$r" = ok ] || printf '    brew [%s]\n    npm [%s]\n    cargo [%s]\n    script [%s]\n    plain [%s]\n    unchanged: %s\n' "$brew" "$npm_nvm" "$cargo" "$script" "$plain" "$([ "$before" = "$after" ] && echo yes || echo NO)"
 check uninstall-channels "uninstall's dry run per channel (Homebrew, nvm's npm, cargo, install script, plain file): the removal its real place says; the install script's files listed, not removed; nothing written" $r "$work/none"

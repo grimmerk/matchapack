@@ -290,7 +290,7 @@ mod tests {
         fs::write(other.join(".crates.toml"), "[v1]\n\"matchapack-other 0.1.0 (path+file:///x)\" = [\"matchapack\"]\n").unwrap();
         assert_eq!(det(&in_root), Channel::Plain, "another package's binary of that name");
         // The install script: the receipt names the binary's directory.
-        let local = file(&d, "home/.local/bin/matchapack");
+        let local = file(&d, "home/.matchapack/bin/matchapack");
         assert_eq!(det(&local), Channel::Plain, "no receipt");
         fs::create_dir_all(&receipts).unwrap();
         let receipt = |prefix: &Path, layout: &str| {
@@ -300,11 +300,11 @@ mod tests {
             );
             fs::write(receipts.join(RECEIPT), r).unwrap();
         };
-        receipt(&d.join("home/.local/bin"), "flat");
+        receipt(&d.join("home/.matchapack/bin"), "flat");
         assert_eq!(det(&local), Channel::Installer { receipt: receipts.join(RECEIPT) });
         assert_eq!(det(&file(&d, "elsewhere/matchapack")), Channel::Plain, "the receipt names another directory");
-        receipt(&d.join("home/.local"), "hierarchical");
-        assert_eq!(det(&file(&d, "home/.local/bin/matchapack")), Channel::Installer { receipt: receipts.join(RECEIPT) }, "<prefix>/bin");
+        receipt(&d.join("home/.matchapack"), "hierarchical");
+        assert_eq!(det(&file(&d, "home/.matchapack/bin/matchapack")), Channel::Installer { receipt: receipts.join(RECEIPT) }, "<prefix>/bin");
         // cargo's records come before a receipt naming the same directory.
         receipt(&cargo_home, "cargo-home");
         assert_eq!(det(&in_cargo), Channel::Cargo { root: cargo_home.clone() });
@@ -328,7 +328,7 @@ mod tests {
             "usr/local/lib/node_modules/matchapack/native/darwin-arm64/matchapack",
             "mise/installs/npm-matchapack/0.1.0/lib/node_modules/matchapack/native/darwin-arm64/matchapack",
             "opt/homebrew/Cellar/matchapack/0.1.0/bin/matchapack",
-            "home/.local/bin/matchapack",
+            "home/.matchapack/bin/matchapack",
         ] {
             assert_eq!(init_note(Some(&file(&d, rel)), true), None, "{rel}");
         }

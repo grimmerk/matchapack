@@ -8,9 +8,9 @@
 //! receipt), which is the default settings directory when XDG_CONFIG_HOME is
 //! unset, are never removed: a line the script appended to the startup files
 //! loads env.sh, so removing it while that line is there would print an
-//! error at every shell start, and the PATH entry it adds serves every
-//! program in that directory, not only matchapack. uninstall lists them, the
-//! lines that load them and the other programs there, and leaves the choice.
+//! error at every shell start. uninstall lists them, the lines that load
+//! them and anything else in the directory they put on PATH (the script's
+//! own, `~/.matchapack/bin`), and leaves the choice.
 //!
 //! It deletes directories, so it deletes only what it can recognise as
 //! matchapack's:
@@ -719,10 +719,31 @@ fn binary_advice(real: &Path, ch: &Channel, cargo_home: &Path) -> String {
         Channel::Cargo { root } if root == cargo_home => format!("Last, the binary: {at} was installed by cargo install: cargo uninstall matchapack"),
         Channel::Cargo { root } => format!("Last, the binary: {at} was installed by cargo install into {}: cargo uninstall --root {} matchapack", root.display(), quoted(root)),
         Channel::Installer { receipt } => {
-            format!("Last, the binary: {at} was put there by the install script: rm {} {} (the binary, and the script's receipt)", quoted(real), quoted(receipt))
+            let dirs = installer_dirs(real);
+            let rmdir = if dirs.is_empty() { String::new() } else { format!("; then rmdir {} (left empty)", dirs.iter().map(|d| quoted(d)).collect::<Vec<_>>().join(" ")) };
+            format!("Last, the binary: {at} was put there by the install script: rm {} {} (the binary, and the script's receipt){rmdir}", quoted(real), quoted(receipt))
         }
         Channel::Plain => format!("Last, the binary: rm {}", quoted(real)),
     }
+}
+
+/// The install script's own directories that removing the binary `real`
+/// leaves empty: its directory and the one above, while they are named for
+/// matchapack (`~/.matchapack/bin`, `~/.matchapack`) and hold nothing else.
+/// A shared directory (`~/.local/bin`) is never named.
+fn installer_dirs(real: &Path) -> Vec<PathBuf> {
+    let mut v = vec![];
+    let mut leaving = real.to_path_buf();
+    for d in real.ancestors().skip(1).take(2) {
+        let ours = d.ancestors().any(|a| a.file_name().is_some_and(|n| n == ".matchapack"));
+        let only = std::fs::read_dir(d).map(|r| r.flatten().all(|e| e.path() == leaving)).unwrap_or(false);
+        if !ours || !only {
+            break;
+        }
+        v.push(d.to_path_buf());
+        leaving = d.to_path_buf();
+    }
+    v
 }
 
 /// What to do with the install script's files (`files`, from
@@ -734,7 +755,7 @@ fn installer_advice(env: &Env, files: &[PathBuf], receipt_named: bool, marked: b
     let path_files: Vec<&PathBuf> = files.iter().filter(|f| **f != receipt).collect();
     let receipt_left = files.contains(&receipt) && !receipt_named;
     if path_files.is_empty() {
-        // Only its receipt (installed with ~/.local/bin already on PATH).
+        // Only its receipt (installed with its directory already on PATH).
         return receipt_left.then(|| format!("The install script's receipt, left in place: {}; nothing loads it: rm {}", receipt.display(), quoted(&receipt)));
     }
     let dir = channel::receipt_dir(&receipt, "matchapack");
@@ -1297,11 +1318,12 @@ mod tests {
     }
 
     /// The install script's files in `env` (its directory: env.receipt_home):
-    /// the binary in `home/.local/bin` with `others` beside it, the receipt
-    /// naming that directory, env.sh and env.fish, the line loading env.sh
-    /// at the end of .zshrc and the fish file. Returns them.
+    /// the binary in `home/.matchapack/bin` (dist's install-path) with
+    /// `others` beside it, the receipt naming that directory, env.sh and
+    /// env.fish, the line loading env.sh at the end of .zshrc and the fish
+    /// file. Returns them.
     fn install_script(env: &mut Env, others: &[&str]) -> Vec<PathBuf> {
-        let bin = env.home.join(".local/bin");
+        let bin = env.home.join(".matchapack/bin");
         fs::create_dir_all(&bin).unwrap();
         for p in std::iter::once(&"matchapack").chain(others) {
             fs::write(bin.join(p), "bin").unwrap();
@@ -1317,8 +1339,8 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::write(env.receipt_home.join("env.sh"), "#!/bin/sh\ncase \":${PATH}:\" in\n    *:\"$HOME/.local/bin\":*)\n        ;;\n    *)\n        export PATH=\"$HOME/.local/bin:$PATH\"\n        ;;\nesac\n").unwrap();
-        fs::write(env.receipt_home.join("env.fish"), "if not contains \"$HOME/.local/bin\" $PATH\n    set -x PATH \"$HOME/.local/bin\" $PATH\nend\n").unwrap();
+        fs::write(env.receipt_home.join("env.sh"), "#!/bin/sh\ncase \":${PATH}:\" in\n    *:\"$HOME/.matchapack/bin\":*)\n        ;;\n    *)\n        export PATH=\"$HOME/.matchapack/bin:$PATH\"\n        ;;\nesac\n").unwrap();
+        fs::write(env.receipt_home.join("env.fish"), "if not contains \"$HOME/.matchapack/bin\" $PATH\n    set -x PATH \"$HOME/.matchapack/bin\" $PATH\nend\n").unwrap();
         let zshrc = fs::read_to_string(env.home.join(".zshrc")).unwrap();
         fs::write(env.home.join(".zshrc"), format!("{zshrc}\n. \"$HOME/.config/matchapack/env.sh\"\n")).unwrap();
         let fish = env.home.join(channel::FISH_CONF_D);
@@ -1661,10 +1683,32 @@ mod tests {
         assert!(last(&env).contains("mise uninstall --all npm:matchapack"), "{}", last(&env));
         place(&mut env, ".volta/tools/image/packages/matchapack/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
         assert!(last(&env).ends_with("is a Volta package: volta uninstall matchapack"), "{}", last(&env));
-        // The install script's: the binary and its receipt.
+        // The install script's: the binary and its receipt, then its two
+        // directories, which nothing else is in.
         install_script(&mut env, &[]);
-        let want = format!("rm {} {} (the binary, and the script's receipt)", quoted(&env.home.join(".local/bin/matchapack")), quoted(&env.receipt_home.join(channel::RECEIPT)));
+        let (bin, top) = (env.home.join(".matchapack/bin"), env.home.join(".matchapack"));
+        let want = format!(
+            "rm {} {} (the binary, and the script's receipt); then rmdir {} {} (left empty)",
+            quoted(&bin.join("matchapack")),
+            quoted(&env.receipt_home.join(channel::RECEIPT)),
+            quoted(&bin),
+            quoted(&top)
+        );
         assert!(last(&env).ends_with(&want), "{}", last(&env));
+        // Something else in ~/.matchapack (not in bin/): only bin/ is named.
+        fs::write(top.join("notes"), "mine").unwrap();
+        assert!(last(&env).ends_with(&format!("; then rmdir {} (left empty)", quoted(&bin))), "{}", last(&env));
+        // Something else in bin/: neither.
+        fs::write(bin.join("tool"), "bin").unwrap();
+        assert!(last(&env).ends_with("(the binary, and the script's receipt)"), "{}", last(&env));
+        // A shared directory is never named, empty or not.
+        let local = env.home.join(".local/bin");
+        fs::create_dir_all(&local).unwrap();
+        fs::rename(bin.join("matchapack"), local.join("matchapack")).unwrap();
+        let r = fs::read_to_string(env.receipt_home.join(channel::RECEIPT)).unwrap().replace(&bin.display().to_string(), &local.display().to_string());
+        fs::write(env.receipt_home.join(channel::RECEIPT), r).unwrap();
+        env.exe = Some(local.join("matchapack"));
+        assert!(last(&env).ends_with("(the binary, and the script's receipt)") && !last(&env).contains("rmdir"), "{}", last(&env));
         env.exe = None;
         assert!(last(&env).contains("the way you installed it"), "{}", last(&env));
         let _ = fs::remove_dir_all(&d);
@@ -1681,7 +1725,7 @@ mod tests {
     fn the_install_scripts_files_are_left_with_their_lines() {
         let d = fs::canonicalize(scratch("uninstall-installer")).unwrap();
         let mut env = setup(&d);
-        let files = install_script(&mut env, &["uv", "uvx"]);
+        let files = install_script(&mut env, &["mine", "tool"]);
         let before = snapshot(&d);
         let (code, out) = run_to_string(&env, false);
         assert_eq!(code, 0, "{out}");
@@ -1693,8 +1737,8 @@ mod tests {
         assert!(out.contains(&format!("{}:2: source \"$HOME/.config/matchapack/env.fish\"   <- the install script's PATH line", files[3].display())), "{out}");
         assert!(!line_of(&out, &format!("  {}:2: command -v", env.home.join(".zshrc").display())).contains("<-"), "the init line is not the script's");
         let advice = line_of(&out, "The install script's files, left in place:");
-        let bin_dir = env.home.join(".local/bin");
-        assert!(advice.contains(&format!("They put {} on PATH", bin_dir.display())) && advice.contains(&format!("also serves the other programs in {} (uv, uvx)", bin_dir.display())), "{advice}");
+        let bin_dir = env.home.join(".matchapack/bin");
+        assert!(advice.contains(&format!("They put {} on PATH", bin_dir.display())) && advice.contains(&format!("also serves the other programs in {} (mine, tool)", bin_dir.display())), "{advice}");
         // The receipt is on the binary's line; the rest here.
         let rm = format!("rm {} {} {}", quoted(&files[0]), quoted(&files[1]), quoted(&files[3]));
         assert!(advice.ends_with(&format!("delete the marked lines first, then: {rm}")), "{advice}");
@@ -1711,8 +1755,8 @@ mod tests {
         assert!(out.contains(&format!("settings: {}: matchapack's files removed; the directory stays", env.config.display())), "{out}");
         // Nothing else in the directory, the binary already gone (another
         // channel now): the receipt joins the files to remove.
-        fs::remove_file(bin_dir.join("uv")).unwrap();
-        fs::remove_file(bin_dir.join("uvx")).unwrap();
+        fs::remove_file(bin_dir.join("mine")).unwrap();
+        fs::remove_file(bin_dir.join("tool")).unwrap();
         env.exe = Some(d.join("bin/matchapack"));
         let (_, out) = run_to_string(&env, false);
         let advice = line_of(&out, "The install script's files, left in place:");
