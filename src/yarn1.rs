@@ -1435,7 +1435,7 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // alone: until 2026-11-22 `yarn cache dir` was started just before it,
     // and in the benchmark (cornerstone3D, Yarn already up to date) Yarn's
     // own run took as long as plain Yarn's while the install as a whole took
-    // 0.4 s longer, with `yarn cache dir` answering at 0.36 s every time;
+    // 0.4 s longer, with `yarn cache dir` answering at 0.35–0.38 s each time;
     // traced runs on a loaded machine showed both new nodes asleep at their
     // start and the install's reaching its main only after `yarn cache dir`
     // had exited (NOTES "The Yarn engine's fixed cost"). Without the hello
