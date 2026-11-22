@@ -199,6 +199,13 @@ def resume_conflicts(first, machine_now, args):
     for k in RESUME_SETTINGS:
         if was_a.get(k) != now_a.get(k):
             out.append(f"--{k.replace('_', '-')} {was_a.get(k)!r} then, {now_a.get(k)!r} now")
+    # `small` is built from this checkout's fixtures/small (the other
+    # projects are pinned by commit): its tree must be the same, and clean.
+    if "small" in set(was_a.get("projects") or []) | set(now_a.get("projects") or []):
+        if was_m.get("small_fixture_tree") != machine_now.get("small_fixture_tree"):
+            out.append(f"fixtures/small tree {was_m.get('small_fixture_tree')!r} then, {machine_now.get('small_fixture_tree')!r} now")
+        if machine_now.get("small_fixture_dirty"):
+            out.append("fixtures/small has uncommitted changes now")
     return out
 
 
@@ -624,6 +631,8 @@ def machine(work_root, env):
         "matchapack": out_of([BIN, "--version"], env=env),
         "matchapack_sha256": files_sha256([BIN]),
         "bench_files_sha256": files_sha256([os.path.join(HERE, "scripts", "bench.py"), os.path.join(HERE, "scripts", "bench.sh")]),
+        "small_fixture_tree": out_of(["git", "-C", HERE, "rev-parse", "HEAD:fixtures/small"]),
+        "small_fixture_dirty": bool(out_of(["git", "-C", HERE, "status", "--porcelain", "--untracked-files=all", "--", "fixtures/small"])),
         "bench_commit": out_of(["git", "-C", HERE, "rev-parse", "HEAD"]),
         "bench_dirty": bool(out_of(["git", "-C", HERE, "status", "--porcelain", "--untracked-files=no"])),
         "power": out_of(["/usr/bin/pmset", "-g", "ps"]).splitlines()[:1],

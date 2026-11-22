@@ -97,7 +97,7 @@ try:
             "fill_npm": "11.10.1", "smoke": False, "projects": ["small"]}
     mach = {"model": "M", "cpu": "C", "macos": "27", "filesystem": "APFS", "node": "v24", "npm": "11.19.1", "yarn": "1.22.22",
             "matchapack": "matchapack 0.1.0 (abc-dirty)", "matchapack_sha256": "m1", "bench_files_sha256": "f1",
-            "bench_commit": "b1", "bench_dirty": True}
+            "bench_commit": "b1", "bench_dirty": True, "small_fixture_tree": "t1", "small_fixture_dirty": False}
     first = {"machine": mach, "args": args}
     check("resume_conflicts: the same tools and settings", bench.resume_conflicts(first, dict(mach), dict(args)) == [])
     check("resume_conflicts: another scope (projects) may resume", bench.resume_conflicts(first, dict(mach), dict(args, projects=["medium"])) == [])
@@ -111,6 +111,13 @@ try:
     check("resume_conflicts: another matchapack binary under the same version string", len(d) == 1, repr(d))
     d = bench.resume_conflicts(first, dict(mach, bench_commit="b2", bench_dirty=False), dict(args))
     check("resume_conflicts: a commit that changes neither file nor binary may resume", d == [], repr(d))
+    d = bench.resume_conflicts(first, dict(mach, bench_commit="b2", small_fixture_tree="t2"), dict(args))
+    check("resume_conflicts: a commit that changes fixtures/small is refused", len(d) == 1 and "fixtures/small" in d[0], repr(d))
+    d = bench.resume_conflicts(first, dict(mach, small_fixture_dirty=True), dict(args))
+    check("resume_conflicts: uncommitted changes in fixtures/small are refused", len(d) == 1 and "fixtures/small" in d[0], repr(d))
+    no_small = {"machine": mach, "args": dict(args, projects=["medium"])}
+    d = bench.resume_conflicts(no_small, dict(mach, small_fixture_tree="t2"), dict(args, projects=["medium"]))
+    check("resume_conflicts: fixtures/small does not matter without the small project", d == [], repr(d))
     fa, fb = os.path.join(tmp, "fa"), os.path.join(tmp, "fb")
     with open(fa, "w") as f:
         f.write("ab")
