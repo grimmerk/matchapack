@@ -1,4 +1,4 @@
-//! The Yarn 1 engine (`matchapack yarn <args>`; NOTES "Yarn 1 engine"): Yarn 1
+//! The Yarn 1 engine (`matchapack yarn <args>`; docs/architecture.md): Yarn 1
 //! runs its own `yarn install`, in a node child started here through the hook
 //! in src/yarn1-hook.js, and during Yarn's link step each file Yarn copies
 //! from its cache into node_modules is made as a copy-on-write clone of the
@@ -99,7 +99,7 @@ const CACHE_OPTIONS: &[&str] = &["--cache-folder", "--preferred-cache-folder", "
 /// request: after that, while it is still unknown, every request is answered
 /// "copy" at once (per request, a slow `yarn cache dir` held each worker for
 /// the full wait, backed the queue up and set off the hook's slow-answer
-/// rule; CI run 43306715867). Measured: with a
+/// rule, in a CI run on 2026-11-13). Measured: with a
 /// warm cache a small install reaches its link step before `yarn cache dir`
 /// answers, and answering "copy" at once cloned nothing (yarn1-emptyfirst:
 /// 314 of 314 files).
@@ -158,7 +158,7 @@ fn command_at(args: &[String]) -> Option<usize> {
     None
 }
 
-/// The Yarn commands the engine runs (NOTES "Yarn 1 commands"), as Yarn
+/// The Yarn commands the engine runs (docs/architecture.md, "Yarn commands"), as Yarn
 /// names them (`src/cli/aliases.js`: `upgrade-interactive` is
 /// `upgradeInteractive`). Each runs Yarn's link step (`Install.init`) in
 /// the process the hook is in: `add` and `upgrade` (an `Add`), `remove` (an
@@ -259,7 +259,7 @@ pub struct YarnBin {
 /// COPYFILE_FICLONE, yarn-classic `src/util/fs-normalized.js`). An older one
 /// copies with no flag, the hook leaves every copy to Node, and the engine
 /// would cost a start-up for no clone (measured on all 17 releases from
-/// 1.0.0 to 1.9.4: 0 files cloned; NOTES "Yarn 1 commands").
+/// 1.0.0 to 1.9.4: 0 files cloned).
 const YARN1_FLOOR_MINOR: u32 = 10;
 
 /// Whether Yarn 1 `version` is at or above 1.10.0 (`YARN1_FLOOR_MINOR`):
@@ -559,8 +559,8 @@ enum Cache {
 
 /// "<n> copied by Node" for the end-of-install line (`stats`: Stats::to_json),
 /// saying why when they are Yarn's first copies of a link step: the hook
-/// leaves those to Node by design (Yarn's one-time probe runs on them, NOTES
-/// "The probe race"), so a run with nothing amiss still has them.
+/// leaves those to Node by design (Yarn's one-time probe runs on them), so
+/// a run with nothing amiss still has them.
 fn copied_by_node(stats: &Value) -> String {
     let total = stats["copied_total"].as_u64().unwrap_or(0);
     let first = stats["copied"]["first-copies"].as_u64().unwrap_or(0);
@@ -1261,7 +1261,7 @@ struct CacheDirAsk {
 /// exec. With both spawns racing (as until 2026-11-13), the install's node
 /// could hold the write end of this pipe, whose reader then saw the end only
 /// when the install ended: the cache folder stayed unknown for the whole
-/// install (CI run 43306715867; NOTES "The cause"). The other way round,
+/// install (seen in a CI run on 2026-11-13). The other way round,
 /// `yarn cache dir` could hold the pipe on which the install's node reports
 /// its exec, and the install started only when `yarn cache dir` ended.
 fn start_yarn_cache_dir(node: &util::NodeStart, yarn_js: &Path, env: &[(String, String)], cwd: &Path, args: &[String]) -> std::result::Result<CacheDirAsk, String> {
@@ -1438,7 +1438,7 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // 0.4 s longer, with `yarn cache dir` answering at 0.35–0.38 s each time;
     // traced runs on a loaded machine showed both new nodes asleep at their
     // start and the install's reaching its main only after `yarn cache dir`
-    // had exited (NOTES "The Yarn engine's fixed cost"). Without the hello
+    // had exited (TESTING.md, "Benchmark"). Without the hello
     // (the hook declined, corepack failed) it is not started at all.
     //
     // It is then the only spawn in flight: the hello comes from the program
@@ -1447,7 +1447,7 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     // process forks during an install or makes a descriptor without
     // close-on-exec in one call (the workers clone, open with O_CLOEXEC, set
     // times, groups and xattrs; the socket and its clone were made before
-    // the install's node). NOTES "Yarn 1 shell route", decision 4.
+    // the install's node).
     //
     // Under corepack the Yarn is the one corepack chose, in the install's
     // node: the hello names it (running the launcher a second time could
@@ -1562,7 +1562,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     };
     // First, and from files only: a Yarn 2+ project is plain Yarn, unlogged
     // and silent like a command that is not an install (no node start, no
-    // yarn.js lookup; NOTES "Yarn 1 shell route").
+    // yarn.js lookup).
     if let Some(why) = yarn2_project(&cwd) {
         if std::env::var("MATCHAPACK_NO_FALLBACK").as_deref() == Ok("1") {
             eprintln!("matchapack: not handled, left unchanged ({why})");

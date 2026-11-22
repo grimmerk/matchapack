@@ -42,7 +42,7 @@ The publish jobs work either way: they use a token secret while one is set, and 
 
    ```sh
    git -C <checkout> fetch origin
-   git -C <checkout> tag -s v0.1.0 -m "matchapack 0.1.0" origin/master
+   git -C <checkout> tag -s v0.1.0 -m "matchapack 0.1.0" origin/main
    git -C <checkout> push origin v0.1.0
    ```
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The Yarn 1 suite (test-yarn1.sh) on the node on PATH and the Yarn 1 named
 # by MATCHAPACK_YARN_JS: what the canary's node-macos job runs for a new Node
-# or a new Yarn 1 release (.github/workflows/npm-canary.yml; NOTES "The Node
-# and Yarn 1 release watch").
+# or a new Yarn 1 release (.github/workflows/npm-canary.yml; TESTING.md, "The
+# npm canary and the Node and Yarn release watch").
 #   yarn-suites.sh <work dir> <out dir>
 # <out dir> gets test-yarn1.log and suites.json, in the npm suites' format
 # (scripts/npm-suites.sh) plus what the Yarn engine depends on:

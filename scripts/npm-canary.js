@@ -26,8 +26,8 @@
 // results, and the last release that passed (the baseline of the next diff).
 // `node`: per watched Node line its newest release seen, that release's
 // libuv (version, and the sha256 of its fs.c: `uvSrc`), the release last tested, its results and the hook's facts; `yarn`:
-// the newest Yarn 1 release seen and the one last tested (NOTES "The Node and
-// Yarn 1 release watch"); `watchFailed`: the date and error of the last
+// the newest Yarn 1 release seen and the one last tested (TESTING.md, "The
+// npm canary and the Node and Yarn release watch"); `watchFailed`: the date and error of the last
 // poll whose watch reads failed (null once it polls again).
 'use strict'
 const fs = require('node:fs')
@@ -50,7 +50,7 @@ const HISTORY_MAX = 60
 //   node src/inject.js --key <npm package dir>
 //     prints the store key of that npm's extraction code and, on the second
 //     line, the full tar fingerprint (the tar files Node loads with pacote,
-//     with tar's dependencies; NOTES "PR C1: the key is the code"). A new
+//     with tar's dependencies; docs/architecture.md, "The store and its key"). A new
 //     tar fingerprint is only reported: every store entry is compared once
 //     under it at run time, so it decides nothing here;
 //   src/npm-fingerprints.json
@@ -942,8 +942,7 @@ function report (stateFile, planFile, resultsDir, outDir, opts) {
     const classText = !r ? '?' : r.known === true ? 'known' : r.known === false ? 'new' : 'unknown'
     const caller = !r ? '?' : !r.compare ? (compareMissing ? 'missing' : '?') : r.compare.callerChanged ? 'changed' : 'same'
     // The tar code against the baseline: reported only (each store entry is
-    // compared once under new tar code at run time; NOTES "PR C1: the key
-    // is the code"), so it changes no action.
+    // compared once under new tar code at run time), so it changes no action.
     const tarCode = !r || !r.compare || !r.compare.tar || r.compare.tar.changed === null ? '?' : r.compare.tar.changed ? 'new' : 'same'
     const classChanged = !!(r && r.compare && r.compare.classChanged)
     // The release this line verified last, tested again (the monthly run, a
@@ -1170,7 +1169,7 @@ function watchReport (state, plan, res, run) {
           L.push(`  - \`${f.replace(/`/g, "'")}\``)
         }
       }
-      L.push(`- A new Yarn 1 release: nothing in the engine knows its code (NOTES "Yarn 1 commands", "Part 4"). Read its changelog; when the suites pass, move the pin in .github/workflows/ci.yml.`, '')
+      L.push(`- A new Yarn 1 release: nothing in the engine knows its code. Read its changelog; when the suites pass, move the pin in .github/workflows/ci.yml.`, '')
       out.sections.push(L.join('\n'))
     }
   }

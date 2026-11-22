@@ -1,5 +1,6 @@
 //! `matchapack store verify [--fix]`: every store entry compared with what
-//! npm's own pacote extracts from its tarball (NOTES "PR C1").
+//! npm's own pacote extracts from its tarball (docs/architecture.md,
+//! "Store maintenance").
 //!
 //! The inject engine, the default since PR C1, places store entries in
 //! place of pacote's extraction, and checks entries against that extraction

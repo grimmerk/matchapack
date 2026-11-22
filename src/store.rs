@@ -506,7 +506,7 @@ impl Store {
     }
 
     /// The record after a routed command (`npm ci`, `install`, `update`,
-    /// `uninstall`), one rule for all (NOTES "Review round 3"), from what the
+    /// `uninstall`), one rule for all, from what the
     /// hidden lockfile npm wrote says (`tree`):
     /// - `Complete`: it names the source (an integrity or a `resolved`) of
     ///   every package npm extracts, so its entries are the project's: the
@@ -1042,7 +1042,7 @@ pub(crate) mod tests {
     /// test took and released, itself or through the code it runs, can
     /// stay held for that moment by another test's child, and a lock
     /// attempt without waiting (`Store::exclusive`, uninstall) is refused.
-    /// Measured (NOTES "A store lock held by another test's child"): with
+    /// Measured (2026-11-19): with
     /// two threads spawning `true`, up to 5 of 500 uninstall runs refused
     /// with posix_spawn, 15 to 29 with fork and exec, none without spawns;
     /// the lock was free again within 2 ms. A lock a test really leaves held

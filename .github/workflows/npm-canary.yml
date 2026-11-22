@@ -13,8 +13,8 @@
 #           and MATCHAPACK_NPM_FINGERPRINT set to `any`; the pacote
 #           fingerprint (pacote's lib/fetcher.js, from the hook's own code;
 #           called "class text" in the reports); the tar code (the tar
-#           fingerprint, part of the store key: `inject.js --key`, NOTES
-#           "PR C1: the key is the code"), recorded per release in
+#           fingerprint, part of the store key: `inject.js --key`,
+#           docs/architecture.md "The store and its key"), recorded per release in
 #           result.json and compared with the baseline's: reported in the
 #           history ("tar code"), the body and a comment, never an action;
 #           the diff of the tracked functions (pacote's FetcherBase class,
@@ -31,7 +31,7 @@
 #           its last verified release, the real gates) and the Yarn suites on
 #           macOS (test-yarn1.sh, scripts/yarn-suites.sh, with the hook's
 #           facts) on that Node; a new stable Yarn 1 release, the Yarn suites
-#           with it. NOTES "The Node and Yarn 1 release watch".
+#           with it. TESTING.md, "The npm canary and the Node and Yarn release watch".
 #   report  rewrites the tracking issue's body (a table per line, a history,
 #           the state) and comments when a person should look: the suites,
 #           the fingerprint, each changed function's diff, the changelog lines
@@ -49,7 +49,7 @@
 # State: one JSON block in the tracking issue's body, rewritten by the
 # workflow (review 2026-11-14, section 9.3). Why there: it needs only
 # `issues: write` (a file in the repository would need `contents: write` and
-# a push to master from a workflow, or a pull request, which needs a
+# a push to main from a workflow, or a pull request, which needs a
 # repository setting); the owner reads the result where the state is, and
 # the poll date in it makes a dead poll visible; the issue's edit history
 # keeps every earlier state. A version is tested once; a red one again only

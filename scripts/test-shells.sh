@@ -104,8 +104,8 @@ MATCHAPACK [isntall-clean]" "npm clean-install; npm ic; npm install-clean; npm i
   for w in $routed; do
     check "routed-$w" "MATCHAPACK [$w] [x]" "npm $w x"
   done
-  # Commands that are not routed (npm runs them itself; NOTES "The install
-  # family"), and a flag first: npm directly.
+  # Commands that are not routed (npm runs them itself; docs/architecture.md,
+  # "The shell integration"), and a flag first: npm directly.
   check not-routed "NPM [run] [build]
 NPM [test]
 NPM [--version]
@@ -142,8 +142,8 @@ YARN [install] [--frozen-lockfile]" "yarn; yarn install --frozen-lockfile"
   check yarn-install "MATCHAPACK-YARN [install] [--frozen-lockfile]" "yarn install --frozen-lockfile"
   check yarn-flag   "MATCHAPACK-YARN [--frozen-lockfile] [--cache-folder] [/c d]" "yarn --frozen-lockfile --cache-folder '/c d'"
   check yarn-args   "MATCHAPACK-YARN [install] [a b] [] [*]" "yarn install 'a b' '' '*'"
-  # The commands that copy packages into node_modules (NOTES "Yarn 1
-  # commands"); `workspace <name>` with add, remove, upgrade or
+  # The commands that copy packages into node_modules (docs/architecture.md,
+  # "Yarn commands"); `workspace <name>` with add, remove, upgrade or
   # upgrade-interactive only.
   check yarn-add    "MATCHAPACK-YARN [add] [x] [--dev]"  "yarn add x --dev"
   check yarn-cmds   "MATCHAPACK-YARN [upgrade]
