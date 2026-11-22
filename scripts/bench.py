@@ -19,7 +19,10 @@ Everything it writes is under the work directory (--work):
   results/             runs.jsonl (one line per timed run), projects.jsonl,
                        meta.jsonl (machine, versions, top CPU users),
                        sentinels.jsonl, summary.md
---cleanup removes everything but logs/ and results/.
+  .matchapack-bench    the marker: this directory belongs to the benchmark
+The benchmark starts only in a new or empty directory (and marks it) or in
+a marked one; --summary-only and --cleanup need the marker too. --cleanup
+removes everything but logs/ and results/.
 """
 import argparse, datetime, fcntl, json, os, re, resource, shutil, signal, statistics, struct, subprocess, sys, time
 
@@ -84,8 +87,22 @@ CASE_TEXT = {
     "yarn-installed": "already installed (integrity check, nothing to do)",
     "yarn-incremental": "incremental install after a lockfile change",
 }
-NPM_ARGS = ["ci", "--no-audit", "--no-fund", "--prefer-offline"]
-YARN_ARGS = ["install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive"]
+# Only the priming install of each project may download (into the scratch
+# npm cache or Yarn's offline mirror). Every later install, timed or setup,
+# is offline: a cache or mirror miss fails it instead of timing a download.
+NPM_PRIME_ARGS = ["ci", "--no-audit", "--no-fund", "--prefer-offline"]
+NPM_ARGS = ["ci", "--no-audit", "--no-fund", "--offline"]
+# --no-default-rc: Yarn reads no .yarnrc or .npmrc of its own finding (the
+# user's ~/.yarnrc could name a yarn-path or move the install); the offline
+# mirror comes from the environment (yarn_env), the cache from the command.
+YARN_PRIME_ARGS = ["install", "--frozen-lockfile", "--ignore-scripts", "--non-interactive", "--no-default-rc"]
+YARN_ARGS = YARN_PRIME_ARGS + ["--offline"]
+MARKER = ".matchapack-bench"
+# A resumed benchmark must measure with what it started with: these
+# settings and toolchain facts are compared with the first record of the
+# bench id, and a difference needs a new --bench-id.
+RESUME_SETTINGS = ("rounds", "disk_rounds", "load_max", "load_wait", "settle", "timeout", "fill_npm", "smoke")
+RESUME_TOOLCHAIN = ("model", "cpu", "macos", "filesystem", "node", "npm", "yarn", "matchapack", "bench_commit", "bench_dirty")
 
 CURRENT = {"pgid": None}
 
@@ -141,9 +158,91 @@ class Work:
             die(f"could not remove {path}")
 
 
+def work_state(root):
+    """What --work names: "missing", "empty", "owned" (it has the marker),
+    "foreign" (anything else in it) or "not-dir"."""
+    if not os.path.lexists(root):
+        return "missing"
+    if os.path.islink(root) or not os.path.isdir(root):
+        return "not-dir"
+    names = os.listdir(root)
+    if MARKER in names and os.path.isfile(os.path.join(root, MARKER)):
+        return "owned"
+    return "empty" if not names else "foreign"
+
+
+def store_ready(store, facts):
+    """Whether `store` was filled completely (Bench.fill_store), with what
+    `facts` names (the npm that filled it, matchapack, the commit)."""
+    try:
+        with open(store + ".ready") as f:
+            return os.path.isdir(store) and json.load(f) == facts
+    except (OSError, ValueError):
+        return False
+
+
+def resume_conflicts(first, machine_now, args):
+    """How the current tools and settings differ from those the bench id
+    was started with (`first`, its first meta record): empty when it may
+    resume."""
+    out = []
+    was_m, was_a = first.get("machine") or {}, first.get("args") or {}
+    now_a = vars(args) if not isinstance(args, dict) else args
+    for k in RESUME_TOOLCHAIN:
+        if was_m.get(k) != machine_now.get(k):
+            out.append(f"{k} {was_m.get(k)!r} then, {machine_now.get(k)!r} now")
+    for k in RESUME_SETTINGS:
+        if was_a.get(k) != now_a.get(k):
+            out.append(f"--{k.replace('_', '-')} {was_a.get(k)!r} then, {now_a.get(k)!r} now")
+    return out
+
+
+def nearest_existing(path):
+    while not os.path.lexists(path):
+        path = os.path.dirname(path)
+    return path
+
+
+def repair_tail(path):
+    """Cuts an incomplete last line (a write torn by a crash) off a JSONL
+    file, so that the next record starts on a line of its own. Complete
+    lines are left as they are. Returns the number of bytes removed."""
+    try:
+        f = open(path, "rb+")
+    except FileNotFoundError:
+        return 0
+    with f:
+        size = f.seek(0, os.SEEK_END)
+        if size == 0:
+            return 0
+        f.seek(size - 1)
+        if f.read(1) == b"\n":
+            return 0
+        # Back to the last newline, a block at a time.
+        end, keep = size, 0
+        while end > 0:
+            start = max(0, end - 65536)
+            f.seek(start)
+            block = f.read(end - start)
+            i = block.rfind(b"\n")
+            if i >= 0:
+                keep = start + i + 1
+                break
+            end = start
+        f.truncate(keep)
+        f.flush()
+        os.fsync(f.fileno())
+        return size - keep
+
+
 def append_line(path, rec):
     """One complete JSON line, flushed to disk: a run is recorded whole or
-    not at all (a torn last line is dropped when the file is read)."""
+    not at all. Called only while the work directory's lock is held, so the
+    torn tail of an earlier, interrupted write can be cut off first (it
+    would otherwise swallow this record into an unreadable line)."""
+    cut = repair_tail(path)
+    if cut:
+        say(f"note: {os.path.basename(path)} ended in an incomplete line ({cut} bytes, an interrupted write): removed")
     with open(path, "a") as f:
         f.write(json.dumps(rec, sort_keys=True) + "\n")
         f.flush()
@@ -211,17 +310,49 @@ def run(cmd, cwd, env, log=None, timeout=None, check=True):
     return rc, text
 
 
-def kill_group(p):
-    for sig, wait in ((signal.SIGTERM, 30), (signal.SIGKILL, 10)):
+def group_alive(pgid):
+    """Whether any process is left in the process group."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def kill_group(p, grace=30):
+    """SIGTERM to the command's process group; after `grace` seconds,
+    SIGKILL to whatever of the group is left (a worker that outlived its
+    parent included); the direct child is reaped either way."""
+    pgid = p.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        p.poll()  # reap the child: a zombie still counts as in the group
+        if not group_alive(pgid):
+            break
+        time.sleep(0.2)
+    if group_alive(pgid):
         try:
-            os.killpg(p.pid, sig)
+            os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
-            return
-        try:
-            p.wait(timeout=wait)
-            return
-        except subprocess.TimeoutExpired:
             pass
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            p.poll()
+            if not group_alive(pgid):
+                break
+            time.sleep(0.2)
+    try:
+        p.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    if group_alive(pgid):
+        say(f"warning: processes of group {pgid} are still there after SIGKILL")
 
 
 def out_of(cmd, cwd=None, env=None):
@@ -334,37 +465,56 @@ def disk(tree, src):
 
 # --- the machine, and what must stay untouched ----------------------------
 
+SENTINEL_DEPTHS = {
+    "~/.cache/matchapack": 3,
+    "~/.config/matchapack": 3,
+    "~/.npm": 4,
+    "~/Library/Caches/Yarn": 2,
+}
+
+
+def tree_state(root, depth):
+    """Every entry (files and directories) down to `depth` levels below
+    `root`, by relative path, kind, size, mtime (ns) and inode, as one
+    SHA-256 and a count; also the newest mtime, for the report. Two states
+    are equal only if no entry at those levels was added, removed or
+    rewritten (a change deeper down shows only where it changed a
+    directory's mtime within the levels)."""
+    import hashlib
+    h = hashlib.sha256()
+    n = 0
+    newest, newest_path = None, None
+    base = root.count(os.sep)
+    entries = []
+    for d, dirs, names in os.walk(root):
+        dirs.sort()
+        if d.count(os.sep) - base >= depth:
+            dirs[:] = []
+        for x in dirs + names:
+            p = os.path.join(d, x)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            entries.append((os.path.relpath(p, root), st.st_mode & 0o170000, st.st_size, st.st_mtime_ns, st.st_ino))
+            if newest is None or st.st_mtime > newest:
+                newest, newest_path = st.st_mtime, p
+    st = os.lstat(root)
+    entries.append((".", st.st_mode & 0o170000, st.st_size, st.st_mtime_ns, st.st_ino))
+    for e in sorted(entries):
+        h.update(repr(e).encode())
+        n += 1
+    return {"digest": h.hexdigest(), "entries": n, "depth": depth, "mtime": newest, "path": newest_path}
+
+
 def sentinels():
-    """Newest mtime (files and directories, a few levels deep) of the
-    user's real matchapack state and npm / Yarn caches. The run must not
-    change them; another process on the machine can, which the report
-    then says."""
-    home = os.path.expanduser("~")
-    paths = {
-        "~/.cache/matchapack": (os.path.join(home, ".cache/matchapack"), 3),
-        "~/.config/matchapack": (os.path.join(home, ".config/matchapack"), 3),
-        "~/.npm": (os.path.join(home, ".npm"), 4),
-        "~/Library/Caches/Yarn": (os.path.join(home, "Library/Caches/Yarn"), 2),
-    }
+    """The user's real matchapack state and npm / Yarn caches, entry by
+    entry a few levels deep (tree_state). The run must not change them;
+    another process on the machine can, which the report then says."""
     out = {}
-    for name, (root, depth) in paths.items():
-        if not os.path.lexists(root):
-            out[name] = None
-            continue
-        newest, newest_path = os.lstat(root).st_mtime, root
-        base = root.count(os.sep)
-        for d, dirs, names in os.walk(root):
-            if d.count(os.sep) - base >= depth:
-                dirs[:] = []
-            for x in dirs + names:
-                p = os.path.join(d, x)
-                try:
-                    m = os.lstat(p).st_mtime
-                except OSError:
-                    continue
-                if m > newest:
-                    newest, newest_path = m, p
-        out[name] = {"mtime": newest, "path": newest_path}
+    for name, depth in SENTINEL_DEPTHS.items():
+        root = os.path.expanduser(name)
+        out[name] = tree_state(root, depth) if os.path.lexists(root) else None
     return out
 
 
@@ -373,16 +523,20 @@ def sentinel_changes(a, b, since):
     (another process may have written them: the times tell)."""
     out = []
     for k in a:
-        if a[k] == b.get(k):
+        x, y = a[k], b.get(k)
+        if (x or {}).get("digest") == (y or {}).get("digest") and bool(x) == bool(y):
             continue
-        if not b.get(k):
+        if not y:
             out.append(f"{k}: gone")
+            continue
+        if not x:
+            out.append(f"{k}: created during the run")
             continue
         root = os.path.expanduser(k)
         newer = []
         for d, dirs, names in os.walk(root):
-            for x in dirs + names:
-                p = os.path.join(d, x)
+            for name in dirs + names:
+                p = os.path.join(d, name)
                 try:
                     m = os.lstat(p).st_mtime
                 except OSError:
@@ -393,7 +547,8 @@ def sentinel_changes(a, b, since):
                 break
         newer.sort()
         listed = ", ".join(f"{p} ({datetime.datetime.fromtimestamp(m).isoformat(timespec='seconds')})" for m, p in newer[:10])
-        out.append(f"{k}: {len(newer)}{'+' if len(newer) > 200 else ''} entries written since the start: {listed}")
+        out.append(f"{k}: entries changed within {x.get('depth')} levels ({x.get('entries')} before, {y.get('entries')} after); "
+                   f"{len(newer)}{'+' if len(newer) > 200 else ''} entries with a time after the start: {listed or 'none'}")
     return out
 
 
@@ -447,7 +602,7 @@ def machine(work_root, env):
         "device": dev,
         "node": out_of(["node", "-v"], env=env),
         "npm": out_of(["npm", "-v"], env=env),
-        "yarn": out_of(["yarn", "--version"], env=env),
+        "yarn": out_of(["yarn", "--no-default-rc", "--version"], env=env),
         "matchapack": out_of([BIN, "--version"], env=env),
         "bench_commit": out_of(["git", "-C", HERE, "rev-parse", "HEAD"]),
         "bench_dirty": bool(out_of(["git", "-C", HERE, "status", "--porcelain", "--untracked-files=no"])),
@@ -467,8 +622,10 @@ def base_env(w, args):
         "NPM_CONFIG_USERCONFIG": w.p("env", "npmrc"),
         "NPM_CONFIG_GLOBALCONFIG": w.p("env", "global-npmrc"),
         "npm_config_update_notifier": "false",
-        # Yarn 1: no ~/.yarnrc, no self-update check (it would write
-        # ~/.yarnrc); its cache and mirror are set per run.
+        # Yarn 1: no ~/.yarnrc as its user config, no self-update check (it
+        # would write ~/.yarnrc); every Yarn command also has
+        # --no-default-rc (YARN_PRIME_ARGS); its cache and mirror are set
+        # per run.
         "YARN_USERCONFIG": w.p("env", "yarnrc"),
         "YARN_DISABLE_SELF_UPDATE_CHECK": "true",
         # matchapack: scratch config and logs; the trial scope is the work
@@ -508,10 +665,22 @@ def git(w, *a, cwd=None, env=None, log=None):
 
 def fetch_project(w, name, spec, env, log):
     """src/<name>: a git repository at the pinned commit (depth 2, so the
-    Yarn project's parent commit is there)."""
+    Yarn project's parent commit is there). A checkout left by an earlier
+    run is used only when it is what is asked for now: the pinned commit,
+    or for `small` the fixture from the commit this script runs at;
+    otherwise it is fetched again."""
     src = w.p("src", name)
     if os.path.isdir(os.path.join(src, ".git")):
-        return src
+        if name == "small":
+            want = out_of(["git", "-C", HERE, "rev-parse", "HEAD"])
+            have = out_of(["git", "log", "-1", "--format=%s"], cwd=src).split()[-1:]
+            ok = have == [want]
+        else:
+            ok = out_of(["git", "rev-parse", "HEAD"], cwd=src) == spec["commit"]
+        if ok:
+            return src
+        say(f"  {src} is not at the requested revision: fetching it again")
+        w.remove(src)
     tmp = src + ".partial"
     w.remove(tmp)
     os.makedirs(tmp)
@@ -555,8 +724,12 @@ class Bench:
         self.w, self.a = w, args
         self.env = base_env(w, args)
         self.results = w.p("results", "runs.jsonl")
-        self.done = {(r["project"], r["case"], r["round"], r["side"]) for r in read_lines(self.results)
-                     if r.get("bench_id") == args.bench_id}
+        # Every recorded attempt of this bench id, and whether it succeeded
+        # (a resumed run does not repeat one; its tree is reused only if it
+        # succeeded).
+        self.ok = {(r["project"], r["case"], r["round"], r["side"]): r.get("exit") == 0
+                   for r in read_lines(self.results) if r.get("bench_id") == args.bench_id}
+        self.done = set(self.ok)
         self.npm = shutil.which("npm", path=self.env["PATH"])
         self.yarn = shutil.which("yarn", path=self.env["PATH"])
 
@@ -603,6 +776,7 @@ class Bench:
             rec["disk"] = disk(*disk_of)
         append_line(self.results, rec)
         self.done.add(key)
+        self.ok[key] = rc == 0
         flag = " LOAD" if rec["load_flag"] else ""
         bad = "" if rc == 0 else f" EXIT {rc} (see {rec['log']})"
         clones = ""
@@ -612,8 +786,6 @@ class Bench:
         spot = f" spotlight {busy['spotlight_pcpu']:.0f}%" if busy["spotlight_pcpu"] >= 25 else ""
         say(f"  {case} r{rnd} {side}: {rec['wall_s']:.2f}s wall, cpu {rec['cpu_user_s']:.1f}+{rec['cpu_sys_s']:.1f}s, "
             f"load {load0[0]:.1f}->{load1[0]:.1f}{flag}{spot}{bad}{clones}")
-        if rc != 0:
-            self.failures += 1
         return rec
 
     def mp_line(self, path, start):
@@ -631,8 +803,6 @@ class Bench:
         inj, y = r.get("inject") or {}, r.get("yarn1") or {}
         r["cloned"] = y.get("cloned") if y else inj.get("cloned", r.get("cloned"))
         return r
-
-    failures = 0
 
     def sides(self, rnd):
         """Interleaved: plain first in odd rounds, matchapack first in even."""
@@ -667,7 +837,8 @@ class Bench:
             worktree(w, src, t, commit, env)
             say(f"  priming npm's cache: plain npm ci in {t}")
             t0 = time.monotonic()
-            run([self.npm, *NPM_ARGS], os.path.join(t, spec["dir"]), npm_env(env, warm), log=setup_log)
+            run([self.npm, *NPM_PRIME_ARGS], os.path.join(t, spec["dir"]), npm_env(env, warm), log=setup_log,
+                timeout=self.a.timeout)
             prime_s = time.monotonic() - t0
             d = disk(os.path.join(t, spec["dir"]), None)
             rec = {"bench_id": self.a.bench_id, "project": name, "kind": "npm", "repo": spec["repo"], "commit": commit,
@@ -683,24 +854,19 @@ class Bench:
         self.check_space(f"{name} rounds", 4 * info["nm_alloc"] + 2 * GIB)
 
         # The warm store: one matchapack install with this npm.
-        if any(c in cases for c in ("npm-fresh-worktree", "npm-reinstall")) and not os.path.isdir(os.path.join(warm, "v2")):
-            t = os.path.join(runs, "fill-warm")
-            worktree(w, src, t, commit, env)
+        warm_facts = {"npm": self.a.versions["npm"], "matchapack": self.a.versions["matchapack"], "commit": commit}
+        if any(c in cases for c in ("npm-fresh-worktree", "npm-reinstall")) and not store_ready(warm, warm_facts):
             say(f"  filling the warm store with npm {self.a.versions['npm']}")
-            run([BIN, "npm", *NPM_ARGS], os.path.join(t, spec["dir"]), mp_env(npm_env(env, warm)), log=setup_log)
-            drop_tree(w, src, t, env)
+            self.fill_store(warm, warm_facts, src, commit, os.path.join(runs, "fill-warm"), spec["dir"],
+                            lambda store: mp_env(npm_env(env, store)), setup_log)
         # The store another npm filled (its extraction code differs, so
         # each entry gets its one-time comparison under this npm's).
-        if "npm-first-use" in cases and not os.path.isdir(os.path.join(snap, "v2")):
+        snap_facts = {"npm": self.a.fill_npm, "matchapack": self.a.versions["matchapack"], "commit": commit}
+        if "npm-first-use" in cases and not store_ready(snap, snap_facts):
             alt = self.alt_npm()
-            t = os.path.join(runs, "fill-alt")
-            worktree(w, src, t, commit, env)
             say(f"  filling a store with npm {self.a.fill_npm}")
-            w.remove(snap + ".partial")
-            run([BIN, "npm", *NPM_ARGS], os.path.join(t, spec["dir"]),
-                mp_env(npm_env(env, snap + ".partial", alt)), log=setup_log)
-            drop_tree(w, src, t, env)
-            os.rename(snap + ".partial", snap)
+            self.fill_store(snap, snap_facts, src, commit, os.path.join(runs, "fill-alt"), spec["dir"],
+                            lambda store: mp_env(npm_env(env, store, alt)), setup_log)
 
         for rnd in range(1, self.a.rounds + 1):
             say(f"-- {name} round {rnd}/{self.a.rounds}")
@@ -724,15 +890,17 @@ class Bench:
                             run(["/bin/cp", "-c", "-R", snap, store], w.root, env)
                     if case == "npm-reinstall":
                         # Over the tree this side installed in the fresh
-                        # worktree case, else a tree installed now.
+                        # worktree case, if that install succeeded; else a
+                        # tree installed now.
                         prev = os.path.join(runs, f"npm-fresh-worktree-r{rnd}-{side}")
-                        if os.path.isdir(os.path.join(prev, spec["dir"], "node_modules")):
+                        if self.ok.get((name, "npm-fresh-worktree", rnd, side)) and \
+                                os.path.isdir(os.path.join(prev, spec["dir"], "node_modules")):
                             tree, pdir = prev, os.path.join(prev, spec["dir"])
                         else:
                             worktree(w, src, tree, commit, env)
                             cmd0 = [self.npm, *NPM_ARGS] if side == "plain" else [BIN, "npm", *NPM_ARGS]
                             e0 = npm_env(env, warm) if side == "plain" else mp_env(npm_env(env, warm))
-                            run(cmd0, pdir, e0, log=self.log(name, case, f"r{rnd}", side, "setup"))
+                            run(cmd0, pdir, e0, log=self.log(name, case, f"r{rnd}", side, "setup"), timeout=self.a.timeout)
                     else:
                         worktree(w, src, tree, commit, env)
                     cmd = [self.npm, *NPM_ARGS] if side == "plain" else [BIN, "npm", *NPM_ARGS]
@@ -750,6 +918,20 @@ class Bench:
                         drop_tree(w, src, t, env)
         say(f"== {name}: done")
 
+    def fill_store(self, store, facts, src, commit, tree, pdir, env_for, log):
+        """Fills `store` with one matchapack install into a fresh worktree:
+        into `<store>.partial`, published (renamed, then `<store>.ready`
+        written with `facts`) only after the install succeeded, so an
+        interrupted or failed fill is never taken for a filled store."""
+        w = self.w
+        for p in (store + ".ready", store, store + ".partial"):
+            w.remove(p)
+        worktree(w, src, tree, commit, self.env)
+        run([BIN, "npm", *NPM_ARGS], os.path.join(tree, pdir), env_for(store + ".partial"), log=log, timeout=self.a.timeout)
+        drop_tree(w, src, tree, self.env)
+        os.rename(store + ".partial", store)
+        write_atomic(store + ".ready", json.dumps(facts, sort_keys=True) + "\n")
+
     def alt_npm(self):
         """npm <fill_npm> in a scratch prefix, from the registry, with the
         scratch cache and npmrc. Returns the directory to put first on PATH."""
@@ -758,7 +940,7 @@ class Bench:
         if not os.path.exists(os.path.join(bindir, "npm")):
             os.makedirs(prefix, exist_ok=True)
             run([self.npm, "install", "--prefix", prefix, "--no-audit", "--no-fund", f"npm@{self.a.fill_npm}"],
-                prefix, self.env, log=self.log("npm-alt"))
+                prefix, self.env, log=self.log("npm-alt"), timeout=self.a.timeout)
         v = out_of(["npm", "-v"], env=dict(self.env, PATH=bindir + os.pathsep + self.env["PATH"]))
         if v != self.a.fill_npm:
             die(f"npm in {bindir} is {v}, not {self.a.fill_npm}")
@@ -783,7 +965,7 @@ class Bench:
         warm = w.p("yarn-cache")
         info_path = w.p("results", "projects.jsonl")
         known = {(r["project"], r.get("bench_id")): r for r in read_lines(info_path)}
-        yargs = [self.yarn, *YARN_ARGS, "--cache-folder"]
+        yargs = [self.yarn, *YARN_PRIME_ARGS, "--cache-folder"]
 
         def ycmd(side, cache):
             return ([self.yarn] if side == "plain" else [BIN, "yarn"]) + YARN_ARGS + ["--cache-folder", cache]
@@ -808,13 +990,14 @@ class Bench:
             say("  priming Yarn's offline mirror and the warm cache (plain Yarn, the parent commit, then the commit)")
             os.makedirs(w.p("yarn-mirror"), exist_ok=True)
             t0 = time.monotonic()
-            run(yargs + [warm], t, yarn_env(env, w, warm), log=setup_log)
+            run(yargs + [warm], t, yarn_env(env, w, warm), log=setup_log, timeout=self.a.timeout)
             git(w, "checkout", "--", "package.json", "yarn.lock", cwd=t, env=env)
-            run(yargs + [warm], t, yarn_env(env, w, warm), log=setup_log)
+            run(yargs + [warm], t, yarn_env(env, w, warm), log=setup_log, timeout=self.a.timeout)
             prime_s = time.monotonic() - t0
             d = disk(t, None)
             rec = {"bench_id": self.a.bench_id, "project": name, "kind": "yarn", "repo": spec["repo"], "commit": commit,
                    "parent": parent, "dir": spec["dir"], "about": spec["about"], "yarn_args": YARN_ARGS,
+                   "yarn_prime_args": YARN_PRIME_ARGS,
                    "packages": d["packages"], "nm_files": d["files"] + d["empty"], "nm_bytes": d["bytes"], "nm_alloc": d["alloc"],
                    "mirror_files": len(os.listdir(w.p("yarn-mirror"))), "prime_s": round(prime_s, 1)}
             append_line(info_path, rec)
@@ -838,16 +1021,21 @@ class Bench:
                         w.remove(cache)
                         worktree(w, src, tree, commit, env)
                     elif case == "yarn-installed":
+                        # The fresh worktree's tree, if that install
+                        # succeeded (a timed-out one leaves a partial tree);
+                        # else a tree installed now.
                         prev = os.path.join(runs, f"yarn-fresh-worktree-r{rnd}-{side}")
-                        if os.path.isdir(os.path.join(prev, "node_modules")):
+                        if self.ok.get((name, "yarn-fresh-worktree", rnd, side)) and os.path.isdir(os.path.join(prev, "node_modules")):
                             tree = prev
                         else:
                             worktree(w, src, tree, commit, env)
-                            run(ycmd(side, cache), tree, yenv(side, cache), log=self.log(name, case, f"r{rnd}", side, "setup"))
+                            run(ycmd(side, cache), tree, yenv(side, cache), log=self.log(name, case, f"r{rnd}", side, "setup"),
+                                timeout=self.a.timeout)
                     elif case == "yarn-incremental":
                         worktree(w, src, tree, commit, env)
                         at_parent(tree)
-                        run(ycmd(side, cache), tree, yenv(side, cache), log=self.log(name, case, f"r{rnd}", side, "setup"))
+                        run(ycmd(side, cache), tree, yenv(side, cache), log=self.log(name, case, f"r{rnd}", side, "setup"),
+                            timeout=self.a.timeout)
                         git(w, "checkout", "--", "package.json", "yarn.lock", cwd=tree, env=env)
                     else:
                         worktree(w, src, tree, commit, env)
@@ -896,6 +1084,21 @@ def summary(w, bench_id, fill_npm, smoke):
     metas = [r for r in read_lines(w.p("results", "meta.jsonl")) if r.get("bench_id") == bench_id]
     m = metas[0]["machine"] if metas else {}
     a = next((r["args"] for r in metas if r.get("args")), {})
+    # What was measured is what the benchmark was started with, not this
+    # command's options.
+    fill_npm = a.get("fill_npm", fill_npm)
+    smoke = a.get("smoke", smoke)
+
+    def timed_args(kind):
+        # The arguments of the plain side's first timed run, as recorded.
+        r = next((r for r in runs if r["side"] == "plain" and r["case"].startswith(kind + "-")), None)
+        if not r:
+            return "(no run)"
+        cmd = r["cmd"][1:]
+        if "--cache-folder" in cmd:
+            cmd = cmd[:cmd.index("--cache-folder")]
+        return " ".join(cmd)
+
     L = []
     title = "matchapack benchmark" + (" — SMOKE TEST, not results" if smoke else "")
     L += [f"# {title}", ""]
@@ -906,13 +1109,14 @@ def summary(w, bench_id, fill_npm, smoke):
     L += ["Method: each case runs in interleaved rounds (plain first in odd rounds, matchapack first in even ones), "
           f"{a.get('rounds', '?')} rounds, {a.get('settle', '?')} s settle time before each run; times are medians with min–max. "
           "Wall time and CPU time (user + sys) of the install command and every process it waited for. "
-          "npm's cache is warm for both sides in every case (primed by a plain install first; network is not measured), "
-          "npm runs with `--no-audit --no-fund --prefer-offline`. Yarn 1 runs use `--ignore-scripts` (the project's install "
-          "scripts fail in plain Yarn too), and Yarn's tarballs come from an offline mirror primed first, so an empty Yarn cache "
-          "means extracting, not downloading. "
+          "npm's cache is warm for both sides in every case (primed by a plain install first, the only install that may download; "
+          f"network is not measured); timed npm runs: `npm {timed_args('npm')}`. Yarn 1 runs use `--ignore-scripts` (the project's "
+          "install scripts fail in plain Yarn too), and Yarn's tarballs come from an offline mirror primed first, so an empty Yarn "
+          f"cache means extracting, not downloading; timed Yarn runs: `yarn {timed_args('yarn')}`. "
           f"A run that started with a 1-minute load average above {a.get('load_max', '?')} is counted in the LOAD column, not dropped. "
-          "Disk: blocks of node_modules shared with the store or Yarn's cache (first extent, as `scripts/shared-blocks.py`), and the "
-          "bytes allocated by the files that share nothing (new bytes); metadata (inodes, directories) not counted.", ""]
+          "Disk, a first-extent estimate: a node_modules file counts as shared when its first extent is the first extent of a file in "
+          "the store or Yarn's cache (as `scripts/shared-blocks.py`); new bytes are the allocation of the files that share no first "
+          "extent (a shared file whose later blocks were rewritten is not counted there); metadata (inodes, directories) not counted.", ""]
     L += ["## Projects", "", "| Project | Repository @ commit | Packages installed | node_modules (files, size) |", "|---|---|---|---|"]
     for name, p in projects.items():
         c = p.get("source_commit") or p.get("commit", "")
@@ -936,9 +1140,10 @@ def summary(w, bench_id, fill_npm, smoke):
                  f"{fmt_s(cpu['plain'])} | {fmt_s(cpu['matchapack'])} | {rounds} | {flagged} of {len(rs)} | {failed} |")
     L.append("")
     L += ["## Disk per extra worktree", "",
-          "From the first round(s) of each case. New bytes: allocated by node_modules files that share no block with the store or cache. "
+          "From the first round(s) of each case. New bytes: the allocation of node_modules files that share no first extent with the "
+          "store or cache (a first-extent estimate). "
           "Store / cache: what matchapack's store (npm) or Yarn's cache holds after the run, allocated, paid once per machine.", "",
-          "| Project | Case | Side | Files sharing blocks | Bytes shared | New bytes | Store / cache |", "|---|---|---|---|---|---|---|"]
+          "| Project | Case | Side | Files sharing a first extent | Their bytes | New bytes | Store / cache |", "|---|---|---|---|---|---|---|"]
     for pname, case in keys:
         for side in ("plain", "matchapack"):
             ds = [r["disk"] for r in runs if r["project"] == pname and r["case"] == case and r["side"] == side and r.get("disk")]
@@ -958,7 +1163,8 @@ def summary(w, bench_id, fill_npm, smoke):
             p, q = dp[0]["new_alloc"], dm[0]["new_alloc"]
             src = dm[0].get("source_alloc", 0)
             n = p / q if q else float("inf")
-            L.append(f"- **{pname}**: each extra worktree's node_modules writes {human(q)} with matchapack instead of {human(p)} "
+            L.append(f"- **{pname}**: each extra worktree's node_modules allocates {human(q)} with matchapack, against {human(p)} plain, "
+                     f"in files that share no first extent with the {'store' if projects[pname]['kind'] == 'npm' else 'Yarn cache'} "
                      f"(about {n:.0f} worktrees for the disk of one plain copy). 10 worktrees: plain {human(10 * p)}; "
                      f"matchapack {human(10 * q)} plus the {'store' if projects[pname]['kind'] == 'npm' else 'Yarn cache'} once ({human(src)}).")
     L.append("")
@@ -978,17 +1184,37 @@ def summary(w, bench_id, fill_npm, smoke):
     L += (metas[0].get("top_cpu", []) if metas else []) + ["```", ""]
     sent = [r for r in read_lines(w.p("results", "sentinels.jsonl")) if r.get("bench_id") == bench_id]
     if sent:
-        last = sent[-1]
-        L += ["## Isolation check", "", "The user's real matchapack state and npm / Yarn caches: "
-              + ("unchanged." if not last.get("changed") else "CHANGED: " + "; ".join(last["changed"])), ""]
+        L += ["## Isolation check", "", isolation_text(sent), ""]
     return "\n".join(L) + "\n"
+
+
+def isolation_text(sent):
+    """The isolation check of the latest invocation: its start record and
+    the end record after it. No end record: the check did not complete."""
+    starts = [i for i, r in enumerate(sent) if r.get("when") == "start"]
+    if not starts:
+        return "The isolation check did not complete (no start record)."
+    end = next((r for r in sent[starts[-1] + 1:] if r.get("when") == "end"), None)
+    if end is None:
+        return ("The isolation check did not complete: the last invocation stopped before its end check, "
+                "so whether the user's real matchapack state and npm / Yarn caches changed is not known.")
+    if "changed" not in end:
+        return "The isolation check did not complete (the end record has no result)."
+    state = end.get("state") or {}
+    how = ("entries compared by path, kind, size, mtime and inode, " +
+           ", ".join(f"{k} {v['depth']} levels deep" for k, v in state.items() if isinstance(v, dict) and "depth" in v)
+           if any(isinstance(v, dict) and "depth" in v for v in state.values()) else "the newest mtime of each, a few levels deep")
+    if not end["changed"]:
+        return f"The user's real matchapack state and npm / Yarn caches: unchanged ({how})."
+    return f"The user's real matchapack state and npm / Yarn caches: CHANGED ({how}): " + "; ".join(end["changed"])
 
 
 # --- main ------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="matchapack benchmark (issue grimmerk/matchapack-private#7); run through scripts/bench.sh")
-    ap.add_argument("--work", required=True, help="work directory (created; never under ~/git)")
+    ap.add_argument("--work", required=True,
+                    help=f"work directory: new or empty (then marked with {MARKER}), or marked before; never under ~/git")
     ap.add_argument("--projects", default="small,medium,large,yarn", help="comma list of " + ",".join(PROJECTS))
     ap.add_argument("--cases", default=",".join(NPM_CASES + YARN_CASES), help="comma list of cases")
     ap.add_argument("--rounds", type=int, default=5)
@@ -1008,19 +1234,34 @@ def main():
     ap.add_argument("--cleanup", action="store_true", help="remove everything but logs/ and results/, then stop")
     a = ap.parse_args()
 
+    # Everything about --work is checked before anything is created.
     root = os.path.abspath(os.path.expanduser(a.work))
+    real = os.path.realpath(root)
     gitdir = os.path.realpath(os.path.expanduser("~/git"))
-    if root == gitdir or root.startswith(gitdir + os.sep) or os.path.realpath(root).startswith(gitdir + os.sep):
-        die(f"--work {root} is under ~/git: choose another directory")
-    os.makedirs(root, exist_ok=True)
-    root = os.path.realpath(root)
-    if root.startswith(os.path.realpath(HERE) + os.sep):
-        die("--work is inside this checkout")
-    if os.stat(root).st_gid not in os.getgroups():
+    here = os.path.realpath(HERE)
+    for r in (root, real):
+        if r == gitdir or r.startswith(gitdir + os.sep):
+            die(f"--work {root} is under ~/git: choose another directory")
+        if r == here or r.startswith(here + os.sep):
+            die("--work is inside this checkout")
+    st = work_state(root)
+    if st == "not-dir":
+        die(f"--work {root} is not a directory")
+    if st == "foreign":
+        die(f"--work {root} is not empty and has no {MARKER}: the benchmark starts only in a new or empty directory, "
+            f"or in one it marked. If it is a work directory of an older bench.py, mark it by hand: touch {os.path.join(root, MARKER)}")
+    if (a.summary_only or a.cleanup) and st != "owned":
+        die(f"--work {root} is not a benchmark directory (no {MARKER})")
+    gid = os.stat(nearest_existing(root)).st_gid
+    if gid not in os.getgroups():
         # macOS gives a new file its directory's group: npm's extraction
         # then has a group matchapack cannot give its clones (/tmp is
         # wheel), and the numbers would not be a user's.
-        die(f"{root} has group {os.stat(root).st_gid}, not one of yours: use a directory in your home")
+        die(f"{nearest_existing(root)} has group {gid}, not one of yours: use a directory in your home")
+    if st in ("missing", "empty"):
+        os.makedirs(root, exist_ok=True)
+        write_atomic(os.path.join(root, MARKER), "matchapack benchmark work directory (scripts/bench.py); --cleanup may remove its contents\n")
+    root = os.path.realpath(root)
     w = Work(root)
     for d in ("logs", "results", "env", "mp/config", "mp/log", "src", "runs", "stores"):
         os.makedirs(w.p(d), exist_ok=True)
@@ -1076,6 +1317,13 @@ def main():
         die(f"yarn on PATH is {m['yarn']}, not Yarn 1")
     if not root.endswith(".noindex"):
         say("note: a work directory whose name ends in .noindex is not indexed by Spotlight (less noise)")
+    first = next((r for r in read_lines(w.p("results", "meta.jsonl")) if r.get("bench_id") == a.bench_id and r.get("machine")), None)
+    if first:
+        diff = resume_conflicts(first, m, a)
+        if diff:
+            die(f"bench {a.bench_id} was started with other settings or tools; resuming would mix them: "
+                + "; ".join(diff) + ". Start a new benchmark with another --bench-id")
+        say(f"resuming bench {a.bench_id} (same settings and tools)")
     started = time.time()
     s0 = sentinels()
     top = top_cpu()
@@ -1110,6 +1358,16 @@ def main():
     except KeyboardInterrupt as e:
         interrupted = str(e) or "interrupted"
         say(f"stopped ({interrupted}); runs recorded so far are kept; the same --bench-id {a.bench_id} resumes")
+    except SystemExit as e:
+        # A setup step failed (die): the isolation check and the summary
+        # still run, then the run ends with that status.
+        interrupted = f"stopped by an error (exit {e.code})"
+        say(f"{interrupted}; runs recorded so far are kept; the same --bench-id {a.bench_id} resumes")
+        stopped_code = e.code if isinstance(e.code, int) and e.code else 1
+    else:
+        stopped_code = None
+    if interrupted and stopped_code is None:
+        stopped_code = 130
     s1 = sentinels()
     changed = sentinel_changes(s0, s1, started)
     append_line(w.p("results", "sentinels.jsonl"), {"bench_id": a.bench_id, "when": "end", "ts": time.time(), "state": s1, "changed": changed})
@@ -1120,11 +1378,19 @@ def main():
         for c in changed:
             say("!!!   " + c)
         sys.exit(4)
-    if interrupted:
-        sys.exit(130)
-    if b.failures:
-        say(f"{b.failures} timed runs failed (exit status in runs.jsonl, logs in logs/)")
+    if stopped_code is not None:
+        sys.exit(stopped_code)
+    # Every recorded attempt of this bench id, those of earlier invocations
+    # (a resumed run does not repeat them) included.
+    failed = recorded_failures(read_lines(w.p("results", "runs.jsonl")), a.bench_id)
+    if failed:
+        say(f"{failed} timed runs of bench {a.bench_id} failed (exit status in runs.jsonl, logs in logs/)")
         sys.exit(1)
+
+
+def recorded_failures(records, bench_id):
+    """Timed attempts of `bench_id` whose recorded exit status is not 0."""
+    return sum(1 for r in records if r.get("bench_id") == bench_id and r.get("exit") != 0)
 
 
 if __name__ == "__main__":

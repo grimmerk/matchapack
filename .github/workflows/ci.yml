@@ -38,6 +38,8 @@ jobs:
           node-version: 24.22.1
       - name: npm canary decisions (offline)
         run: node scripts/test-npm-canary.js
+      - name: the benchmark script's own logic (offline)
+        run: python3 -B scripts/test-bench.py
       - name: the npm package's launcher (stubs; sh is dash here)
         run: sh scripts/test-npm-launcher.sh
       - name: fish with the real binary (npm ci and the yarn function, real npm and Yarn 1)
