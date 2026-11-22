@@ -102,7 +102,12 @@ MARKER = ".matchapack-bench"
 # settings and toolchain facts are compared with the first record of the
 # bench id, and a difference needs a new --bench-id.
 RESUME_SETTINGS = ("rounds", "disk_rounds", "load_max", "load_wait", "settle", "timeout", "fill_npm", "smoke")
-RESUME_TOOLCHAIN = ("model", "cpu", "macos", "filesystem", "node", "npm", "yarn", "matchapack", "bench_commit", "bench_dirty")
+# The implementation is named by content, not by commit: a dirty checkout
+# says nothing about which edits it holds, so the SHA-256 of bench.py and
+# bench.sh, and of the matchapack binary, are compared (a change committed
+# or not refuses the resume; a commit that changes neither does not).
+RESUME_TOOLCHAIN = ("model", "cpu", "macos", "filesystem", "node", "npm", "yarn", "matchapack", "matchapack_sha256",
+                    "bench_files_sha256")
 
 CURRENT = {"pgid": None}
 
@@ -584,6 +589,19 @@ def free_bytes(path):
     return st.f_bavail * st.f_frsize
 
 
+def files_sha256(paths):
+    """One SHA-256 over the files' bytes, in order (each with its length,
+    so that bytes cannot move from one file to the next unnoticed)."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in paths:
+        with open(p, "rb") as f:
+            data = f.read()
+        h.update(f"{os.path.basename(p)}\0{len(data)}\0".encode())
+        h.update(data)
+    return h.hexdigest()
+
+
 def machine(work_root, env):
     def sysctl(k):
         return out_of(["/usr/sbin/sysctl", "-n", k])
@@ -604,6 +622,8 @@ def machine(work_root, env):
         "npm": out_of(["npm", "-v"], env=env),
         "yarn": out_of(["yarn", "--no-default-rc", "--version"], env=env),
         "matchapack": out_of([BIN, "--version"], env=env),
+        "matchapack_sha256": files_sha256([BIN]),
+        "bench_files_sha256": files_sha256([os.path.join(HERE, "scripts", "bench.py"), os.path.join(HERE, "scripts", "bench.sh")]),
         "bench_commit": out_of(["git", "-C", HERE, "rev-parse", "HEAD"]),
         "bench_dirty": bool(out_of(["git", "-C", HERE, "status", "--porcelain", "--untracked-files=no"])),
         "power": out_of(["/usr/bin/pmset", "-g", "ps"]).splitlines()[:1],
@@ -1082,7 +1102,7 @@ def summary(w, bench_id, fill_npm, smoke):
     runs = [r for r in read_lines(w.p("results", "runs.jsonl")) if r.get("bench_id") == bench_id]
     projects = {r["project"]: r for r in read_lines(w.p("results", "projects.jsonl")) if r.get("bench_id") == bench_id}
     metas = [r for r in read_lines(w.p("results", "meta.jsonl")) if r.get("bench_id") == bench_id]
-    m = metas[0]["machine"] if metas else {}
+    m = next((r["machine"] for r in metas if r.get("machine")), {})
     a = next((r["args"] for r in metas if r.get("args")), {})
     # What was measured is what the benchmark was started with, not this
     # command's options.
@@ -1181,7 +1201,7 @@ def summary(w, bench_id, fill_npm, smoke):
             L.append(f"| {pname} | {case} | {len(rs)} | {sum(1 for r in rs if r.get('load_flag'))} | {sum(1 for x in sp if x >= 25)} | "
                      f"{statistics.median(sp):.0f} ({max(sp):.0f}) | {statistics.median(vm):.0f} ({max(vm):.0f}) |")
     L += ["", "Top CPU users at the start of the benchmark (`ps -Ao pcpu,comm -r`; nothing was stopped):", "", "```"]
-    L += (metas[0].get("top_cpu", []) if metas else []) + ["```", ""]
+    L += next((r.get("top_cpu", []) for r in metas if r.get("machine")), []) + ["```", ""]
     sent = [r for r in read_lines(w.p("results", "sentinels.jsonl")) if r.get("bench_id") == bench_id]
     if sent:
         L += ["## Isolation check", "", isolation_text(sent), ""]
@@ -1344,7 +1364,17 @@ def main():
     append_line(w.p("results", "sentinels.jsonl"), {"bench_id": a.bench_id, "when": "start", "ts": time.time(), "state": s0})
 
     t0 = time.monotonic()
-    interrupted = None
+    stopped_code = run_projects(b, w, a, t0)
+    code = finish(w, a, s0, started, t0, stopped_code)
+    if code:
+        sys.exit(code)
+
+
+def run_projects(b, w, a, t0):
+    """Runs every project. Never raises for a stop: returns None when every
+    project ran, 130 when a signal stopped it (Ctrl-C, SIGTERM, SIGHUP:
+    on_signal), or a setup error's status (die). The runs recorded so far
+    are kept either way."""
     try:
         for x in a.projects:
             spec = dict(PROJECTS[x])
@@ -1354,21 +1384,25 @@ def main():
                 b.yarn_project(x, spec)
             append_line(w.p("results", "meta.jsonl"), {"bench_id": a.bench_id, "ts": time.time(), "after": x,
                                                        "elapsed_s": round(time.monotonic() - t0), "top_cpu": top_cpu(),
-                                                       "free_gib": round(free_bytes(root) / GIB, 1)})
+                                                       "free_gib": round(free_bytes(w.root) / GIB, 1)})
     except KeyboardInterrupt as e:
-        interrupted = str(e) or "interrupted"
-        say(f"stopped ({interrupted}); runs recorded so far are kept; the same --bench-id {a.bench_id} resumes")
+        say(f"stopped ({str(e) or 'interrupted'}); runs recorded so far are kept; the same --bench-id {a.bench_id} resumes")
+        return 130
     except SystemExit as e:
         # A setup step failed (die): the isolation check and the summary
-        # still run, then the run ends with that status.
-        interrupted = f"stopped by an error (exit {e.code})"
-        say(f"{interrupted}; runs recorded so far are kept; the same --bench-id {a.bench_id} resumes")
-        stopped_code = e.code if isinstance(e.code, int) and e.code else 1
-    else:
-        stopped_code = None
-    if interrupted and stopped_code is None:
-        stopped_code = 130
-    s1 = sentinels()
+        # still run (finish), then the run ends with that status.
+        code = e.code if isinstance(e.code, int) and e.code else 1
+        say(f"stopped by an error (exit {code}); runs recorded so far are kept; the same --bench-id {a.bench_id} resumes")
+        return code
+    return None
+
+
+def finish(w, a, s0, started, t0, stopped_code, state=None):
+    """The end of every run, however it stopped: the isolation check's end
+    record, the summary, and the exit status (4: the user's real state
+    changed; else `stopped_code`; else 1 when a recorded timed run of this
+    bench id failed; else 0). `state` replaces sentinels() in tests."""
+    s1 = (state or sentinels)()
     changed = sentinel_changes(s0, s1, started)
     append_line(w.p("results", "sentinels.jsonl"), {"bench_id": a.bench_id, "when": "end", "ts": time.time(), "state": s1, "changed": changed})
     write_atomic(w.p("results", "summary.md"), summary(w, a.bench_id, a.fill_npm, a.smoke))
@@ -1377,15 +1411,16 @@ def main():
         say("!!! ISOLATION CHECK FAILED: the user's real state changed during the run (this run or another process):")
         for c in changed:
             say("!!!   " + c)
-        sys.exit(4)
+        return 4
     if stopped_code is not None:
-        sys.exit(stopped_code)
+        return stopped_code
     # Every recorded attempt of this bench id, those of earlier invocations
     # (a resumed run does not repeat them) included.
     failed = recorded_failures(read_lines(w.p("results", "runs.jsonl")), a.bench_id)
     if failed:
         say(f"{failed} timed runs of bench {a.bench_id} failed (exit status in runs.jsonl, logs in logs/)")
-        sys.exit(1)
+        return 1
+    return 0
 
 
 def recorded_failures(records, bench_id):

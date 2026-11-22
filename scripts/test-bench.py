@@ -2,8 +2,10 @@
 """Offline tests of scripts/bench.py's own logic (no npm, no Yarn, no
 network): the JSONL tail repair, the work directory's marker, the store
 markers, resume safety, the isolation-check report, the per-entry
-sentinel, the exit status from recorded failures, the process-group
-clean-up on a timeout, and the machine-wide lock bench.sh takes.
+sentinel, the exit status from recorded failures, the end of a run however
+it stops (a signal during an install, a setup error, a complete run), the
+process-group clean-up on a timeout, and the machine-wide lock bench.sh
+takes.
     python3 scripts/test-bench.py
 Exit 0 when every check passes."""
 import importlib.util
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("bench", os.path.join(HERE, "bench.py"))
@@ -93,7 +96,8 @@ try:
     args = {"rounds": 10, "disk_rounds": 1, "load_max": 3.0, "load_wait": 60.0, "settle": 10.0, "timeout": 1800.0,
             "fill_npm": "11.10.1", "smoke": False, "projects": ["small"]}
     mach = {"model": "M", "cpu": "C", "macos": "27", "filesystem": "APFS", "node": "v24", "npm": "11.19.1", "yarn": "1.22.22",
-            "matchapack": "matchapack 0.1.0 (abc)", "bench_commit": "b1", "bench_dirty": False}
+            "matchapack": "matchapack 0.1.0 (abc-dirty)", "matchapack_sha256": "m1", "bench_files_sha256": "f1",
+            "bench_commit": "b1", "bench_dirty": True}
     first = {"machine": mach, "args": args}
     check("resume_conflicts: the same tools and settings", bench.resume_conflicts(first, dict(mach), dict(args)) == [])
     check("resume_conflicts: another scope (projects) may resume", bench.resume_conflicts(first, dict(mach), dict(args, projects=["medium"])) == [])
@@ -101,8 +105,23 @@ try:
     check("resume_conflicts: another npm", len(d) == 1 and d[0].startswith("npm "), repr(d))
     d = bench.resume_conflicts(first, dict(mach), dict(args, rounds=5, fill_npm="11.9.0"))
     check("resume_conflicts: other rounds and fill npm", len(d) == 2, repr(d))
-    d = bench.resume_conflicts(first, dict(mach, bench_commit="b2"), dict(args))
-    check("resume_conflicts: another bench script", len(d) == 1, repr(d))
+    d = bench.resume_conflicts(first, dict(mach, bench_files_sha256="f2"), dict(args))
+    check("resume_conflicts: other bench.py / bench.sh contents (a dirty checkout edited since)", len(d) == 1, repr(d))
+    d = bench.resume_conflicts(first, dict(mach, matchapack_sha256="m2"), dict(args))
+    check("resume_conflicts: another matchapack binary under the same version string", len(d) == 1, repr(d))
+    d = bench.resume_conflicts(first, dict(mach, bench_commit="b2", bench_dirty=False), dict(args))
+    check("resume_conflicts: a commit that changes neither file nor binary may resume", d == [], repr(d))
+    fa, fb = os.path.join(tmp, "fa"), os.path.join(tmp, "fb")
+    with open(fa, "w") as f:
+        f.write("ab")
+    with open(fb, "w") as f:
+        f.write("c")
+    h1 = bench.files_sha256([fa, fb])
+    with open(fa, "w") as f:
+        f.write("a")
+    with open(fb, "w") as f:
+        f.write("bc")
+    check("files_sha256: bytes moved from one file to the next change it", bench.files_sha256([fa, fb]) != h1)
 
     # --- the isolation-check report --------------------------------------------------
     s = {"~/.npm": {"digest": "x", "entries": 3, "depth": 4}}
@@ -139,6 +158,60 @@ try:
     # --- the exit status from recorded failures -----------------------------------------------
     recs = [{"bench_id": "b", "exit": 0}, {"bench_id": "b", "exit": "timeout"}, {"bench_id": "b", "exit": 1}, {"bench_id": "c", "exit": 1}]
     check("recorded_failures: every failed attempt of the bench id, earlier invocations included", bench.recorded_failures(recs, "b") == 2)
+
+    # --- the end of a run, however it stops ------------------------------------------------------
+    # run_projects and finish as main() calls them, with a stand-in for
+    # the projects and for the user's real state (sentinels()).
+    def run_stub(stop, records=()):
+        wd2 = tempfile.mkdtemp(dir=tmp)
+        os.makedirs(os.path.join(wd2, "results"))
+        for r in records:
+            bench.append_line(os.path.join(wd2, "results", "runs.jsonl"), r)
+        # main() records the machine and the start of the isolation check
+        # before the projects.
+        bench.append_line(os.path.join(wd2, "results", "meta.jsonl"),
+                          {"bench_id": "t", "machine": mach, "args": args, "top_cpu": ["%CPU COMM"]})
+        bench.append_line(os.path.join(wd2, "results", "sentinels.jsonl"), {"bench_id": "t", "when": "start", "ts": time.time()})
+        w2 = bench.Work(wd2)
+        a2 = types.SimpleNamespace(projects=["small"], bench_id="t", fill_npm="11.10.1", smoke=False)
+
+        class Stand:
+            def npm_project(self, name, spec):
+                stop()
+
+            yarn_project = npm_project
+
+        state = lambda: {"~/.npm": {"digest": "d", "entries": 1, "depth": 4, "mtime": 0, "path": "x"}}
+        stopped = bench.run_projects(Stand(), w2, a2, time.monotonic())
+        code = bench.finish(w2, a2, state(), time.time(), time.monotonic(), stopped, state=state)
+        ends = [r for r in bench.read_lines(os.path.join(wd2, "results", "sentinels.jsonl")) if r.get("when") == "end"]
+        summary_md = os.path.join(wd2, "results", "summary.md")
+        text = open(summary_md).read() if os.path.exists(summary_md) else ""
+        return code, ends, text
+
+    def install_stopped_by_sigterm():
+        # The real path: SIGTERM reaches this process while an install
+        # runs; on_signal turns it into KeyboardInterrupt inside run().
+        bench.run([sys.executable, "-c", "import os, signal, time; os.kill(os.getppid(), signal.SIGTERM); time.sleep(30)"],
+                  tmp, dict(os.environ), check=False)
+
+    old_term = signal.signal(signal.SIGTERM, bench.on_signal)
+    try:
+        code, ends, text = run_stub(install_stopped_by_sigterm)
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
+    check("a signal during an install: exit 130, the end check recorded, the summary written",
+          code == 130 and len(ends) == 1 and "unchanged" in text, f"code={code} ends={len(ends)}")
+    code, ends, text = run_stub(lambda: bench.die("a setup step failed", 7))
+    check("a setup error: its status, the end check recorded, the summary written",
+          code == 7 and len(ends) == 1 and "unchanged" in text, f"code={code} ends={len(ends)}")
+    code, ends, _ = run_stub(lambda: None)
+    check("a complete run with no failure: exit 0", code == 0 and len(ends) == 1, f"code={code}")
+    failed_run = {"bench_id": "t", "project": "small", "case": "npm-fresh-worktree", "round": 1, "side": "plain", "order": 1,
+                  "exit": "timeout", "wall_s": 1.0, "cpu_user_s": 0.5, "cpu_sys_s": 0.5, "load_flag": False,
+                  "noise": {"spotlight_pcpu": 0.0, "vm_pcpu": 0.0, "top": []}, "cmd": ["npm", "ci", "--offline"]}
+    code, _, _ = run_stub(lambda: None, records=[failed_run])
+    check("a complete run with a recorded failure: exit 1", code == 1, f"code={code}")
 
     # --- the process group after a timeout -----------------------------------------------------
     # The parent ends on SIGTERM; a worker it started ignores SIGTERM. The

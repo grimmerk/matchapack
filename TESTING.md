@@ -68,7 +68,7 @@ Each takes a work directory, builds its own store, settings and log there, and n
 | `scripts/test-yarn1.sh` | the Yarn 1 harness and engine on the `fixtures/yarn1-*` projects ([The Yarn 1 harness](#the-yarn-1-harness)) |
 | `scripts/test-npm-launcher.sh` | the npm package's `sh` launcher, with stub binaries |
 | `scripts/test-npm-canary.js` | the canary's decisions, offline |
-| `scripts/test-bench.py` | the benchmark script's own logic, offline: the repair of a torn results line, the work directory's marker, the store markers, resume safety, the isolation check and its report, the exit status, the clean-up of a timed-out process group, the machine-wide lock |
+| `scripts/test-bench.py` | the benchmark script's own logic, offline: the repair of a torn results line, the work directory's marker, the store markers, resume safety, the isolation check and its report, the end of a run however it stops (a signal during an install, a setup error), the exit status, the clean-up of a timed-out process group, the machine-wide lock |
 | `scripts/handover-test.sh` | where nothing can be cloned (ext4; the store and the project on two filesystems): `matchapack npm ci` against plain `npm ci` |
 
 ### The fixture harness (npm)
