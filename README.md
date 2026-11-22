@@ -22,7 +22,7 @@ Every checkout of a JavaScript project needs its own `node_modules`. If you keep
 
 matchapack runs your own npm or Yarn 1 and changes one step inside it. Where npm would unpack a package, or Yarn would copy a file from its cache, matchapack makes a clone (`clonefile` on APFS, the Mac's file system, or a reflink on the Linux file systems Btrfs and XFS) of a copy it already has. Everything else is npm's or Yarn's own work: which packages, where they go, install scripts, bin links, `package-lock.json`, `yarn.lock`, npm's hidden lockfile (`node_modules/.package-lock.json`) and Yarn's `.yarn-integrity`.
 
-The tree is the one plain npm or Yarn builds: the same paths, contents, permissions and symlinks, file times set by the same rule as npm's or Yarn's own, and the same lockfiles, byte for byte. [TESTING.md](TESTING.md#what-identical-means) says how, and where, each of these is checked. Nothing is added to the project: no config file, no `package.json` change, so nobody else on your team has to change anything.
+The tree is the one plain npm or Yarn builds: the same paths, contents, permissions and symlinks, file times set by the same rule as npm's or Yarn's own, and the same lockfiles, byte for byte. [TESTING.md](TESTING.md#what-identical-means) says how, and where, each of these is checked, including byte-for-byte comparisons on two public projects that anyone can repeat. Nothing is added to the project: no config file, no `package.json` change, so nobody else on your team has to change anything.
 
 ## Do you need matchapack?
 

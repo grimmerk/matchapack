@@ -12,7 +12,8 @@ Questions people ask before they install. How it works is in [architecture.md](a
 - [Does my team have to change anything?](#does-my-team-have-to-change-anything) No: nothing in the project changes.
 - [Is anything sent over the network?](#is-anything-sent-over-the-network) Not by matchapack; npm and Yarn download what they would anyway.
 - [What if I delete the store, or clean npm's cache?](#what-if-i-delete-the-store-or-clean-npms-cache) Installed projects keep working.
-- [Is it safe to try?](#is-it-safe-to-try) It changes nothing outside `node_modules`, and every gate falls back to plain npm.
+- [Is it safe to try?](#is-it-safe-to-try) It changes only how packages are placed, and every gate falls back to plain npm.
+- [Is it written with AI?](#is-it-written-with-ai) Yes, with Claude Code; every change is reviewed and checked against plain npm and Yarn.
 
 ## Why not pnpm?
 
@@ -64,8 +65,12 @@ Installed `node_modules` keep working: clones are independent files. The next in
 
 ## Is it safe to try?
 
-- It writes only `node_modules`, the store, its run log and its settings; nothing else in the project.
+- It changes only how packages are placed in `node_modules`. What npm and Yarn write themselves (`package.json`, the lockfiles) and what install scripts do happen as with plain npm or Yarn. Of its own, matchapack writes only the store, its run log and its settings.
 - Every gate it cannot pass falls back to plain npm or Yarn, with nothing changed, and says why.
 - `MATCHAPACK=0 npm ci` runs plain npm for one command.
 - To try it without the shell line, run `matchapack npm ci` in a spare worktree, then `matchapack report`.
 - `matchapack uninstall` is a dry run until you add `--yes`, and installed `node_modules` keep working after it.
+
+## Is it written with AI?
+
+Yes. matchapack is written by one maintainer working with Claude Code. Every pull request is reviewed by two review tools, larger changes also by a separate step-back review, and each finding is checked against the code; every change is tested against plain npm and Yarn, as [TESTING.md](../TESTING.md#independent-reviews) describes.

@@ -150,7 +150,7 @@ A test that cannot fail reads as coverage and proves nothing. Guards (a gate, a 
 
 ## Independent reviews
 
-Every pull request is reviewed by two review tools, run locally on the branch: the Codex CLI and the CodeRabbit CLI. Larger changes also get a step-back review of the whole design, not only of the diff. Every finding is checked against the code; the conclusion for each, fixed or not and why, goes into the pull request.
+matchapack is written by one maintainer working with Claude Code. Every pull request is reviewed by two review tools (Codex CLI and CodeRabbit CLI); larger or riskier changes also get a separate step-back review by another model with a fresh context, which looks for gaps in the approach rather than line-level bugs. Each finding is checked against the code before it is fixed.
 
 ## Real projects
 
@@ -174,8 +174,12 @@ Clean statistics in `matchapack report` show that matchapack ran and cloned; the
 **Latest samples (2026-11-22, a build of the main branch of that day):**
 
 - **npm:** two samples of `npm ci` on a large private monorepo (two worktrees). Plain npm took 95–99 s, matchapack 65–72 s. `package.json` and `package-lock.json` were byte-identical, `npm ls` was the same as plain, and two plain runs differed in 0 paths. The verdict was BUILD-OUTPUT-ONLY (the trees differ only outside `node_modules`): 1–2 files differed, all in the build output of one workspace package of the project (`dist/*.d.mts` and `*.d.cts`, written by the project's own build at install time; the same size, other content). No installed package differed. The cause is the project's own build, not the install: the same files were seen to differ between builds of the same source before (three builds, three different outputs, in the order of the members of union types), and in this sample the two plain builds happened to agree. So it touches only files the project's own build writes outside `node_modules`; every installed package was identical.
-- **A public project:** _(placeholder: one sample of `npm ci` on a public project with the verdict IDENTICAL, and one Yarn 1 sample, after the benchmark machine is free; numbers to come)_
 - **Yarn 1:** no new replay this time: every logged run was skipped (its manifests had changed since, or its directory was gone). The latest real-project evidence for Yarn is a comparison of 2026-11-20 on a copy of grimmerk/codev, an Electron app with native modules: `scripts/verify-yarn1.sh --engine yarn1` (plain Yarn twice, matchapack once), 64,552 paths compared, identical except `node_modules/.prisma/client/index.js`, which embeds each tree's absolute path and differs between the two plain runs too. matchapack cloned 56,914 files, in 15.4 s against about 18.7 s for plain Yarn.
+
+**Two public projects anyone can repeat (2026-11-22, a build of the main branch of that day).** Both are the benchmark's projects at its pinned commits; each was compared on a fresh checkout, with an empty store and npm or Yarn cache:
+
+- **npm, zwave-js/zwave-js-ui at `7af2ab653895` (1,612 packages):** `MATCHAPACK_VERIFY_META=1 MATCHAPACK_VERIFY_BYTES=1 MATCHAPACK_VERIFY_NOISE=1 MATCHAPACK_VERIFY_CLONES=some scripts/verify.sh <checkout> <work>`, with `MATCHAPACK_STORE` and `npm_config_cache` set to new directories. IDENTICAL, including times outside the runs, owner, group and attribute names on 52,278 paths; the hidden lockfile byte-identical; `npm ls` the same as plain; two plain `npm ci` runs differed in 0 paths.
+- **Yarn 1, cornerstonejs/cornerstone3D at `d0e0e37510e2` (2,498 packages):** `scripts/verify-yarn1.sh --engine yarn1 <checkout> --ignore-scripts`. Plain against plain and plain against matchapack both IDENTICAL on 96,727 paths: times to the nanosecond, owner, group, attribute names and the bytes of `.yarn-integrity`. 81,718 files were cloned (896 MiB) and Yarn's first 128 copies left to Node; 81,602 of 81,731 files share blocks with Yarn's cache.
 
 ## Benchmark
 
