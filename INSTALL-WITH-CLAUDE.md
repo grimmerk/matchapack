@@ -22,7 +22,7 @@ You are installing matchapack, a command-line tool that makes `npm ci`, `npm ins
 
 Rules for the whole install:
 
-- **Ask before every step that changes the machine** (steps 3 to 6 below). Say in one or two plain sentences what the step does and what it changes, then wait for a yes. Checking commands (steps 1 and 2) need no question.
+- **Ask before every step that changes the machine** (steps 3 to 5 below). Say in one or two plain sentences what the step does and what it changes, then wait for a yes. Checking commands (steps 1, 2 and 6) need no question.
 - **Show the exact line and the exact file before you change a shell startup file**, and add to the end of the file only. Never reorder, rewrite or delete the user's existing lines without asking about each one.
 - **Never use `sudo`**, and never type a password or token for the user.
 - **If a command is blocked or denied** by Claude Code's permissions (an edit of a shell startup file often is, since it changes every future shell), do not look for another way to run it. Tell the user which command it was and give two choices: approve it (in auto mode: `/permissions`, then "Recently denied", then `r` on that command) or run it themselves by typing `! <command>` in the prompt.

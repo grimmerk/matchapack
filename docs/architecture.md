@@ -12,6 +12,7 @@ This document explains how matchapack works inside: the shell integration, the t
 - [The inject engine (npm)](#the-inject-engine-npm)
   - Diagram D2: [one `npm ci`, step by step](#d2-one-npm-ci-step-by-step)
   - [Start-up: the lazy hook and npm's install root](#start-up-the-lazy-hook-and-npms-install-root)
+  - [How the hook enters npm's process](#how-the-hook-enters-npms-process)
   - [Which packages are cloned](#which-packages-are-cloned)
   - [The clone server](#the-clone-server)
   - [Filling the store through pacote](#filling-the-store-through-pacote)
@@ -33,7 +34,7 @@ This document explains how matchapack works inside: the shell integration, the t
 - [Environment variables](#environment-variables)
 - [Design decisions](#design-decisions)
 
-Diagrams: D1 shows every part and how a command reaches it. D2 zooms into the npm path of D1 (the nodes `MP`, `IJ`, `NPM`, `CS` and `ST`). D3 zooms into the Yarn path of D1 (the nodes `MP`, `YH`, `YARN`, `YS` and `YC`).
+Diagrams: D1 shows every part and how a command reaches it. D2 zooms into the npm path of D1 (the nodes `MP`, `IJ`, `NPM`, `CS`, `ST`, `NC` and `NM`). D3 zooms into the Yarn path of D1 (the nodes `MP`, `YH`, `YARN`, `YS`, `YC` and `NM`).
 
 ## Overview
 
@@ -68,6 +69,8 @@ flowchart LR
   ST --> CS
   YC["YC Yarn's cache"] --> YS
   YS -->|clone| NM
+  NPM -->|"everything else: packages it extracts itself, bin links, scripts, lockfiles"| NM
+  YARN -->|"its first 128 copies, bin links, scripts, .yarn-integrity"| NM
   MP --> LOG["LOG run log"]
 ```
 
@@ -95,8 +98,8 @@ flowchart LR
 | copy-on-write clone (a clone) | a new file that shares its disk blocks with the original until one of them is written. On APFS (the Mac's file system) it is made with `clonefile(2)`; on Linux with the `FICLONE` ioctl. A clone is an independent file: changing or deleting one side never changes the other |
 | reflink | the Linux name for the same thing; Btrfs and XFS (made with `reflink=1`) support it, ext4 does not |
 | store | matchapack's directory of extracted packages, `~/.cache/matchapack/store` by default |
-| store entry | one extracted package in the store, named by the integrity (`sha512-…`) of its tarball |
-| extraction code, store key | the code that extracts a package (pacote's `lib/fetcher.js`, the tar code Node loads, libuv's version). Each entry records the keys under which it is known to equal pacote's extraction |
+| store entry | one extracted package in the store, named by the integrity (`sha512-…`) of its tarball: the entry's name |
+| extraction code, extraction key | the code that extracts a package (pacote's `lib/fetcher.js`, the tar code Node loads, and libuv's version), written as one key. Each entry records the extraction keys under which it is known to equal pacote's extraction. "The key" below means this key, not the entry's name |
 | fingerprint | the SHA-256 of pacote's `lib/fetcher.js`; the list of fingerprints matchapack was tested with is in `src/npm-fingerprints.json` |
 | hidden lockfile | `node_modules/.package-lock.json`, npm's record of what is installed |
 | pacote, arborist | npm's libraries: pacote fetches and extracts packages, arborist builds and writes the tree |
@@ -161,9 +164,11 @@ What it is for: to follow one install through the npm path of D1. The node names
 
 ```text
  MP matchapack binary (src/wrapper.rs, src/inject.rs)
-   ① checks that need no node: MATCHAPACK=0, npm major, umask 022, -g / --dry-run / --help,
-     start directory inside the trial scope   ── fails ──▶ PLAIN plain npm
-   ② takes the store's shared lock; makes a socket pair; starts node with IJ
+   ① checks that need no node: MATCHAPACK=0, npm on PATH traced to npm's own package, npm major,
+     umask 022, -g / --dry-run / --help, start directory inside the trial scope
+                                              ── fails ──▶ PLAIN plain npm
+   ② writes IJ into a private run directory; takes the store's shared lock; makes a socket
+     pair; starts node with IJ, as the npm on PATH would start
       │ socket on fd 3, one JSON object per line each way
       ▼
  IJ inject hook (src/inject.js), in the node process
@@ -179,8 +184,10 @@ What it is for: to follow one install through the npm path of D1. The node names
    ⑦ arborist builds the tree; for each package it calls extract (the hook):
         eligible? no  ──▶ pacote extracts it, as plain npm
                   yes ──▶ {"integrity","dest"} ──▶ CS clone server
-                            entry in ST, not picked for a check ──▶ clone into NM, touch, "ok"
-                            missing, or picked ──▶ "extract_to": pacote extracts from NC into
+                            entry in ST, known under the running key, not picked
+                                                          ──▶ clone into NM, touch, "ok"
+                            missing, not yet known under the key, or picked for a check
+                                ──▶ "extract_to": pacote extracts from NC into
                               a fresh directory ──▶ CS fills ST or compares ──▶ clone into NM
    ⑧ npm runs scripts, links bins, writes the hidden lockfile, prints its summary
       ▼
@@ -189,13 +196,13 @@ What it is for: to follow one install through the npm path of D1. The node names
      (for store gc) and one line to LOG; passes npm's exit status on
 ```
 
-1. The binary runs the checks that need no node process. If one fails, plain npm runs and nothing was changed.
-2. It takes the store's shared lock for the whole run (so `store gc` cannot remove an entry in use), makes a socket pair and starts node with `src/inject.js`. The node child gets the socket as file descriptor 3 and your environment as it is.
+1. The binary runs the checks that need no node process, among them that the `npm` on PATH can be traced to npm's own package ([Finding npm and Yarn](#finding-npm-and-yarn)). If one fails, plain npm runs and nothing was changed.
+2. It writes the hook, `src/inject.js` (compiled into the binary), into a private run directory, takes the store's shared lock for the whole run (so `store gc` cannot remove an entry in use), makes a socket pair and starts node with the hook, the way the npm on PATH would start ([How the hook enters npm's process](#how-the-hook-enters-npms-process)). The node child gets the socket as file descriptor 3 and your environment as it is.
 3. Before anything of npm is loaded, the hook reads pacote's `lib/fetcher.js` from disk and hashes it. An unknown fingerprint means pacote code this build was not tested with: the hook says so and exits 90, and plain npm runs.
 4. The hook starts npm's own `lib/cli.js` with your arguments. It loads nothing of npm before npm's own start-up code runs.
 5. When npm has loaded its config and starts the command, the hook reports npm's install root (`npm.prefix`), whether npm is global, the command and the flags that make it install nothing. The clone server runs the checks that depend on where npm installs and pins that root. A refusal ends node with exit 90 before the command ran, and plain npm runs.
 6. When npm itself loads pacote, the hook checks that pacote's classes have the expected shape and replaces `extract`.
-7. For each package, the hook decides whether a clone can reproduce pacote's extraction exactly. If so, it asks the clone server, which clones the store entry into the destination. A missing entry, or one picked for a check, is extracted by pacote into a directory the server hands out; the server then fills the store with it, or compares it with the entry.
+7. For each package, the hook decides whether a clone can reproduce pacote's extraction exactly. If so, it asks the clone server, which clones the store entry into the destination. A missing entry, an entry not yet known under the running extraction key, or one picked for a check is extracted by pacote into a directory the server hands out; the server then fills the store with it, or compares it with the entry ([Run-time checks](#run-time-checks), cases A to C).
 8. npm finishes its own work.
 9. matchapack compares the packages npm placed with the packages the hook saw, writes the project record and the log line, and exits with npm's status.
 
@@ -207,15 +214,25 @@ What it is for: to follow one install through the npm path of D1. The node names
 
 **npm's install root.** When npm starts its command (its config loaded, the command not run yet), a wrapper around `Npm.prototype.exec` reports `npm.prefix`, `npm.global`, the command (as npm's own table names it) and the flags that make it install nothing. So where npm installs is npm's own answer: `npm ci` inside a workspace of a monorepo clones into the workspace root's `node_modules`, and `npm ci --prefix <dir>` into that directory. matchapack runs every gate that depends on the location on that root and pins it: the server clones only inside it. There is no config load of its own before npm: that would cost one more node start per command, and could disagree with npm.
 
-**The npm version gate.** npm must be a major version this engine has been run on: 10, 11 or 12 (`INJECT_NPM_MAJORS` in `src/wrapper.rs`). There is no code per npm version, so every 10.x, 11.x and 12.x passes this check; the fingerprint gate catches a release whose extraction changed. `MATCHAPACK_NPM_VERSIONS=any`, or a list such as `13.1`, overrides it.
+**The npm version gate.** npm must be a major version this engine has been run on: 10, 11 or 12 (`INJECT_NPM_MAJORS` in `src/wrapper.rs`). There is no code per npm version, so every 10.x, 11.x and 12.x passes this check; the fingerprint gate catches a release whose extraction changed. `MATCHAPACK_NPM_VERSIONS` replaces the majors: `any`, or a comma-separated list (`11.19` means 11.19.x, `13` means 13.x; a list without `11` then turns npm 11 away).
+
+### How the hook enters npm's process
+
+- The binary writes `inject.js`, which is compiled into it, into a private run directory (`<store>/tmp/<pid>-<nanos>-run`, mode 0700, removed after the run).
+- It starts node the way the `npm` on PATH would start it (the same node binary and, behind a version manager's shim, the shim's environment) with `inject.js <npm's package directory> <your arguments>`, the socket as file descriptor 3, and two variables of its own (the descriptor number and the accepted fingerprints).
+- The hook removes those variables, and its test variables, from its environment, sets `process.argv` to npm's `bin/npm-cli.js` and your arguments, and calls npm's own `lib/cli.js`.
+
+So the scripts npm runs see npm's own environment: `npm_execpath` (npm's `bin/npm-cli.js`, which npm takes from its own directory), `npm_config_*`, PATH and your variables, and none of matchapack's. What differs from plain npm: inside npm's own process, `require.main` is the hook, not `npm-cli.js`; the hook has wrapped `process.emit` (to note signals, [Stopping](#stopping-signals-and-a-matchapack-that-goes-away)), npm's `Npm.prototype.exec` (to report the root) and pacote's `extract`. Install scripts on macOS do not inherit the socket (checked: a root script sees no open descriptor above 2); on Linux this was not checked, and a script holding it could only ask for clones the server's checks allow. An `npm` that a script runs is plain npm: the shell function exists only in interactive shells.
 
 ### Which packages are cloned
 
 A package is cloned only when the result is exactly what pacote would extract. The rules are in `src/inject.js` (`ineligible`):
 
-- pacote fetches it as a registry tarball (its `RemoteFetcher` and `RegistryFetcher` classes) with an integrity, which is the store key. A git dependency, a `file:` tarball and a directory link are not, so npm's own pacote handles them (a git dependency may run its `prepare` script);
+- pacote fetches it as a registry tarball (its `RemoteFetcher` and `RegistryFetcher` classes) with an integrity, which names the store entry. A git dependency, a `file:` tarball and a directory link are not, so npm's own pacote handles them (a git dependency may run its `prepare` script);
 - npm's default file modes, and the process umask is 022;
+- the lockfile entry has a `resolved` URL and an `integrity` (without `resolved`, pacote fetches the package's manifest first and marks its bins executable while extracting; without `integrity`, there is no entry name to look up). A lockfile whose entries lack them saves nothing;
 - the fetcher has not loaded the package's manifest for itself (pacote would then mark bins executable during extraction);
+- pacote's `allowGitIgnore` is off (the default: pacote renames `.gitignore` to `.npmignore`, and the store holds that);
 - with `--install-strategy=linked`, npm's fetchers carry no integrity, so npm extracts every package itself: nothing is cloned, and the tree is npm's.
 
 Checked with a `file:` tarball, bundled dependencies and a git dependency (the git dependency on npm 10.5.2, 10.9.10, 11.19.1 and 12.2.2): the git dependency and the `file:` tarball are extracted by npm, bundled dependencies come with the clone of the package that ships them, everything else is cloned, and the tree equals plain npm's. A shrinkwrap follows the same rule but has not been run.
@@ -277,7 +294,7 @@ When the filesystem cannot clone, npm extracts every package itself, and matchap
 |---|---|
 | `v2/<algo>/<first 2 hex>/<rest of the hex>/` | one entry: the package root as pacote extracts it, named by the tarball's integrity |
 | `made-by/` | per entry, the keys of the extraction code under which it is known to equal pacote's extraction |
-| `declined/` | one file per extraction code whose extraction a clone cannot reproduce (the key on its first line, the reason on its second) |
+| `declined/` | one file per extraction code whose extraction a clone cannot reproduce: the key, the reason, and the matchapack build that recorded it (`build: <version (commit)>`), on three lines |
 | `projects/` | one record per installed project: its directory and the entries it uses (for `store gc`) |
 | `sizes/` | cached entry sizes |
 | `tmp/` | work directories; an entry is written here and renamed into place, so a present entry is always complete |
@@ -294,17 +311,17 @@ tar:<first 32 hex of the tar fingerprint> uv:<libuv's version>
 
 - The **fetcher** part is the fingerprint of the gate above: one concept, used twice.
 - The **tar fingerprint** (`tarFingerprint` in `src/inject.js`) covers tar's package and every package in its `dependencies`, transitively, found as Node finds them: the `<name>@<version>` of each, and the SHA-256 of every file of those packages that Node has loaded (and, when one of them is an ES module, of every ES module file in them). Each package's own `package.json` is left out, so that code that only reads a version does not change the fingerprint.
-- **libuv's version** (Node's file-system library): a libuv release could change the bytes or modes that `open`, `write` and `mkdir` leave. Node's own version and zlib are not in the key.
+- **libuv's version** (Node's file-system library): a libuv release could change the bytes or modes that `open`, `write` and `mkdir` leave. Node's own version and zlib are not in the key. This part is a version, not code: Node also changes libuv's code under one version number (its copy code changed from Node 26.0 to 26.2 under libuv 1.52.1), and such a change is not seen by the key; the one-in-50 sample and `store verify` cover it.
 
 The key is computed when npm itself has loaded pacote (which loads tar) and sent before the hook is installed, so every request sees it. `node src/inject.js --key <npm dir>` prints it.
 
-Why the code and not the version numbers: an npm release that changes none of the extraction code (often only pacote's version number moves) then compares nothing, and switching back and forth between two npm or Node versions compares nothing again. Over npm 10.0.0 to 12.2.2, the key changes in 23 of 73 release steps. It also covers two gaps a version key has: tar's dependencies, which were separate packages in tar 6.x to 7.5.7, and code patched in place under the same version number.
+Why the code and not the version numbers: an npm release that changes none of the extraction code (often only pacote's version number moves) then compares nothing, and switching back and forth between two npm or Node versions compares nothing again. Over npm 10.0.0 to 12.2.2, the key changes in 23 of 73 release steps. It also covers two gaps a version key has: tar's dependencies, which were separate packages in tar 6.x to 7.5.7, and code patched in place under the same version number (for pacote and tar; not for libuv, above).
 
 **The one-time comparison.** When an entry is about to be cloned under a key that its record does not have, pacote extracts the same tarball and the two are compared file by file: the same paths, contents and file modes (directory modes follow the umask, which is gated to 022). Equal: the key is added to the record and the entry is cloned. Different: the entry is replaced by pacote's extraction (the old one renamed aside first, so an install cloning from it at that moment gets the whole old entry or an error, never a mix), which is what gets installed, and matchapack says so. A difference never blocks the engine: replacing makes each compared entry right, while blocking would leave every later install slower.
 
-After an upgrade that changes the key, the first install compares each entry it uses once: about twice a plain `npm ci` for the packages that install uses (a second project using the same packages compares nothing), and the summary says so. `matchapack store verify` does the same work ahead of time for the whole store.
+After an upgrade that changes the key, the first install compares each entry it uses once: 1.7 to 2.8 times a plain `npm ci` in the benchmark, for the packages that install uses (a second project using the same packages compares nothing), and the summary says so. `matchapack store verify` does the same work ahead of time for the whole store.
 
-**The decline list.** If pacote's extraction under some code stops being what a clone reproduces (the time check above), matchapack stops cloning in that install and says so. When something had already been cloned, the install counts as broken: plain `npm ci` rebuilds it, and the install family stops with the repair advice. When nothing had, the install is npm's own and stands. Either way the code goes on the decline list, and later installs under it are npm's own. To try that code again, delete its file (`grep -lx '<key>' <store>/declined/*` finds it; deleting the directory clears them all).
+**The decline list.** If pacote's extraction under some code stops being what a clone reproduces (the time check above), matchapack stops cloning in that install and says so. When something had already been cloned, the install counts as broken: plain `npm ci` rebuilds it, and the install family stops with the repair advice. When nothing had, the install is npm's own and stands. Either way the code goes on the decline list, and later installs under it, by the same matchapack build, are npm's own. A decline holds only for the build that recorded it: another build (an upgrade or a rebuild of matchapack) compares again and declines again only if the extraction is still not what a clone reproduces. To try that code again with the same build, delete its file (`grep -lx '<key>' <store>/declined/*` finds it; deleting the directory clears them all). When the hook cannot compute the key at all, the key is unknown: it vouches for nothing, every entry is compared before it is cloned, and nothing is declined.
 
 ## Run-time checks
 
@@ -319,7 +336,7 @@ What keeps matchapack right on an npm release it has not seen is checked while i
 
 Why C does not compare everything: the same tarball (fixed by its integrity) through the same extraction code gives the same files, and B has already shown them equal to the entry, so a second comparison adds nothing. The one-in-50 sample is a safety net for what the key does not cover (a store file changed or damaged since, Node's own file-system layer, zlib, the operating system), not a speed-up. To check the whole store at once after an upgrade, run `matchapack store verify`.
 
-`MATCHAPACK_INJECT_CHECK` (`should_check` in `src/serve.rs`): a number N (50 when unset) compares one in N entries known under the running key and always compares an entry not yet known under it; `all` compares every entry; `off` compares nothing at all, B included, so after an upgrade that changed the extraction code nothing is compared before it is cloned. To make the sample cheaper, set a larger number, not `off`. Measured on a large project (about 3,800 packages, warm store): plain `npm ci` 14.6 s; matchapack with no comparison 7.5 s; the default one-in-50 sample added about 0.4 s (7.8 to 8.0 s). The fingerprint gate and the result trap cost milliseconds.
+`MATCHAPACK_INJECT_CHECK` (`should_check` in `src/serve.rs`): a number N (50 when unset) compares one in N entries known under the running key and always compares an entry not yet known under it; `all` compares every entry; `off` compares nothing at all, B included, so after an upgrade that changed the extraction code nothing is compared before it is cloned. To make the sample cheaper, set a larger number, not `off`. Measured earlier, not with the benchmark's method (a project of 27 direct dependencies, 3,840 packages installed, `--ignore-scripts`, medians of three rounds): plain `npm ci` 14.6 s; matchapack with a warm store and no comparison 7.5 s; with the default one-in-50 sample 8.0 s, so the sample costs about 0.5 s (7 %) and 2.7 s of CPU per install there. The fingerprint gate and the result trap cost milliseconds.
 
 Two more checks run after npm exits:
 
@@ -448,7 +465,7 @@ matchapack decides before Yarn starts and prints why when:
 
 ## Linux
 
-The inject engine works the same way on Linux, with per-file clones: there is no directory clone on Linux, so the server makes each directory and clones each file with the `FICLONE` ioctl. Btrfs and XFS (made with `reflink=1`) support it.
+The inject engine works the same way on Linux, with per-file clones: there is no directory clone on Linux, so the server makes each directory and clones each file with the `FICLONE` ioctl. Btrfs and XFS (made with `reflink=1`) support it. On Btrfs, small files are stored inline in the file system's metadata, which a clone copies: in the Linux job's project, 29,071 small files were inline, so only 16,708 of 45,780 files shared blocks with the store, but those held 491 of the 512 MiB.
 
 Where nothing can be cloned (ext4, or the store and the project on two filesystems, `EXDEV`), the first refused clone stops cloning for that install, npm extracts every package itself, and matchapack says so. The tree is npm's own; only the saving is lost. There is no probe before npm runs: npm removes the old `node_modules` itself, as with plain npm.
 
@@ -462,8 +479,12 @@ Stopping matchapack stops npm or Yarn, however it is stopped.
 
 - npm and Yarn run in matchapack's process group, so Ctrl-C, `kill -- -<pgid>`, `timeout` and most cancellations in continuous integration (CI) reach them once, from the kernel, exactly as they reach plain npm.
 - A signal sent to matchapack alone (`kill <pid>`, an IDE's stop button, a supervisor) reaches npm through matchapack: matchapack sends a line naming the signal over the socket, and the hook signals its own process. npm then stops as plain npm given that signal stops: arborist's handler rolls back a half-done install, and a running script gets the signal too. matchapack waits for it, logs the run as `interrupted`, never starts npm a second time, and exits as npm did.
-- If matchapack is killed outright (SIGKILL, a crash), the socket closes; the hook takes that as SIGTERM and stops npm. npm's rollback then finishes after matchapack has exited.
-- **Never a second signal on top of npm's own.** A group signal reaches npm and matchapack at the same moment; the hook must not then add one, because npm's reify handler removes itself on the first signal, and a second one, with no listener left, kills npm in the middle of its rollback. The hook notes every SIGTERM, SIGINT and SIGHUP its process receives (by wrapping `process.emit`, without a listener of its own, which would keep npm's `signal-exit` from re-raising the signal) and stops itself only when none has arrived. Because Node emits a signal in a later loop turn, the hook waits 50 ms (`MATCHAPACK_STOP_GRACE_MS`) before acting on matchapack's line.
+- If matchapack is killed outright (SIGKILL, a crash), the socket closes with no line, and there are three cases:
+  - nothing had asked matchapack to stop before, and npm received no signal of its own: the hook stops npm with SIGTERM, and npm's rollback finishes after matchapack has exited (about 0.7 to 0.9 s later on the small fixture), so the shell or CI sees the command end before npm has undone its work;
+  - matchapack had first been asked to stop (a supervisor's SIGTERM, then SIGKILL; an IDE's stop, then force-kill): the hook kills npm with SIGKILL, as plain npm would get from that supervisor. There is no rollback, and the tree is left half made: run `npm ci` again;
+  - npm had already received a signal itself (a group signal): the hook sends nothing more.
+- A second signal to matchapack while it waits for npm (another signal, or the same one 500 ms or more after the first) is passed on as the last line, and then ends matchapack at once by that signal; npm, already stopping, finishes its rollback after matchapack has exited. The same signal within 500 ms counts as one stop sent twice (GNU `timeout` signals its command and then the whole group, microseconds apart).
+- **Never a second signal on top of npm's own.** A group signal reaches npm and matchapack at the same moment; the hook must not then add one, because npm's reify handler removes itself on the first signal, and a second one, with no listener left, kills npm in the middle of its rollback. The hook notes every SIGTERM, SIGINT and SIGHUP its process receives (by wrapping `process.emit`, without a listener of its own, which would keep npm's `signal-exit` from re-raising the signal) and stops itself only when none has arrived. Because Node emits a signal in a later loop turn, the hook waits 50 ms (`MATCHAPACK_STOP_GRACE_MS`) before acting on matchapack's line. The cost: a signal sent to matchapack's pid reaches npm about 50 ms later than it would reach plain npm, so near the end of a phase npm does what plain npm signalled that much later would do (measured with a longer wait: a SIGHUP just after bins were linked found npm past its rollback handler, and npm died with the tree in place, where plain npm signalled at that moment rolled back).
 - The same applies to Yarn. In `yarn workspace <name> add …`, the Yarn that links is a child of the one matchapack started; it stops when the Yarn that started it goes away.
 
 An earlier design forwarded signals from matchapack to npm and moved npm into its own process group. It was dropped: without a terminal, npm in its own group survived a group SIGKILL and kept writing; with a terminal, a group SIGTERM reached npm twice, and the late copy killed npm during its rollback in 2 of 12 runs.
@@ -471,7 +492,7 @@ An earlier design forwarded signals from matchapack to npm and moved npm into it
 ## Store maintenance
 
 - **Project records.** Every install records its directory and the entries it uses in `<store>/projects/`. A package stays in the store while a project installed from it still has its `node_modules`.
-- **`matchapack store gc`** removes entries no recorded project uses. Removing an entry never breaks an installed `node_modules` (its files are clones, independent of the entry), but disk space comes back only for entries no `node_modules` still shares blocks with, so the real run reports the volume's free space before and after. Entries extracted in the last hour are kept. gc is refused while an install is running (the store lock). Records whose path no longer has a `node_modules` (a project moved, renamed, deleted, or its `node_modules` removed) are listed and dropped. A record whose path cannot be checked (a parent directory matchapack cannot search, or an unmounted volume under `/Volumes`) is kept and listed separately.
+- **`matchapack store gc [--dry-run]`** removes entries no recorded project uses (`--dry-run` lists what it would remove and changes nothing). Removing an entry never breaks an installed `node_modules` (its files are clones, independent of the entry), but disk space comes back only for entries no `node_modules` still shares blocks with, so the real run reports the volume's free space before and after. Entries extracted in the last hour are kept. gc is refused while an install is running (the store lock). Records whose path no longer has a `node_modules` (a project moved, renamed, deleted, or its `node_modules` removed) are listed and dropped. A record whose path cannot be checked (a parent directory matchapack cannot search, or an unmounted volume under `/Volumes`) is kept and listed separately.
 - **`matchapack store adopt <dir>…`** records the npm projects under each directory, from their hidden lockfiles, so that gc keeps their entries: for a project that was moved, or a copy made with its `node_modules` (`cp -c -R`), which has no record of its own. An existing record is added to, never narrowed. It follows no symlink and never enters a `node_modules`, a `.git` or the store. Yarn projects need no record.
 - **`matchapack store verify [--fix]`** compares every entry with what npm's own pacote (the npm on `PATH`) extracts from its tarball in the npm cache: files, contents, file and directory modes. Exit 1 when one differs. `--fix` replaces those with pacote's extraction. A matching entry is recorded as known to that extraction code. About 3 minutes for 8,779 entries on a busy machine (each tarball is extracted again, by node).
 
@@ -506,16 +527,17 @@ Every routed command that reaches matchapack appends one JSON line to `~/.cache/
 | `MATCHAPACK_LOG=0` | no run log |
 | `MATCHAPACK_PATHS` | the trial scope, `:`-separated, instead of `~/.config/matchapack/paths` |
 | `MATCHAPACK_INJECT_CHECK` | how often an entry known under the running key is compared: a number N (one in N; 50 by default), `all`, or `off` ([Run-time checks](#run-time-checks)) |
-| `MATCHAPACK_NPM_VERSIONS` | npm versions to accept beyond 10, 11 and 12 (`any`, or a list such as `13.1`) |
+| `MATCHAPACK_NPM_VERSIONS` | the npm versions to accept instead of 10, 11 and 12: `any`, or a comma-separated list (`11.19` means 11.19.x, `13` means 13.x) |
 | `MATCHAPACK_NPM_FINGERPRINT` | pacote fingerprints to accept beyond the list (`any`, or a comma-separated list) |
 | `MATCHAPACK_YARN_JS` | the `yarn.js` to run, when `yarn` on `PATH` cannot be followed |
 | `MATCHAPACK_NO_FALLBACK=1` | a decline exits 3 with nothing changed instead of running plain npm or Yarn |
 | `MATCHAPACK_ENGINE` | unset, empty or `inject`; any other value is refused |
 | `MATCHAPACK_VERBOSE` | more detail in matchapack's lines |
+| `MATCHAPACK_INJECT_THREADS` | the clone server's threads (default: the number of CPUs) |
 | `MATCHAPACK_STOP_GRACE_MS` | the hook's wait before it acts on matchapack's stop line (50 ms) |
-| `MATCHAPACK_TEST_BROKE`, `MATCHAPACK_YARN_SIMULATE`, `MATCHAPACK_INJECT_HOOK` | for tests only |
+| `MATCHAPACK_TEST_BROKE`, `MATCHAPACK_TEST_WRITER`, `MATCHAPACK_TEST_APPEND_TO`, `MATCHAPACK_STRESS`, `MATCHAPACK_INJECT_HOOK`, `MATCHAPACK_YARN_SIMULATE`, `MATCHAPACK_YARN_PROBE_DIR`, `MATCHAPACK_YARN_TIMEOUT_MS`, `MATCHAPACK_YARN_CACHE_DIR_SECS`, `MATCHAPACK_YARN_FAIL_EVERY`, `MATCHAPACK_YARN_FAIL_FIXUP_EVERY`, `MATCHAPACK_YARN_SLOW_FIXUP_EVERY`, `MATCHAPACK_YARN_SLOW_FIXUP_MS` | for tests only |
 
-`UV_THREADPOOL_SIZE` is not matchapack's, but helps: removing the old `node_modules` on a reinstall is npm's own step, which runs on Node's thread pool (4 threads by default), as with plain `npm ci`. `export UV_THREADPOOL_SIZE=16` (or your core count) makes it faster on a large project, with or without matchapack. On a 3,466-package project, in 4 rounds on a busy machine, npm's removal went from about 12 % slower than a 10-thread removal to about 7 % faster.
+`UV_THREADPOOL_SIZE` is not matchapack's, but helps: removing the old `node_modules` on a reinstall is npm's own step, which runs on Node's thread pool (4 threads by default), as with plain `npm ci`. `export UV_THREADPOOL_SIZE=16` (or your core count) makes it faster on a large project. Measured only through matchapack, on a private 3,466-package project in 4 rounds on a busy machine: npm's removal went from about 12 % slower than a 10-thread removal to about 7 % faster. The same is expected for plain `npm ci`, which runs the same step, but was not measured.
 
 ## Design decisions
 
@@ -523,13 +545,19 @@ Every routed command that reaches matchapack appends one JSON line to `~/.cache/
 
 **A directory clone per package on macOS.** One `clonefile(2)` per package directory took 4.3 to 10.2 s on a large monorepo; a clone per file took 24.7 to 34.6 s, which made the whole install slower than plain `npm ci`. Apple warns that a directory clone blocks changes to the source directory while it runs; the sources here are store entries that only matchapack writes, written once and renamed into place before any clone reads them. Linux has no directory clone, so the per-file path is kept for it (and was checked on macOS too: identical trees).
 
+**Clones, not hard links or symlinks.** A hard link is one file in many places: an edit in one checkout (a patched package, a build that writes into `node_modules`) changes every checkout and the store, and all places share one set of file times and modes, so a tree cannot have npm's own times. A symlink changes the layout that tools see (pnpm's layout, with `realpath` pointing into a store). A clone is an independent file with its own metadata, in npm's own layout, and an edit copies only the changed blocks. The price: it needs a file system that clones (APFS, Btrfs, XFS with reflinks).
+
+**A shell function, not a launcher named `npm` on PATH.** The function reaches what people type and Claude Code sessions (their shell snapshot carries functions); a Node version manager that puts its own `npm` first on PATH cannot shadow it; and matchapack's own npm calls cannot loop back into it, since child processes do not see shell functions. The cost is the other side of that: scripts, Makefiles, editors, CI and non-interactive shells run plain npm unless they call `matchapack npm` themselves. A launcher on PATH would reach them all, and is not built.
+
+**What a store hit skips, and the trust that takes.** On a hit (an entry known under the running extraction key and not picked for the sample), pacote's `extract` is not called: npm's tarball is not opened, nothing is read from npm's cache or the network for that package, and the tarball's integrity is not checked again. It was checked by pacote when the entry was filled, and the entry was compared with pacote's extraction once under this key. After that, a store file changed or damaged since is caught only by the one-in-50 sample or by `matchapack store verify`; plain npm reads and checks the tarball on every extraction. The store is the user's own directory, written only by matchapack; that is the trust it takes.
+
 **Store entries are never made read-only.** A directory clone carries modes as they are, so a read-only entry would give read-only package directories.
 
-**The store is keyed by tarball integrity, filled and checked by pacote.** A request cannot name a source outside the store, and the entry is what npm's own extraction gives. Comparing once per extraction code, then sampling, keeps the daily cost low ([The store and its key](#the-store-and-its-key)).
+**Store entries are named by tarball integrity, filled and checked by pacote.** A request cannot name a source outside the store, and the entry is what npm's own extraction gives. Comparing once per extraction code, then sampling, keeps the daily cost low ([The store and its key](#the-store-and-its-key)).
 
 **Replace a differing entry; do not block.** After a pacote or tar change, a difference replaces the entry with pacote's extraction and the install goes on. Blocking would leave every later install slower; replacing makes each compared entry right.
 
-**Hand over rather than fail.** Every gate leads to plain npm or Yarn with nothing changed. The worst case of a routed command is the command you typed.
+**Hand over rather than fail.** Every gate leads to plain npm or Yarn with nothing changed: for a declined run, the worst case is the command you typed. A run that breaks after npm has started is the exception: `npm ci` is rebuilt with plain npm, and the install family stops with the repair advice ([npm's errors, and a run that breaks](#npms-errors-and-a-run-that-breaks)); and a matchapack killed with SIGKILL after it was asked to stop leaves npm killed too ([Stopping](#stopping-signals-and-a-matchapack-that-goes-away)).
 
 **No signal forwarding** ([Stopping](#stopping-signals-and-a-matchapack-that-goes-away)).
 

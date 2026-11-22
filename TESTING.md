@@ -1,6 +1,6 @@
 # How matchapack is tested
 
-matchapack's promise is that the `node_modules` it builds is the one plain npm or plain Yarn 1 would build, only made of clones. This document says what "the same" is checked on, which tests check it, where they run, what is checked on real projects, and what is not tested. How matchapack works is in [docs/architecture.md](docs/architecture.md); how to use it is in the [README](README.md).
+matchapack's promise is that the `node_modules` it builds is the one plain npm or plain Yarn 1 would build, only made of clones. This document says what "the same" is checked on, which tests check it, where they run, what is checked on real projects, and what is not tested. How matchapack works is in [docs/architecture.md](docs/architecture.md); how to use it is in the [README](README.md). Terms such as hook, store, fingerprint and trial scope are defined in the [glossary](docs/architecture.md#glossary) there.
 
 ## Contents
 
@@ -34,11 +34,24 @@ Every comparison installs the same project twice, on copies, with plain npm (or 
 | file contents | byte for byte |
 | modes | permission bits of files and directories |
 | symlinks | their targets (`.bin` links, workspace links) |
-| times | each path's modification time, to the nanosecond (`--meta`) |
-| owner and group | uid and gid of each path (`--meta`) |
-| extended attributes | their names (`--meta`); not their values, because macOS gives every file a `com.apple.provenance` value that a clone keeps from its source and a copy does not |
-| npm's files | `package.json`, `package-lock.json` and the hidden lockfile (`node_modules/.package-lock.json`), byte for byte; whether npm still trusts the hidden lockfile; `npm ls` |
-| Yarn's files | `.yarn-integrity`, byte for byte (`--meta` reports it on a line of its own) |
+| npm's hidden lockfile | `node_modules/.package-lock.json`, as JSON; its bytes are reported |
+| times | each path's modification time, to the nanosecond (`--meta` only) |
+| owner and group | uid and gid of each path (`--meta` only) |
+| extended attributes | their names (`--meta` only); not their values, because macOS gives every file a `com.apple.provenance` value that a clone keeps from its source and a copy does not |
+| Yarn's `.yarn-integrity` | byte for byte (`--meta` reports it on a line of its own) |
+
+The harness scripts add checks of their own: `scripts/verify.sh` runs `npm ls` and, with `MATCHAPACK_VERIFY_BYTES=1` (which `scripts/verify-npm.sh` sets for every fixture, and the npm sampler does not), requires the hidden lockfile to be byte-identical; `scripts/verify-steps.sh` also requires `package.json` and `package-lock.json` to be byte-identical and checks whether npm still trusts the hidden lockfile. Which check runs where is in the table below.
+
+Not compared anywhere: access, change and creation times, ACLs, the values of extended attributes, and the order in which a directory lists its entries.
+
+| Where | Paths, kinds, contents, modes, symlinks | Hidden lockfile | `package.json`, lockfile bytes | Times, owner, group, attribute names | Also |
+|---|---|---|---|---|---|
+| npm fixtures (`verify-npm.sh`, each fixture) | yes | bytes | not written by `npm ci` | the `workspaces` fixture only | `npm ls` |
+| step harness (`verify-steps.sh`, about 50 cases) | yes, after every step | bytes | bytes | one case | `npm ls`, npm's trust, stale times, the log record |
+| large repository on Linux (`linux-large.yml`, by hand) | yes | bytes | not written by `npm ci` | yes | `npm ls` |
+| Yarn 1 harness (`test-yarn1.sh`, `verify-yarn1.sh`) | yes | not Yarn's | as files of the tree | yes | `.yarn-integrity` bytes |
+| npm samples of real runs (`verify-sample.sh`) | yes | as JSON | bytes, for commands that write them | no | `npm ls` |
+| Yarn samples of real runs (`verify-sample.sh --yarn`) | yes | not Yarn's | as files of the tree | yes | `.yarn-integrity` bytes |
 
 Two rules keep the comparison honest:
 
@@ -60,12 +73,13 @@ Each takes a work directory, builds its own store, settings and log there, and n
 | Script | What it checks |
 |---|---|
 | `scripts/test-inject.sh` | the inject engine: the hook cloned, a disabled hook and a store miss give the same tree, every gate, npm's own failures passed on once, the store lock, the project record, the file group with a store under another group, npm's flags on the workspaces fixture (`--omit=dev`, `--workspace`, `--workspaces`, `--install-strategy`, `NODE_ENV=production`, `.npmrc` settings), each against plain `npm ci` |
-| `scripts/test-inject-hook.js` | the hook's eligibility rules against npm's real fetcher classes, the fingerprint and the store key, the repair advice ([Combination sweeps](#combination-sweeps)) |
+| `scripts/test-inject-hook.js` | the hook's eligibility rules against npm's real fetcher classes, the fingerprint and the extraction key, the repair advice ([Combination sweeps](#combination-sweeps)) |
 | `scripts/test-wrapper.sh` | routing through the shell function: aliases, bypasses, the trial scope, hand-overs that leave `node_modules` untouched, npm's failures passed on once, the run log, the `mp` short name |
 | `scripts/test-safety.sh` | tampered lockfiles and symlinked directories, each against plain `npm ci` on a copy: the same exit status, and nothing written outside the project beyond what npm itself writes |
 | `scripts/test-store.sh` | project records, `store gc`, `store adopt`, `store verify` through npm's pacote, the store lock and the clean-up of temporary directories |
 | `scripts/test-shells.sh` | the same routing in bash, zsh and fish, with a stub `matchapack` in Docker; with `--real`, fish with the real binary, real npm and Yarn 1 |
 | `scripts/test-yarn1.sh` | the Yarn 1 harness and engine on the `fixtures/yarn1-*` projects ([The Yarn 1 harness](#the-yarn-1-harness)) |
+| stopping (in `test-wrapper.sh` and `test-yarn1.sh`) | signals against plain npm and Yarn given the same signal: SIGKILL of matchapack during a root script, SIGTERM then SIGKILL to its pid, a group SIGTERM, a group SIGTERM then SIGINT or SIGKILL to the pid, Ctrl-C in a pseudo-terminal; for Yarn, SIGTERM and SIGKILL during the link step and SIGHUP during a workspace command |
 | `scripts/test-npm-launcher.sh` | the npm package's `sh` launcher, with stub binaries |
 | `scripts/test-npm-canary.js` | the canary's decisions, offline |
 | `scripts/test-bench.py` | the benchmark script's own logic, offline: the repair of a torn results line, the work directory's marker, the store markers, resume safety, the isolation check and its report, the end of a run however it stops (a signal during an install, a setup error), the exit status, the clean-up of a timed-out process group, the machine-wide lock |
@@ -99,11 +113,11 @@ The fixtures name their tarballs (`fixtures/optional-upward/tarballs`) by the pl
 
 | Job | Runner | What it runs |
 |---|---|---|
-| `linux` | Ubuntu | `cargo test` and a release build with warnings as errors; `test-shells.sh` in Docker (bash, zsh, fish with stubs); the canary's decisions; the benchmark script's own logic; the npm launcher; fish with the real binary, real npm and Yarn 1; the hand-over where nothing can be cloned (ext4, and `EXDEV` with an empty and a filled store) |
+| `linux` | Ubuntu | `cargo test` and a release build with warnings as errors; `test-shells.sh` in Docker (bash, zsh, fish with stubs); the canary's decisions; the benchmark script's own logic; the npm launcher; fish with the real binary and real npm, and the yarn function (macOS-only, so loaded by hand) with real Yarn 1 to check its route, arguments and status, not clones; the hand-over where nothing can be cloned (ext4, and `EXDEV` with an empty and a filled store) |
 | `linux-npm` | Ubuntu, one job per npm line: 10.9.10, 11.21.2, 12.2.2 | `test-inject.sh` and `verify-npm.sh` with the work directories on a loop-mounted Btrfs, so the hook really clones |
 | `macos` | macOS 15, Node 24.22.1 (npm 11.19.1), Node 22.14.0 as a second Node | the safety, routing, store and inject suites; the fixture harness with byte-identical hidden lockfiles; the Yarn 1 harness and engine with Yarn 1.22.22, including the cross-Node and two-volume cases and the route in fish |
 
-The npm versions are pinned, never "the newest", so a new npm release cannot turn an unrelated pull request red. Moving a pin is the canary's job.
+The npm versions are pinned, never "the newest", so a new npm release cannot turn an unrelated pull request red. The canary below says when a newer release passes; a person moves the pins.
 
 ### The npm canary and the Node and Yarn release watch
 
@@ -113,13 +127,15 @@ The npm versions are pinned, never "the newest", so a new npm release cannot tur
 - **Node and Yarn 1.** The Yarn engine depends on Node's `fs.copyFile`, which is libuv's, and libuv changes inside a Node line (Node 22.11.0 to 22.12.0 changed what a copy keeps). The watch reads Node's release list, the libuv version of each watched line's newest release, and a hash of libuv's copy code (`deps/uv/src/unix/fs.c`) at that release, because Node also picks libuv fixes without changing libuv's version. A new Node major, or a libuv change in a watched line, runs the npm suites on Linux and the Yarn suites on macOS (`scripts/yarn-suites.sh`) on that Node. A new stable Yarn 1 release runs the Yarn suites with it.
 - **Results** go to a tracking issue: a table per line, a history, and a comment when a person should look (a new fingerprint, a changed function, a new major, a failed suite). The run is red whenever it commented, so GitHub's failed-run email is the notice.
 
-The run-time checks ([docs/architecture.md](docs/architecture.md#run-time-checks)) are the other half: an npm release whose pacote code is not on the list runs as plain npm until the canary has tested it and the fingerprint is added.
+The canary only reports; it changes nothing. The run-time checks ([docs/architecture.md](docs/architecture.md#run-time-checks)) are the other half: an npm release whose pacote code is not on the list runs as plain npm until the canary has tested it, a person has added the fingerprint, and a matchapack release carries it. GitHub turns off a scheduled workflow of a public repository after 60 days without activity in it, so the canary needs a commit, or a click on "Enable workflow", at least that often.
 
 ### Linux
 
 - **Btrfs and XFS in CI.** `linux-npm` runs the npm suites on Btrfs on every pull request. `.github/workflows/linux-large.yml` (run by hand, and on pull requests that change it) installs a large public project, zwave-js/zwave-js-ui at a pinned commit (1,686 lockfile entries, 1,611 installed; native addon, esbuild and other install scripts), on Btrfs and on XFS (made with `reflink=1`), each on a loop image: plain `npm ci` against matchapack with an empty store, then fresh copies with the warm store, with byte-identical hidden lockfiles and `diff --meta`.
 - **Where nothing can be cloned.** `scripts/handover-test.sh` (in the `linux` job) runs `matchapack npm ci` against plain `npm ci` with the store and projects on ext4, and with the store on Btrfs and the projects on ext4 (`EXDEV`), empty and filled; and a lockfile out of sync, where npm's own status must come back and `node_modules` stay untouched.
 - **Docker.** `scripts/linux-test.sh` runs the harness on Btrfs and XFS in Docker, with the negative cases (overlayfs, two filesystems).
+- **What CI builds is not what is released.** CI builds and tests a glibc binary; the released Linux binaries are static musl builds, which only `linux-large.yml` runs (one of its jobs alternates glibc and musl builds on Btrfs). XFS is tested only in that job, not on every pull request.
+- **Disk on Btrfs.** Small files are stored inline in Btrfs's metadata, which a clone copies: on the large project, 16,708 of 45,780 files shared blocks with the store, holding 491 of 512 MiB.
 
 ## Combination sweeps
 
@@ -130,19 +146,19 @@ Some rules are checked against every combination a tool defines, not a few examp
 
 ## Mutation checks
 
-A test that cannot fail reads as coverage and proves nothing. Every guard (a gate, a check of a request, a comparison rule) gets a mutation check when it is written: the guard is broken on purpose in a scratch copy, the named test must go red, and the copy is thrown away. Each test is first run unmutated, to show that its filter matches. Examples of the scale: the inject engine's first pull request had 21 mutations and a control (20 caught, 1 equivalent, the control survived); the sampled verification's Yarn part was checked with a mutation that clones Yarn's first copies, over 40 samples. When a mutation survives, either a test is added or the guard is shown to be redundant, and the result is written down.
+A test that cannot fail reads as coverage and proves nothing. Guards (a gate, a check of a request, a comparison rule) get a mutation check when they are written, nearly all of them (an exception: the fish side of the `mp` short name was not mutated locally, only run in CI): the guard is broken on purpose in a scratch copy, the named test must go red, and the copy is thrown away. Each test is first run unmutated, to show that its filter matches. Examples of the scale: the inject engine's first pull request had 21 mutations and a control (20 caught, 1 that changes nothing a test could see, and the control, a change that should not be caught, was not); the sampled verification's Yarn part was checked with a mutation that clones Yarn's first copies, over 40 samples. When a mutation survives, either a test is added or the guard is shown to be redundant, and the result is written down.
 
 ## Independent reviews
 
-Every pull request is reviewed by tools that did not write it, run locally on the branch: the Codex CLI and the CodeRabbit CLI. Larger changes also get a step-back review of the whole design, not only of the diff. Every finding is checked against the code; the conclusion for each, fixed or not and why, goes into the pull request.
+Every pull request is reviewed by two review tools, run locally on the branch: the Codex CLI and the CodeRabbit CLI. Larger changes also get a step-back review of the whole design, not only of the diff. Every finding is checked against the code; the conclusion for each, fixed or not and why, goes into the pull request.
 
 ## Real projects
 
-The fixtures are small on purpose. The harness (`scripts/verify.sh`, or `scripts/verify-npm.sh` with a project) has also been run on real projects throughout development, on copies, never changing the project. Some of these runs were made with the earlier engine that the inject engine replaced; the current engine's everyday runs are checked by the sampled verification below.
+The fixtures are small on purpose. The harness (`scripts/verify.sh`, or `scripts/verify-npm.sh` with a project) has also been run on real projects, on copies, never changing the project. Not every run used the engine that ships; each group says which:
 
-- public open-source projects for npm: compass (4,701 lockfile entries, 76 workspace links, native builds), eventsource, vscode-git-graph and rollup-starter-app (version 2 lockfiles, sha1-only integrities), and the Linux job's zwave-js-ui ([Linux](#linux));
-- private repositories of the maintainer's: 14 in the harness's list of subjects, the largest an npm workspaces monorepo with about 3,600 lockfile entries in 6 workspaces (plain `npm ci` itself fails on 4 of them, so those cannot be compared). They are not named here;
-- for Yarn 1, three real projects (a single package, a 9-workspace project, and a private service repository), with install scripts and without: identical to plain Yarn down to file times in nanoseconds, owner, group, extended attribute names and the bytes of `.yarn-integrity`. One install fails in plain Yarn too, in a native build; up to that point the trees differed only where two plain runs also differ. 99.7 % or more of the bytes Yarn takes from its cache shared blocks with it.
+- **With the shipping npm engine:** zwave-js-ui, on every run of the Linux job ([Linux](#linux)); a large private npm monorepo (the sampled runs below); a private project with 3 workspaces on npm 10.
+- **With the earlier engine only** (October and early November 2026, before the inject engine): the public projects compass (4,701 lockfile entries, 76 workspace links, native builds), eventsource, vscode-git-graph and rollup-starter-app (version 2 lockfiles, sha1-only integrities); and 12 private repositories (not named here), the largest an npm workspaces monorepo with about 3,600 lockfile entries in 6 workspaces (plain `npm ci` itself fails on 4 of them, so those cannot be compared).
+- **Yarn 1** (the only Yarn engine there has been): three real projects, a single package, a 9-workspace project and a private service repository, with install scripts and without: identical to plain Yarn down to file times in nanoseconds, owner, group, extended attribute names and the bytes of `.yarn-integrity`. One install fails in plain Yarn too, in a native build; up to that point the trees differed only where two plain runs also differ. 99.7 % or more of the bytes Yarn takes from its cache shared blocks with it.
 
 matchapack has been in the maintainer's daily use since November 2026, on npm and Yarn 1 projects; `matchapack report` shows what happened in those runs.
 
@@ -152,17 +168,20 @@ Clean statistics in `matchapack report` show that matchapack ran and cloned; the
 
 - **What is replayed.** Full installs (`npm ci`; `yarn` / `yarn install`), from the files as the run left them. And commands that started with no `node_modules`, as in a fresh clone (`npm install` / `update` / `uninstall`, `yarn add` / `upgrade` / `remove`), from the files before the run: the run log keeps a SHA-256 of the lockfile and of each manifest before and after every run, and the files before come from the project while they still have those hashes, else from its git HEAD.
 - **When it says IDENTICAL.** Only when the replay's inputs equal what the logged run recorded (the files it hashed, the project's rc files, the words it logged, and the environment's npm or Yarn settings, compared by hash), matchapack's run in the replay cloned as many files or packages as the logged run, and every check of the comparison passed. When the sampler cannot be sure the replay repeated the run, it does not say IDENTICAL.
-- **The other results.** DIFFERENT (the trees differ, a check failed, or matchapack failed where plain installed); ERROR (the replay could not test anything or did not repeat the run); SKIPPED, with the reason (the project or its files changed since, a local `file:` dependency, a secret in the arguments, a record from an older build); and for Yarn RACE-SHAPED: a difference with the shape of plain Yarn's own race, which is run again with one pool thread. Still there, it is DIFFERENT; gone, it stays RACE-SHAPED: neither a pass nor a fail, sample that project again.
+- **The other results.** BUILD-OUTPUT-ONLY (npm only): `node_modules`, the manifests and `npm ls` are the same, and the only differing files are outside `node_modules`, written by the project's own build scripts; DIFFERENT (the trees differ, a check failed, or matchapack failed where plain installed); ERROR (the replay could not test anything or did not repeat the run); SKIPPED, with the reason (the project or its files changed since, a local `file:` dependency, a secret in the arguments, a record from an older build); and for Yarn RACE-SHAPED: a difference with the shape of plain Yarn's own race, which is run again with one pool thread. Still there, it is DIFFERENT; gone, it stays RACE-SHAPED: neither a pass nor a fail, sample that project again.
 - **Limits.** It replays commands run on a tree that already had `node_modules` only as full installs; incremental commands on an existing tree are not sampled, since their result depends on that tree. npm samples compare paths, contents, modes and `npm ls`, not times, owners or extended attributes (Yarn samples do). The user's and the global rc files (`~/.npmrc`, `~/.yarnrc`) are neither logged nor hashed. Each sample installs the project three or four times (a Yarn sample that needs the one-thread run, seven or eight).
 
 **Latest samples (2026-11-22, a build of the main branch of that day):**
 
-- **npm:** two samples of `npm ci` on a large private monorepo (two worktrees). Plain npm took 95–99 s, matchapack 65–72 s. `package.json` and `package-lock.json` were byte-identical, `npm ls` was the same as plain, and two plain runs differed in 0 paths. The verdict was BUILD-OUTPUT-ONLY (the trees differ only outside `node_modules`): 1–2 files differed, all in the build output of one workspace package of the project (`dist/*.d.mts` and `*.d.cts`, written by the project's own build at install time; the same size, other content). No installed package differed. The cause is not established. A plausible one is that the build tool's output depends on the order in which it lists a directory, which can differ between a cloned directory and one npm extracted; either way it touches only files the project's own build writes.
+- **npm:** two samples of `npm ci` on a large private monorepo (two worktrees). Plain npm took 95–99 s, matchapack 65–72 s. `package.json` and `package-lock.json` were byte-identical, `npm ls` was the same as plain, and two plain runs differed in 0 paths. The verdict was BUILD-OUTPUT-ONLY (the trees differ only outside `node_modules`): 1–2 files differed, all in the build output of one workspace package of the project (`dist/*.d.mts` and `*.d.cts`, written by the project's own build at install time; the same size, other content). No installed package differed. The cause is the project's own build, not the install: the same files were seen to differ between builds of the same source before (three builds, three different outputs, in the order of the members of union types), and in this sample the two plain builds happened to agree. So it touches only files the project's own build writes outside `node_modules`; every installed package was identical.
+- **A public project:** _(placeholder: one sample of `npm ci` on a public project with the verdict IDENTICAL, and one Yarn 1 sample, after the benchmark machine is free; numbers to come)_
 - **Yarn 1:** no new replay this time: every logged run was skipped (its manifests had changed since, or its directory was gone). The latest real-project evidence for Yarn is a comparison of 2026-11-20 on a copy of grimmerk/codev, an Electron app with native modules: `scripts/verify-yarn1.sh --engine yarn1` (plain Yarn twice, matchapack once), 64,552 paths compared, identical except `node_modules/.prisma/client/index.js`, which embeds each tree's absolute path and differs between the two plain runs too. matchapack cloned 56,914 files, in 15.4 s against about 18.7 s for plain Yarn.
 
 ## Benchmark
 
 `scripts/bench.sh` measures disk and time against plain npm and Yarn 1 on public projects pinned to a commit. Everything it uses is under its work directory (a new or empty directory, which it marks as its own): its own store, settings, logs and trial scope, npm's and Yarn's caches, and empty npmrc and yarnrc files, so the user's are neither read nor used; the real caches and matchapack state are compared entry by entry, a few levels deep, before and after. One benchmark runs per machine, and a benchmark resumes after an interruption only with the same tools and settings.
+
+The benchmark measures time and disk; it does not compare the trees. Of its projects, zwave-js-ui is compared in the Linux job and cornerstone3D was one of the Yarn 1 projects above.
 
 **Method.** Each case runs in 10 interleaved rounds (plain first in odd rounds, matchapack first in even ones), with 10 s of settle time before each run; times are medians with the minimum and maximum. Wall time and CPU time (user plus system) of the install command and every process it waited for. npm's cache is warm for both sides in every case (primed by a plain install first, the only install that may download; network is not measured). Yarn 1 runs use `--ignore-scripts` (one project's install scripts fail in plain Yarn too), and Yarn's tarballs come from an offline mirror primed first, so an empty Yarn cache means extracting, not downloading. Disk is a first-extent estimate: a file in `node_modules` counts as shared when its first extent is the first extent of a file in the store or Yarn's cache (`scripts/shared-blocks.py`), and "new bytes" are the space allocated by the files that share no first extent (a shared file whose later blocks were rewritten would not be counted there); metadata (inodes, directories) is not counted.
 
@@ -178,6 +197,8 @@ The two runs below were made with an earlier version of the script, in which the
 | medium (npm) | zwave-js/zwave-js-ui @ `7af2ab653895` | 1,612 | 45,843 files, 632 MiB |
 | large (npm) | apache/superset @ `90cf89255c21`, `superset-frontend` | 2,709 | 172,399 files, 2.09 GiB |
 | yarn (Yarn 1) | cornerstonejs/cornerstone3D @ `d0e0e37510e2` | 2,498 | 81,847 files, 1.19 GiB |
+
+This table describes the tree of the priming install: every regular file, empty ones included, and the space they allocate. The disk table below counts the non-empty files of the measured fresh-worktree run, so its numbers differ slightly (6,021 rather than 6,036 files, for example). The medium project, zwave-js-ui, installs 1,611 packages on Linux (the CI job above) and 1,612 on macOS: optional packages depend on the platform.
 
 **Time, the quiet run** (wall time, medians, with min–max; the ratio is matchapack's median over plain's):
 
@@ -245,11 +266,18 @@ The results are in `<work>/results/summary.md`. A work directory whose name ends
 
 - **corepack** only at 0.36.0 (Node 24's own copy, and the package `npm i -g corepack` installs). corepack on Node 25 or later, which no longer bundles it, has not been run.
 - **Version managers** other than nvm, fnm, Homebrew's `node`, the official installer, volta, mise and asdf (all on macOS): nodenv, nvs, proto, pkgx, Nix wrappers, Homebrew's `node` behind a shim, and version managers on Linux have not been run. Unknown launchers run plain npm or Yarn by design.
-- **An old store entry against a new libuv's code.** The release watch runs with a fresh store, and the store key names libuv's version only, not its code; the one-in-50 sample and `store verify` are the safety net there.
+- **An old store entry against a new libuv's code.** The release watch runs with a fresh store, and the extraction key names libuv's version only, not its code; the one-in-50 sample and `store verify` are the safety net there.
 - **`scripts/convert-existing.sh`'s npm "nothing cloned" path** is tested only with a stand-in `matchapack`.
 - **Windows** is not supported, and nothing runs there.
 - **Linux** has been run on CI runners and in Docker only, not on a desktop machine. Yarn on Linux is plain Yarn by design.
 - **Commands not routed** (`npm dedupe`, `prune`, `audit fix`, `install-test`, `install-ci-test`) are not tested through matchapack, because they run plain npm.
+- **Version managers** volta 2.0.2, mise 2026.10.24 and asdf 0.20.2 were run by hand; no suite runs them.
+- **The Intel Mac and Linux arm64 binaries** are built for each release, but no test suite runs on them (CI's macOS runner is Apple silicon, its Linux runner x86_64).
+- **The released Linux binaries** are static musl builds; pull-request CI tests a glibc build, and musl builds run only in the large-repository job (by hand, or on pull requests that change it). XFS, too, is tested only in that job.
+- **Node versions** other than the CI ones (22.14.0 and 24.22.1) and those the release watch picks up (a new major, or a libuv change in a watched line).
+- **macOS's own bash** (3.2): the shell tests run bash in a Debian image; on macOS the function is exercised in zsh.
+- **Install time on Linux** has been measured only in single CI runs, not with the benchmark.
+- **A shrinkwrap** (`npm-shrinkwrap.json`) follows the same rules as a lockfile but has not been run.
 
 ## Running the tests yourself
 
@@ -267,5 +295,7 @@ scripts/verify-npm.sh /tmp/mp-verify-npm              # the fixtures and the ste
 scripts/verify-npm.sh /tmp/mp-verify-npm ~/code/app   # plus a real project (copied, never changed)
 scripts/test-yarn1.sh /tmp/mp-yarn1                   # needs Yarn 1 (MATCHAPACK_YARN_JS can name its yarn.js)
 ```
+
+A local run covers less than CI unless you set what CI sets: the Yarn case of a cache filled by another Node major is skipped without `MATCHAPACK_YARN_PRIME_NODE` (a second Node's binary), and the yarn function's route in fish needs `MATCHAPACK_FISH` (a fish binary).
 
 After an npm upgrade, `scripts/verify-npm.sh` is the routine: it says whether the new npm's pacote fingerprint is on the list. A new npm major goes into `INJECT_NPM_MAJORS` in `src/wrapper.rs`, and a new fingerprint into `src/npm-fingerprints.json`, only after `scripts/test-inject.sh` and `scripts/verify-npm.sh` pass with it; the list is compiled into the binary, so rebuild matchapack afterwards.

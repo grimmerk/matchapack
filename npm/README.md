@@ -2,13 +2,15 @@
 
 Makes `npm ci`, `npm install` (also `npm update` and `npm uninstall`) and Yarn 1 installs place `node_modules` as copy-on-write clones, so each extra checkout or git worktree of a repo costs almost no disk. The full documentation is on GitHub: <https://github.com/grimmerk/matchapack>.
 
+Works on macOS (APFS) and on Linux with Btrfs, or XFS with reflinks; with npm 10, 11 and 12, and with Yarn 1 on macOS.
+
 This npm package is one of several ways to install the matchapack binary. It holds the binaries for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64; static, so any Linux distribution), and its `matchapack` command is a small shell script that runs the one for your machine. It has no install script and downloads nothing, so it works with `--ignore-scripts`. Install it globally:
 
 ```sh
 npm i -g matchapack
 ```
 
-Then add matchapack's line to your shell startup file, as the GitHub README describes (zsh or bash), as the last line, below anything that sets up your `PATH` or your Node version:
+Then add matchapack's line to your shell startup file, as the GitHub README describes (zsh or bash; for fish, see the GitHub README), as the last line, below anything that sets up your `PATH` or your Node version:
 
 ```sh
 command -v matchapack >/dev/null && eval "$(matchapack init)"
@@ -16,7 +18,7 @@ command -v matchapack >/dev/null && eval "$(matchapack init)"
 
 If your startup file already has this line from an earlier install, keep it at the end of the file: move it below any line added after it, such as the line `. "$HOME/.config/matchapack/env.sh"` that matchapack's install script appends, or a Node version manager's. A line that runs before matchapack is on your `PATH` does nothing, and npm then runs plain without a message.
 
-The global install is the supported way to use this package. matchapack is a tool for your shell, not a dependency of a project; a project install may work, but Yarn's Plug'n'Play installs are not supported.
+The global install is the supported way to use this package. matchapack is a tool for your shell, not a dependency of a project: installed as a dependency of a project it may work, but that is not tested, and it does not work in a Yarn Plug'n'Play project.
 
 ## With nvm, fnm, mise or another Node version manager
 
