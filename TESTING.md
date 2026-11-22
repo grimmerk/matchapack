@@ -68,6 +68,7 @@ Each takes a work directory, builds its own store, settings and log there, and n
 | `scripts/test-yarn1.sh` | the Yarn 1 harness and engine on the `fixtures/yarn1-*` projects ([The Yarn 1 harness](#the-yarn-1-harness)) |
 | `scripts/test-npm-launcher.sh` | the npm package's `sh` launcher, with stub binaries |
 | `scripts/test-npm-canary.js` | the canary's decisions, offline |
+| `scripts/test-bench.py` | the benchmark script's own logic, offline: the repair of a torn results line, the work directory's marker, the store markers, resume safety, the isolation check and its report, the exit status, the clean-up of a timed-out process group, the machine-wide lock |
 | `scripts/handover-test.sh` | where nothing can be cloned (ext4; the store and the project on two filesystems): `matchapack npm ci` against plain `npm ci` |
 
 ### The fixture harness (npm)
@@ -98,7 +99,7 @@ The fixtures name their tarballs (`fixtures/optional-upward/tarballs`) by the pl
 
 | Job | Runner | What it runs |
 |---|---|---|
-| `linux` | Ubuntu | `cargo test` and a release build with warnings as errors; `test-shells.sh` in Docker (bash, zsh, fish with stubs); the canary's decisions; the npm launcher; fish with the real binary, real npm and Yarn 1; the hand-over where nothing can be cloned (ext4, and `EXDEV` with an empty and a filled store) |
+| `linux` | Ubuntu | `cargo test` and a release build with warnings as errors; `test-shells.sh` in Docker (bash, zsh, fish with stubs); the canary's decisions; the benchmark script's own logic; the npm launcher; fish with the real binary, real npm and Yarn 1; the hand-over where nothing can be cloned (ext4, and `EXDEV` with an empty and a filled store) |
 | `linux-npm` | Ubuntu, one job per npm line: 10.9.10, 11.21.2, 12.2.2 | `test-inject.sh` and `verify-npm.sh` with the work directories on a loop-mounted Btrfs, so the hook really clones |
 | `macos` | macOS 15, Node 24.22.1 (npm 11.19.1), Node 22.14.0 as a second Node | the safety, routing, store and inject suites; the fixture harness with byte-identical hidden lockfiles; the Yarn 1 harness and engine with Yarn 1.22.22, including the cross-Node and two-volume cases and the route in fish |
 
@@ -156,9 +157,11 @@ Clean statistics in `matchapack report` show that matchapack ran and cloned; the
 
 ## Benchmark
 
-`scripts/bench.sh` measures disk and time against plain npm and Yarn 1 on public projects pinned to a commit. Everything it uses is under its work directory: its own store, settings, logs and trial scope, npm's and Yarn's caches, and empty npmrc and yarnrc files, so the user's are neither read nor used; the real caches and matchapack state are checked before and after.
+`scripts/bench.sh` measures disk and time against plain npm and Yarn 1 on public projects pinned to a commit. Everything it uses is under its work directory (a new or empty directory, which it marks as its own): its own store, settings, logs and trial scope, npm's and Yarn's caches, and empty npmrc and yarnrc files, so the user's are neither read nor used; the real caches and matchapack state are compared entry by entry, a few levels deep, before and after. One benchmark runs per machine, and a benchmark resumes after an interruption only with the same tools and settings.
 
-**Method.** Each case runs in 10 interleaved rounds (plain first in odd rounds, matchapack first in even ones), with 10 s of settle time before each run; times are medians with the minimum and maximum. Wall time and CPU time (user plus system) of the install command and every process it waited for. npm's cache is warm for both sides in every case (primed by a plain install first; network is not measured), and npm runs with `--no-audit --no-fund --prefer-offline`. Yarn 1 runs use `--ignore-scripts` (one project's install scripts fail in plain Yarn too), and Yarn's tarballs come from an offline mirror primed first, so an empty Yarn cache means extracting, not downloading. Disk: the blocks of `node_modules` shared with the store or Yarn's cache (`scripts/shared-blocks.py`), and the bytes allocated by files that share nothing; metadata (inodes, directories) is not counted.
+**Method.** Each case runs in 10 interleaved rounds (plain first in odd rounds, matchapack first in even ones), with 10 s of settle time before each run; times are medians with the minimum and maximum. Wall time and CPU time (user plus system) of the install command and every process it waited for. npm's cache is warm for both sides in every case (primed by a plain install first, the only install that may download; network is not measured). Yarn 1 runs use `--ignore-scripts` (one project's install scripts fail in plain Yarn too), and Yarn's tarballs come from an offline mirror primed first, so an empty Yarn cache means extracting, not downloading. Disk is a first-extent estimate: a file in `node_modules` counts as shared when its first extent is the first extent of a file in the store or Yarn's cache (`scripts/shared-blocks.py`), and "new bytes" are the space allocated by the files that share no first extent (a shared file whose later blocks were rewritten would not be counted there); metadata (inodes, directories) is not counted.
+
+The two runs below were made with an earlier version of the script, in which the timed npm runs used `--prefer-offline` and the Yarn runs had neither `--offline` nor `--no-default-rc`. Checked afterwards: every package came from the warm cache (npm's debug logs show no download), the benchmark machine's `~/.yarnrc` sets nothing that changes an install (no `yarn-path`, install, cache or mirror setting), and neither run was interrupted or resumed. The script now runs every install after the priming one with `--offline`, so a cache or mirror miss fails the run instead of timing a download, and gives every Yarn command `--no-default-rc`.
 
 **Machine.** An Apple M4 Mac (10 cores, 32 GiB), macOS 27.0.1, APFS; Node 24.22.1, npm 11.19.1, Yarn 1.22.22; matchapack 0.1.0.
 
@@ -192,9 +195,9 @@ Clean statistics in `matchapack report` show that matchapack ran and cloned; the
 | yarn | already installed (nothing to do) | 0.49 s (0.30–0.75) | 0.89 s (0.87–1.03) | 1.80× | 0.46 s | 0.56 s |
 | yarn | incremental install after a lockfile change | 2.43 s (2.36–2.49) | 3.74 s (3.55–3.89) | 1.54× | 5.16 s | 7.30 s |
 
-**Disk per extra worktree** (fresh worktree, warm store or cache):
+**Disk per extra worktree** (fresh worktree, warm store or cache; new bytes as defined above, a first-extent estimate):
 
-| Project | Files sharing blocks | New bytes per worktree: plain | matchapack | Store or cache, once per machine |
+| Project | Files sharing a first extent | New bytes per worktree: plain | matchapack | Store or cache, once per machine |
 |---|---|---|---|---|
 | small | 6,020 of 6,021 (99.8 % of bytes) | 84 MiB | 164 KiB | store 77 MiB |
 | medium | 45,784 of 45,786 (99.9 %) | 635 MiB | 772 KiB | store 619 MiB |
@@ -260,4 +263,4 @@ scripts/verify-npm.sh /tmp/mp-verify-npm ~/code/app   # plus a real project (cop
 scripts/test-yarn1.sh /tmp/mp-yarn1                   # needs Yarn 1 (MATCHAPACK_YARN_JS can name its yarn.js)
 ```
 
-After an npm upgrade, `scripts/verify-npm.sh` is the routine: it says whether the new npm's pacote fingerprint is on the list. A new npm major goes into `INJECT_NPM_MAJORS` in `src/wrapper.rs`, and a new fingerprint into `src/npm-fingerprints.json`, only after `scripts/test-inject.sh` and `scripts/verify-npm.sh` pass with it.
+After an npm upgrade, `scripts/verify-npm.sh` is the routine: it says whether the new npm's pacote fingerprint is on the list. A new npm major goes into `INJECT_NPM_MAJORS` in `src/wrapper.rs`, and a new fingerprint into `src/npm-fingerprints.json`, only after `scripts/test-inject.sh` and `scripts/verify-npm.sh` pass with it; the list is compiled into the binary, so rebuild matchapack afterwards.

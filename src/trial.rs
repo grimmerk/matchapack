@@ -528,7 +528,7 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
     if !unknown.is_empty() {
         let list: Vec<String> = unknown.iter().map(|(v, n)| format!("{v}: {n}")).collect();
         println!(
-            "npm fingerprint gate: {} runs went to plain npm, pacote code not tested with this build ({}); update matchapack, or run scripts/test-inject.sh and verify-npm.sh with that npm and add its fingerprint to src/npm-fingerprints.json",
+            "npm fingerprint gate: {} runs went to plain npm, pacote code not tested with this build ({}); update matchapack, or run scripts/test-inject.sh and verify-npm.sh with that npm, add its fingerprint to src/npm-fingerprints.json and rebuild matchapack (the list is compiled in)",
             unknown.values().sum::<usize>(),
             list.join(", ")
         );

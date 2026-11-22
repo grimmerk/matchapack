@@ -51,7 +51,7 @@ fp=$(node "$here/src/inject.js" --fingerprint "$npm_dir")
 if grep -q "\"$fp\"" "$here/src/npm-fingerprints.json"; then
   echo "pacote fingerprint $fp: listed in src/npm-fingerprints.json"
 else
-  echo "pacote fingerprint $fp: NOT listed in src/npm-fingerprints.json; add it once this and scripts/test-inject.sh pass"
+  echo "pacote fingerprint $fp: NOT listed in src/npm-fingerprints.json; add it once this and scripts/test-inject.sh pass, then rebuild matchapack"
 fi
 
 # The fixtures install from this run's own tarball server, on a free port;

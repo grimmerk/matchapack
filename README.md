@@ -29,7 +29,7 @@ Ten worktrees of one project, measured with [`scripts/bench.sh`](scripts/bench.s
 | large (npm, Superset's frontend) | 2,709 | 2.07 GiB | 20.68 GiB | 61 MiB + the store, 1.82 GiB |
 | Yarn 1 (cornerstone3D) | 2,498 | 1.19 GiB | 11.91 GiB | 10 MiB (Yarn's own cache, 1.88 GiB, is there with plain Yarn too) |
 
-The store is matchapack's one copy of every package, shared by all projects on the machine.
+The store is matchapack's one copy of every package, shared by all projects on the machine. A worktree's size here is the space allocated by its `node_modules` files that share no first extent with the store or Yarn's cache (an estimate from each file's first extent; directories and other metadata are not counted).
 
 Once the store (for Yarn 1, Yarn's cache) has the packages, installing a fresh worktree is also faster, because cloning a package is quicker than unpacking it:
 

@@ -123,10 +123,10 @@ Check that a new shell has the function (use the user's shell; for fish: `fish -
 zsh -i -c 'type npm'
 ```
 
-It should say that `npm` is a shell function. Then check that a routed command reaches matchapack, without changing anything: in one of the user's npm projects with a `package-lock.json` (ask which one), a dry run is handed to plain npm with matchapack's reason, and npm's own dry run installs nothing:
+It should say that `npm` is a shell function. Then check that a routed command reaches matchapack, without changing anything: in one of the user's npm projects with a `package-lock.json` (ask which one), a dry run is handed to plain npm with matchapack's reason, and npm's own dry run installs nothing (`--ignore-scripts`, so that no script of the project, such as a root `prepare` or `postinstall`, can run and change its files):
 
 ```sh
-zsh -i -c 'cd "<project>" && npm ci --dry-run'
+zsh -i -c 'cd "<project>" && npm ci --dry-run --ignore-scripts'
 ```
 
 The first line should be `matchapack: running plain npm instead (option --dry-run installs nothing)`. Then tell the user, in a few lines:

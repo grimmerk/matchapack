@@ -1157,11 +1157,13 @@ mod tests {
         let list = npm_fingerprints();
         // The eight texts of pacote's lib/fetcher.js in npm 10.0.0 to 12.2.2,
         // each listed after test-inject.sh and verify-npm.sh passed on a
-        // release with it.
+        // release with it, must stay; a fingerprint added later needs no
+        // change here (no fixed count), only distinct entries.
         for p in ["07f98090ee5bc371", "8d7208cf1a9e98ee", "cef1bd59a34dfe60", "1a385341f75d6c77", "45eabb392a0c7c33", "6972084f1fa0d668", "97dbf9a402ad3329", "b7d5a64232232301"] {
             assert!(list.iter().any(|f| f.starts_with(p)), "{p}");
         }
-        assert_eq!(list.len(), 8, "{list:?}");
+        assert!(list.len() >= 8, "{list:?}");
+        assert_eq!(list.iter().collect::<std::collections::BTreeSet<_>>().len(), list.len(), "duplicates: {list:?}");
         assert!(list.iter().all(|f| is_fingerprint(f) && *f == f.to_ascii_lowercase()), "{list:?}");
         let v: serde_json::Value = serde_json::from_str(super::NPM_FINGERPRINTS).unwrap();
         for (f, e) in v["fingerprints"].as_object().unwrap() {
