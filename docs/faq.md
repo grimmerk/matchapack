@@ -14,6 +14,7 @@ Questions people ask before they install. How it works is in [architecture.md](a
 - [What if I delete the store, or clean npm's cache?](#what-if-i-delete-the-store-or-clean-npms-cache) Installed projects keep working.
 - [Is it safe to try?](#is-it-safe-to-try) It changes only how packages are placed, and every gate falls back to plain npm.
 - [Is it written with AI?](#is-it-written-with-ai) Yes, with Claude Code; every change is reviewed and checked against plain npm and Yarn.
+- [Why the name?](#why-the-name) "Match a pack", and matcha.
 
 ## Why not pnpm?
 
@@ -74,3 +75,7 @@ Installed `node_modules` keep working: clones are independent files. The next in
 ## Is it written with AI?
 
 Yes. matchapack is written by one maintainer working with Claude Code. Every pull request is reviewed by two review tools, larger changes also by a separate step-back review, and each finding is checked against the code; every change is tested against plain npm and Yarn, as [TESTING.md](../TESTING.md#independent-reviews) describes.
+
+## Why the name?
+
+It reads two ways. "Match a pack": when an install needs a package (a "pack"), matchapack matches it to a copy already on the disk (in its store, or for Yarn 1 in Yarn's cache) and, when there is one, places a clone of that copy. And matcha: the picture near the top of the README is a matcha layer cake standing for the store, with smaller blocks beside it for the checkouts that take their packages from it.
