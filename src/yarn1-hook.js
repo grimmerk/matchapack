@@ -1,4 +1,4 @@
-// The Yarn 1 engine's node side (`matchapack yarn`; NOTES "Yarn 1 engine").
+// The Yarn 1 engine's node side (`matchapack yarn`; docs/architecture.md).
 // Runs the user's Yarn 1 in this process, the way its bin/yarn.js does, with
 // one behaviour changed: while Yarn's link step runs (Yarn's own extension
 // point, global.experimentalYarnHooks.linkStep, tells when), each

@@ -5,11 +5,11 @@ An optional dependency whose `engines` cannot be met: `lc-eng` asks for
 needs (arborist `optional-set.js`); `lc-s` stays because `lc-r` also needs it.
 Expected node_modules: `lc-r`, `lc-s`.
 
-npm 11 drops such packages while it builds the ideal tree (marks them inert),
-so the tree matchapack takes from npm's dry run already lacks them. npm 10.9
-decides only when it extracts them, which a dry run never reaches: on npm 10.9.2
-matchapack installed `lc-eng` and `lc-q` here, one reason npm 10 is not in the
-version gate (NOTES, "npm 10").
+npm 11 drops such packages while it builds the ideal tree (marks them inert).
+npm 10.9 decides only when it extracts them, which npm's dry run never
+reaches: an earlier matchapack engine, which took its tree from npm's dry run,
+installed `lc-eng` and `lc-q` here on npm 10.9.2. The inject engine leaves
+the extraction to npm, so the tree is npm's own on both.
 
 The tarballs live with the optional-upward fixture (`lc-eng`'s source is in
 `../optional-upward/pkgs/lc-eng`). The suites serve them on a port of their

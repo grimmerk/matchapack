@@ -13,8 +13,8 @@ their own in a copy (scripts/fixture-server.py).
   y1-b 1.0.0/2.0.0, y1-c 1.0.0, @y1/scoped 1.0.0 (a scoped name)
   y1-empty 1.0.0  package.json, index.js, 40 small files and 400 EMPTY files:
                   under Node >= 22 the copy of an empty file keeps the source's
-                  times, which flips Yarn's time probe (NOTES "Yarn 1
-                  harness")
+                  times, which flips Yarn's time probe (TESTING.md, "The
+                  Yarn 1 harness")
   y1-script 1.0.0 an install script that writes built.txt
   y1-execpath 1.0.0  an install script that records $npm_execpath and runs
                   `node "$npm_execpath" --version` (execpath.txt)
@@ -33,8 +33,7 @@ package (`y1-many`; `@y1/scoped` in a folder `@y1`): what a registry answers
 for it (each version's manifest, `dist.tarball`, `dist.shasum`; `latest` the
 highest version). Yarn 1 takes a plain file server as a registry, so a
 fixture whose .yarnrc names http://127.0.0.1:48321 as its registry can `yarn
-add y1-c` and `yarn upgrade` by name (fixtures/yarn1-upgrade; NOTES "Yarn 1
-commands"). The npm fixtures name no package of these.
+add y1-c` and `yarn upgrade` by name (fixtures/yarn1-upgrade). The npm fixtures name no package of these.
 """
 import gzip, hashlib, io, json, os, tarfile
 

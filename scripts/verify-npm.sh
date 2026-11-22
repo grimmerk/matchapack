@@ -51,7 +51,7 @@ fp=$(node "$here/src/inject.js" --fingerprint "$npm_dir")
 if grep -q "\"$fp\"" "$here/src/npm-fingerprints.json"; then
   echo "pacote fingerprint $fp: listed in src/npm-fingerprints.json"
 else
-  echo "pacote fingerprint $fp: NOT listed in src/npm-fingerprints.json; add it once this passes (NOTES \"G-lite\")"
+  echo "pacote fingerprint $fp: NOT listed in src/npm-fingerprints.json; add it once this and scripts/test-inject.sh pass"
 fi
 
 # The fixtures install from this run's own tarball server, on a free port;
@@ -93,7 +93,7 @@ for f in small stale-flags optional-upward optional-engines legacy-peer bundled 
 done
 case_ workspaces MATCHAPACK_VERIFY_META=1 -- "$FX/workspaces"
 # The root's predependencies / dependencies / postdependencies scripts,
-# which npm ci runs (the classic engine did not; NOTES "Inject engine").
+# which npm ci runs (the engine before the inject engine did not).
 case_ dep-event -- "$FX/dep-event"
 # A failing optional dependency script: npm ci removes the package.
 case_ optional-script-fail -- "$FX/optional-script-fail"
@@ -162,8 +162,8 @@ for p in "$@"; do
   case_ "project-$(basename "$p")" -- "$p"
 done
 
-# The install family (npm install, update, uninstall; NOTES "The install
-# family"): scripts/verify-steps.sh runs the same npm commands with plain
+# The install family (npm install, update, uninstall; TESTING.md, "The step
+# harness: incremental installs"): scripts/verify-steps.sh runs the same npm commands with plain
 # npm and through `matchapack npm`, from the same start, and compares after
 # every step (tree, hidden lockfile bytes, package.json and
 # package-lock.json bytes, npm ls, the hidden lockfile trusted, the log

@@ -269,8 +269,8 @@ for s in HUP INT; do
 done
 # SIGKILL of matchapack: the socket closes and npm stops (SIGTERM from the
 # hook), after matchapack has exited. During the root script, which runs
-# until stopped: without the hook npm would wait for it for ever (on
-# master the orphan npm and its script ran on). npm passes the SIGTERM on,
+# until stopped: without the hook npm would wait for it for ever (before
+# this was handled, the orphan npm and its script ran on). npm passes the SIGTERM on,
 # the script ends by it, and npm with it.
 stopped sigkill mp KILL pid script
 [ "$ready" = yes ] && [ "$rc" = 137 ] && [ -z "$alive" ] && [ -z "$newer" ] && grep -q 'matchapack has gone; stopping npm (SIGTERM)' "$d.out" && again && r=ok || r=bad

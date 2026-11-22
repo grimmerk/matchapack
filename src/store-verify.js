@@ -1,4 +1,4 @@
-// `matchapack store verify`'s node side (src/verify.rs; NOTES "PR C1"):
+// `matchapack store verify`'s node side (src/verify.rs):
 // extracts store entries' tarballs with npm's own pacote, the way the inject
 // engine's hook has them extracted (src/inject.js), so that the store is
 // judged by what `npm ci` would put on disk.

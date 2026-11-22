@@ -1,7 +1,7 @@
 # Checks for every pull request (and on demand). macOS runners bill 10x on a
 # private repository, so only what needs APFS clones runs there, on one npm;
 # the rest runs on Linux, including the npm suites on each pinned npm line
-# (linux-npm). Not on pushes to master: a pull request already ran them.
+# (linux-npm). Not on pushes to main: a pull request already ran them.
 name: ci
 on:
   pull_request:

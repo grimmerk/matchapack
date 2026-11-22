@@ -345,7 +345,8 @@ fn probe_launcher_within(launcher: &Path, name: &str, path: &OsStr, cwd: &Path, 
         _ => format!("--require \"{js_str}\""),
     };
     // Output to files, not pipes: no pipe for another thread's spawn to
-    // inherit (NOTES "The cause (2026-11-13)"), and nothing to read until
+    // inherit (such a child keeps the pipe open, and its reader then waits
+    // until that child ends), and nothing to read until
     // the launcher has exited.
     let files = [js.clone(), run_dir.join("launcher-probe.out"), run_dir.join("launcher-probe.err")];
     let remove = || {
@@ -501,7 +502,7 @@ pub(crate) mod tests {
     }
 
     /// A simulated version manager under `d`, the shape of `flavor`'s shims
-    /// (the real tools: NOTES "Version managers"):
+    /// (the real tools: docs/architecture.md, "Finding npm and Yarn"):
     /// - `volta`: `shims/{node,npm,yarn}` are symlinks to one binary that
     ///   dispatches on its name; an npm can be pinned apart from node (its
     ///   own image, `.fakenpm` here);

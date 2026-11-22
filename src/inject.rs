@@ -1,5 +1,5 @@
-//! The inject engine, the only one since PR C2 (NOTES "Inject engine", "PR C2";
-//! grimmerk/matchapack-private#33): npm runs its own `npm ci`, in a node child started
+//! The inject engine, the only engine (docs/architecture.md, "The inject
+//! engine (npm)"): npm runs its own `npm ci`, in a node child started
 //! here, and only the per-package extraction is replaced by a clone from the
 //! store. This process keeps what must be decided before anything starts
 //! (npm version gate, umask), holds the store's shared lock for the whole
@@ -7,7 +7,7 @@
 //! socket (src/serve.rs). Where npm installs is npm's own answer: the helper
 //! reports it when npm starts the command, and the server runs the gates
 //! that depend on it (trial scope, a symlinked node_modules) and pins it
-//! (grimmerk/matchapack-private#36; NOTES "The lazy hook and npm's install root").
+//! (docs/architecture.md, "Start-up: the lazy hook and npm's install root").
 //! Everything else is npm's: reading its config and arguments, validating the
 //! lockfile, removing the old node_modules, scripts, bin links, the hidden
 //! lockfile, the audit.
@@ -145,7 +145,7 @@ fn hidden_packages(text: &[u8]) -> Option<Packages> {
 /// integrity; the plan's U2): a package npm keeps that is new in the hidden
 /// lockfile is not extracted, and a package npm restores at the same
 /// version (its directory removed by hand) is, so that filter both raised
-/// false alarms and missed packages (NOTES "Review round 4"). A lower
+/// false alarms and missed packages. A lower
 /// bound: a package the hook missed was extracted by npm, so its
 /// package.json is new and it is counted; one npm or a script set back in
 /// time is not. None: no hidden lockfile after the run.
@@ -209,8 +209,8 @@ fn extraction_outcome(odd: &str, cloned: usize, decline: &str) -> std::result::R
     }
 }
 
-/// The line that says why an install was slow (NOTES "PR C1: the key is
-/// the code"): more than half of the cloned packages were compared because
+/// The line that says why an install was slow (docs/architecture.md, "The
+/// store and its key"): more than half of the cloned packages were compared because
 /// their records did not know the running extraction code. None otherwise.
 fn new_code_line(new_key_checks: usize, cloned: usize, key: &str) -> Option<String> {
     if cloned == 0 || new_key_checks * 2 <= cloned {

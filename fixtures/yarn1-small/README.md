@@ -13,7 +13,7 @@ The tarballs are made by `make-tarballs.py` (deterministic).
   `y1-b`), a scoped package, nested directories. No empty files.
 - `yarn1-emptyfirst`: one package with 400 empty files among its first
   copies. Under Node >= 22 the copy of an empty file keeps the source's
-  times, which flips Yarn's time probe (NOTES "Yarn 1 harness").
+  times, which flips Yarn's time probe (TESTING.md, "The Yarn 1 harness").
 - `yarn1-scriptpkg`: a dependency with an install script that writes
   `built.txt`, a file the two runs write at different times.
 - `yarn1-many` (Yarn 1 engine): 322 package files, more than the first 128

@@ -4,9 +4,9 @@
 # symlink targets, .yarn-integrity bytes, mtimes to the nanosecond, uid, gid,
 # xattr names). Plain against plain must come out identical before anything
 # is compared with an engine; when it does not, the run says "plain varies"
-# and shows the evidence (NOTES "Yarn 1 harness"). With --engine yarn1, a
+# and shows the evidence (TESTING.md, "The Yarn 1 harness"). With --engine yarn1, a
 # third copy is installed by `matchapack yarn` with the same cache and
-# compared with the first plain run (NOTES "Yarn 1 engine").
+# compared with the first plain run.
 #
 #   verify-yarn1.sh [options] <project-dir> [yarn install args...]
 #
@@ -57,8 +57,8 @@
 #                      run with that run's own flags)
 #   --command 'WORDS'  after the install, run `yarn WORDS` in every tree:
 #                      plain Yarn in the prime run, in plain1 and plain2;
-#                      `matchapack yarn WORDS` in the engine tree (NOTES
-#                      "Yarn 1 commands"). The install before it is plain
+#                      `matchapack yarn WORDS` in the engine tree
+#                      (docs/architecture.md, "Yarn commands"). The install before it is plain
 #                      Yarn in every tree, so a difference is the command's.
 #                      WORDS are split at spaces; --non-interactive is added
 #                      after them (no --frozen-lockfile), and the run's cache
