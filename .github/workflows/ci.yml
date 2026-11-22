@@ -38,6 +38,8 @@ jobs:
           node-version: 24.22.1
       - name: npm canary decisions (offline)
         run: node scripts/test-npm-canary.js
+      - name: the npm package's launcher (stubs; sh is dash here)
+        run: sh scripts/test-npm-launcher.sh
       - name: fish with the real binary (npm ci and the yarn function, real npm and Yarn 1)
         # On the runner, not in a container: the binary built above, Yarn
         # 1.22.22 into a scratch prefix under RUNNER_TEMP.

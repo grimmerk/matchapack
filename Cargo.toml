@@ -2,6 +2,28 @@
 name = "matchapack"
 version = "0.1.0"
 edition = "2024"
+# The oldest toolchain that builds the locked dependencies (sha2 0.11 needs
+# 1.88; checked with `cargo +1.88 check --locked --all-targets`).
+rust-version = "1.88"
+description = "Makes npm ci, npm install and Yarn 1 place node_modules as copy-on-write clones, so each extra checkout or git worktree costs almost no disk"
+license = "MIT OR Apache-2.0"
+authors = ["Grimmer Kang"]
+repository = "https://github.com/grimmerk/matchapack"
+homepage = "https://github.com/grimmerk/matchapack"
+readme = "README.md"
+keywords = ["npm", "yarn", "node-modules", "copy-on-write", "reflink"]
+categories = ["command-line-utilities", "development-tools", "filesystem"]
+# What the crate ships: the sources, the files they embed (shell/, src/*.js,
+# src/*.json) and the build script. Not the lab notes, the test fixtures or
+# the test and measurement scripts. Check with `cargo package --list`.
+include = [
+    "/build.rs",
+    "/src/**",
+    "/shell/**",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -22,3 +44,8 @@ walkdir = "2.5.0"
 [dev-dependencies]
 flate2 = "1.1.10"
 tar = "0.4.46"
+
+# The profile that dist (cargo-dist) builds release artifacts with.
+[profile.dist]
+inherits = "release"
+lto = "thin"

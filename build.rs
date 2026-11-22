@@ -9,8 +9,23 @@ fn git(args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Whether this crate is the top of its own git checkout. A build from a
+/// crates.io package (`cargo install matchapack`, or `cargo package`'s verify
+/// step under target/package/) may sit inside some other repository, a home
+/// directory kept in git for example; that repository's HEAD says nothing
+/// about this binary.
+fn own_checkout() -> bool {
+    let canon = |p: &str| std::fs::canonicalize(p).ok();
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok();
+    match (git(&["rev-parse", "--show-toplevel"]), manifest) {
+        (Some(top), Some(dir)) => canon(&top).is_some() && canon(&top) == canon(&dir),
+        _ => false,
+    }
+}
+
 fn main() {
-    let build = match git(&["rev-parse", "--short=10", "HEAD"]) {
+    let sha = if own_checkout() { git(&["rev-parse", "--short=10", "HEAD"]) } else { None };
+    let build = match sha {
         Some(sha) if !sha.is_empty() => {
             let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
             if dirty { format!("{sha}-dirty") } else { sha }

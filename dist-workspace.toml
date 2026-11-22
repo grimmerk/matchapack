@@ -1,0 +1,70 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (cargo-dist). After a change here, run `dist generate`
+# (it rewrites .github/workflows/release.yml) and `dist plan`; RELEASING.md
+# has the release procedure.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax). 0.34
+# builds Apple silicon on macos-15 by default (0.32 still picked the retired
+# macos-14, whose job was cancelled, so nothing was released); check the
+# runners with `dist plan --output-format=json` after an upgrade.
+cargo-dist-version = "0.34.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app. Not dist's "npm" installer: its
+# package downloads the binary from the GitHub Release in an install script,
+# or at the first run under --ignore-scripts, through a Node wrapper. The npm
+# packages are built by scripts/npm-packages.js and published by
+# .github/workflows/publish-npm.yml instead (RELEASING.md says why).
+installers = ["shell", "homebrew"]
+# The Homebrew tap the formula is pushed to (`brew install grimmerk/tap/matchapack`);
+# needs the HOMEBREW_TAP_TOKEN secret (write access to that repository)
+tap = "grimmerk/homebrew-tap"
+# Jobs that run after the GitHub Release: the formula to the tap, the crate to
+# crates.io and the packages to npm, both through trusted publishing (see
+# .github/workflows/publish-crates.yml and publish-npm.yml)
+publish-jobs = ["homebrew", "./publish-crates", "./publish-npm"]
+# The reusable workflows are called from release.yml, so they get an OIDC
+# token only if the calling job grants it
+github-custom-job-permissions = { "publish-crates" = { id-token = "write", contents = "read" }, "publish-npm" = { id-token = "write", contents = "read" } }
+# Target platforms to build apps for (Rust target-triple syntax)
+# No Windows: matchapack clones with clonefile(2) and the FICLONE ioctl.
+# Linux: static musl binaries only, one per CPU, so that every Linux runs the
+# same binary whatever its C library and its age (a glibc build needs the
+# build runner's glibc or newer: 2.35 on ubuntu-22.04, which leaves out
+# RHEL 9 and Amazon Linux 2023). linux-large.yml's libc job compares the
+# musl and the glibc build on a large install.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
+# Path that the shell installer places the binary in: a directory of its
+# own, ~/.matchapack/bin (dist's one-directory "flat" layout). Not
+# ~/.local/bin: dist 0.33+ migrates an old dist env script in the install
+# directory, so if ~/.local/bin/env were byte-identical to one another dist
+# tool wrote there, our installer would rewrite every `. "$HOME/.local/bin/
+# env"` line in the startup files to load matchapack's env.sh and delete
+# that file, and other tools' PATH would then hang on ours. Here the only
+# files it can migrate are ~/.matchapack/bin/env and env.fish. But with
+# MATCHAPACK_INSTALL_DIR, CARGO_DIST_FORCE_INSTALL_DIR or
+# MATCHAPACK_UNMANAGED_INSTALL the install directory, and so the migrated
+# <dir>/env, is the one named there, and the migration runs even with
+# MATCHAPACK_NO_MODIFY_PATH=1 and in the unmanaged mode: never point those
+# at a shared directory such as ~/.local/bin (and leave them out of user
+# documentation, or document them with that warning). Unless the directory
+# is already on PATH, the installer writes ~/.config/matchapack/env.sh and
+# env.fish (next to its receipt, matchapack-receipt.json), appends
+# `. "$HOME/.config/matchapack/env.sh"` to ~/.profile (creating it when
+# missing), to each of ~/.bashrc, ~/.bash_profile and ~/.bash_login that
+# exists, and to ~/.zshrc (or ~/.zshenv; it creates ~/.zshrc when neither
+# exists), and always writes ~/.config/fish/conf.d/matchapack.env.fish.
+# The name is sticky: a later change of install-path leaves the old binary
+# and its PATH line behind on every machine that installed with this one.
+install-path = "~/.matchapack/bin"
+# Printed after the binary is in place. That PATH line is appended at the end
+# of the startup file, so matchapack's own line (which checks `command -v
+# matchapack`) must come after it. No shell syntax here: dist pastes the text
+# into a double-quoted string of the installer script.
+install-success-msg = "matchapack is installed. To route npm and Yarn through it, put the matchapack init line from the README at the END of your shell startup file (below the PATH line this installer may add there): https://github.com/grimmerk/matchapack#install"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
