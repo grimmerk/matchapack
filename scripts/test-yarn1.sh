@@ -1566,6 +1566,14 @@ else bad "probe decline then plain yarn (exit $rc)"; fi
 d=$(project secret); myarn "$d" -- --otp 314159 --registry "http://u:hunter2@127.0.0.1:$FX_PORT/"
 if [ $rc = 0 ] && ! grep -q '314159\|hunter2' "$work/y1/log/log.jsonl" && [ "$(lastlog 'r["args"][-1]')" = "http://***@127.0.0.1:$FX_PORT/" ]; then ok "an --otp value and URL credentials are not logged"
 else bad "secrets in the log (exit $rc)"; fi
+# `yarn cache dir` is started only after the hook's hello: the install's
+# node starts first and alone (docs/architecture.md, "The Yarn 1 engine"). The
+# log carries both times; the files are cloned all the same.
+d=$(project order); myarn "$d" --
+if [ $rc = 0 ] && [ "$(lastlog 'r["yarn1"]["cache_started_secs"] is not None and r["yarn1"]["hello_secs"] is not None and r["yarn1"]["cache_started_secs"] >= r["yarn1"]["hello_secs"]')" = True ] \
+  && [ "$(lastlog 'r["yarn1"]["cloned"] > 0')" = True ]; then
+  ok "yarn cache dir starts after the hook's hello ($(lastlog 'r["yarn1"]["hello_secs"]') s, then $(lastlog 'r["yarn1"]["cache_started_secs"]') s); files cloned"
+else bad "the install's node first, then yarn cache dir (exit $rc, hello $(lastlog 'r["yarn1"].get("hello_secs")'), cache dir started $(lastlog 'r["yarn1"].get("cache_started_secs")'))"; fi
 # With MATCHAPACK_YARN_JS the only Yarn there is (no yarn on PATH), every
 # path runs it: other commands, --version, the MATCHAPACK=0 bypass.
 nodeonly=$work/nodeonly; mkdir -p "$nodeonly"; ln -sf "$node" "$nodeonly/node"

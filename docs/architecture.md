@@ -390,7 +390,7 @@ What it is for: to follow one install through the Yarn path of D1. The node name
 ```text
  MP matchapack binary (src/yarn1.rs)
    ① gates: Yarn 1 found on PATH, yarn.lock at or above, not Yarn 2+, scope, …  ── fails ──▶ PLAIN
-   ② writes the hook; starts node with YH (socket on fd 3); in parallel asks `yarn cache dir`
+   ② writes the hook; starts node with YH (socket on fd 3); once the hook says hello, asks `yarn cache dir` (in parallel with the rest of the install)
       ▼
  YH Yarn hook (src/yarn1-hook.js), in the node process
    ③ reads N from the Yarn code that runs (its copy concurrency); not found ──▶ decline
@@ -412,7 +412,7 @@ What it is for: to follow one install through the Yarn path of D1. The node name
 ```
 
 1. The binary runs the gates ([When it runs plain Yarn instead](#when-it-runs-plain-yarn-instead)).
-2. It starts node with the hook and, in parallel, asks the same Yarn for its cache folder (`yarn cache dir`, with the same working directory, environment and cache arguments).
+2. It starts node with the hook. Once the hook says hello, it asks the same Yarn for its cache folder (`yarn cache dir`, with the same working directory, environment and cache arguments), in parallel with the rest of the install. The install's node starts alone: starting both at the same moment could delay the install's start (see TESTING.md, "Benchmark"), and the cache folder is needed only at the link step, seconds later. If the hook declines, `yarn cache dir` is not started at all.
 3. The hook reads N, Yarn's number of concurrent copies, from the Yarn code that runs (`CONCURRENT_QUEUE_ITEMS`). If it cannot find it, it declines.
 4. It probes Node's own copy on two small files: which times (access, modification) and which group a copy keeps. A non-empty copy that kept its modification time (a libuv that writes the data before setting the times), or a copy that shares blocks with its source (a Node that already clones), makes it decline: plain Yarn.
 5. It sends those facts and replaces `fs.copyFile`. Yarn's first N copies go to Node. Every later copy is a request to the server.

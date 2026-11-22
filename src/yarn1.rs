@@ -601,6 +601,11 @@ pub struct Stats {
     pub link_steps: u64,
     pub link_step_ends: u64,
     pub cache: Option<String>,
+    /// When the hook's hello came (its Yarn is starting), seconds after the
+    /// start.
+    pub hello_secs: Option<f64>,
+    /// When `yarn cache dir` was started, seconds after the start.
+    pub cache_started_secs: Option<f64>,
     /// When `yarn cache dir` answered (or failed), seconds after the start.
     pub cache_secs: Option<f64>,
     pub errors: Vec<String>,
@@ -633,6 +638,8 @@ impl Stats {
             "first": self.hello.as_ref().and_then(|h| h.get("first")).cloned().unwrap_or(Value::Null),
             "facts": self.hello.as_ref().and_then(|h| h.get("facts")).cloned().unwrap_or(Value::Null),
             "cache": self.cache,
+            "hello_secs": self.hello_secs,
+            "cache_started_secs": self.cache_started_secs,
             "cache_secs": self.cache_secs,
             // Set when Yarn ran: the hook in the Yarn a workspace command
             // started declined, and that Yarn ran without clones.
@@ -743,29 +750,44 @@ impl Server {
                     return Ok(d);
                 }
                 Some(None) => return Err("the workspace's hook names no directory".into()),
-                None if install_ended.load(Ordering::Relaxed) => return Err("the install ended first".into()),
+                None if install_ended.load(Ordering::Relaxed) => return Err(ENDED_FIRST.into()),
                 None => std::thread::sleep(Duration::from_millis(10)),
             }
         }
     }
 
-    /// Under corepack: the `bin/yarn.js` corepack chose, as the hook's hello
-    /// names it (checked to be Yarn 1's npm package), once it has arrived;
-    /// an error when the install ends first (corepack failed, or the hook
-    /// declined).
-    fn chosen_yarn(&self, install_ended: &AtomicBool) -> std::result::Result<PathBuf, String> {
+    /// The hook's hello, once it has arrived (the install's node is running
+    /// and its Yarn is starting); an error when the install ends first
+    /// (corepack failed, or the hook declined).
+    fn hello(&self, install_ended: &AtomicBool) -> std::result::Result<Value, String> {
         loop {
-            let named = self.stats.lock().unwrap().hello.as_ref().map(|h| h["yarn_js"].as_str().map(PathBuf::from));
-            match named {
-                Some(Some(js)) => {
-                    yarn1_package(&js)?;
-                    return Ok(js);
-                }
-                Some(None) => return Err("the hook's hello names no yarn.js".into()),
-                None if install_ended.load(Ordering::Relaxed) => return Err("the install ended first".into()),
-                None => std::thread::sleep(Duration::from_millis(10)),
+            if let Some(h) = self.stats.lock().unwrap().hello.clone() {
+                return Ok(h);
             }
+            if install_ended.load(Ordering::Relaxed) {
+                return Err(ENDED_FIRST.into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Under corepack: the `bin/yarn.js` corepack chose, as the hook's hello
+    /// names it (checked to be Yarn 1's npm package), once it has arrived
+    /// (`hello`).
+    fn chosen_yarn(&self, install_ended: &AtomicBool) -> std::result::Result<PathBuf, String> {
+        let js = self.hello(install_ended)?["yarn_js"].as_str().map(PathBuf::from).ok_or("the hook's hello names no yarn.js")?;
+        yarn1_package(&js)?;
+        Ok(js)
+    }
+
+    /// Record that `yarn cache dir` is being started (`cache_started_secs`).
+    fn cache_dir_starts(&self) {
+        self.stats.lock().unwrap().cache_started_secs = Some(self.secs());
+    }
+
+    /// Seconds since the server's start, to two places (the log's times).
+    fn secs(&self) -> f64 {
+        (self.started.elapsed().as_secs_f64() * 100.0).round() / 100.0
     }
 
     /// Yarn's cache folder as `yarn cache dir` printed it, or why it is not
@@ -787,7 +809,7 @@ impl Server {
                 Cache::Unusable(why) => format!("unusable: {why}"),
                 Cache::Pending => "pending".into(),
             });
-            st.cache_secs = Some((self.started.elapsed().as_secs_f64() * 100.0).round() / 100.0);
+            st.cache_secs = Some(self.secs());
         }
         *self.cache.lock().unwrap() = state;
         self.cache_known.notify_all();
@@ -963,6 +985,7 @@ impl Server {
                     let _ = self.facts.set(f);
                 }
                 s.hello = Some(v.clone());
+                s.hello_secs = Some(self.secs());
             }
             return true;
         }
@@ -1188,6 +1211,21 @@ fn now_mtime(p: &Path) -> Option<std::time::SystemTime> {
     std::fs::symlink_metadata(p).and_then(|m| m.modified()).ok()
 }
 
+/// Why Yarn's cache folder is not known when the install ended before `yarn
+/// cache dir` answered (or before it was started: `Server::hello`).
+const ENDED_FIRST: &str = "the install ended first";
+
+/// Why this install had no clones because of Yarn's cache folder, for the
+/// end-of-install line (`stats`: Stats::to_json); None when the folder was
+/// known, or when the install ended before it was and no request waited for
+/// it (an install with nothing to clone, such as one already up to date, is
+/// often over before `yarn cache dir` answers: nothing was lost).
+fn unusable_cache_note(stats: &Value) -> Option<&str> {
+    let why = stats["cache"].as_str()?.strip_prefix("unusable: ")?;
+    let waited = stats["copied"]["cache-dir-pending"].as_u64().unwrap_or(0) > 0;
+    (why != ENDED_FIRST || waited).then_some(why)
+}
+
 /// How long `yarn cache dir` may take (it took 0.2–0.45 s in the review),
 /// counted from its start. After that it is killed, and nothing in this
 /// install is cloned.
@@ -1215,9 +1253,9 @@ struct CacheDirAsk {
 /// (the same node, yarn.js, working directory, environment and cache
 /// arguments).
 ///
-/// Call it on the thread that starts the install's node, before that node is
-/// started, never in parallel with it (under corepack: once the hook's hello
-/// has come, when that spawn has finished; `run` says why that holds). On macOS a pipe is made and only then
+/// Call it only once the hook's hello has come, when the spawn of the
+/// install's node has finished, never in parallel with it (`run` says why
+/// that holds). On macOS a pipe is made and only then
 /// marked close-on-exec (two calls: there is no pipe2), so a process forked
 /// on another thread in between inherits the pipe and keeps it through its
 /// exec. With both spawns racing (as until 2026-11-13), the install's node
@@ -1306,7 +1344,7 @@ impl CacheDirAsk {
                 Ok(Some(st)) => break st,
                 Ok(None) if cancel.load(Ordering::Relaxed) => {
                     self.kill();
-                    return Err("the install ended first".to_string());
+                    return Err(ENDED_FIRST.to_string());
                 }
                 Ok(None) if self.started.elapsed() > deadline => {
                     self.kill();
@@ -1330,7 +1368,7 @@ impl CacheDirAsk {
         if !Path::new(&line).is_absolute() {
             // (Its pipe may have been left before its line was read.)
             let ended = cancel.load(Ordering::Relaxed);
-            return Err(if ended { "the install ended first".to_string() } else { format!("yarn cache dir printed {line:?}") });
+            return Err(if ended { ENDED_FIRST.to_string() } else { format!("yarn cache dir printed {line:?}") });
         }
         Ok(PathBuf::from(line))
     }
@@ -1391,42 +1429,48 @@ fn run(cwd: &Path, root: &Path, yarn: &YarnBin, args: &[String]) -> std::result:
     cmd.env_remove("MATCHAPACK_YARN_CHILD");
     let deadline = std::env::var("MATCHAPACK_YARN_CACHE_DIR_SECS").ok().and_then(|v| v.parse().ok()).map(Duration::from_secs_f64).unwrap_or(CACHE_DIR_DEADLINE);
     let install_ended = AtomicBool::new(false);
-    // Yarn's cache folder, asked of the same Yarn: started here, before the
-    // install's node and not beside it (start_yarn_cache_dir says why), and
-    // answered in parallel with the install: requests wait for it
-    // (CACHE_WAIT).
+    // Yarn's cache folder, asked of the same Yarn, on the thread below once
+    // the hook's hello has come, and answered in parallel with the install:
+    // requests wait for it (CACHE_WAIT). The install's node starts first and
+    // alone: until 2026-11-22 `yarn cache dir` was started just before it,
+    // and in the benchmark (cornerstone3D, Yarn already up to date) Yarn's
+    // own run took as long as plain Yarn's while the install as a whole took
+    // 0.4 s longer, with `yarn cache dir` answering at 0.35–0.38 s each time;
+    // traced runs on a loaded machine showed both new nodes asleep at their
+    // start and the install's reaching its main only after `yarn cache dir`
+    // had exited (TESTING.md, "Benchmark"). Without the hello
+    // (the hook declined, corepack failed) it is not started at all.
     //
-    // Under corepack the Yarn is known only once corepack has chosen it, in
-    // the install's node (the hello names it; running the launcher a second
-    // time could resolve, download or prompt again). Then `yarn cache dir`
-    // is started on the thread below, after the hello, and it is still the
-    // only spawn in flight: the hello comes from the program the install's
-    // node exec'd, so that spawn (fork, exec, its close-on-exec error pipe)
-    // has finished, and nothing else in this process forks during an
-    // install or makes a descriptor without close-on-exec in one call (the
-    // workers clone, open with O_CLOEXEC, set times, groups and xattrs; the
-    // socket and its clone were made before the install's node).
+    // It is then the only spawn in flight: the hello comes from the program
+    // the install's node exec'd, so that spawn (fork, exec, its
+    // close-on-exec error pipe) has finished, and nothing else in this
+    // process forks during an install or makes a descriptor without
+    // close-on-exec in one call (the workers clone, open with O_CLOEXEC, set
+    // times, groups and xattrs; the socket and its clone were made before
+    // the install's node).
+    //
+    // Under corepack the Yarn is the one corepack chose, in the install's
+    // node: the hello names it (running the launcher a second time could
+    // resolve, download or prompt again).
     //
     // For `yarn workspace <name> <command> …` the Yarn that links is the one
     // the workspace command starts, in the workspace's directory, with the
     // arguments after the name only (Yarn passes it nothing of its own): its
     // cache options are those, resolved in that directory (a relative
     // `--cache-folder`, a workspace's `.yarnrc`). That directory is known
-    // from that Yarn's hello, so `yarn cache dir` is started after it, as
-    // under corepack and for the same reason it is then the only spawn here.
+    // from that Yarn's hello, so `yarn cache dir` waits for it too.
     let workspace = workspace_args(args).is_some();
     let cache_from = workspace_args(args).map_or(args, |w| &w[1..]);
-    let ask = if yarn.corepack || workspace { None } else { Some(start_yarn_cache_dir(&node, &yarn.js, &yarn.env, cwd, cache_from)) };
     let status = std::thread::scope(|s| {
         s.spawn(|| {
-            let ask = match ask {
-                Some(a) => a,
-                None => {
-                    let js = if yarn.corepack { server.chosen_yarn(&install_ended) } else { Ok(yarn.js.clone()) };
-                    let dir = if workspace { server.child_dir(&install_ended) } else { Ok(cwd.to_path_buf()) };
-                    js.and_then(|js| dir.and_then(|d| start_yarn_cache_dir(&node, &js, &yarn.env, &d, cache_from)))
-                }
-            };
+            let js = if yarn.corepack { server.chosen_yarn(&install_ended) } else { server.hello(&install_ended).map(|_| yarn.js.clone()) };
+            let dir = if workspace { server.child_dir(&install_ended) } else { Ok(cwd.to_path_buf()) };
+            let ask = js.and_then(|js| {
+                dir.and_then(|d| {
+                    server.cache_dir_starts();
+                    start_yarn_cache_dir(&node, &js, &yarn.env, &d, cache_from)
+                })
+            });
             server.set_cache(ask.and_then(|a| a.answer(deadline, &install_ended)))
         });
         let serve = |sock| {
@@ -1602,7 +1646,7 @@ pub fn cli(args: Vec<String>) -> i32 {
             if s.stats["linked"] == true || n("cloned") > 0 {
                 eprintln!("matchapack: {} files cloned from Yarn's cache ({}), {}, in {:.1}s", n("cloned"), mib(n("cloned_bytes")), copied_by_node(&s.stats), s.secs);
             }
-            if let Some(why) = s.stats["cache"].as_str().and_then(|c| c.strip_prefix("unusable: ")) {
+            if let Some(why) = unusable_cache_note(&s.stats) {
                 eprintln!("matchapack: no clones in this install: {why}");
             }
             if s.unseen {
@@ -2312,6 +2356,33 @@ mod tests {
         assert_eq!(s3.chosen_yarn(&ended).unwrap_err(), "the install ended first");
     }
 
+    /// `yarn cache dir` starts once the hook's hello has come, for every Yarn
+    /// (`run`): `hello` does not return before it, returns it with its time
+    /// recorded for the log, and gives up when the install ends without one
+    /// (then `yarn cache dir` is never started).
+    #[test]
+    fn the_cache_folder_is_asked_only_after_the_hello() {
+        let f = fx("y1-hello-wait");
+        let s = Server::new(f.root.clone()).unwrap();
+        let ended = AtomicBool::new(false);
+        let (got, early) = std::thread::scope(|sc| {
+            let h = sc.spawn(|| s.hello(&ended));
+            std::thread::sleep(Duration::from_millis(300));
+            let early = h.is_finished();
+            assert!(s.record_message(&json!({ "hello": true, "first": 128, "facts": {} })));
+            (h.join().unwrap(), early)
+        });
+        assert!(!early, "returned before the hello");
+        assert_eq!(got.unwrap()["first"], json!(128));
+        let secs = s.stats.lock().unwrap().hello_secs;
+        assert!(secs.is_some_and(|t| t >= 0.3), "{secs:?}");
+        assert!(s.stats.lock().unwrap().to_json()["hello_secs"].is_number());
+        let s2 = Server::new(f.root.clone()).unwrap();
+        ended.store(true, Ordering::Relaxed);
+        assert_eq!(s2.hello(&ended).unwrap_err(), "the install ended first");
+        assert!(s2.stats.lock().unwrap().cache_started_secs.is_none());
+    }
+
     /// Once the node child is gone (`stop`), a worker waiting for Yarn's
     /// cache folder stops waiting: matchapack ends with the install, not at
     /// the cache folder's deadline.
@@ -2397,6 +2468,19 @@ mod tests {
         assert_eq!(st.declined.as_deref(), Some("why"));
         // The end-of-install line says why Yarn's first copies were Node's.
         assert_eq!(copied_by_node(&st.to_json()), "131 copied by Node (128 of them Yarn's first copies, left to Node by design)");
+    }
+
+    /// The end-of-install line about Yarn's cache folder: said when it cost
+    /// clones, not when an install with nothing to clone ended before `yarn
+    /// cache dir` answered (now started after the hello, it often has).
+    #[test]
+    fn the_cache_note_is_said_only_when_it_cost_clones() {
+        let note = |cache: Value, copied: Value| unusable_cache_note(&json!({ "cache": cache, "copied": copied })).map(String::from);
+        assert_eq!(note(json!("/c/v6"), json!({})), None);
+        assert_eq!(note(Value::Null, json!({})), None);
+        assert_eq!(note(json!("unusable: the install ended first"), json!({ "first-copies": 101 })), None);
+        assert_eq!(note(json!("unusable: the install ended first"), json!({ "cache-dir-pending": 3 })).as_deref(), Some("the install ended first"));
+        assert_eq!(note(json!("unusable: yarn cache dir did not answer in 15s"), json!({})).as_deref(), Some("yarn cache dir did not answer in 15s"));
     }
 
     #[test]
