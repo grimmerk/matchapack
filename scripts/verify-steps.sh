@@ -24,8 +24,8 @@
 #     UNSEEN=<n>               the "unseen" count B must log (default 0)
 #   Every step also gets --no-audit --no-fund.
 #
-# After every step, all of these must hold (the floor, NOTES "The install
-# family"):
+# After every step, all of these must hold (TESTING.md, "The step harness:
+# incremental installs"):
 #   - the two exit statuses are equal;
 #   - `matchapack diff --normalize-roots A B`: identical, and the hidden
 #     lockfile byte-identical (every file of the project is compared, so

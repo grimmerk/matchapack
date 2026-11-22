@@ -7,10 +7,10 @@
 # name, a directory mode, a .yarn-integrity byte, and the two differences
 # between plain Yarn and the study's prototype (an empty file among the first
 # copies; the file group under Node >= 22). Then the Yarn 1 engine
-# (`matchapack yarn`, NOTES "Yarn 1 engine"): identical to plain Yarn on
+# (`matchapack yarn`): identical to plain Yarn on
 # yarn1-many, yarn1-emptyfirst (at the default thread pool, where plain
 # Yarn's own race is tolerated on the engine side too, and strictly with one
-# pool thread; NOTES "The probe race", issue grimmerk/matchapack-private#57), a regrouped cache, a cache with extra
+# pool thread; TESTING.md, "The Yarn 1 harness"), a regrouped cache, a cache with extra
 # xattrs, refused clones, failed fix-ups, --production, workspaces, an
 # incremental install, umask 002 and (MATCHAPACK_YARN_PRIME_NODE=<node>) a
 # cache filled by another Node; install flags and workspace layouts
@@ -34,7 +34,7 @@ here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 # The convert-existing interrupt cases need convert-existing.sh's INT trap,
 # which a non-interactive bash cannot set when SIGINT was ignored on entry;
 # a job started with `&` by a shell without job control has it ignored, and
-# the cases then fail as if matchapack were at fault (NOTES "Stopping").
+# the cases then fail as if matchapack were at fault.
 if python3 -c 'import signal,sys; sys.exit(0 if signal.getsignal(signal.SIGINT) is signal.SIG_IGN else 1)'; then
   echo "SIGINT is ignored in this shell (a job started with & without job control): run the suite in the foreground or with set -m" >&2
   exit 2
@@ -88,7 +88,7 @@ if [ "$(uname)" = Darwin ]; then has_xattr() { xattr "$1" 2>/dev/null | grep -qx
 else has_xattr() { python3 -c 'import os,sys; sys.exit(0 if sys.argv[2] in os.listxattr(sys.argv[1], follow_symlinks=False) else 1)' "$1" "$2"; }; fi
 # probe_only <case> <B dir> <B window> <B cache>: does <case>'s plain1
 # differ from <B dir> ONLY the way Yarn's time probe makes two plain runs
-# differ (NOTES "Yarn 1 harness", "The probe race")? Mtime differences only
+# differ (TESTING.md, "The Yarn 1 harness")? Mtime differences only
 # (at least one), every one on a NON-EMPTY top-level file of the y1-empty
 # package; no other class, no path only on one side, every .yarn-integrity
 # byte-identical. The race: Yarn's one flag "do copies keep times?" is
@@ -508,7 +508,7 @@ fake_at "$pk" "r['command'] = 'upgrade-interactive'; r['replay'] = {'kind': 'com
 skip "upgrade-interactive" "the choices made in its prompt are not logged" "$pk"
 
 # 5. Picking: distinct projects, newest first, until N replays ran (a skip
-# does not use one up; master's picker passed over projects whose directory
+# does not use one up; an earlier picker passed over projects whose directory
 # was gone); a command that started with node_modules there is not replayed.
 sp_fake "r['command'] = 'add'; r['node_modules_before'] = 'present'; r['root'] = r['dir'] = '$sp/added'"
 sp_fake "r['root'] = r['dir'] = '$sp/gone2'"
@@ -585,7 +585,7 @@ if [ $rc = 0 ] && [ -f "$work/script/plain1/node_modules/y1-script/built.txt" ] 
 else bad "yarn1-scriptpkg (exit $rc)"; fi
 
 # Under Node >= 22 plain Yarn's own result on this fixture depends on a race
-# (NOTES "Yarn 1 harness"): mostly identical, sometimes "plain varies". A
+# (TESTING.md, "The Yarn 1 harness"): mostly identical, sometimes "plain varies". A
 # varying run passes only when it varies the way the race does (probe_only);
 # its evidence is kept as emptyfirst-varies-<case>.txt.
 for c in empty empty-empty; do
@@ -736,7 +736,7 @@ fi # TEST_YARN1_PART
 verify engine-bogus --engine bogus "$FX/yarn1-small"
 if [ $rc = 2 ]; then ok "--engine with an unknown name is refused"; else bad "--engine bogus (exit $rc)"; fi
 
-# --- The Yarn 1 engine (`matchapack yarn`, NOTES "Yarn 1 engine") --------------
+# --- The Yarn 1 engine (`matchapack yarn`) -------------------------------------
 # Each case: plain, plain, engine on fresh copies, same cache (verify-yarn1.sh
 # --engine yarn1); the engine must have installed and cloned, and differ from
 # plain1 nowhere, or only where the two plain runs differ too.
@@ -747,8 +747,8 @@ everify() { local c=$1; shift; verify "$c" --engine yarn1 "$@"; }
 same() { grep -q 'plain vs engine: IDENTICAL' "$work/out"; }
 # first128 <case>: Yarn's first copies were left to Node, all 128 of them
 # (Yarn's copy concurrency; the hook reads it from the bundle). Checked by
-# count: leaving none to Node changes the tree only in some runs (issue grimmerk/matchapack-private#57,
-# NOTES "The probe race"), the count always.
+# count: leaving none to Node changes the tree only in some runs (plain
+# Yarn's own race), the count always.
 first128() { [ "$(ejson "$1" "y['first']")" = 128 ] && [ "$(copied "$1" first-copies)" = 128 ]; }
 
 if [ "${TEST_YARN1_PART:-all}" != route ]; then
@@ -844,7 +844,7 @@ else bad "file named after its tree's path (exit $rc, raw plain differences ${ra
 # lockfile lacks (y1-many: enough files that the engine clones some), with
 # node_modules/keepme already there. Not y1-empty: its empty files flip
 # Yarn's time probe, so two PLAIN runs already differ in mtimes (measured
-# here 2026-11-14: 2 of 3 plain pairs; NOTES "Yarn 1 harness"). Plain Yarn
+# here 2026-11-14: 2 of 3 plain pairs). Plain Yarn
 # and `matchapack yarn` on separate copies (cp -p of one source, so files
 # outside node_modules keep the same times), one scratch cache.
 sy=$work/sync; rm -rf "${sy:?}"; mkdir -p "$sy/src/node_modules/keepme"
@@ -944,8 +944,8 @@ mkdir -p "$work/e-in/cache"; touch "$work/e-in/cache/keep"
 verify e-in --cache-dir "$work/e-in/cache" "$FX/yarn1-many"
 if [ $rc = 2 ] && [ -f "$work/e-in/cache/keep" ]; then ok "a --cache-dir inside --work is refused and left alone"; else bad "--cache-dir inside --work (exit $rc)"; fi
 
-# yarn1-emptyfirst at the default thread pool: plain Yarn's own race (NOTES
-# "The probe race"; issue grimmerk/matchapack-private#57) can hit the engine's run as well as a plain
+# yarn1-emptyfirst at the default thread pool: plain Yarn's own race
+# (TESTING.md, "The Yarn 1 harness") can hit the engine's run as well as a plain
 # one, so the engine may differ from plain1 the way two plain runs can.
 # emptyfirst_engine_verdict <case> <exit> [<engine tree>] [<plain2 tree>]:
 # the verdict on such a case, whose harness output is in $work/out. Passes
@@ -1294,7 +1294,7 @@ else bad "harness on a run that cloned nothing (exit $rc)"; fi
 
 fi # TEST_YARN1_PART != commands
 
-# --- Yarn commands that change dependencies (NOTES "Yarn 1 commands") --------
+# --- Yarn commands that change dependencies -----------------------------------
 # Each: plain Yarn installs every tree, then runs the command (plain Yarn in
 # the prime run and in plain1 and plain2, `matchapack yarn` in the engine
 # tree); the trees, package.json, yarn.lock and .yarn-integrity included,
@@ -1525,7 +1525,7 @@ d=$(project floor); gate "Yarn older than 1.10.0" 'yarn 1.9.4 is older than 1.10
 if ! grep -q 'matchapack yarn hook:' "$work/out"; then ok "Yarn older than 1.10.0: declined before node started"
 else bad "Yarn older than 1.10.0: declined only by the hook (node was started)"; fi
 # A Yarn 2+ project is told from its files before anything else, and is
-# plain Yarn unlogged (NOTES "Yarn 1 shell route"): exit 3 here, the reason
+# plain Yarn unlogged: exit 3 here, the reason
 # printed, no log line.
 yarn2() { # yarn2 <name> <expected reason text> <dir>
   local n0; n0=$(wc -l < "$work/y1/log/log.jsonl" 2>/dev/null || echo 0)
@@ -2191,7 +2191,7 @@ if [ "$(uname)" = Darwin ]; then
   # (round 4) Interrupted while a process that ignores SIGINT stays in the
   # project: no restore under it; the backup is kept and its place said.
   # (Its output goes elsewhere: a process that keeps the install's output
-  # pipe open holds the script until it exits; NOTES, residual risk.)
+  # pipe open holds the script until it exits: a known residual risk.)
   r=$(croot stay); w11=$(cproj stay yarn1-many "$r"); echo keep > "$w11/node_modules/y1-a/SENTINEL"
   python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["scripts"]={"postinstall":"sh -c \"trap \x27\x27 INT; exec sleep 60\" </dev/null >/dev/null 2>&1 & echo $! > stayer.pid; touch started; sleep 60"}; json.dump(d, open(p,"w"))' "$w11/package.json"
   set -m; MATCHAPACK_CONVERT_TEST_WAIT_TICKS=4 conv "$r" --apply & pid=$!; set +m

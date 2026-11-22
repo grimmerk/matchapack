@@ -792,7 +792,7 @@ pub fn process_umask() -> u32 {
 /// reported). A major is listed once the inject harness has run on it
 /// (`scripts/verify-npm.sh`, `scripts/test-inject.sh`):
 /// 10 (10.8.2 and 10.9.2, also a 3-workspace project; 10.5.2, 10.7.0 and
-/// 10.9.10; NOTES), 11 (11.17–11.20 in use), 12 (12.2.2). Inside a major,
+/// 10.9.10), 11 (11.17–11.20 in use), 12 (12.2.2). Inside a major,
 /// the pacote fingerprint gate (`npm_fingerprints`) decides.
 pub const INJECT_NPM_MAJORS: &[u32] = &[10, 11, 12];
 
@@ -828,8 +828,8 @@ fn version_matches(version: &str, pattern: &str) -> bool {
 /// The pacote code the hook may be installed on: fingerprints (SHA-256 of
 /// pacote's lib/fetcher.js, the file of its FetcherBase class, `node
 /// src/inject.js --fingerprint <npm dir>`) of the npm releases the harness has run on, with the versions
-/// and the date (src/npm-fingerprints.json; NOTES "G-lite: npm release
-/// safety"). Inside a listed major, this is what decides whether an npm
+/// and the date (src/npm-fingerprints.json; docs/architecture.md, "Start-up:
+/// the lazy hook and npm's install root"). Inside a listed major, this is what decides whether an npm
 /// release the binary has never seen gets the hook: it does when its pacote
 /// code is byte for byte code that was tested.
 const NPM_FINGERPRINTS: &str = include_str!("npm-fingerprints.json");
@@ -1155,13 +1155,15 @@ mod tests {
     #[test]
     fn npm_fingerprint_list() {
         let list = npm_fingerprints();
-        // The eight texts of pacote's lib/fetcher.js in npm 10.0.0 to 12.2.2
-        // (NOTES "The lazy hook and npm's install root"), each listed after
-        // test-inject.sh and verify-npm.sh passed on a release with it.
+        // The eight texts of pacote's lib/fetcher.js in npm 10.0.0 to 12.2.2,
+        // each listed after test-inject.sh and verify-npm.sh passed on a
+        // release with it, must stay; a fingerprint added later needs no
+        // change here (no fixed count), only distinct entries.
         for p in ["07f98090ee5bc371", "8d7208cf1a9e98ee", "cef1bd59a34dfe60", "1a385341f75d6c77", "45eabb392a0c7c33", "6972084f1fa0d668", "97dbf9a402ad3329", "b7d5a64232232301"] {
             assert!(list.iter().any(|f| f.starts_with(p)), "{p}");
         }
-        assert_eq!(list.len(), 8, "{list:?}");
+        assert!(list.len() >= 8, "{list:?}");
+        assert_eq!(list.iter().collect::<std::collections::BTreeSet<_>>().len(), list.len(), "duplicates: {list:?}");
         assert!(list.iter().all(|f| is_fingerprint(f) && *f == f.to_ascii_lowercase()), "{list:?}");
         let v: serde_json::Value = serde_json::from_str(super::NPM_FINGERPRINTS).unwrap();
         for (f, e) in v["fingerprints"].as_object().unwrap() {

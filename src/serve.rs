@@ -1,8 +1,8 @@
-//! The clone server of the inject engine (see inject.rs and NOTES "Inject
-//! engine"): npm runs its own `npm ci` in a node child, and for every package
+//! The clone server of the inject engine (see inject.rs and
+//! docs/architecture.md, "The clone server"): npm runs its own `npm ci` in a node child, and for every package
 //! it would extract, the hook in src/inject.js asks this process to place the
-//! package's store entry instead. Node cannot clone (see NOTES), so the clone
-//! and the mtime touch happen here.
+//! package's store entry instead. Node has no call for a directory clone, so
+//! the clone and the mtime touch happen here.
 //!
 //! The project root is npm's own (grimmerk/matchapack-private#36): when npm
 //! starts its command, the helper reports `npm.prefix` (the `root` message),
@@ -64,7 +64,7 @@
 //! is known to be what pacote extracts (`store.made_by`; keys such as
 //! `fetcher:<32 hex> tar:<32 hex> uv:1.52.1`, `code_key`: pacote's
 //! lib/fetcher.js, the tar files node loaded with tar's dependencies, and
-//! libuv's version; NOTES "PR C1: the key is the code"): the code that made
+//! libuv's version; docs/architecture.md, "The store and its key"): the code that made
 //! it, and each one that later extracted it to the same tree. An entry is
 //! compared before use **once per key**: whenever the code that is running is
 //! not in the record yet (matchapack's own extractor, the classic engine's

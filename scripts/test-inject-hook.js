@@ -205,7 +205,7 @@ function storeVerifyHello () {
   })
 }
 
-// The tar fingerprint and the key (NOTES "PR C1: the key is the code").
+// The tar fingerprint and the key (docs/architecture.md, "The store and its key").
 function keyCases () {
   // Recomputed here from its definition, against what this process loaded
   // with pacote (it loads tar): tar as pacote resolves it and the packages

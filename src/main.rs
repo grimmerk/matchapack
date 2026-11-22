@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use store::Store;
 
 #[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MATCHAPACK_BUILD"), ")"), about = "Materialize node_modules from package-lock.json with copy-on-write clones")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MATCHAPACK_BUILD"), ")"), about = "npm ci, npm install and Yarn 1 installs that share disk space between checkouts: copy-on-write clones, the tree plain npm or Yarn builds")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -109,7 +109,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "alias")]
         no_alias: bool,
     },
-    /// Remove matchapack's own state: the store, the trial logs, the settings directory
+    /// Remove matchapack's own state: the store, the run log, the settings directory
     ///
     /// Without --yes, prints what it would remove and how much space that
     /// frees, and changes nothing. It never edits shell startup files: it
@@ -170,7 +170,7 @@ enum Cmd {
         #[arg(long)]
         normalize_roots: bool,
     },
-    /// Summarise the trial logs: outcomes, reasons, time, space, verification samples.
+    /// Summarise the run log: outcomes, reasons, time, space, verification samples.
     Report {
         /// Only the last N days.
         #[arg(long)]

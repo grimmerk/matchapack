@@ -7,8 +7,8 @@
 One log (`log.jsonl`) to pick from and one file (`verify.jsonl`) to record
 in, for both engines; `matchapack report` shows both (src/trial.rs). A
 sample replays one logged run of one project, plain and through matchapack,
-on copies, and compares the trees (NOTES "Sampled verification of real
-runs"). Two kinds of run are replayed (issue grimmerk/matchapack-private#77):
+on copies, and compares the trees (TESTING.md, "Sampled verification of
+real runs"). Two kinds of run are replayed:
 
 - full installs: `npm ci` (with the logged words, on copy-on-write copies of
   the whole project, by scripts/verify.sh); `yarn` / `yarn install` with or
@@ -368,7 +368,7 @@ def first_copies_kept(e):
     correct record measured) to Node (`copied["first-copies"]`). A replay
     that breaks it is DIFFERENT, whatever the trees: with those copies
     cloned, plain Yarn's time probe sees clones, and the tree is right only
-    by chance (NOTES "The probe race", mutation M2)."""
+    by chance (measured with a mutation that clones those copies)."""
     y = e.get("yarn1") or {}
     if not isinstance(y.get("cloned"), int) or y["cloned"] == 0:
         return None
@@ -513,8 +513,8 @@ def has_empty_package_file(tree):
 
 
 def race_shaped(own, tree, node_version):
-    """Can the engine's own differences be plain Yarn's probe race (#57,
-    NOTES "The probe race")? Under Node 22.12 or later (libuv 1.49: a copy
+    """Can the engine's own differences be plain Yarn's probe race
+    (TESTING.md, "The Yarn 1 harness")? Under Node 22.12 or later (libuv 1.49: a copy
     sets the times before the data), in a tree with an empty package file
     (the race needs empty and non-empty files among Yarn's first copies):
     mtime differences only, each on a non-empty regular file under a

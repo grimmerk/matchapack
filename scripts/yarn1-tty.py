@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a command in a pseudo-terminal and answer `yarn upgrade-interactive`'s
 prompt as a person would who takes every update: <a> (toggle all), then
-Enter. For scripts/verify-yarn1.sh --command-tty (NOTES "Yarn 1 commands").
+Enter. For scripts/verify-yarn1.sh --command-tty.
 
   yarn1-tty.py [--timeout SECONDS] -- <command> [args...]
 

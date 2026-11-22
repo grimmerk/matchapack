@@ -971,7 +971,7 @@ fi
 
 # 16. The install family (npm install / update / uninstall) through the
 #     shell function: npm's own command with the hook, and the bookkeeping
-#     of an incremental install (NOTES "The install family"). The trees
+#     of an incremental install (docs/architecture.md, "The install family"). The trees
 #     themselves are compared with plain npm by scripts/verify-steps.sh.
 rec_of() { python3 -c "
 import glob, json, sys

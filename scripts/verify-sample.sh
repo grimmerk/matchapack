@@ -44,7 +44,7 @@
 # install does. A sample says IDENTICAL only when the replay's inputs equal
 # what the run recorded (the files it hashed, the words it logged),
 # matchapack cloned at least as much in it as in the run, and every check
-# passed (NOTES "Sampled verification of real runs", review rounds 1 and 2).
+# passed (TESTING.md, "Sampled verification of real runs").
 # MATCHAPACK_LOG_DIR_REAL: the log directory (default ~/.cache/matchapack).
 set -uo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)

@@ -32,7 +32,7 @@
 # not a conversion: the previous node_modules is put back.
 #
 # Each project goes through these states; every failure leaves it in a known
-# one (NOTES "Yarn 1 shell route", decision 5):
+# one:
 #   plan      read-only checks, the list of node_modules to replace;
 #             a failure: SKIP, nothing changed
 #   backing   each node_modules copied (copy-on-write) to a new folder of

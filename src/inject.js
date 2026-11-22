@@ -1,5 +1,5 @@
-// The inject engine's node side (MATCHAPACK_ENGINE=inject; NOTES "Inject
-// engine"). Runs npm's REAL command in this process, the way bin/npm-cli.js
+// The inject engine's node side (docs/architecture.md, "The inject engine
+// (npm)"). Runs npm's REAL command in this process, the way bin/npm-cli.js
 // does, with one method replaced: pacote's FetcherBase.prototype.extract, the
 // single place where npm puts a package's files into a directory. It is
 // reached after pacote's policy checks (allow-git / allow-remote / allow-file
@@ -7,7 +7,7 @@
 // exists), so npm's refusals stay npm's.
 //
 // Nothing of npm is loaded before npm's own start-up code runs
-// (grimmerk/matchapack-private#59; NOTES "The lazy hook and npm's install
+// (docs/architecture.md, "Start-up: the lazy hook and npm's install
 // root"). In order:
 //   1. before npm: find npm's pacote (resolved, not loaded) and hash its
 //      lib/fetcher.js; a file not on the list is "tell matchapack, exit 90",
@@ -213,7 +213,7 @@ function fetcherBase (pacote) {
 // pacote's lib/fetcher.js, read as bytes from disk before npm starts, so
 // nothing of npm has to be loaded to decide (#59): its SHA-256 is the
 // fingerprint. The hook is installed only on a fingerprint the harness has
-// run on (src/npm-fingerprints.json; NOTES "G-lite: npm release safety").
+// run on (src/npm-fingerprints.json).
 // Until 2026-11 it was the text of the loaded class alone; the file holds
 // that text, so the gate only became stricter.
 function fingerprintFile (file) {
@@ -314,7 +314,7 @@ function esmFiles (dir, types) {
   return out
 }
 
-// The tar fingerprint (NOTES "PR C1: the key is the code"): the SHA-256 over
+// The tar fingerprint (docs/architecture.md, "The store and its key"): the SHA-256 over
 // the sorted, distinct lines of
 //   - `<name>@<version>` of every package of tarPackages (so a package
 //     whose code Node did not load, or loaded where require.cache does not

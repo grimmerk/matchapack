@@ -3,7 +3,7 @@
 //! the lockfile and of each manifest before and after it. A run that started
 //! with no `node_modules` has a known before-state (the manifests and the
 //! lockfile), so it can be replayed on copies, plain and through matchapack,
-//! like a full install (NOTES "Sampled verification of real runs").
+//! like a full install (TESTING.md, "Sampled verification of real runs").
 //!
 //! The files are small (a lockfile of a large project is a few MiB): each is
 //! read and hashed once before the run and once after it. Workspaces are

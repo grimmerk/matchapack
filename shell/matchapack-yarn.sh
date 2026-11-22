@@ -10,7 +10,7 @@
 # clones of Yarn's cache when it is safe to and otherwise runs the real yarn
 # with the same arguments (a Yarn 2+ project is told from its files, without
 # starting node). Every other yarn command (`yarn global …`, `yarn run …`,
-# `yarn workspace <name> install`, …; README "What stays plain Yarn"), and
+# `yarn workspace <name> install`, …; docs/architecture.md, "Yarn commands"), and
 # `yarn --version` / `--help`, goes straight to yarn without starting
 # matchapack.
 #

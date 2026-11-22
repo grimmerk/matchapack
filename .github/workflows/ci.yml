@@ -1,7 +1,7 @@
 # Checks for every pull request (and on demand). macOS runners bill 10x on a
 # private repository, so only what needs APFS clones runs there, on one npm;
 # the rest runs on Linux, including the npm suites on each pinned npm line
-# (linux-npm). Not on pushes to master: a pull request already ran them.
+# (linux-npm). Not on pushes to main: a pull request already ran them.
 name: ci
 on:
   pull_request:
@@ -38,6 +38,8 @@ jobs:
           node-version: 24.22.1
       - name: npm canary decisions (offline)
         run: node scripts/test-npm-canary.js
+      - name: the benchmark script's own logic (offline)
+        run: python3 -B scripts/test-bench.py
       - name: the npm package's launcher (stubs; sh is dash here)
         run: sh scripts/test-npm-launcher.sh
       - name: fish with the real binary (npm ci and the yarn function, real npm and Yarn 1)
