@@ -1,3 +1,4 @@
+mod channel;
 mod clone;
 mod diff;
 mod gc;
@@ -315,7 +316,7 @@ const INIT_SHELLS: [&str; 3] = ["zsh", "bash", "fish"];
 /// `yarn` function is defined there). The files in shell/ are the one
 /// definition; the binary carries them so the rc line needs no checkout of
 /// this repository, and users who already have the line get the `yarn`
-/// function with the next `cargo install`. Then the short name `alias`
+/// function with the next update of the binary. Then the short name `alias`
 /// (`mp` unless --alias or --no-alias), guarded so that it is defined only
 /// when the name is free in the shell that runs it.
 fn init_script(shell: &str, macos: bool, alias: Option<&str>) -> String {
@@ -498,11 +499,17 @@ fn main() -> Result<()> {
             // npm and yarn functions must not go missing over a bad name.
             let name = if no_alias { None } else { Some(alias.unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
             let refused = name.as_deref().and_then(|n| check_alias(n, &shell).err());
+            use std::io::IsTerminal;
+            let tty = std::io::stdout().is_terminal();
             if refused.is_none() {
-                use std::io::IsTerminal;
-                if let Some(r) = alias_report(name.as_deref(), std::io::stdout().is_terminal()) {
+                if let Some(r) = alias_report(name.as_deref(), tty) {
                     eprintln!("{r}");
                 }
+            }
+            // By hand only, as the report above: a global npm package of one
+            // Node version is lost when the version changes.
+            if let Some(n) = channel::init_note(std::env::current_exe().ok().as_deref(), tty) {
+                eprintln!("{n}");
             }
             print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { name.as_deref() }));
             if let Some(e) = refused {

@@ -15,14 +15,34 @@ Requires a filesystem with reflinks: APFS (every current Mac), Btrfs or XFS
 with `reflink=1`. Elsewhere it hands over to npm or Yarn. On Linux, Yarn 1's own
 copy already clones, so matchapack leaves Yarn alone there.
 
-## Use
+## Install
+
+One of these (macOS on Apple silicon or Intel; Linux on x86_64 or arm64):
 
 ```sh
-cargo install --path .          # puts matchapack in ~/.cargo/bin
+# Homebrew
+brew install grimmerk/tap/matchapack
+# the install script (puts it in ~/.matchapack/bin and that on PATH)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | sh
+# npm
+npm i -g matchapack
+# crates.io (builds it from source)
+cargo install matchapack --locked
 ```
 
-Then add one line to your shell's startup file. Not sure which shell you use?
-Run `echo $0` (macOS has used zsh by default since 10.15).
+The install script appends its PATH line to the end of your startup files.
+If one of them already has matchapack's init line (from a Homebrew, npm or
+cargo install), move that line below the one the script added: otherwise,
+once that other install is gone, it runs before `~/.matchapack/bin` is on
+PATH, and matchapack silently stops routing npm and Yarn.
+
+With nvm or fnm, a global npm package belongs to the Node version that was
+active: after you switch versions, `matchapack` is not on PATH until you
+install it there too (Homebrew and the install script do not depend on the
+Node version; `matchapack init` run by hand says so when this applies).
+
+Then add one line at the end of your shell's startup file. Not sure which
+shell you use? Run `echo $0` (macOS has used zsh by default since 10.15).
 
 | shell | file | line |
 |---|---|---|
@@ -30,12 +50,16 @@ Run `echo $0` (macOS has used zsh by default since 10.15).
 | bash | `~/.bashrc` | `command -v matchapack >/dev/null && eval "$(matchapack init)"` |
 | fish | `~/.config/fish/config.fish` | `type -q matchapack; and matchapack init \| source` |
 
-Put it after the line that puts `~/.cargo/bin` on PATH (rustup usually does
-that in `~/.zshenv` or `~/.profile`); if it comes earlier, it does nothing.
+It must come after the line that puts matchapack on PATH, so put it at the
+end of the file: the install script appends its PATH line,
+`. "$HOME/.config/matchapack/env.sh"` (fish: a file in
+`~/.config/fish/conf.d`), at the end of the file, and Homebrew's `brew
+shellenv`, rustup's and a Node version manager's lines must run first too.
+If it comes earlier, it does nothing.
 `matchapack init` detects the shell that runs it; `matchapack init zsh` (or
 `bash`, `fish`) names it explicitly. The function comes from the binary, so
-no checkout of this repository is needed and it updates with `cargo
-install`. Sourcing `shell/matchapack.sh` from a checkout still works.
+no checkout of this repository is needed and it updates with the binary.
+Sourcing `shell/matchapack.sh` from a checkout still works.
 
 `mp` is a short name for `matchapack` when that name is free (`mp store
 gc`); if `mp` is something else on your machine, use `matchapack`. The line
@@ -49,6 +73,8 @@ name (`eval "$(matchapack init --alias NAME)"`, fish `matchapack init
 --alias NAME | source`; not a builtin of the shell, nor npm, yarn or
 matchapack: refused, the line still defines the npm function), and
 `--no-alias` defines none.
+
+## Use
 
 Open a new terminal, then type `npm ci` as usual:
 
@@ -69,6 +95,10 @@ $ npm install left-pad@1.3.0
 …npm's own output: "added 1 package, and audited 349 packages in 1s"…
 matchapack: 1 package cloned from the store, npm extracted 0 (inject engine; MATCHAPACK=0 npm install for plain npm)
 ```
+
+Install scripts run as they do without matchapack: a package that downloads
+files in its postinstall (Prisma's engines, for example) behaves exactly as
+with plain npm or Yarn.
 
 Taken over, with any of npm's flags: `npm ci` (and `clean-install`, `ic`,
 `install-clean`, `isntall-clean`), `npm install` (and `i`, `add`, `in`,
@@ -121,7 +151,9 @@ alias is not expanded inside a function), and then npm runs plain.
 Remove: `matchapack uninstall` lists what it would remove (the store, the
 trial logs, the settings directory), the space that frees, the lines of your
 startup files that mention matchapack (file:line; it never edits them) and
-the command that removes the binary (`cargo uninstall matchapack`);
+the command that removes the binary the way it was installed (`brew
+uninstall`, `npm uninstall -g`, `cargo uninstall`, or `rm` for the install
+script, whose PATH line and files it lists and leaves in place);
 `matchapack uninstall --yes` removes matchapack's state. Installed
 node_modules keep working without the store (clones are independent files),
 and a later `npm ci` or `yarn` without the line is plain npm or Yarn.
@@ -504,16 +536,16 @@ blocks with it. It is not faster: a fresh install took about as long as
 plain Yarn on one project and about 10 % longer on the 9-workspace one.
 Numbers and method: `NOTES.md`, "Yarn 1: summary".
 
-**How to turn it on.** Nothing beyond the line from "Use" (`eval
+**How to turn it on.** Nothing beyond the line from "Install" (`eval
 "$(matchapack init)"`, or fish's). On macOS that line also defines a `yarn`
 shell function. A startup file that already has the line gets the function
-with the next `cargo install`, in a new terminal. Then type `yarn` as usual:
+with the next update of the binary, in a new terminal. Then type `yarn` as usual:
 
 ```
 $ yarn install --frozen-lockfile
 matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)
 …Yarn's own output…
-matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node, in 25.2s
+matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node (Yarn's first copies, left to Node by design), in 25.2s
 ```
 
 `matchapack yarn <args>` does the same without the function. Sourcing
@@ -950,7 +982,7 @@ packages again.
 ## Other commands
 
 - `matchapack init zsh|bash|fish [--alias NAME | --no-alias]`: print the
-  shell integration (see "Use"), with the short name `mp` for matchapack
+  shell integration (see "Install"), with the short name `mp` for matchapack
   when that name is free; `--alias NAME` picks another name, `--no-alias`
   none.
 - `matchapack uninstall [--yes]`: remove matchapack's own state. Without
@@ -978,7 +1010,17 @@ packages again.
   store frees only the blocks no project shares; the dry run estimates it
   from the project records, the real run prints the volume's free space
   before and after. `~/.cache/matchapack/backup` (backups
-  `scripts/convert-existing.sh` kept) is left for you to check and remove.
+  `scripts/convert-existing.sh` kept) is left for you to check and remove,
+  and so are the install script's files (`env.sh`, `env.fish` and its
+  receipt in `${XDG_CONFIG_HOME:-~/.config}/matchapack`, and
+  `~/.config/fish/conf.d/matchapack.env.fish`): a line the script appended
+  to your startup files loads `env.sh`, which puts `~/.matchapack/bin` on
+  PATH, and removing a file a startup file still loads prints an error at
+  every shell start. uninstall marks those lines and gives the commands to
+  remove the files once they are gone. The last line says how to remove the binary,
+  from where it really is: Homebrew's Cellar, an npm package (and whether it
+  belongs to one Node version), cargo's install records, the install
+  script's receipt, or a plain file.
 - `matchapack install [dir] [--ignore-scripts] [-- npm args]`: the install
   itself, with its counts and times (same gates as `npm ci`). The classic
   engine's options (`--no-rebuild`, `--mtime`, `--npm-cache`) and `matchapack

@@ -557,6 +557,22 @@ enum Cache {
     Unusable(String),
 }
 
+/// "<n> copied by Node" for the end-of-install line (`stats`: Stats::to_json),
+/// saying why when they are Yarn's first copies of a link step: the hook
+/// leaves those to Node by design (Yarn's one-time probe runs on them, NOTES
+/// "The probe race"), so a run with nothing amiss still has them.
+fn copied_by_node(stats: &Value) -> String {
+    let total = stats["copied_total"].as_u64().unwrap_or(0);
+    let first = stats["copied"]["first-copies"].as_u64().unwrap_or(0);
+    if first == 0 {
+        format!("{total} copied by Node")
+    } else if first == total {
+        format!("{total} copied by Node (Yarn's first copies, left to Node by design)")
+    } else {
+        format!("{total} copied by Node ({first} of them Yarn's first copies, left to Node by design)")
+    }
+}
+
 #[derive(Debug)]
 enum Outcome {
     Cloned { bytes: u64 },
@@ -1585,13 +1601,7 @@ pub fn cli(args: Vec<String>) -> i32 {
                 eprintln!("matchapack: {why}");
             }
             if s.stats["linked"] == true || n("cloned") > 0 {
-                eprintln!(
-                    "matchapack: {} files cloned from Yarn's cache ({}), {} copied by Node, in {:.1}s",
-                    n("cloned"),
-                    mib(n("cloned_bytes")),
-                    n("copied_total"),
-                    s.secs
-                );
+                eprintln!("matchapack: {} files cloned from Yarn's cache ({}), {}, in {:.1}s", n("cloned"), mib(n("cloned_bytes")), copied_by_node(&s.stats), s.secs);
             }
             if let Some(why) = s.stats["cache"].as_str().and_then(|c| c.strip_prefix("unusable: ")) {
                 eprintln!("matchapack: no clones in this install: {why}");
@@ -2386,5 +2396,15 @@ mod tests {
         assert_eq!(st.copied.get("first-copies"), Some(&128));
         assert_eq!(st.copied.get("xy"), Some(&1));
         assert_eq!(st.declined.as_deref(), Some("why"));
+        // The end-of-install line says why Yarn's first copies were Node's.
+        assert_eq!(copied_by_node(&st.to_json()), "131 copied by Node (128 of them Yarn's first copies, left to Node by design)");
+    }
+
+    #[test]
+    fn copied_by_node_says_why() {
+        let line = |copied: Value, total: u64| copied_by_node(&json!({ "copied": copied, "copied_total": total }));
+        assert_eq!(line(json!({ "first-copies": 128 }), 128), "128 copied by Node (Yarn's first copies, left to Node by design)");
+        assert_eq!(line(json!({ "not-eligible": 3 }), 3), "3 copied by Node");
+        assert_eq!(line(json!({}), 0), "0 copied by Node");
     }
 }
