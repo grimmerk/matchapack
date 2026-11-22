@@ -1,5 +1,5 @@
 //! `matchapack uninstall`: remove matchapack's own state (the store, the
-//! trial logs, the settings directory), and say what else to remove by hand
+//! run log, the settings directory), and say what else to remove by hand
 //! (the shell integration line; the binary, the way it was installed:
 //! `channel`; the install script's PATH setup). Without `--yes` it only
 //! prints what it would do and writes nothing.
@@ -290,7 +290,7 @@ impl Kind {
     fn label(self) -> &'static str {
         match self {
             Kind::Store => "store",
-            Kind::Logs => "trial logs",
+            Kind::Logs => "run log",
             Kind::Config => "settings",
         }
     }
