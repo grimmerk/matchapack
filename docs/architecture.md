@@ -390,7 +390,7 @@ What it is for: to follow one install through the Yarn path of D1. The node name
 ```text
  MP matchapack binary (src/yarn1.rs)
    ① gates: Yarn 1 found on PATH, yarn.lock at or above, not Yarn 2+, scope, …  ── fails ──▶ PLAIN
-   ② writes the hook; starts node with YH (socket on fd 3); once the hook says hello, asks `yarn cache dir` (in parallel with the rest of the install)
+   ② writes the hook; starts node with YH (socket on fd 3); after its hello, asks `yarn cache dir`
       ▼
  YH Yarn hook (src/yarn1-hook.js), in the node process
    ③ reads N from the Yarn code that runs (its copy concurrency); not found ──▶ decline

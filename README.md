@@ -84,7 +84,9 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
    ```sh
    brew install grimmerk/tap/matchapack
    # or
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf \
+     https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
+     | sh
    ```
 
 2. **Add one line at the end of your shell's startup file.** Not sure which shell you use? Run `echo $SHELL`.
@@ -121,7 +123,7 @@ Type `npm ci` as usual:
 ```
 $ npm ci
 matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm)
-…npm's own output: warnings, script output, "added 347 packages in 1s", the audit summary…
+…npm's own output (warnings, "added 347 packages in 1s", the audit summary)…
 matchapack: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
 ```
 
@@ -133,7 +135,8 @@ On macOS, in a Yarn 1 project, `yarn`, `yarn install`, `yarn add`, `upgrade`, `r
 $ yarn install --frozen-lockfile
 matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)
 …Yarn's own output…
-matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node (Yarn's first copies, left to Node by design), in 25.2s
+matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node
+  (Yarn's first copies, left to Node by design), in 25.2s
 ```
 
 **Where it applies.** The line defines shell functions named `npm` and (on macOS) `yarn` in your interactive shells. What does not run through such a shell runs plain npm: a script, a Makefile, an editor's task runner, CI, or a coding agent that starts its own non-interactive shell. Call matchapack by name there: `matchapack npm ci`, `matchapack yarn install`. Claude Code sessions started after you added the line use the functions (they take them from their shell snapshot). An existing `alias npm=…` wins over the function, so matchapack is skipped. For one command, `MATCHAPACK=0 npm install` or `command npm install` runs plain npm.
