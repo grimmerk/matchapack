@@ -257,6 +257,17 @@ This table describes the tree of the priming install: every regular file, empty 
 
 In total, 74 of the quiet run's 320 runs started above load 3.0, against 197 of the busy run's. Every ratio stays on the same side of 1.0 in both runs, the main case (a fresh worktree) is within 0.09 between them, and the disk numbers are the same. So the conclusions do not depend on an idle machine; the exact ratios move by up to about 0.4 in the cases with the most work per entry (first use after an npm change).
 
+**Yarn 1, a later run (2026-11-23, the current build).** After the two runs above, the Yarn 1 engine changed when it asks for Yarn's cache folder (`yarn cache dir` now starts only after the hook's hello). The Yarn project was measured again on the same Mac, idle, on mains power, thermal pressure nominal throughout (10 rounds, Yarn 1 only); the README's Yarn 1 rows come from this run:
+
+| Case | Plain | matchapack | Ratio | Runs above load 3.0 |
+|---|---|---|---|---|
+| empty Yarn cache | 18.49 s (18.07–19.01) | 19.92 s (18.80–23.11) | 1.08× | 6 of 20 |
+| a fresh worktree, warm cache | 12.82 s (10.62–14.29) | 11.44 s (11.08–14.45) | 0.89× | 7 of 20 |
+| already installed (nothing to do) | 0.48 s (0.30–0.68) | 0.67 s (0.35–1.06) | 1.39× | 5 of 20 |
+| incremental install after a lockfile change | 2.44 s (2.33–2.47) | 3.15 s (2.63–3.61) | 1.29× | 10 of 20 |
+
+On a cool, idle machine plain Yarn copies faster than in the earlier runs, so the saving on a fresh worktree is smaller (0.89× against 0.82×). Most of the cost on small commands is not matchapack's own work. This Mac has an endpoint security agent installed, and it reacts to file-by-file clones: right after the Yarn 1 engine (or `cp -c -R`) clones about 80,000 files, starting a large program such as node takes about 0.3 s longer for about 90 seconds, and 2 to 3 cores are busy in the background for about 2 minutes, in no process that `ps` or `top` shows. Copying the same files (`cp -R`), or cloning them a package directory at a time as the npm engine does, does not do this. In the benchmark many runs follow such an install, so starts of node in the next runs, plain Yarn's included, often pay it (in 19 of matchapack's 20 small-command runs its node started about 0.3 s late). Outside the benchmark, on an already installed tree with no install shortly before, matchapack took 0.32 s against plain Yarn's 0.30 s.
+
 To run it yourself (macOS, APFS; the quiet run took 5.5 hours with every project and 10 rounds, unattended):
 
 ```sh
