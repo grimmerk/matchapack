@@ -3,6 +3,7 @@
 Questions people ask before they install. How it works is in [architecture.md](architecture.md), how it is tested in [TESTING.md](../TESTING.md), and how to install it in the [README](../README.md#install).
 
 - [Why not pnpm?](#why-not-pnpm) It is another package manager; matchapack keeps npm or Yarn 1.
+- [How does it compare with pnpm, Bun and Yarn 2+?](#how-does-it-compare-with-pnpm-bun-and-yarn-2) A table: where the shared copy lives, clone or hard link, and what changes for the team.
 - [Why not hard links?](#why-not-hard-links) An edit in one checkout would change all of them, and the tree could not have npm's own file times.
 - [Does `du` show the saving?](#does-du-show-the-saving) No: look at the disk's free space or `matchapack report`.
 - [What happens on a new npm or Node release?](#what-happens-on-a-new-npm-or-node-release) Mostly nothing; sometimes one slower install, or plain npm until an update.
@@ -19,6 +20,22 @@ Questions people ask before they install. How it works is in [architecture.md](a
 ## Why not pnpm?
 
 pnpm keeps one store too, and clones or hard-links from it. If your project can switch to pnpm, that is a good answer. But switching changes the project: another lockfile, another `node_modules` layout (symlinks into a store), and everyone on the team, every CI job and every Dockerfile must use pnpm. matchapack is for projects that stay on npm or Yarn 1: the lockfile, the layout and the tree stay npm's or Yarn's, and only the disk use changes.
+
+## How does it compare with pnpm, Bun and Yarn 2+?
+
+Checked on 2026-11-24 against npm 12.2.3, Yarn 1.22.22, pnpm 12.23.0, Yarn 4.19.0 and Bun 1.4.5, from their documentation and source (links below). "Clone" is a copy-on-write clone; "hard link" is one file in many places. Where a cell lists several ways, the tool tries them in that order and uses the next one when the first is not possible (another file system, or the store on another volume).
+
+| Tool | Shared copy | How files reach `node_modules` on macOS (APFS) | On Linux | An edit stays in one checkout | Changes the project | Shared across projects |
+|---|---|---|---|---|---|---|
+| npm | a cache of downloaded tarballs | full copy: each package is unpacked | full copy | yes | no | downloads only |
+| Yarn 1 | a cache of unpacked packages | full copy | full copy; a clone of the cache file on Btrfs and XFS | yes | no | downloads only (Btrfs, XFS: yes) |
+| pnpm (default) | a content-addressed store | clone; if it cannot clone, hard link; if neither works, copy | hard link; if it cannot, clone; if neither works, copy (since pnpm 12; before that, clone first) | macOS: yes; Linux: no | yes: `pnpm-lock.yaml`, symlinked layout, the whole team on pnpm | yes |
+| Yarn 4, `node-modules` linker | a cache of zip archives | full copy (`nmMode: classic`, the default); hard links into a global store with `nmMode: hardlinks-global` | the same | classic: yes; hard links: no | for a project already on Yarn 4, no (a setting); from npm, yes: another package manager and lockfile | classic: downloads only; hard links: yes |
+| Yarn 4, Plug'n'Play (its default) | a cache of zip archives | no `node_modules`: packages are read from the cache | the same | (no files to edit in place) | yes: tools must understand Plug'n'Play | yes |
+| Bun (default) | a cache of unpacked packages | clone; if it cannot clone, copy | hard link; if it cannot, copy | macOS: yes; Linux: no | yes: `bun.lock`, the whole team on Bun | yes |
+| matchapack | its store (for Yarn 1, Yarn's own cache) | clone; when it cannot clone, plain npm or Yarn installs | clone on Btrfs and XFS (npm); other file systems: plain npm | yes | no | yes |
+
+Sources: npm [cache](https://docs.npmjs.com/cli/v12/commands/npm-cache/) and [config](https://docs.npmjs.com/cli/v12/using-npm/config/); Yarn 1 [cache](https://classic.yarnpkg.com/en/docs/cli/cache) and [its copy](https://github.com/yarnpkg/yarn/blob/v1.22.22/src/util/fs-normalized.js#L40-L45) (Node's libuv clones only on Linux: [fs.c](https://github.com/libuv/libuv/blob/v1.53.0/src/unix/fs.c#L1375-L1392)); pnpm [`packageImportMethod`](https://pnpm.io/settings/node-modules#packageimportmethod) and [12.0.0](https://github.com/pnpm/pnpm/releases/tag/v12.0.0); Yarn 4 [`nmMode`, `nodeLinker`](https://yarnpkg.com/configuration/yarnrc) and [linkers](https://yarnpkg.com/features/linkers); Bun [global cache](https://bun.com/docs/pm/global-cache) and [install backends](https://bun.com/docs/pm/cli/install). Each tool has options that change its row (pnpm and Bun can be told to clone or copy on Linux too).
 
 ## Why not hard links?
 

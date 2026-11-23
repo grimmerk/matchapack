@@ -445,7 +445,7 @@ Every other command runs Yarn directly; matchapack does not start:
 - `yarn workspaces …`, `yarn run` and scripts, `why`, `info`, `list`, `outdated`, `cache`, `link` and `unlink` (a symlink), `pack`, `publish`, `import`, `check`, `autoclean`, `policies`: they copy no package into `node_modules`;
 - `yarn --version`, `yarn --help`, and any command with `--help` or `-h`.
 
-Costs, measured: each routed command costs about 0.25 s of CPU more than plain Yarn (on `yarn add` of a 3-file package). On an already installed project, where Yarn checks `.yarn-integrity` and stops, the benchmark measured 0.89 s instead of 0.49 s ([TESTING.md](../TESTING.md#benchmark)).
+Costs, measured: each routed command costs about 0.25 s of CPU more than plain Yarn (on `yarn add` of a 3-file package). On an already installed project, where Yarn checks `.yarn-integrity` and stops, the benchmark measured 0.67 s instead of 0.48 s, most of it the cost of starting node right after a large clone on a Mac with an endpoint security agent; with no install shortly before, 0.32 s instead of 0.30 s ([TESTING.md](../TESTING.md#benchmark)).
 
 ### When it runs plain Yarn instead
 
