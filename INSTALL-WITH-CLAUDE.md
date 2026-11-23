@@ -64,7 +64,9 @@ Ask first, and explain the choices:
 - **The install script**, which downloads the prebuilt binary into `~/.matchapack/bin`:
 
   ```sh
-  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | sh
+  curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
+    | sh
   ```
 
   Tell the user that this runs an install script from matchapack's GitHub releases page, and that it appends a line, `. "$HOME/.config/matchapack/env.sh"`, to their shell startup files to put `~/.matchapack/bin` on the `PATH`. In this session, call the binary as `~/.matchapack/bin/matchapack` until a new terminal is open.
