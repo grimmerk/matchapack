@@ -8,7 +8,7 @@ Works with npm 10, 11 and 12 on macOS (APFS) and on Linux with Btrfs or XFS, and
 
 [Install](#install) · [Use](#use) · [Do you need it?](#do-you-need-matchapack) · [Limits](#limits) · [FAQ](docs/faq.md) · [How it works](docs/architecture.md) · [How it is tested](TESTING.md) · [Install with Claude Code](INSTALL-WITH-CLAUDE.md)
 
-<img align="right" width="240" src="docs/assets/matchapack-hero.png" alt="A large three-layer matcha cake stands for the store. Beside it, two small blocks in the same shade are two worktrees of one project, cloned from the store, and a third block in another shade is a second project that takes its packages from the same store.">
+<img align="right" width="240" src="docs/assets/matchapack-hero.png" alt="A large three-layer matcha cake stands for the store. Beside it, two small blocks in the same shade are two worktrees of one project, cloned from the store, and a lower block of one dark layer, the store's bottom layer, is a second project that takes another part of the same store.">
 
 ① The first install of a package puts one copy of it in the store (`~/.cache/matchapack/store`), which all your projects share.
 
