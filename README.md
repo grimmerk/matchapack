@@ -100,11 +100,11 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
    echo 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.zshrc
    # bash
    echo 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.bashrc
-   # fish
-   echo 'type -q matchapack; and matchapack init | source' >> ~/.config/fish/config.fish
+   # fish (its configuration directory, even when XDG_CONFIG_HOME moves it)
+   mkdir -p $__fish_config_dir; and echo 'type -q matchapack; and matchapack init | source' >> $__fish_config_dir/config.fish
    ```
 
-   The line must stay below every line that puts matchapack or Node on PATH (the install script's `. "$HOME/.config/matchapack/env.sh"`, Homebrew's `brew shellenv`, a Node version manager's); if something added later goes below it, move the line back to the end. bash login shells (Terminal on macOS, an SSH session) read `~/.bash_profile` or `~/.profile`; make sure that file loads `~/.bashrc`, or put the line there. fish with `XDG_CONFIG_HOME` set reads `$XDG_CONFIG_HOME/fish/config.fish` instead.
+   The line must stay below every line that puts matchapack or Node on PATH (the install script's `. "$HOME/.config/matchapack/env.sh"`, Homebrew's `brew shellenv`, a Node version manager's); if something added later goes below it, move the line back to the end. bash login shells (Terminal on macOS, an SSH session) read `~/.bash_profile` or `~/.profile`; make sure that file loads `~/.bashrc`, or put the line there.
 
 3. **Open a new terminal and check:** `type npm` says that `npm` is a shell function.
 
@@ -203,7 +203,7 @@ Volta, mise and a cargo `--root` install get their own command. Installed `node_
 | A umask other than 022 | runs plain npm | |
 | An endpoint security agent (the security software many companies install) | the Yarn 1 engine clones file by file, and such an agent may then scan the clones in the background: on the test Mac, after an install of 80,000 files, the agent kept 2 to 3 cores busy for about 2 minutes, and each start of node meanwhile took 0.3 s longer. The npm engine clones a package directory at once and did not cause this | nothing: it settles by itself; `MATCHAPACK=0 yarn` for plain Yarn |
 
-**If matchapack is killed in the middle of an install.** A plain `kill -9` (SIGKILL) stops npm too, and npm rolls back its half-done install by itself. If matchapack was first asked to stop and then killed (a supervisor's SIGTERM, then SIGKILL), npm is killed before it can roll back, and the project is left half-installed: run the same install again (`npm ci`, or `npm install` if the project has no lockfile yet). Details: [docs/architecture.md](docs/architecture.md#stopping-signals-and-a-matchapack-that-goes-away).
+**If matchapack is killed in the middle of an install.** A plain `kill -9` (SIGKILL) stops npm too, and npm rolls back its half-done install by itself. If matchapack was first asked to stop and then killed (a supervisor's SIGTERM, then SIGKILL), npm is killed before it can roll back, and the project is left half-installed: run `npm ci` again; if the project has no lockfile yet, remove `node_modules` first and run `npm install`. Details: [docs/architecture.md](docs/architecture.md#stopping-signals-and-a-matchapack-that-goes-away).
 
 ## More
 
