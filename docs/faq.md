@@ -84,7 +84,7 @@ Installed `node_modules` keep working: clones are independent files. The next in
 ## Is it safe to try?
 
 - It changes only how packages are placed in `node_modules`. What npm and Yarn write themselves (`package.json`, the lockfiles) and what install scripts do happen as with plain npm or Yarn. Of its own, matchapack writes only the store, its run log and its settings.
-- Every gate it cannot pass falls back to plain npm or Yarn, with nothing changed, and says why.
+- Every gate it cannot pass falls back to plain npm or Yarn, with nothing changed, and says why (for a few common cases of `npm install`, such as `-g`, only in its run log).
 - `MATCHAPACK=0 npm ci` runs plain npm for one command.
 - To try it without the shell line, run `matchapack npm ci` in a spare worktree, then `matchapack report`.
 - `matchapack uninstall` is a dry run until you add `--yes`, and installed `node_modules` keep working after it.

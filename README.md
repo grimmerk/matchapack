@@ -156,7 +156,7 @@ matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node
 | `matchapack store` | where the store is and what it holds |
 | `matchapack store gc [--dry-run]` | removes packages no installed project uses; installed `node_modules` never depend on the store |
 | `matchapack store adopt <dir>` | records projects installed before records existed, or moved, so that gc keeps their packages |
-| `matchapack store verify [--fix]` | compares every package in the store with npm's own extraction (after an npm or Node upgrade, ahead of the next installs) |
+| `matchapack store verify [--fix]` | compares every package in the store whose tarball is still in npm's cache with npm's own extraction (after an npm or Node upgrade, ahead of the next installs) |
 | `matchapack npm …`, `matchapack yarn …` | what the shell functions run, for scripts and CI |
 | `matchapack uninstall [--yes]` | removes matchapack's own state ([Uninstall](#uninstall)) |
 
@@ -203,7 +203,7 @@ Volta, mise and a cargo `--root` install get their own command. Installed `node_
 | A umask other than 022 | runs plain npm | |
 | An endpoint security agent or antivirus (the security software many companies install) | the Yarn 1 engine clones file by file, and such an agent may then scan the clones in the background: on the test Mac, after an install of 80,000 files, the agent kept 2 to 3 cores busy for about 2 minutes, and each start of node meanwhile took 0.3 s longer. The npm engine clones a package directory at once and did not cause this, and a Mac without such an agent showed no slowdown | nothing: it settles by itself; `MATCHAPACK=0 yarn` for plain Yarn |
 
-**If matchapack is killed in the middle of an install.** A plain `kill -9` (SIGKILL) stops npm too, and npm rolls back its half-done install by itself. If matchapack was first asked to stop and then killed (a supervisor's SIGTERM, then SIGKILL), npm is killed before it can roll back, and the project is left half-installed: run `npm ci` again; if the project has no lockfile yet, remove `node_modules` first and run `npm install`. Details: [docs/architecture.md](docs/architecture.md#stopping-signals-and-a-matchapack-that-goes-away).
+**If matchapack is killed in the middle of an install.** A plain `kill -9` (SIGKILL) stops npm too: npm gets SIGTERM and rolls back its half-done install by itself, as plain npm would. If matchapack was first asked to stop and then killed (a supervisor's SIGTERM, then SIGKILL), npm is killed before it can roll back, and the project is left half-installed: run `npm ci` again; if the project has no lockfile yet, remove `node_modules` first and run `npm install`. Details: [docs/architecture.md](docs/architecture.md#stopping-signals-and-a-matchapack-that-goes-away).
 
 ## More
 
