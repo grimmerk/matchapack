@@ -11,7 +11,9 @@ Works with npm 10, 11 and 12 on macOS (APFS) and on Linux with Btrfs or XFS, and
 <p align="center"><img src="docs/assets/matchapack-hero.png" width="300" alt="A large three-layer matcha cake stands for the store. Beside it, two small blocks in the same shade are two worktrees of one project, cloned from the store, and a third block in another shade is a second project that takes its packages from the same store."></p>
 
 ① The first install of a package puts one copy of it in the store (`~/.cache/matchapack/store`).
+
 ② Every later install of that package, in any checkout, places a copy-on-write clone of it: a new file that shares its disk blocks with the store's copy.
+
 ③ Editing a cloned file gives that checkout its own copy of the changed blocks; the store and the other checkouts do not change.
 
 ## Why
