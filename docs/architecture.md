@@ -81,12 +81,12 @@ flowchart LR
 | PLAIN | plain npm or Yarn | npm or Yarn run directly, as without matchapack | [When it runs plain npm instead](#when-it-runs-plain-npm-instead) |
 | IJ | inject hook (src/inject.js) | the code that starts npm and replaces its extraction | [Start-up: the lazy hook and npm's install root](#start-up-the-lazy-hook-and-npms-install-root) |
 | NPM | npm's own code | npm, arborist (npm's tree builder) and pacote, unchanged | [The inject engine (npm)](#the-inject-engine-npm) |
-| CS | clone server (in MP) | answers the hook: checks each request, clones from the store | [The clone server](#the-clone-server) |
+| CS | clone server (in MP) | answers the hook: checks each request, clones from the store. Threads inside matchapack, not a network server: no port and no socket file; reached through a socket pair that only the node matchapack started holds | [The clone server](#the-clone-server) |
 | ST | store | extracted packages, one directory per tarball integrity | [The store and its key](#the-store-and-its-key) |
 | NC | npm's cache | npm's own cache of tarballs; pacote reads it | [Filling the store through pacote](#filling-the-store-through-pacote) |
 | YH | Yarn hook (src/yarn1-hook.js) | the code inside Yarn that sends file copies to matchapack | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
 | YARN | Yarn 1's own code | Yarn 1, unchanged | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
-| YS | Yarn clone server (in MP) | answers the Yarn hook: clones a cache file to its destination | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
+| YS | Yarn clone server (in MP) | answers the Yarn hook: clones a cache file to its destination. Like CS, threads inside matchapack, reached only by the node it started | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
 | YC | Yarn's cache | Yarn's own unpacked packages; the source of the clones | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
 | NM | project node_modules | the tree being installed | [The inject engine (npm)](#the-inject-engine-npm) |
 | LOG | run log | one JSON line per routed command, read by `matchapack report` | [The run log and the report](#the-run-log-and-the-report) |
@@ -239,7 +239,7 @@ Checked with a `file:` tarball, bundled dependencies and a git dependency (the g
 
 ### The clone server
 
-The clone server runs in the matchapack process, on threads of its own. Requests come over the socket, one JSON object per line, and are served concurrently (npm starts every extraction at once). `src/serve.rs` documents every message.
+The clone server runs in the matchapack process, on threads of its own (as many as the machine has cores; `MATCHAPACK_INJECT_THREADS` changes it). It is not a network server: it has no port and no socket file, and nothing has to connect to it. Before starting node, matchapack creates a connected pair of sockets (`socketpair(2)`, a Unix-domain socket pair, on macOS and Linux alike) and gives node one end as fd 3; only a process holding that end can send requests: node and the hook in it (install scripts do not inherit it on macOS; on Linux see above). Requests come over the socket, one JSON object per line, and are served concurrently (npm starts every extraction at once; those beyond the thread count wait their turn, as npm's own file work waits for Node's I/O threads, four by default). If a request cannot be served, npm extracts that package itself; if matchapack goes away, npm stops (see [Stopping](#stopping-signals-and-a-matchapack-that-goes-away)). `src/serve.rs` documents every message.
 
 - **Transport.** A socket pair, inherited by node as fd 3. Not the child's stdin or stdout: they are your terminal, which npm and its scripts need. Not a named socket: a path can exceed macOS's 104-byte limit, and any process of the user could connect. Not a server that node starts: the server would then learn the store and the project root from node, which would make its path checks pointless.
 - **The source is named by integrity, not by path.** The server parses the integrity string with the store's own parser and derives the entry path from the digest, so a request cannot name a source outside the store. The entry must be a real directory.
