@@ -99,7 +99,7 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
      | sh
    ```
 
-2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` and `yarn` go through matchapack, and defines `mp` as a short name for `matchapack` (see Notes below). Run only the command for your shell (`echo $SHELL` tells you which):
+2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` (and, on macOS, `yarn`) go through matchapack, and defines `mp` as a short name for `matchapack` when that name is free (see Notes below). Run only the command for your shell (`echo $SHELL` tells you which):
 
    zsh:
 
