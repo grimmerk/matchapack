@@ -26,7 +26,9 @@ Done once, by the repository owner, in the public repository `grimmerk/matchapac
 3. **Install dist 0.34.0**, the version `cargo-dist-version` in `dist-workspace.toml` names (`dist plan` refuses to run with any other version):
 
    ```sh
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.34.0/cargo-dist-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf \
+     https://github.com/axodotdev/cargo-dist/releases/download/v0.34.0/cargo-dist-installer.sh \
+     | sh
    ```
 
 4. **Check the plan** before the first tag: `dist plan` must list the four archives, the installer and the formula, and `dist plan --output-format=json` the runners: `macos-15` for Apple silicon (dist 0.32 still picked the retired `macos-14`, whose job is cancelled, so nothing was released), `macos-15-intel`, `ubuntu-22.04` and `ubuntu-22.04-arm` with musl-tools.
@@ -71,7 +73,9 @@ Every binary must print the tag's version and its commit: `matchapack 0.1.0 (<sh
 
   ```sh
   d=$(mktemp -d)
-  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | MATCHAPACK_UNMANAGED_INSTALL="$d" sh
+  curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
+    | MATCHAPACK_UNMANAGED_INSTALL="$d" sh
   "$d/matchapack" --version
   ```
 
