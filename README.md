@@ -133,14 +133,14 @@ Notes:
 ### Other ways to install
 
 - **From source**, with Rust's `cargo` (Rust 1.88 or later): `cargo install matchapack --locked` from crates.io, or `cargo install --git https://github.com/grimmerk/matchapack matchapack --locked` for the latest `main`. A build from crates.io prints `(unknown)` for its commit in `matchapack --version`.
-- **Without piping a script into `sh`:** download the archive for your platform from the [Releases page](https://github.com/grimmerk/matchapack/releases/latest), check it against its `.sha256` file, and put `matchapack` in a directory on your `PATH`. On macOS a browser marks the download as quarantined, and the binary is not notarized, so clear the mark once: `xattr -d com.apple.quarantine matchapack`.
+- **Without piping a script into `sh`:** download the archive for your platform (`matchapack-<target>.tar.xz`) from the [Releases page](https://github.com/grimmerk/matchapack/releases/latest), check it against its `.sha256` file (`shasum -a 256 -c matchapack-<target>.tar.xz.sha256` in the same folder), extract it (`tar -xf matchapack-<target>.tar.xz`), and put the `matchapack` file from the `matchapack-<target>` folder in a directory on your `PATH`. On macOS a browser marks the download as quarantined, and the binary is not notarized, so clear the mark on the binary where you put it: `xattr -d com.apple.quarantine <that directory>/matchapack`.
 - **npm:** there is no npm package yet: npm refused the name `matchapack` as too similar to another package ([#18](https://github.com/grimmerk/matchapack/issues/18)).
 
 Then go on with step 2 above.
 
 ### Updating
 
-`brew upgrade matchapack`; or run the install script again; or `cargo install matchapack --locked --force`; or, for an archive from the Releases page, replace the binary with the new release's. The line in your startup file needs no change: new terminals get the new version's shell code.
+`brew upgrade matchapack`; or run the install script again; or `cargo install matchapack --locked --force` (for a `--git` install, the same `--git` line with `--force`); or, for an archive from the Releases page, replace the binary with the new release's and, on macOS, clear its quarantine mark again. The line in your startup file needs no change: new terminals get the new version's shell code.
 
 ## Use
 
