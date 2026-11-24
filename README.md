@@ -2,7 +2,7 @@
 
 matchapack saves disk space when you keep several checkouts of a JavaScript project, such as one git worktree per branch or per AI coding agent. It makes `npm ci`, `npm install` and `yarn` (Yarn 1) place each package as a copy-on-write clone of one shared copy: ten worktrees of a project take about the disk space of one, a fresh npm worktree installs in about 70 % of the time, and every `node_modules` is the one plain npm or Yarn would build. (The name: it matches each pack(age) to a copy already on the disk; and matcha. [More](docs/faq.md#why-the-name).)
 
-Works with npm 10, 11 and 12 on macOS (APFS) and on Linux with Btrfs or XFS, and with Yarn 1.10 or later on macOS.
+Works with npm 10, 11 and 12 on macOS (APFS, the Mac's file system) and on Linux with Btrfs or XFS (with reflink, on by default since xfsprogs 5.1), and with Yarn 1.10 or later on macOS.
 
 **Status:** 0.1.0, new. In its author's daily use on macOS since November 2026. Tested: macOS on Apple silicon (daily use and continuous integration, CI) and Linux x86_64 with Btrfs and XFS (CI only; its install time has not been benchmarked there). Built but not tested: Intel Macs and Linux on arm64.
 
@@ -24,7 +24,7 @@ Every checkout of a JavaScript project needs its own `node_modules`, and each `n
 
 ## What it does
 
-matchapack runs your own npm or Yarn 1 and changes one step inside it. Where npm would unpack a package, or Yarn would copy a file from its cache, matchapack makes a clone (`clonefile` on APFS, the Mac's file system, or a reflink on the Linux file systems Btrfs and XFS) of a copy it already has. Everything else is npm's or Yarn's own work: which packages, where they go, install scripts, bin links, `package-lock.json`, `yarn.lock`, npm's hidden lockfile (`node_modules/.package-lock.json`) and Yarn's `.yarn-integrity`.
+matchapack runs your own npm or Yarn 1 and changes one step inside it. Where npm would unpack a package, or Yarn would copy a file from its cache, matchapack makes a clone (`clonefile` on APFS, or a reflink on the Linux file systems Btrfs and XFS) of a copy it already has. Everything else is npm's or Yarn's own work: which packages, where they go, install scripts, bin links, `package-lock.json`, `yarn.lock`, npm's hidden lockfile (`node_modules/.package-lock.json`) and Yarn's `.yarn-integrity`.
 
 The tree is the one plain npm or Yarn builds: the same paths, contents, permissions and symlinks, file times set by the same rule as npm's or Yarn's own, and the same lockfiles, byte for byte. [TESTING.md](TESTING.md#what-identical-means) says how, and where, each of these is checked, including byte-for-byte comparisons on two public projects that anyone can repeat. Nothing is added to the project: no config file, no `package.json` change, so nobody else on your team has to change anything.
 
@@ -33,9 +33,9 @@ The tree is the one plain npm or Yarn builds: the same paths, contents, permissi
 Maybe not:
 
 - **Your project can switch to pnpm, Bun or Yarn 2+.** They keep one shared copy too, and clone or hard-link from it ([how they compare](docs/faq.md#how-does-it-compare-with-pnpm-bun-and-yarn-2)). matchapack is for projects that stay on npm or Yarn 1.
-- **You keep one checkout of one project.** There is little to share (a reinstall still takes about 0.8 of plain npm's time). Several projects already share the store.
+- **You keep one checkout of one project.** There is little to share, although a reinstall still takes about 0.8 of plain npm's time. Several different projects do share the store, for the packages they have in common.
 - **Yarn 1 on Linux with Btrfs or XFS:** Yarn's own copy already clones there.
-- **Your disk is ext4** (most Linux installs), or you use Windows: nothing can be cloned.
+- **Your disk is ext4** (most Linux installs): nothing can be cloned. Windows is not supported.
 - **CI or Docker builds that start from an empty disk:** there is nothing to share with. A CI runner that keeps its disk between jobs (a self-hosted runner on APFS, Btrfs or XFS) can share.
 
 | | Changes the project | An edit in one checkout changes the others | Tree identical to npm's |
@@ -72,16 +72,16 @@ What it costs (matchapack's time as a multiple of plain npm's or Yarn's: 1.00× 
 | When | Cost |
 |---|---|
 | The first install of a package, when the store does not have it yet | 1.04× to 1.27× for a whole install with an empty store (Yarn 1: 1.08× with an empty Yarn cache) |
-| The first install after an npm upgrade that changed how npm unpacks packages | 1.7× to 2.8× for that one `npm ci`: each package in the store is compared once with npm's own extraction. This code changed in 23 of the 73 npm releases from 10.0.0 (August 2023) to 12.2.2 (November 2026), about once every 7 weeks; each Node release carries its own npm, so a Node upgrade can bring one too |
+| The first install after an npm or Node upgrade that changed the code that unpacks packages (pacote's or tar's code, or Node's libuv version) | 1.7× to 2.8× for that one `npm ci`: each package it installs is compared once with npm's own extraction ([why](docs/architecture.md#the-store-and-its-key)). This code changed in 23 of the 73 steps from one npm release to the next, from 10.0.0 (August 2023) to 12.2.2 (November 2026), about once every 7 weeks; each Node release carries its own npm, so a Node upgrade can bring one too |
 | Yarn 1 commands with little to do | 0.67 s instead of 0.48 s on an already installed project (1.39×), 3.15 s instead of 2.44 s for an incremental install after a lockfile change (1.29×) |
 
 Conditions: an Apple M4 MacBook Air (10 cores, 32 GiB), macOS 27, APFS, with an endpoint security agent installed; Node 24.22.1, npm 11.19.1, Yarn 1.22.22; each case in 10 interleaved rounds, medians; npm's cache warm on both sides (download time is not measured). The npm rows come from one run and a second, busy run that gave the same conclusions; the Yarn 1 rows from a later run with the current build. The full tables, the method and every run are in [TESTING.md](TESTING.md#benchmark).
 
 ## Install
 
-You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) with Btrfs or XFS; Node with npm 10, 11 or 12 (and Yarn 1.10 or later for Yarn projects on macOS); zsh, bash or fish.
+You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) with Btrfs or XFS (`reflink=1`); Node with npm 10, 11 or 12 (and Yarn 1.10 or later for Yarn projects on macOS); zsh, bash or fish.
 
-**With Claude Code:** paste the prompt in [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md); Claude does the steps below, asking before each one. By hand:
+**With Claude Code:** paste the prompt in [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md); Claude does the steps below, asking before each step that changes your machine. By hand:
 
 1. **Install the binary**, with Homebrew or with the install script (it puts the binary in `~/.matchapack/bin` and adds that directory to PATH):
 
@@ -114,7 +114,7 @@ Other ways to install: `npm i -g matchapack` (one package with every binary, no 
 
 Notes:
 
-- **nvm, fnm and other Node version managers:** a global npm package belongs to the Node version that was active. After you switch versions, `matchapack` is not on PATH, and npm runs plain without a message, until you install it there too. Homebrew and the install script do not depend on the Node version; `matchapack init` run by hand says when this applies.
+- **nvm, fnm and other Node version managers:** a global npm package belongs to the Node version that was active. After you switch versions, `matchapack` is not on PATH, and npm runs plain without a message, until you install it there too. Homebrew and the install script do not depend on the Node version. Run by hand, `matchapack init` warns when your matchapack is a global npm package of one Node version.
 - **`mp`:** the line also defines `mp` as a short name for `matchapack`, but only when nothing named `mp` exists when the line runs (no alias, function, builtin or command on PATH; checked at every shell start). `matchapack init --alias NAME` picks another name, `--no-alias` none.
 
 ### Updating
@@ -132,7 +132,7 @@ matchapack: npm ci with clones from the store (MATCHAPACK=0 npm ci for plain npm
 matchapack: added 347 packages from the store in 0.8s (inject engine; npm extracted 0)
 ```
 
-`npm extracted N` counts the packages npm unpacked itself, such as git dependencies. `npm install`, `npm update` and `npm uninstall` go the same way, more quietly: matchapack adds a line only when it installed a package or has something to say (a hand-over to plain npm, a warning). npm writes `package.json` and `package-lock.json` itself, as always. A fresh `npm install` in a new worktree saves as much as `npm ci`.
+The inject engine is matchapack's npm engine, which works inside npm's own process ([how](docs/architecture.md#the-inject-engine-npm)). `npm extracted N` counts the packages npm unpacked itself, such as git dependencies. `npm install`, `npm update` and `npm uninstall` go the same way, more quietly: matchapack adds a line only when it installed a package or has something to say (a hand-over to plain npm, a warning). npm writes `package.json` and `package-lock.json` itself, as always. A fresh `npm install` in a new worktree saves as much as `npm ci`.
 
 On macOS, in a Yarn 1 project, `yarn`, `yarn install`, `yarn add`, `upgrade`, `remove` and `upgrade-interactive` go through matchapack too:
 
@@ -140,8 +140,7 @@ On macOS, in a Yarn 1 project, `yarn`, `yarn install`, `yarn add`, `upgrade`, `r
 $ yarn install --frozen-lockfile
 matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)
 …Yarn's own output…
-matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node
-  (Yarn's first copies, left to Node by design), in 25.2s
+matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node (Yarn's first copies, left to Node by design), in 25.2s
 ```
 
 **Where it applies.** The line defines shell functions named `npm` and (on macOS) `yarn` in your interactive shells. What does not run through such a shell runs plain npm: a script, a Makefile, an editor's task runner, CI, or a coding agent that starts its own non-interactive shell. Call matchapack by name there: `matchapack npm ci`, `matchapack yarn install`. Claude Code sessions started after you added the line use the functions (they take them from their shell snapshot). An existing `alias npm=…` wins over the function, so matchapack is skipped. For one command, `MATCHAPACK=0 npm install` or `command npm install` runs plain npm.
@@ -190,7 +189,7 @@ Volta, mise and a cargo `--root` install get their own command. Installed `node_
 | Situation | What matchapack does | What you can do |
 |---|---|---|
 | A file system without clones (ext4), or the store and the project on two file systems (two volumes of one disk count as two) | hands the install to plain npm or Yarn: the same tree, no saving | keep projects on APFS, Btrfs or XFS, and set `MATCHAPACK_STORE` to a directory on the projects' volume |
-| npm other than 10, 11 or 12, or a new npm release whose unpacking code this build was not tested with | runs plain npm and says so | update matchapack |
+| npm other than 10, 11 or 12, or a new npm release whose unpacking code (pacote's `lib/fetcher.js`) this build was not tested with | runs plain npm and says so | update matchapack |
 | Yarn 2 and later (Plug'n'Play included); Yarn 1 on Linux | runs plain Yarn | nothing: on Linux Yarn 1 already clones |
 | Windows | not supported | |
 | Scripts, editors, CI, non-interactive shells | not called (no shell function there): plain npm | call it by name: `matchapack npm ci` |
@@ -201,7 +200,7 @@ Volta, mise and a cargo `--root` install get their own command. Installed `node_
 | A small `yarn add` (128 files or fewer) | clones nothing: Yarn's first 128 copies are left to Node by design | |
 | A future Node release with a known change in how it copies files (not yet released) | runs Yarn 1 installs as plain Yarn: the tree stays right, nothing is cloned | update matchapack once it supports that Node |
 | A umask other than 022 | runs plain npm | |
-| An endpoint security agent or antivirus (the security software many companies install) | the Yarn 1 engine clones file by file, and such an agent may then scan the clones in the background: on the test Mac, after an install of 80,000 files, the agent kept 2 to 3 cores busy for about 2 minutes, and each start of node meanwhile took 0.3 s longer. The npm engine clones a package directory at once and did not cause this, and a Mac without such an agent showed no slowdown | nothing: it settles by itself; `MATCHAPACK=0 yarn` for plain Yarn |
+| An endpoint security agent or antivirus (the security software many companies install) | the Yarn 1 engine clones file by file, and such an agent may then scan the clones in the background: on the test Mac, after an install of 80,000 files, the agent kept 2 to 3 cores busy for about 2 minutes, and for about 90 seconds each start of node took 0.3 s longer. The npm engine clones a package directory at once and did not cause this, and a Mac without such an agent showed no slowdown | nothing: it settles by itself; `MATCHAPACK=0 yarn` for plain Yarn |
 
 **If matchapack is killed in the middle of an install.** A plain `kill -9` (SIGKILL) stops npm too: npm gets SIGTERM and rolls back its half-done install by itself, as plain npm would. If matchapack was first asked to stop and then killed (a supervisor's SIGTERM, then SIGKILL), npm is killed before it can roll back, and the project is left half-installed: run `npm ci` again (with workspaces on npm before 10.8.1, first remove each workspace member's `node_modules`, which that `npm ci` keeps); if the project has no lockfile yet, remove `node_modules` first and run `npm install`. Details: [docs/architecture.md](docs/architecture.md#stopping-signals-and-a-matchapack-that-goes-away).
 
