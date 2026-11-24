@@ -194,10 +194,11 @@ What it is for: to follow one install through the npm path of D1. The node names
                             entry in ST, known under the running key, not picked
                                                           ──▶ clone into NM, touch, "ok"
                             missing, not yet known under the key, or picked for a check
-                                ──▶ "extract_to": pacote extracts the tarball (from NC, or
-                              downloaded) into a fresh directory ──▶ CS checks its times, then
-                                missing: clones it into NM; it becomes the ST entry
-                                else:    compares it with the entry ──▶ clone into NM
+                              ──▶ "extract_to": pacote extracts the tarball (from NC,
+                                  or downloaded) into a fresh directory
+                              ──▶ CS checks its times, then
+                                    missing: clones it into NM; it becomes the ST entry
+                                    else:    compares it with the entry ──▶ clone into NM
                             CS refuses (any error) ──▶ pacote extracts that package
                             times not as expected  ──▶ no more clones in this run (⑨: broken
                                                        if something had been cloned)
@@ -317,10 +318,12 @@ When the filesystem cannot clone, npm extracts every package itself, and matchap
 
 An entry is removed the same way in reverse (renamed out, then deleted), so a crash never leaves a half-deleted entry that would read as present. The layout version (`v2`) is bumped whenever the entry format changes.
 
-**The key is the extraction code**, not version numbers. It is one line:
+**The key is the extraction code**, not version numbers. It is one line of three parts, separated by spaces (shown here one part per line):
 
 ```text
-fetcher:<first 32 hex of the SHA-256 of pacote's lib/fetcher.js> tar:<first 32 hex of the tar fingerprint> uv:<libuv's version>
+fetcher:<first 32 hex of the SHA-256 of pacote's lib/fetcher.js>
+tar:<first 32 hex of the tar fingerprint>
+uv:<libuv's version>
 ```
 
 - The **fetcher** part is the fingerprint of the gate above: one concept, used twice.
