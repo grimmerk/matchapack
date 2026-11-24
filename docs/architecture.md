@@ -34,7 +34,7 @@ This document explains how matchapack works inside: the shell integration, the t
 - [Environment variables](#environment-variables)
 - [Design decisions](#design-decisions)
 
-Diagrams: D1 shows every part and how a command reaches it. D2 zooms into the npm path of D1 (the nodes `MP`, `IJ`, `NPM`, `CS`, `ST`, `NC` and `NM`). D3 zooms into the Yarn path of D1 (the nodes `MP`, `YH`, `YARN`, `YS`, `YC` and `NM`).
+Diagrams: D1 shows the parts and how a command reaches them. D2 zooms into the npm path of D1 (the nodes `MP`, `IJ`, `NPM`, `CS`, `ST`, `NC`, `NM`, `PLAIN` and `LOG`). D3 zooms into the Yarn path of D1 (the nodes `MP`, `YH`, `YARN`, `YS`, `YC`, `NM`, `PLAIN` and `LOG`).
 
 ## Overview
 
@@ -47,49 +47,52 @@ There are two engines:
 
 ### D1: the whole system
 
-What it is for: to see every part of matchapack and the path a command takes. D2 and D3 show the npm path and the Yarn path in detail.
+What it is for: to see the parts of matchapack and the path a command takes. D2 and D3 show the npm path and the Yarn path in detail.
 
 ```mermaid
 flowchart LR
   SH["SH shell function (npm, yarn)"] -->|routed command| MP["MP matchapack binary"]
   SH -->|any other command| PLAIN["PLAIN plain npm or Yarn"]
-  MP -->|gate failed| PLAIN
+  MP -->|"declined; or a broken npm ci, run again plain"| PLAIN
   subgraph npmproc ["node process: npm"]
-    IJ["IJ inject hook (src/inject.js)"] --> NPM["NPM npm's own code"]
+    IJ["IJ inject hook (src/inject.js)"] -->|"starts; replaces pacote's extract"| NPM["NPM npm's own code"]
   end
   subgraph yarnproc ["node process: Yarn 1"]
-    YH["YH Yarn hook (src/yarn1-hook.js)"] --> YARN["YARN Yarn 1's own code"]
+    YH["YH Yarn hook (src/yarn1-hook.js)"] -->|"starts; answers its copyFile"| YARN["YARN Yarn 1's own code"]
   end
   MP -->|starts| IJ
   MP -->|starts| YH
+  IJ -.->|"declines: exit 90"| MP
+  YH -.->|"declines: exit 90"| MP
   IJ <-->|socket, JSON lines| CS["CS clone server (in MP)"]
   YH <-->|socket, JSON lines| YS["YS Yarn clone server (in MP)"]
   NC["NC npm's cache"] -->|pacote extracts a missing package| ST["ST store"]
   CS -->|clone| NM["NM project node_modules"]
   ST --> CS
+  MP -->|"lock for the run; project record"| ST
   YC["YC Yarn's cache"] --> YS
   YS -->|clone| NM
-  NPM -->|"everything else: packages it extracts itself, bin links, scripts, lockfiles"| NM
-  YARN -->|"its first 128 copies, bin links, scripts, .yarn-integrity"| NM
+  NPM -->|"everything else: packages it extracts itself, bin links, scripts, the hidden lockfile"| NM
+  YARN -->|"everything else: its first 128 copies, copies YS does not clone, bin links, scripts, .yarn-integrity"| NM
   MP --> LOG["LOG run log"]
 ```
 
 | ID | Name | What it is | Section |
 |---|---|---|---|
-| SH | shell function (npm, yarn) | the `npm` and `yarn` functions that `matchapack init` prints into your shell | [The shell integration](#the-shell-integration) |
-| MP | matchapack binary | the Rust program: gates, the clone servers, the store, the log | [The inject engine (npm)](#the-inject-engine-npm) |
-| PLAIN | plain npm or Yarn | npm or Yarn run directly, as without matchapack | [When it runs plain npm instead](#when-it-runs-plain-npm-instead) |
+| SH | shell function (npm, yarn) | the `npm` function, and on macOS the `yarn` function, that `matchapack init` prints into your shell | [The shell integration](#the-shell-integration) |
+| MP | matchapack binary | the Rust program: gates, the clone servers, the store, the log | [The inject engine (npm)](#the-inject-engine-npm), [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
+| PLAIN | plain npm or Yarn | npm or Yarn run directly, as without matchapack (when matchapack starts it: with `MATCHAPACK=0` in its environment) | [When it runs plain npm instead](#when-it-runs-plain-npm-instead), [When it runs plain Yarn instead](#when-it-runs-plain-yarn-instead) |
 | IJ | inject hook (src/inject.js) | the code that starts npm and replaces its extraction | [Start-up: the lazy hook and npm's install root](#start-up-the-lazy-hook-and-npms-install-root) |
-| NPM | npm's own code | npm, arborist (npm's tree builder) and pacote, unchanged | [The inject engine (npm)](#the-inject-engine-npm) |
-| CS | clone server (in MP) | answers the hook: checks each request, clones from the store. Threads inside matchapack, not a network server: no port and no socket file; reached through a socket pair that only the node matchapack started holds | [The clone server](#the-clone-server) |
+| NPM | npm's own code | npm, arborist (npm's tree builder) and pacote: npm's own files, none changed on disk; in the process, IJ replaces one method, pacote's `extract` | [The inject engine (npm)](#the-inject-engine-npm) |
+| CS | clone server (in MP) | answers the hook: checks each request, clones from the store. Threads inside matchapack, not a network server: no port and no socket file; reached through a socket pair whose other end matchapack gives only to the node it started (what that node's own children inherit: [How the hook enters npm's process](#how-the-hook-enters-npms-process)) | [The clone server](#the-clone-server) |
 | ST | store | extracted packages, one directory per tarball integrity | [The store and its key](#the-store-and-its-key) |
 | NC | npm's cache | npm's own cache of tarballs; pacote reads it | [Filling the store through pacote](#filling-the-store-through-pacote) |
 | YH | Yarn hook (src/yarn1-hook.js) | the code inside Yarn that sends file copies to matchapack | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
 | YARN | Yarn 1's own code | Yarn 1, unchanged | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
-| YS | Yarn clone server (in MP) | answers the Yarn hook: clones a cache file to its destination. Like CS, threads inside matchapack, reached only by the node it started | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
+| YS | Yarn clone server (in MP) | answers the Yarn hook: clones a cache file to its destination. Like CS, threads inside matchapack, with a socket pair given only to the node it started | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
 | YC | Yarn's cache | Yarn's own unpacked packages; the source of the clones | [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
-| NM | project node_modules | the tree being installed | [The inject engine (npm)](#the-inject-engine-npm) |
-| LOG | run log | one JSON line per routed command, read by `matchapack report` | [The run log and the report](#the-run-log-and-the-report) |
+| NM | project node_modules | the tree being installed | [The inject engine (npm)](#the-inject-engine-npm), [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos) |
+| LOG | run log | one JSON line per routed command that reaches matchapack (none in a Yarn 2+ project), read by `matchapack report` and `matchapack store gc` | [The run log and the report](#the-run-log-and-the-report) |
 
 ## Glossary
 
@@ -160,51 +163,63 @@ matchapack npm ci --no-audit         # what the shell function runs
 
 ### D2: one `npm ci`, step by step
 
-What it is for: to follow one install through the npm path of D1. The node names (`MP`, `IJ`, `NPM`, `CS`, `ST`, `NC`, `NM`) are the ones in D1.
+What it is for: to follow one install through the npm path of D1. The node names (`MP`, `IJ`, `NPM`, `CS`, `ST`, `NC`, `NM`, `PLAIN`, `LOG`) are the ones in D1.
 
 ```text
  MP matchapack binary (src/wrapper.rs, src/inject.rs)
-   ① checks before npm starts: MATCHAPACK=0, npm on PATH traced to npm's own package, npm major,
-     umask 022, -g / --dry-run / --help, start directory inside the trial scope
-                                              ── fails ──▶ PLAIN plain npm
-   ② writes IJ into a private run directory; takes the store's shared lock; makes a socket
+   ① checks before npm starts: MATCHAPACK=0, MATCHAPACK_ENGINE, -g / --dry-run / --help, start
+     directory inside the trial scope, npm on PATH traced to npm's own package, npm major,
+     umask 022, …                             ── fails ──▶ PLAIN plain npm or Yarn
+   ② takes the store's shared lock; writes IJ into a private run directory; makes a socket
      pair; starts node with IJ, as the npm on PATH would start
       │ socket on fd 3, one JSON object per line each way
       ▼
  IJ inject hook (src/inject.js), in the node process
    ③ nothing of npm loaded yet: hashes pacote's lib/fetcher.js (the fingerprint)
-     not on the list ── {"declined"}, exit 90 ──▶ PLAIN plain npm
+     not on the list ── {"declined"}, exit 90 ──▶ PLAIN
    ④ watches Module.prototype.require; starts npm's lib/cli.js with your arguments
       ▼
  NPM npm's own code
    ⑤ npm loads its config, then starts the command:
-     IJ reports npm's install root ──▶ CS checks it (scope, global, symlinked node_modules)
+     IJ reports npm's install root ──▶ CS checks it (global, the command, installs nothing,
+                                       the root exists, scope, symlinked node_modules)
                                        refused ── exit 90 before the command ran ──▶ PLAIN
-   ⑥ npm loads pacote: IJ checks its shape, then replaces FetcherBase.prototype.extract
+   ⑥ npm loads pacote: IJ sends the extraction key to CS, checks pacote's shape, then
+     replaces FetcherBase.prototype.extract
+        key on the store's decline list ──▶ CS refuses every request: npm extracts everything
+        shape not as expected           ──▶ no hook: npm extracts everything (no exit 90)
    ⑦ arborist builds the tree; for each package it calls extract (the hook):
         eligible? no  ──▶ pacote extracts it, as plain npm
-                  yes ──▶ {"integrity","dest"} ──▶ CS clone server
+                  yes ──▶ {"integrity","dest"} ──▶ CS clone server (in MP)
                             entry in ST, known under the running key, not picked
                                                           ──▶ clone into NM, touch, "ok"
                             missing, not yet known under the key, or picked for a check
-                                ──▶ "extract_to": pacote extracts from NC into
-                              a fresh directory ──▶ CS fills ST or compares ──▶ clone into NM
+                                ──▶ "extract_to": pacote extracts the tarball (from NC, or
+                              downloaded) into a fresh directory ──▶ CS checks its times, then
+                                missing: clones it into NM; it becomes the ST entry
+                                else:    compares it with the entry ──▶ clone into NM
+                            CS refuses (any error) ──▶ pacote extracts that package
+                            times not as expected  ──▶ no more clones in this run (⑨: broken
+                                                       if something had been cloned)
    ⑧ npm runs scripts, links bins, writes the hidden lockfile, prints its summary
       ▼
  MP after npm exits
-   ⑨ checks that every package npm placed went through the hook; writes the project record
-     (for store gc) and one line to LOG; passes npm's exit status on
+   ⑨ writes the project record (for store gc); after a run that succeeded, warns when npm
+     placed a package the hook never saw; writes one line to LOG; passes npm's exit status on
+     a broken run (the result trap; an extraction no clone reproduces, after clones;
+       matchapack's own failure after npm started)
+        ──▶ npm ci: PLAIN, plain npm ci again; the install family: stops with the repair advice
 ```
 
 1. The binary runs the checks that come before npm starts, among them that the `npm` on PATH can be traced to npm's own package (behind a version manager's shim, this starts node once with a probe that stops before npm runs; [Finding npm and Yarn](#finding-npm-and-yarn)). If one fails, plain npm runs and nothing was changed.
-2. It writes the hook, `src/inject.js` (compiled into the binary), into a private run directory, takes the store's shared lock for the whole run (so `store gc` cannot remove an entry in use), makes a socket pair and starts node with the hook, the way the npm on PATH would start ([How the hook enters npm's process](#how-the-hook-enters-npms-process)). The node child gets the socket as file descriptor 3 and the environment plain npm would get.
+2. It takes the store's shared lock for the whole run (so `store gc` cannot remove an entry in use), writes the hook, `src/inject.js` (compiled into the binary), into a private run directory, makes a socket pair and starts node with the hook, the way the npm on PATH would start ([How the hook enters npm's process](#how-the-hook-enters-npms-process)). The node child gets the socket as file descriptor 3 and the environment plain npm would get.
 3. Before anything of npm is loaded, the hook reads pacote's `lib/fetcher.js` from disk and hashes it. An unknown fingerprint means pacote code this build was not tested with: the hook says so and exits 90, and plain npm runs.
 4. The hook starts npm's own `lib/cli.js` with your arguments. It loads nothing of npm before npm's own start-up code runs.
 5. When npm has loaded its config and starts the command, the hook reports npm's install root (`npm.prefix`), whether npm is global, the command and the flags that make it install nothing. The clone server runs the checks that depend on where npm installs and pins that root. A refusal ends node with exit 90 before the command ran, and plain npm runs.
-6. When npm itself loads pacote, the hook checks that pacote's classes have the expected shape and replaces `extract`.
-7. For each package, the hook decides whether a clone can reproduce pacote's extraction exactly. If so, it asks the clone server, which clones the store entry into the destination. A missing entry, an entry not yet known under the running extraction key, or one picked for a check is extracted by pacote into a directory the server hands out; the server then fills the store with it, or compares it with the entry ([Run-time checks](#run-time-checks), cases A to C).
+6. When npm itself loads pacote, the hook first sends the extraction key ([The store and its key](#the-store-and-its-key)); a key on the store's decline list makes the clone server refuse every request, so npm extracts everything itself. Then it checks that pacote's classes have the expected shape and replaces `extract`. A pacote of another shape gets no hook: npm is already running, so there is no exit 90; npm extracts every package itself, and the run says why.
+7. For each package, the hook decides whether a clone can reproduce pacote's extraction exactly. If so, it asks the clone server, which clones the store entry into the destination. A missing entry, an entry not yet known under the running extraction key, or one picked for a check is extracted by pacote into a directory the server hands out; the server checks its times, then clones it into the destination and makes it the store entry (a missing entry), or compares it with the entry ([Run-time checks](#run-time-checks), cases A to C). A request the server refuses, for any reason, is extracted by pacote as plain npm would. If pacote's extraction is not what a clone reproduces (the time check), nothing more is cloned in this run.
 8. npm finishes its own work.
-9. matchapack compares the packages npm placed with the packages the hook saw, writes the project record and the log line, and exits with npm's status.
+9. matchapack writes the project record, compares the packages npm placed with the packages the hook saw (after a run that succeeded; a difference is a warning), writes the log line, and exits with npm's status. A run that broke (the result trap, an extraction no clone reproduces after something was cloned, or matchapack's own failure after npm started): `npm ci` runs again as plain `npm ci`, and `npm install`, `update` and `uninstall` stop with the repair advice ([npm's errors, and a run that breaks](#npms-errors-and-a-run-that-breaks)).
 
 ### Start-up: the lazy hook and npm's install root
 
@@ -284,7 +299,7 @@ When the filesystem cannot clone, npm extracts every package itself, and matchap
 
 - npm's own errors (a lockfile out of sync, a failing script) are printed once, by npm, and its exit status is passed on. matchapack never runs npm a second time for them: `npm ci` would fail the same way.
 - `npm ci`'s own output comes back, the `npm audit` summary included (and its network request; `--no-audit` turns it off, as with npm).
-- **A broken run** is one where npm read something of the hook's result that pacote's own result does not have (the result trap, [Run-time checks](#run-time-checks)), or matchapack itself failed after npm started. For `npm ci` through `matchapack npm` (not a run stopped by a signal, see [Stopping](#stopping-signals-and-a-matchapack-that-goes-away), and not `matchapack install`, which only reports the error), matchapack removes the package directories it placed in that run outside the root's `node_modules` (`npm ci` before npm 10.8.1 keeps what it finds in a workspace member's own `node_modules`), then runs plain `npm ci`, which removes the root's after checking the lockfile. For the install family, it stops with the repair advice ([The repair advice](#the-repair-advice)).
+- **A broken run** is one where npm read something of the hook's result that pacote's own result does not have (the result trap, [Run-time checks](#run-time-checks)), or pacote's extraction was not what a clone reproduces after something had been cloned ([The store and its key](#the-store-and-its-key), the decline list), or matchapack itself failed after npm started. For `npm ci` through `matchapack npm` (not a run stopped by a signal, see [Stopping](#stopping-signals-and-a-matchapack-that-goes-away), and not `matchapack install`, which only reports the error), matchapack removes the package directories it placed in that run outside the root's `node_modules` (`npm ci` before npm 10.8.1 keeps what it finds in a workspace member's own `node_modules`), then runs plain `npm ci`, which removes the root's after checking the lockfile. For the install family, it stops with the repair advice ([The repair advice](#the-repair-advice)).
 
 ## The store and its key
 
@@ -312,7 +327,7 @@ fetcher:<first 32 hex of the SHA-256 of pacote's lib/fetcher.js> tar:<first 32 h
 - The **tar fingerprint** (`tarFingerprint` in `src/inject.js`) covers tar's package and every package in its `dependencies`, transitively, found as Node finds them: the `<name>@<version>` of each, and the SHA-256 of every file of those packages that Node has loaded (and, when one of them is an ES module, of every ES module file in them). Each package's own `package.json` is left out, so that code that only reads a version does not change the fingerprint.
 - **libuv's version** (Node's file-system library): a libuv release could change the bytes or modes that `open`, `write` and `mkdir` leave. Node's own version and zlib are not in the key. This part is a version, not code: Node also changes libuv's code under one version number (its copy code changed from Node 26.0 to 26.2 under libuv 1.52.1), and such a change is not seen by the key; the one-in-50 sample and `store verify` cover it.
 
-The key is computed when npm itself has loaded pacote (which loads tar) and sent before the hook is installed, so every request sees it. `node src/inject.js --key <npm dir>` prints it.
+The key is computed when npm itself has loaded pacote (which loads tar) and sent before the hook is installed, so every request sees it. `node src/inject.js --key <npm dir>` prints it, and the tar fingerprint on a second line.
 
 Why the code and not the version numbers: an npm release that changes none of the extraction code (often only pacote's version number moves) then compares nothing, and switching back and forth between two npm or Node versions compares nothing again. Over npm 10.0.0 to 12.2.2, the key changes in 23 of 73 release steps. It also covers two gaps a version key has: tar's dependencies, which were separate packages in tar 6.x to 7.5.7, and code patched in place under the same version number (for pacote and tar; not for libuv, above).
 
@@ -384,38 +399,39 @@ During its link step, Yarn 1 copies each file with `fs.copyFile(src, dest, COPYF
 
 ### D3: one Yarn 1 install, step by step
 
-What it is for: to follow one install through the Yarn path of D1. The node names (`MP`, `YH`, `YARN`, `YS`, `YC`, `NM`) are the ones in D1.
+What it is for: to follow one install through the Yarn path of D1. The node names (`MP`, `YH`, `YARN`, `YS`, `YC`, `NM`, `PLAIN`, `LOG`) are the ones in D1.
 
 ```text
  MP matchapack binary (src/yarn1.rs)
    ① gates: Yarn 1 found on PATH, yarn.lock at or above, not Yarn 2+, scope, …  ── fails ──▶ PLAIN
-   ② writes the hook; starts node with YH (socket on fd 3); after its hello, asks `yarn cache dir`
+   ② writes the hook; starts node with YH (socket on fd 3)
       ▼
  YH Yarn hook (src/yarn1-hook.js), in the node process
-   ③ reads N from the Yarn code that runs (its copy concurrency); not found ──▶ decline
+   ③ reads N from the Yarn code that runs (its copy concurrency); not found ──▶ decline, as in ④
    ④ probes Node's own copy: which times and which group does a copy keep?
      a non-empty copy kept its time, or shares blocks ──▶ decline (exit 90) ──▶ PLAIN
-   ⑤ sends the facts; replaces fs.copyFile; starts YARN Yarn 1's own code
+   ⑤ replaces fs.copyFile; says hello with the facts; starts YARN Yarn 1's own code
+        MP, at the hello: asks `yarn cache dir` (a second node), in parallel with the install
       ▼
  YARN link step: copyFile #1 … #N   ──▶ Node's own copy (Yarn's time probe sees real copies)
-                 copyFile #N+1 …    ──▶ {"src","dest"} ──▶ YS Yarn clone server
-                                          waits for the cache root (at most 10 s)
+                 copyFile #N+1 …    ──▶ {"src","dest"} ──▶ YS Yarn clone server (in MP)
+                                          waits for the cache root (until 10 s after YS started)
                                           src: a regular file inside YC; dest: inside the
-                                          project, below a node_modules
+                                          project, below a node_modules (NM)
                                           clonefile ──▶ fix-up (group, extended attributes, times)
                                     ok ──▶ Yarn's own time fix, as after a copy
                                     not ok ──▶ Node's copy of that file
    ⑥ Yarn runs scripts, writes .yarn-integrity
       ▼
- MP logs the run; prints the counts; passes Yarn's exit status on
+ MP prints the counts; writes one line to LOG; passes Yarn's exit status on
 ```
 
 1. The binary runs the gates ([When it runs plain Yarn instead](#when-it-runs-plain-yarn-instead)).
 2. It starts node with the hook. Once the hook says hello, it asks the same Yarn for its cache folder (`yarn cache dir`, with the same working directory, environment and cache arguments), in parallel with the rest of the install. The install's node starts alone: starting both at the same moment could delay the install's start (see TESTING.md, "Benchmark"), and the cache folder is needed only at the link step, seconds later. If the hook declines, `yarn cache dir` is not started at all.
 3. The hook reads N, Yarn's number of concurrent copies, from the Yarn code that runs (`CONCURRENT_QUEUE_ITEMS`). If it cannot find it, it declines.
 4. It probes Node's own copy on two small files: which times (access, modification) and which group a copy keeps. A non-empty copy that kept its modification time (a libuv that writes the data before setting the times), or a copy that shares blocks with its source (a Node that already clones), makes it decline: plain Yarn.
-5. It sends those facts and replaces `fs.copyFile`. Yarn's first N copies go to Node. Every later copy is a request to the server.
-6. Yarn finishes its own work; matchapack logs the run and prints how many files were cloned.
+5. It replaces `fs.copyFile` and sends those facts in its hello. Yarn's first N copies go to Node. Every later copy is a request to the server.
+6. Yarn finishes its own work; matchapack prints how many files were cloned and logs the run.
 
 **The first N copies are left to Node, by design.** Yarn checks once, on the first files it copies, whether a copy keeps the source's times; if not, it sets each file's times itself afterwards ("fixTimes"). That check must see real copies, or Yarn would draw the wrong conclusion for every file. Yarn's copy queue runs N at a time and starts copy N+1 only when one has finished, its time fix included, so leaving the first N to Node is enough. N is 128 (Yarn's `CONCURRENT_QUEUE_ITEMS = fs.copyFile ? 128 : 4`, read from the Yarn code that runs). So a `yarn add` that copies 128 files or fewer clones nothing (`typescript`: 117 files, 30.9 MiB, none cloned; `date-fns`: 4,783 files, 94 % of its bytes cloned). On a full install the 128 are noise. The end-of-install line says "128 copied by Node (Yarn's first copies, left to Node by design)".
 

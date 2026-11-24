@@ -56,8 +56,9 @@
 //! package not in the store the answer is `extract_to`, a fresh directory in
 //! this server's temporary directory; the hook runs pacote's own extract into
 //! it (the very fetcher npm made for that package) and sends the request
-//! again with `extracted`. The directory then becomes the store entry
-//! (renamed in only if no other install got there first) and is cloned.
+//! again with `extracted`. The directory is cloned into the project and
+//! then becomes the store entry (renamed in only if no other install got
+//! there first).
 //! The same round trip checks the store against pacote (`why: "check"`): the
 //! entry is compared with pacote's extraction (`store::compare_extraction`) before
 //! anything is placed. Each entry records the extraction code under which it
