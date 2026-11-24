@@ -73,7 +73,8 @@ impl Dirs {
     pub fn login_files(&self, shell: &str) -> Vec<PathBuf> {
         match shell {
             "fish" => vec![],
-            "bash" => [".bash_profile", ".bash_login", ".profile"].iter().map(|f| self.home.join(f)).collect(),
+            // A login bash reads only the first of these that exists.
+            "bash" => [".bash_profile", ".bash_login", ".profile"].iter().map(|f| self.home.join(f)).find(|p| p.exists()).into_iter().collect(),
             _ => {
                 let z = self.zdot();
                 vec![z.join(".zprofile"), z.join(".zlogin")]
@@ -264,6 +265,18 @@ mod tests {
         // Linux: a new terminal reads only ~/.bashrc, so the line is still to add.
         let s = hint(&dirs(&h), "bash", &Alias::Default, false);
         assert!(s.contains(">> ~/.bashrc") && s.contains("~/.bash_profile:1 runs matchapack init already, but only login shells"), "{s}");
+    }
+
+    #[test]
+    fn a_login_bash_reads_only_the_first_profile_that_exists() {
+        let h = scratch("rcline-bash-profile");
+        fs::write(h.join(".bash_profile"), "export A=1\n").unwrap();
+        fs::write(h.join(".profile"), "eval \"$(matchapack init)\"\n").unwrap();
+        // ~/.bash_profile exists, so a login bash never reads ~/.profile.
+        assert_eq!(dirs(&h).login_files("bash"), vec![h.join(".bash_profile")]);
+        assert!(hint(&dirs(&h), "bash", &Alias::Default, true).contains(">> ~/.bashrc"));
+        fs::remove_file(h.join(".bash_profile")).unwrap();
+        assert!(hint(&dirs(&h), "bash", &Alias::Default, true).contains("~/.profile:1 already runs"));
     }
 
     #[test]
