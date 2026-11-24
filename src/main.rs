@@ -499,7 +499,7 @@ fn main() -> Result<()> {
             // A refused name still prints the integration, without the alias:
             // the rc line's eval / source runs whatever is printed, and the
             // npm and yarn functions must not go missing over a bad name.
-            let name = if no_alias { None } else { Some(alias.unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
+            let name = if no_alias { None } else { Some(alias.clone().unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
             let refused = name.as_deref().and_then(|n| check_alias(n, &shell).err());
             use std::io::IsTerminal;
             let tty = std::io::stdout().is_terminal();
@@ -520,11 +520,7 @@ fn main() -> Result<()> {
                 if let Some(dirs) = rcline::Dirs::from_env() {
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
-                    let a = match (no_alias, name.as_deref()) {
-                        (true, _) => rcline::Alias::None,
-                        (false, Some(n)) if n != DEFAULT_ALIAS => rcline::Alias::Named(n),
-                        _ => rcline::Alias::Default,
-                    };
+                    let a = rcline::Alias::from_args(no_alias, alias.as_deref());
                     eprintln!("\n{}", rcline::hint(&dirs, &shell, &a, cfg!(target_os = "macos")));
                 }
             }

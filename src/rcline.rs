@@ -42,9 +42,9 @@ impl Dirs {
         }
     }
 
-    /// Every file `shell` reads at start that could hold the line, to find
-    /// one that is already there.
-    pub fn shell_files(&self, shell: &str) -> Vec<PathBuf> {
+    /// The files every interactive `shell` reads, a login shell or not: a
+    /// line there reaches every new terminal.
+    pub fn nonlogin_files(&self, shell: &str) -> Vec<PathBuf> {
         match shell {
             "fish" => {
                 let dir = self.fish_dir();
@@ -56,13 +56,27 @@ impl Dirs {
                 }
                 v
             }
-            "bash" => [".bashrc", ".bash_profile", ".bash_login", ".profile"].iter().map(|f| self.home.join(f)).collect(),
+            "bash" => vec![self.home.join(".bashrc")],
             _ => {
+                // ~/.zshenv too when ZDOTDIR is set: ZDOTDIR is usually set in
+                // ~/.zshenv itself, which zsh then reads before ZDOTDIR's files.
                 let z = self.zdot();
-                let mut v = vec![self.home.join(".zshenv")];
-                v.extend([".zshenv", ".zprofile", ".zshrc", ".zlogin"].iter().map(|f| z.join(f)));
+                let mut v = vec![self.home.join(".zshenv"), z.join(".zshenv"), z.join(".zshrc")];
                 v.dedup();
                 v
+            }
+        }
+    }
+
+    /// The files only a login shell reads. Terminal and iTerm on macOS open
+    /// login shells; a terminal on Linux usually does not.
+    pub fn login_files(&self, shell: &str) -> Vec<PathBuf> {
+        match shell {
+            "fish" => vec![],
+            "bash" => [".bash_profile", ".bash_login", ".profile"].iter().map(|f| self.home.join(f)).collect(),
+            _ => {
+                let z = self.zdot();
+                vec![z.join(".zprofile"), z.join(".zlogin")]
             }
         }
     }
@@ -74,13 +88,45 @@ impl Dirs {
             Err(_) => path.display().to_string(),
         }
     }
+
+    /// `path` for a command line: `show`'s form when it needs no quoting,
+    /// else double-quoted, with the home directory as `$HOME`.
+    pub fn shell_path(&self, path: &Path) -> String {
+        let shown = self.show(path);
+        if shown.chars().all(|c| c.is_ascii_alphanumeric() || "/._-~+,:@".contains(c)) {
+            return shown;
+        }
+        let quote = |s: &str| s.chars().fold(String::new(), |mut q, c| {
+            if "\\\"$`".contains(c) {
+                q.push('\\');
+            }
+            q.push(c);
+            q
+        });
+        match path.strip_prefix(&self.home) {
+            Ok(rest) => format!("\"$HOME/{}\"", quote(&rest.display().to_string())),
+            Err(_) => format!("\"{}\"", quote(&path.display().to_string())),
+        }
+    }
 }
 
 /// The short-name arguments as the user gave them to `init`.
+#[derive(Debug, PartialEq)]
 pub enum Alias<'a> {
     Default,
     Named(&'a str),
     None,
+}
+
+impl<'a> Alias<'a> {
+    /// From `init`'s options: an explicit `--alias mp` stays in the line.
+    pub fn from_args(no_alias: bool, alias: Option<&'a str>) -> Alias<'a> {
+        match (no_alias, alias) {
+            (true, _) => Alias::None,
+            (false, Some(n)) => Alias::Named(n),
+            (false, None) => Alias::Default,
+        }
+    }
 }
 
 /// matchapack's line for `shell`'s startup file, the README's form.
@@ -96,13 +142,17 @@ pub fn line(shell: &str, alias: &Alias) -> String {
     }
 }
 
-/// The lines of `files` that already run `matchapack init` (not commented out).
+/// The lines of `files` that run `matchapack init`, outside a comment (a
+/// line that starts with `#`, or the part after ` #`). A plain text match:
+/// it also accepts the user's own forms of the line (a full path to the
+/// binary, `source <(…)`).
 pub fn existing(files: &[PathBuf]) -> Vec<(PathBuf, usize, String)> {
     crate::uninstall::rc_lines(files)
         .into_iter()
         .filter(|(_, _, l)| {
             let t = l.trim_start();
-            !t.starts_with('#') && t.contains("matchapack init")
+            let code = t.find(" #").or_else(|| t.find("\t#")).map_or(t, |i| &t[..i]);
+            !code.starts_with('#') && code.contains("matchapack init")
         })
         .collect()
 }
@@ -110,7 +160,11 @@ pub fn existing(files: &[PathBuf]) -> Vec<(PathBuf, usize, String)> {
 /// What `matchapack init`, run by hand, says after the shell code: the
 /// command that adds the line, or where the line already is.
 pub fn hint(dirs: &Dirs, shell: &str, alias: &Alias, macos: bool) -> String {
-    if let Some((file, n, _)) = existing(&dirs.shell_files(shell)).first() {
+    let every = existing(&dirs.nonlogin_files(shell));
+    let login = existing(&dirs.login_files(shell));
+    // On macOS a new terminal is a login shell and reads both sets.
+    let found = every.first().or(if macos { login.first() } else { None });
+    if let Some((file, n, _)) = found {
         return format!(
             "matchapack init: {}:{n} already runs matchapack init, so new terminals have the {}. If `type npm` in a new terminal does not say it is a shell function, move that line below the lines that put matchapack and Node on PATH.",
             dirs.show(file),
@@ -122,12 +176,18 @@ pub fn hint(dirs: &Dirs, shell: &str, alias: &Alias, macos: bool) -> String {
     let command = if shell == "fish" {
         format!("mkdir -p $__fish_config_dir; and echo '{the_line}' >> $__fish_config_dir/config.fish")
     } else {
-        format!("echo '{the_line}' >> {}", dirs.show(&file))
+        format!("echo '{the_line}' >> {}", dirs.shell_path(&file))
     };
     let mut s = format!(
         "matchapack init: the code above does nothing until your shell runs it at every start. To turn it on, add this line at the end of {}, then open a new terminal:\n\n  {command}\n\nKeep it below every line that puts matchapack or Node on PATH.",
         dirs.show(&file)
     );
+    if let Some((file, n, _)) = login.first() {
+        s.push_str(&format!(
+            " {}:{n} runs matchapack init already, but only login shells read that file, and a terminal on Linux usually starts a non-login shell.",
+            dirs.show(file)
+        ));
+    }
     if shell == "bash" && macos {
         s.push_str(" Terminal on macOS opens login shells, which read ~/.bash_profile: make sure it loads ~/.bashrc.");
     }
@@ -158,14 +218,16 @@ mod tests {
         assert_eq!(d.startup_file("bash"), PathBuf::from("/h/.bashrc"));
         assert_eq!(d.startup_file("fish"), PathBuf::from("/x/fish/config.fish"));
         assert_eq!(dirs(Path::new("/h")).startup_file("fish"), PathBuf::from("/h/.config/fish/config.fish"));
-        assert_eq!(d.shell_files("zsh")[0], PathBuf::from("/h/.zshenv"), "~/.zshenv is read before ZDOTDIR's files");
+        assert_eq!(d.nonlogin_files("zsh"), vec![PathBuf::from("/h/.zshenv"), PathBuf::from("/z/.zshenv"), PathBuf::from("/z/.zshrc")]);
+        assert_eq!(d.login_files("zsh"), vec![PathBuf::from("/z/.zprofile"), PathBuf::from("/z/.zlogin")]);
+        assert_eq!(d.nonlogin_files("bash"), vec![PathBuf::from("/h/.bashrc")]);
     }
 
     #[test]
     fn hint_gives_the_command_when_no_file_has_the_line() {
         let h = scratch("rcline-none");
         // A line that only mentions matchapack, and a commented-out init line: neither counts.
-        fs::write(h.join(".zshrc"), "export MATCHAPACK_PATHS=x\n# eval \"$(matchapack init)\"\n").unwrap();
+        fs::write(h.join(".zshrc"), "export MATCHAPACK_PATHS=x\n# eval \"$(matchapack init)\"\nexport A=1 # matchapack init later\n").unwrap();
         let s = hint(&dirs(&h), "zsh", &Alias::Default, false);
         assert!(s.contains(r#"echo 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.zshrc"#), "{s}");
         assert!(s.contains("at the end of ~/.zshrc"), "{s}");
@@ -173,6 +235,35 @@ mod tests {
         assert!(b.contains(r#"eval "$(matchapack init --alias mpk)"' >> ~/.bashrc"#) && b.contains("~/.bash_profile"), "{b}");
         let f = hint(&dirs(&h), "fish", &Alias::Default, false);
         assert!(f.contains("mkdir -p $__fish_config_dir; and echo 'type -q matchapack; and matchapack init | source' >> $__fish_config_dir/config.fish"), "{f}");
+    }
+
+    #[test]
+    fn an_explicit_alias_stays_in_the_line() {
+        assert_eq!(Alias::from_args(false, Some("mp")), Alias::Named("mp"));
+        assert_eq!(Alias::from_args(false, None), Alias::Default);
+        assert_eq!(Alias::from_args(true, Some("x")), Alias::None);
+    }
+
+    #[test]
+    fn a_path_with_spaces_is_quoted_in_the_command() {
+        let h = scratch("rcline-quote");
+        let d = Dirs { home: h.clone(), zdotdir: Some(h.join("My Config")), xdg_config_home: None };
+        assert_eq!(d.shell_path(&h.join(".zshrc")), "~/.zshrc");
+        assert_eq!(d.shell_path(&h.join("My Config/.zshrc")), "\"$HOME/My Config/.zshrc\"");
+        assert_eq!(d.shell_path(Path::new("/o/a $b")), "\"/o/a \\$b\"");
+        let s = hint(&d, "zsh", &Alias::Default, false);
+        assert!(s.contains(">> \"$HOME/My Config/.zshrc\""), "{s}");
+    }
+
+    #[test]
+    fn a_login_only_file_counts_on_macos_only() {
+        let h = scratch("rcline-login");
+        fs::write(h.join(".bash_profile"), "eval \"$(matchapack init)\"\n").unwrap();
+        // macOS: Terminal opens login shells, which read ~/.bash_profile.
+        assert!(hint(&dirs(&h), "bash", &Alias::Default, true).contains("~/.bash_profile:1 already runs"));
+        // Linux: a new terminal reads only ~/.bashrc, so the line is still to add.
+        let s = hint(&dirs(&h), "bash", &Alias::Default, false);
+        assert!(s.contains(">> ~/.bashrc") && s.contains("~/.bash_profile:1 runs matchapack init already, but only login shells"), "{s}");
     }
 
     #[test]
