@@ -83,25 +83,41 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
 
 **With Claude Code:** paste the prompt in [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md); Claude does the steps below, asking before each step that changes your machine. By hand:
 
-1. **Install the binary**, with Homebrew or with the install script (it puts the binary in `~/.matchapack/bin` and adds that directory to PATH):
+1. **Install the binary**, with one of these (run one, not both):
+
+   Homebrew:
 
    ```sh
    brew install grimmerk/tap/matchapack
-   # or
+   ```
+
+   The install script (it puts the binary in `~/.matchapack/bin` and adds that directory to PATH):
+
+   ```sh
    curl --proto '=https' --tlsv1.2 -LsSf \
      https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
      | sh
    ```
 
-2. **Add matchapack's line at the end of your shell's startup file.** Run the command for your shell (`echo $SHELL` tells you which):
+2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` (and, on macOS, `yarn`) go through matchapack, and defines `mp` as a short name for `matchapack` when that name is free (see Notes below). Run only the command for your shell (`echo $SHELL` tells you which):
+
+   zsh:
 
    ```sh
-   # zsh
    echo 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.zshrc
-   # bash
+   ```
+
+   bash:
+
+   ```sh
    echo 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.bashrc
-   # fish (its configuration directory, even when XDG_CONFIG_HOME moves it)
-   mkdir -p $__fish_config_dir; and echo 'type -q matchapack; and matchapack init | source' >> $__fish_config_dir/config.fish
+   ```
+
+   fish (in fish's own configuration directory, even when XDG_CONFIG_HOME moves it):
+
+   ```fish
+   mkdir -p $__fish_config_dir
+   echo 'type -q matchapack; and matchapack init | source' >> $__fish_config_dir/config.fish
    ```
 
    The line must stay below every line that puts matchapack or Node on PATH (the install script's `. "$HOME/.config/matchapack/env.sh"`, Homebrew's `brew shellenv`, a Node version manager's); if something added later goes below it, move the line back to the end. bash login shells (Terminal on macOS, an SSH session) read `~/.bash_profile` or `~/.profile`; make sure that file loads `~/.bashrc`, or put the line there.
@@ -133,13 +149,14 @@ matchapack: added 347 packages from the store in 0.8s (inject engine; npm extrac
 
 The inject engine is matchapack's npm engine, which works inside npm's own process ([how](docs/architecture.md#the-inject-engine-npm)). `npm extracted N` counts the packages npm unpacked itself, such as git dependencies. `npm install`, `npm update` and `npm uninstall` go the same way, more quietly: matchapack adds a line only when it installed a package or has something to say (a hand-over to plain npm, a warning). npm writes `package.json` and `package-lock.json` itself, as always. A fresh `npm install` in a new worktree saves as much as `npm ci`.
 
-On macOS, in a Yarn 1 project, `yarn`, `yarn install`, `yarn add`, `upgrade`, `remove` and `upgrade-interactive` go through matchapack too:
+On macOS, in a Yarn 1 project, `yarn`, `yarn install`, `yarn add`, `upgrade`, `remove` and `upgrade-interactive` go through matchapack too (the last line is one line, wrapped here):
 
 ```
 $ yarn install --frozen-lockfile
 matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)
 …Yarn's own output…
-matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node (Yarn's first copies, left to Node by design), in 25.2s
+matchapack: 56914 files cloned from Yarn's cache (425.3 MiB), 128 copied by Node
+  (Yarn's first copies, left to Node by design), in 25.2s
 ```
 
 **Where it applies.** The line defines shell functions named `npm` and (on macOS) `yarn` in your interactive shells. What does not run through such a shell runs plain npm: a script, a Makefile, an editor's task runner, CI, or a coding agent that starts its own non-interactive shell. Call matchapack by name there: `matchapack npm ci`, `matchapack yarn install`. Claude Code sessions started after you added the line use the functions (they take them from their shell snapshot). An existing `alias npm=…` wins over the function, so matchapack is skipped. For one command, `MATCHAPACK=0 npm install` or `command npm install` runs plain npm.
