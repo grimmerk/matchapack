@@ -406,7 +406,8 @@ none" ]
     case $s in
       zsh) yenv+=(ZDOTDIR="$yh/zdot"); yrc=$yh/zdot/.zshrc ;;
       fish) yenv+=(XDG_CONFIG_HOME="$yh/xdg"); yrc=$yh/xdg/fish/config.fish ;;
-      bash) yrc=$yh/.bashrc ;;
+      # macOS: init writes ~/.bashrc only when the login profile loads it.
+      bash) yrc=$yh/.bashrc; [ "$(uname)" = Darwin ] && printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > "$yh/.bash_profile" ;;
     esac
     y1=$("${yenv[@]}" matchapack init "$s" --yes 2>/dev/null </dev/null); y1rc=$?
     y2=$("${yenv[@]}" matchapack init "$s" --yes 2>&1 >/dev/null </dev/null)

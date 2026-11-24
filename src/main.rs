@@ -515,7 +515,20 @@ fn init(shell: &str, f: &InitFlags, term: Term, euid: u32, dirs: Option<&rcline:
         };
         return 2;
     }
-    let (true, Some(dirs)) = (human, dirs) else { return 0 };
+    if !human {
+        return 0;
+    }
+    // --yes asked for a write that did not happen: a script must see it.
+    let refused = if f.yes { 1 } else { 0 };
+    let Some(dirs) = dirs else {
+        // No HOME, so no startup file to name. --print showed the code,
+        // which is all it asked for; otherwise say so, as a refusal.
+        if f.print {
+            return 0;
+        }
+        let _ = writeln!(err, "matchapack init: HOME is not set, so it cannot tell which startup file your shell reads; nothing was written. Set HOME and run it again, or add the line yourself (README, Install, step 2).");
+        return refused;
+    };
     let mode = if f.yes {
         rcline::Mode::Yes
     } else if f.dry_run {
@@ -533,8 +546,7 @@ fn init(shell: &str, f: &InitFlags, term: Term, euid: u32, dirs: Option<&rcline:
     let a = rcline::Alias::from_args(f.no_alias, f.alias);
     let setup = rcline::Setup { mode, named: f.named, short, root_in_other_home: rcline::root_in_other_home(euid, &dirs.home) };
     match rcline::setup(dirs, shell, &a, macos, &setup, ask, err) {
-        // --yes asked for a write that did not happen: a script must see it.
-        Ok(rcline::Outcome::Refused) if f.yes => 1,
+        Ok(rcline::Outcome::Refused) => refused,
         Ok(_) => 0,
         Err(e) => {
             let _ = writeln!(err, "matchapack init: error: {e:#}");
@@ -942,6 +954,45 @@ mod tests {
             assert!(err.contains("the shell integration was printed without it"), "{err}");
         }
         assert_eq!(std::fs::read_dir(&h).unwrap().count(), 0, "nothing written");
+    }
+
+    /// Without HOME there is no file to name: --yes says so and fails, by
+    /// hand it says so, --print and the startup line print only the code.
+    #[test]
+    fn init_without_home_says_so() {
+        let run = |f: &InitFlags, term: Term| {
+            let mut ask = |_: &str| -> bool { panic!("asked without HOME") };
+            let (mut out, mut err) = (vec![], vec![]);
+            let code = init("zsh", f, term, 501, None, &mut ask, &mut out, &mut err);
+            (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+        };
+        let tty = Term { stdout: true, stdin: true };
+        for (f, term, status) in [(InitFlags { yes: true, ..NONE }, PIPE, 1), (InitFlags { dry_run: true, ..NONE }, PIPE, 0), (NONE, tty, 0)] {
+            let (code, out, err) = run(&f, term);
+            assert_eq!((code, out.as_str()), (status, ""));
+            assert!(err.contains("HOME is not set") && err.contains("nothing was written"), "{err}");
+        }
+        let (code, out, err) = run(&InitFlags { print: true, ..NONE }, tty);
+        assert!(code == 0 && !out.is_empty() && !err.contains("HOME"), "{err}");
+        let (code, out, err) = run(&NONE, PIPE);
+        assert_eq!((code, out, err), (0, init_script("zsh", cfg!(target_os = "macos"), Some("mp")), String::new()));
+    }
+
+    /// A refused write fails --yes (status 1), and only --yes: root in
+    /// another user's home, as under sudo.
+    #[test]
+    fn init_yes_that_is_refused_exits_1() {
+        let h = crate::store::tests::scratch("init-refused");
+        let dirs = crate::rcline::Dirs { home: h.clone(), zdotdir: None, xdg_config_home: None };
+        for (f, status) in [(InitFlags { yes: true, ..NONE }, 1), (InitFlags { dry_run: true, ..NONE }, 0)] {
+            let mut ask = |_: &str| -> bool { panic!("asked") };
+            let (mut out, mut err) = (vec![], vec![]);
+            let code = init("zsh", &f, PIPE, 0, Some(&dirs), &mut ask, &mut out, &mut err);
+            let err = String::from_utf8(err).unwrap();
+            assert_eq!(code, status, "{err}");
+            assert!(err.contains("running as root in"), "{err}");
+        }
+        assert!(!h.join(".zshrc").exists());
     }
 
     /// --yes and --dry-run leave stdout empty, so a mistaken

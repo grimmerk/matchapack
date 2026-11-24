@@ -99,7 +99,7 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
      | sh
    ```
 
-2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` (and, on macOS, `yarn`) go through matchapack, and defines `mp` as a short name for `matchapack` when that name is free (see Notes below). Run `matchapack init` in a terminal and answer `y`: it adds the line to the end of your shell's startup file (it shows the line and the file first). If a file your shell reads already runs `matchapack init`, it says which line and changes nothing. `matchapack init --dry-run` only shows the file and the line.
+2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` (and, on macOS, `yarn`) go through matchapack, and defines `mp` as a short name for `matchapack` when that name is free (see Notes below). Run `matchapack init` in a terminal and answer `y`: it adds the line to the end of your shell's startup file (it shows the line and the file first). If a file your shell reads already runs `matchapack init`, it says which line and changes nothing. When it will not write the file (bash on macOS when no login profile loads `~/.bashrc`, or under `sudo` in another user's home), it says why and what to do instead. `matchapack init --dry-run` only shows the file and the line.
 
    Or add it yourself. Run only the command for your shell (`echo $SHELL` tells you which):
 

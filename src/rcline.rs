@@ -165,17 +165,29 @@ fn code(line: &str) -> Option<&str> {
 /// Where the shell already runs matchapack init: the first such line of the
 /// files every interactive shell reads, else, on macOS only (a new terminal
 /// there is a login shell, which reads both sets), of the login-only files.
-/// Also the login-only files' lines, which a Linux terminal skips.
+/// On macOS a ~/.bashrc line that a login bash never reads (`unread`)
+/// comes after a login-only file's line. Also the login-only files' lines,
+/// which a Linux terminal skips.
 type Found = (Option<(PathBuf, usize, String)>, Vec<(PathBuf, usize, String)>);
 fn found(dirs: &Dirs, shell: &str, macos: bool) -> Found {
     let every = existing(&dirs.nonlogin_files(shell));
     let login = existing(&dirs.login_files(shell));
-    let first = every.into_iter().next().or(if macos { login.first().cloned() } else { None });
+    let login_first = if macos { login.first().cloned() } else { None };
+    let first = match every.into_iter().next() {
+        Some(e) if unread(dirs, &e.0, macos).is_some() => login_first.or(Some(e)),
+        Some(e) => Some(e),
+        None => login_first,
+    };
     (first, login)
 }
 
-/// What is said when `file:n` already runs matchapack init.
+/// What is said when `file:n` already runs matchapack init; on macOS, when
+/// that is ~/.bashrc and a login bash does not read it (`unread`), that it
+/// does not run in a new terminal, and what makes it run.
 fn already(dirs: &Dirs, file: &Path, n: usize, macos: bool) -> String {
+    if let Some(s) = unread(dirs, file, macos) {
+        return format!("matchapack init: {}:{n} runs matchapack init, but {}, so a new terminal does not run that line. {}, then open a new terminal.", dirs.show(file), s.why, s.fix);
+    }
     format!(
         "matchapack init: {}:{n} already runs matchapack init, so new terminals have the {}. If `type npm` in a new terminal does not say it is a shell function, move that line below the lines that put matchapack and Node on PATH.",
         dirs.show(file),
@@ -257,20 +269,71 @@ fn no_write_reason(dirs: &Dirs, shell: &str, macos: bool, root_in_other_home: bo
         return Some(format!("matchapack init: running as root in {}, a home directory that belongs to another user (as under sudo), so it does not write the file: a startup file written by root does not belong there. Run `matchapack init` as that user, or add the line by hand.", dirs.home.display()));
     }
     if shell == "bash" && macos {
-        // A login bash reads only the first of its profiles that exists.
-        let Some(profile) = dirs.login_files("bash").into_iter().next() else {
-            return Some("matchapack init: Terminal on macOS opens login shells, and a login bash reads ~/.bash_profile, ~/.bash_login or ~/.profile, none of which exists here: it would never read ~/.bashrc, so it does not write it. Create ~/.bash_profile containing `[ -f ~/.bashrc ] && . ~/.bashrc` and run `matchapack init` again, or add matchapack's line to ~/.bash_profile yourself.".to_string());
-        };
-        let text = std::fs::read(&profile).ok()?;
-        let loads = String::from_utf8_lossy(&text).lines().any(|l| code(l).is_some_and(|c| c.contains(".bashrc")));
-        if !loads {
-            let p = dirs.show(&profile);
+        if let Some(s) = login_bash_skips_bashrc(dirs) {
             return Some(format!(
-                "matchapack init: Terminal on macOS opens login shells, which read {p}, and {p} does not load ~/.bashrc: a line in ~/.bashrc would not run there, so it does not write it. Load ~/.bashrc from {p} (for example, add `[ -f ~/.bashrc ] && . ~/.bashrc` to it) and run `matchapack init` again, or add matchapack's line to {p} yourself."
+                "matchapack init: {}: a line in ~/.bashrc would not run there, so it does not write it. {} and run `matchapack init` again, or add matchapack's line to {} yourself.",
+                s.why,
+                s.fix,
+                dirs.show(&s.profile)
             ));
         }
     }
     None
+}
+
+/// Why a login bash does not read ~/.bashrc, and what makes it.
+struct BashSkip {
+    why: String,
+    fix: String,
+    /// The profile a login bash reads (~/.bash_profile when none exists).
+    profile: PathBuf,
+}
+
+/// Terminal on macOS opens login shells, and a login bash reads ~/.bashrc
+/// only when the first of ~/.bash_profile, ~/.bash_login and ~/.profile
+/// that exists loads it (`loads_bashrc`). None when it does. A profile that
+/// cannot be read counts as one that does not.
+fn login_bash_skips_bashrc(dirs: &Dirs) -> Option<BashSkip> {
+    let load = "`[ -f ~/.bashrc ] && . ~/.bashrc`";
+    let Some(profile) = dirs.login_files("bash").into_iter().next() else {
+        return Some(BashSkip {
+            why: "Terminal on macOS opens login shells, and a login bash reads only ~/.bash_profile, ~/.bash_login or ~/.profile, none of which exists here".to_string(),
+            fix: format!("Create ~/.bash_profile containing {load}"),
+            profile: dirs.home.join(".bash_profile"),
+        });
+    };
+    let p = dirs.show(&profile);
+    let why = match std::fs::read(&profile) {
+        Ok(text) if String::from_utf8_lossy(&text).lines().any(|l| loads_bashrc(dirs, l)) => return None,
+        Ok(_) => format!("Terminal on macOS opens login shells, which read {p}, and {p} does not load ~/.bashrc"),
+        Err(e) => format!("Terminal on macOS opens login shells, which read {p}, and matchapack could not read {p} to see whether it loads ~/.bashrc ({e})"),
+    };
+    Some(BashSkip { why, fix: format!("Load ~/.bashrc from {p} (for example, add {load} to it)"), profile })
+}
+
+/// Whether a profile's line loads ~/.bashrc: a `.` or `source` command
+/// whose file is ~/.bashrc itself (`~/.bashrc`, `$HOME/.bashrc`,
+/// `${HOME}/.bashrc` or the home directory spelled out, quoted or not).
+/// A mention (`echo ~/.bashrc`) or another file (`~/.bashrc.local`) does
+/// not count.
+fn loads_bashrc(dirs: &Dirs, line: &str) -> bool {
+    let Some(c) = code(line) else { return false };
+    let spelled = dirs.home.join(".bashrc").to_string_lossy().into_owned();
+    let is_bashrc = |w: &str| {
+        let w = w.replace(['"', '\''], "");
+        ["~/.bashrc", "$HOME/.bashrc", "${HOME}/.bashrc", spelled.as_str()].contains(&w.as_str())
+    };
+    // Each command of the line: split at `;`, `&&`, `||` and `|`.
+    c.split([';', '&', '|']).any(|cmd| {
+        let mut words = cmd.split_whitespace().skip_while(|w| ["then", "do", "else", "{"].contains(w));
+        matches!(words.next(), Some("." | "\\." | "source")) && words.next().is_some_and(is_bashrc)
+    })
+}
+
+/// On macOS, why a new terminal's bash does not read `file`, when it is
+/// ~/.bashrc and the login profile does not load it (`login_bash_skips_bashrc`).
+fn unread(dirs: &Dirs, file: &Path, macos: bool) -> Option<BashSkip> {
+    (macos && file == dirs.home.join(".bashrc")).then(|| login_bash_skips_bashrc(dirs)).flatten()
 }
 
 /// `file` as shown, and the file it really is when it is a symbolic link.
@@ -335,7 +398,8 @@ pub enum Outcome {
     /// `Mode::Hint`: the command to paste was printed.
     Hinted,
     /// It must not write (`no_write_reason`): the reason and the command
-    /// to paste were printed.
+    /// to paste were printed. Or, on macOS, ~/.bashrc has the line but a
+    /// login bash does not read it (`unread`): that, and how to fix it.
     Refused,
 }
 
@@ -352,6 +416,10 @@ pub fn setup(dirs: &Dirs, shell: &str, alias: &Alias, macos: bool, s: &Setup, as
     let (first, login) = found(dirs, shell, macos);
     if let Some((file, n, init_line)) = first {
         say(&already(dirs, &file, n, macos));
+        // The line is there, but a new terminal does not read the file.
+        if unread(dirs, &file, macos).is_some() {
+            return Ok(Outcome::Refused);
+        }
         let after = path_lines_after(&file, n);
         if let Some((last, _)) = after.last() {
             let shown = dirs.show(&file);
@@ -691,9 +759,10 @@ mod tests {
         assert_eq!(r.unwrap(), Outcome::Written(h.join(".bashrc"), 2));
         assert_eq!(asked, vec!["Add it at the end of ~/.bashrc? Nothing else in the file changes. [y/N] "]);
         assert!(out.contains("~/.profile:1 runs matchapack init already, but only login shells read that file"), "{out}");
-        // On macOS the same file counts: nothing to ask.
+        // On macOS a new terminal reads ~/.profile, which runs the line
+        // (and does not load ~/.bashrc): nothing to ask.
         let (r, _, _) = run(&dirs(&h), "bash", &Alias::Default, true, Mode::Ask, None);
-        assert_eq!(r.unwrap(), Outcome::Already(h.join(".bashrc"), 2));
+        assert_eq!(r.unwrap(), Outcome::Already(h.join(".profile"), 1));
         fs::remove_file(h.join(".bashrc")).unwrap();
         assert_eq!(run(&dirs(&h), "bash", &Alias::Default, true, Mode::Ask, None).0.unwrap(), Outcome::Already(h.join(".profile"), 1));
     }
@@ -722,6 +791,71 @@ mod tests {
         let h = scratch("setup-mac-profile-loads");
         fs::write(h.join(".bash_profile"), "[ -f ~/.bashrc ] && . ~/.bashrc\n").unwrap();
         assert_eq!(run(&dirs(&h), "bash", &Alias::Default, true, Mode::Yes, None).0.unwrap(), Outcome::Written(h.join(".bashrc"), 2));
+    }
+
+    #[test]
+    fn a_profile_loads_bashrc_only_by_sourcing_that_file() {
+        let d = dirs(Path::new("/Users/u"));
+        for l in [
+            "[ -f ~/.bashrc ] && . ~/.bashrc",
+            "[[ -r ~/.bashrc ]] && source ~/.bashrc",
+            "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi",
+            "\t. \"$HOME/.bashrc\"",
+            "test -f ~/.bashrc && source \"${HOME}/.bashrc\" # aliases",
+            "source \"$HOME\"/.bashrc",
+            "[ -s ~/.bashrc ] && \\. ~/.bashrc",
+            ". /Users/u/.bashrc",
+        ] {
+            assert!(loads_bashrc(&d, l), "{l}");
+        }
+        for l in ["echo ~/.bashrc", "source ~/.bashrc.local", ". ~/.bashrc_extra", "# . ~/.bashrc", "export A=1 # . ~/.bashrc", "[ -f ~/.bashrc ]", "cp ~/.bashrc /tmp", ". /Users/other/.bashrc"] {
+            assert!(!loads_bashrc(&d, l), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_profile_that_only_mentions_bashrc_or_cannot_be_read_is_not_written_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = scratch("setup-mac-mention");
+        fs::write(h.join(".bash_profile"), "echo ~/.bashrc\nsource ~/.bashrc.local\n").unwrap();
+        let (r, out, _) = run(&dirs(&h), "bash", &Alias::Default, true, Mode::Yes, None);
+        assert_eq!(r.unwrap(), Outcome::Refused);
+        assert!(out.contains("~/.bash_profile does not load ~/.bashrc"), "{out}");
+        fs::write(h.join(".bash_profile"), ". ~/.bashrc\n").unwrap();
+        fs::set_permissions(h.join(".bash_profile"), fs::Permissions::from_mode(0o000)).unwrap();
+        let (r, out, _) = run(&dirs(&h), "bash", &Alias::Default, true, Mode::Yes, None);
+        assert_eq!(r.unwrap(), Outcome::Refused);
+        assert!(out.contains("could not read ~/.bash_profile to see whether it loads ~/.bashrc"), "{out}");
+        assert!(!h.join(".bashrc").exists());
+    }
+
+    #[test]
+    fn a_bashrc_line_that_a_macos_login_bash_skips_is_not_called_set_up() {
+        let h = scratch("setup-mac-skipped-line");
+        fs::write(h.join(".bash_profile"), "export A=1\n").unwrap();
+        fs::write(h.join(".bashrc"), format!("{ZSH_LINE}\n")).unwrap();
+        for mode in [Mode::Ask, Mode::Yes, Mode::DryRun, Mode::Hint] {
+            let (r, out, asked) = run(&dirs(&h), "bash", &Alias::Default, true, mode, None);
+            assert_eq!(r.unwrap(), Outcome::Refused, "{mode:?}");
+            assert!(asked.is_empty());
+            assert!(
+                out.contains("~/.bashrc:1 runs matchapack init, but Terminal on macOS opens login shells, which read ~/.bash_profile, and ~/.bash_profile does not load ~/.bashrc, so a new terminal does not run that line.")
+                    && out.contains("Load ~/.bashrc from ~/.bash_profile")
+                    && !out.contains("already runs")
+                    && !out.contains(">> ~/.bashrc"),
+                "{out}"
+            );
+        }
+        assert!(hint(&dirs(&h), "bash", false, &Alias::Default, true).contains("so a new terminal does not run that line"));
+        assert_eq!(fs::read_to_string(h.join(".bashrc")).unwrap(), format!("{ZSH_LINE}\n"), "nothing written");
+        // Linux: a terminal's bash reads ~/.bashrc.
+        assert_eq!(run(&dirs(&h), "bash", &Alias::Default, false, Mode::Yes, None).0.unwrap(), Outcome::Already(h.join(".bashrc"), 1));
+        // The profile runs the line itself: set up.
+        fs::write(h.join(".bash_profile"), format!("export A=1\n{ZSH_LINE}\n")).unwrap();
+        assert_eq!(run(&dirs(&h), "bash", &Alias::Default, true, Mode::Yes, None).0.unwrap(), Outcome::Already(h.join(".bash_profile"), 2));
+        // The profile loads ~/.bashrc: ~/.bashrc's line counts.
+        fs::write(h.join(".bash_profile"), "[ -f ~/.bashrc ] && . ~/.bashrc\n").unwrap();
+        assert_eq!(run(&dirs(&h), "bash", &Alias::Default, true, Mode::Yes, None).0.unwrap(), Outcome::Already(h.join(".bashrc"), 1));
     }
 
     #[test]
