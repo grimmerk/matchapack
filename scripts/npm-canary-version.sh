@@ -5,7 +5,7 @@
 # "reason", "newMajor", ...}). Runs the npm suites on that release with both
 # overrides (the canary tests a release whatever the gates say), installs the
 # baseline release next to it, and records the fingerprint, the tar code
-# (the tar fingerprint, part of the store key since PR C1 of #39; recorded
+# (the tar fingerprint, part of the store key; recorded
 # in result.json and compared with the baseline's, for the report only:
 # it never changes the canary's action) and the diff of the tracked
 # functions. <out dir> gets item.json, suites.json, the suites'

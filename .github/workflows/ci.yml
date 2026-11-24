@@ -1,7 +1,8 @@
-# Checks for every pull request (and on demand). macOS runners bill 10x on a
-# private repository, so only what needs APFS clones runs there, on one npm;
-# the rest runs on Linux, including the npm suites on each pinned npm line
-# (linux-npm). Not on pushes to main: a pull request already ran them.
+# Checks for every pull request (and on demand). While the repository was
+# private, macOS runners billed 10x, so only what needs APFS clones runs
+# there, on one npm; the rest runs on Linux, including the npm suites on
+# each pinned npm line (linux-npm). Not on pushes to main: a pull request
+# already ran them.
 name: ci
 on:
   pull_request:
@@ -107,7 +108,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # A second Node major, for test-yarn1.sh's "cache filled by another
-      # Node" case (MATCHAPACK_YARN_PRIME_NODE, #52): set up first, so that
+      # Node" case (MATCHAPACK_YARN_PRIME_NODE, #16): set up first, so that
       # the next setup-node puts 24 first on PATH.
       - uses: actions/setup-node@v4
         with:

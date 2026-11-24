@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sampled verification of real runs during the trial (issue grimmerk/matchapack-private#77).
+# Sampled verification of real runs during the trial (issue #16).
 #   verify-sample.sh [--yarn] [N] [project-dir...]
 # With no directories: takes the N (default 2) most recent distinct projects
 # whose newest run in the run log (~/.cache/matchapack/log.jsonl) can be

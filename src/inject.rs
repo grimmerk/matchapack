@@ -24,16 +24,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// MATCHAPACK_ENGINE: unset, empty or `inject` (the only engine since PR C2,
-/// #33) is fine. `classic` names the engine PR C2 removed, and anything else
-/// is no engine: an error, never a silent default. `matchapack install` stops
-/// on it; `npm ci` through the shell function runs plain npm with it as the
-/// reason (nothing has been changed, and the tree is npm's either way).
+/// MATCHAPACK_ENGINE: unset, empty or `inject` (the only engine since the
+/// classic engine was removed) is fine. `classic` names the removed engine,
+/// and anything else is no engine: an error, never a silent default.
+/// `matchapack install` stops on it; `npm ci` through the shell function
+/// runs plain npm with it as the reason (nothing has been changed, and the
+/// tree is npm's either way).
 pub fn engine() -> std::result::Result<(), String> {
     match std::env::var("MATCHAPACK_ENGINE").as_deref() {
         Err(_) | Ok("") | Ok("inject") => Ok(()),
         Ok("classic") => Err(
-            "MATCHAPACK_ENGINE=classic: the classic engine was removed in PR C2; unset MATCHAPACK_ENGINE (or set it to inject) for the inject engine".into(),
+            "MATCHAPACK_ENGINE=classic: the classic engine was removed before 0.1.0; unset MATCHAPACK_ENGINE (or set it to inject) for the inject engine".into(),
         ),
         Ok(other) => Err(format!("MATCHAPACK_ENGINE={other} is not an engine (inject is the only one)")),
     }
@@ -140,10 +141,10 @@ fn hidden_packages(text: &[u8]) -> Option<Packages> {
 /// that is a symlink (npm 10 with --install-strategy=linked: hoisted paths
 /// point into node_modules/.store, which the hook saw).
 ///
-/// This replaced, in review round 4, a first filter by the hidden lockfile
-/// before the run (a package new in it, or with another version or
-/// integrity; the plan's U2): a package npm keeps that is new in the hidden
-/// lockfile is not extracted, and a package npm restores at the same
+/// This replaced a first filter by the hidden lockfile before the run (a
+/// package new in it, or with another version or integrity): a package npm
+/// keeps that is new in the hidden lockfile is not extracted, and a package
+/// npm restores at the same
 /// version (its directory removed by hand) is, so that filter both raised
 /// false alarms and missed packages. A lower
 /// bound: a package the hook missed was extracted by npm, so its
@@ -293,7 +294,7 @@ pub(crate) fn threads() -> usize {
 /// The outer error: the child could not be started. Shared by the npm inject
 /// engine and the Yarn 1 engine (src/yarn1.rs). While the child runs,
 /// SIGTERM, SIGHUP and SIGINT are caught and the first is passed to the hook
-/// (src/signals.rs, #64); the caller asks `signals::received` afterwards.
+/// (src/signals.rs); the caller asks `signals::received` afterwards.
 pub(crate) fn run_serving(
     cmd: &mut std::process::Command,
     ours: UnixStream,
@@ -546,7 +547,7 @@ pub fn run(o: &InjectOpts) -> std::result::Result<Summary, InstallError> {
     for (kind, (n, first)) in &stats.differs {
         match kind.as_str() {
             // Expected: matchapack's own extractor (the classic engine's,
-            // removed in PR C2; its entries stay in older stores) differs
+            // removed before 0.1.0; its entries stay in older stores) differs
             // from pacote for some odd tarballs.
             "extractor" => crate::info!("inject: {n} store entries made by matchapack's extractor differed from npm's extraction and were replaced (first: {})", first[0]),
             "changed" => eprintln!(

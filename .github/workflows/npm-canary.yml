@@ -1,4 +1,4 @@
-# The npm release canary (G-lite, #32): tests each new npm release of the
+# The npm release canary: tests each new npm release of the
 # supported majors once, soon after it is published, and asks for a person
 # only when something changed.
 #
@@ -47,7 +47,7 @@
 #           only if "Participating" email is on, for every repository.
 #
 # State: one JSON block in the tracking issue's body, rewritten by the
-# workflow (review 2026-11-14, section 9.3). Why there: it needs only
+# workflow. Why there: it needs only
 # `issues: write` (a file in the repository would need `contents: write` and
 # a push to main from a workflow, or a pull request, which needs a
 # repository setting); the owner reads the result where the state is, and

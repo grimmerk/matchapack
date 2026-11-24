@@ -1,7 +1,7 @@
 // Unit checks of the inject hook's eligibility rules (src/inject.js
 // `ineligible`), its result trap (`resultTrap`), its fingerprint, and the
 // helper's start-up (nothing of npm loaded before npm, the install root npm
-// reports, the lazy hook; #59, #36), against
+// reports, the lazy hook), against
 // the fetcher objects of the npm given: the real
 // pacote classes are constructed, so a renamed field or a changed default in
 // a new pacote fails here instead of silently turning every package into a
@@ -88,13 +88,13 @@ const quiet = async (name, use) => {
   check(`trap: ${name} gives what the plain object gives, and reads nothing unexpected`,
     JSON.stringify([got, t.reads.filter(r => r.endsWith(':false'))]), JSON.stringify([want, []]))
 }
-// The helper's start-up (#59) and the install root it reports (#36), on this
+// The helper's start-up and the install root it reports, on this
 // npm: src/inject.js started with a socket as fd 3, as inject.rs starts it,
 // and a stand-in for matchapack on the other end that answers the root
 // message as `rootAnswer` says. A probe loaded before the helper
 // (`--require`) wraps Module.prototype.require first and reports:
 //   - how many files under the npm directory are in require.cache when npm's
-//     lib/cli.js is first required (#59: the helper loads none of npm);
+//     lib/cli.js is first required (the helper loads none of npm);
 //   - at exit, whether Module.prototype.require is the probe's own again
 //     (the helper's watcher removed itself), and which loaded pacote copies
 //     have their FetcherBase.prototype.extract replaced by the hook.
@@ -365,12 +365,12 @@ async function helperCases () {
   }
   const roots = (r) => r.messages.filter(m => m.root !== undefined && m.integrity === undefined)
   try {
-    // #59: npm prints its version; nothing of npm was loaded before its
+    // npm prints its version; nothing of npm was loaded before its
     // lib/cli.js, and the hello names the file fingerprint.
     {
       const r = await helperRun({ args: ['--version'], rootAnswer: () => ({ ok: true }), cwd: tmp })
       const hello = r.messages.find(m => m.hello)
-      check('helper: no file of npm is loaded before npm\'s lib/cli.js (#59)',
+      check('helper: no file of npm is loaded before npm\'s lib/cli.js',
         JSON.stringify([r.code, r.out.trim(), r.probe && r.probe.beforeCli]),
         JSON.stringify([0, require(path.join(npmDir, 'package.json')).version, []]))
       check('helper: the hello carries the file fingerprint and the pending hook',
@@ -712,7 +712,7 @@ async function sweepRepair () {
   await quiet('Promise.resolve', async (v) => JSON.stringify(await Promise.resolve(v)))
   {
     // util.inspect: from Node 26 every Proxy prints as `Proxy(<the target's
-    // text>)`, even with showProxy off (#69). So the trap must print exactly
+    // text>)`, even with showProxy off. So the trap must print exactly
     // what a bare Proxy of the plain object prints (before Node 26: the plain
     // object's own text), and inspecting it reads nothing through the trap.
     const t = trapped()

@@ -6,6 +6,6 @@ One dependency, `y1-rootpath` (tarball made by
 names `build/Release/.deps/<absolute path>/…` files. A (npm ci) and B
 (matchapack) therefore each have a path named after their own tree:
 `scripts/verify.sh` compares with `matchapack diff --normalize-roots`, which
-writes each tree's root as `<root>`, so the two paths match (issue grimmerk/matchapack-private#48).
+writes each tree's root as `<root>`, so the two paths match.
 `allowScripts` lets npm >= 11.19 run the script. Tarballs: see
 optional-upward's README.

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Inject engine tests (the only engine since PR C2), end to end with the
-# release binary and the npm on PATH:
+# Inject engine tests (the only engine since the classic engine was
+# removed), end to end with the release binary and the npm on PATH:
 #   test-inject.sh <work-dir>
 # What the fixture harness cannot show: that the hook really cloned, that a
 # disabled hook and a store miss still give npm ci's tree, the gates before
 # npm starts, that npm's own failures stay npm's, the store lock and the
 # project record, the hook's eligibility rules and result trap, the helper's
 # start-up (test-inject-hook.js), the pacote fingerprint gate, the install
-# root npm reports and the gates on it (#36), and npm 12 patches.
+# root npm reports and the gates on it, and npm 12 patches.
 # Uses its own store and log directory, never the real ones.
 # To run it with another npm, put that npm first on PATH (for example one
 # installed with `npm i --prefix <dir> npm@12.2.2`: PATH=<dir>/node_modules/.bin:$PATH).
@@ -21,7 +21,7 @@ mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 # The projects sit in a directory of the user's own group (macOS: new paths
 # take their directory's group). Under a directory of a group the user is
 # not in (macOS /tmp: wheel), placements moved in from the store's tmp/ are
-# left to npm, which changes the counts below (#41; case 4f covers it).
+# left to npm, which changes the counts below (case 4f covers it).
 chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs MATCHAPACK_PATHS=$work
 unset MATCHAPACK_ENGINE MATCHAPACK_INJECT_HOOK MATCHAPACK_INJECT_THREADS MATCHAPACK
@@ -67,9 +67,9 @@ wrapped() { # dir command...
 last_log() { tail -1 "$work/logs/log.jsonl" | python3 -c "import json,sys;r=json.load(sys.stdin);print($1)"; }
 last_log_in() { tail -1 "$1/log.jsonl" | python3 -c "import json,sys;r=json.load(sys.stdin);print($2)"; }
 # classic_entries <store>: make the store's entries what the classic engine
-# (removed in PR C2) left in stores it filled: no made-by record, and lc-dup's
+# (removed before 0.1.0) left in stores it filled: no made-by record, and lc-dup's
 # run.sh (listed twice in its tarball) with mode 644 where npm's extraction
-# gives 755. Stores filled before PR C2 still hold such entries.
+# gives 755. Stores it filled still hold such entries.
 classic_entries() {
   rm -rf "${1:?}/made-by"
   local f; f=$(find "$1/v2" -path '*/run.sh' -type f | head -1)
@@ -154,7 +154,7 @@ MATCHAPACK_STORE=$work/store-miss npm_config_cache=$work/cache-miss install "$p"
   && ok "the next install: 0 new in the store, all 3 cloned" || bad "after a miss: cloned $(cloned), filled $(filled)"
 
 # 4b. Store entries that matchapack's own extractor made (the classic
-#     engine's, removed in PR C2: entries with no made-by record) are
+#     engine's, removed before 0.1.0: entries with no made-by record) are
 #     compared with pacote's extraction before their first use, and then
 #     recorded as known to this pacote and tar.
 cs=$work/store-classic
@@ -219,7 +219,7 @@ MATCHAPACK_STORE=$os install "$p" && [ "$(cloned)" = 2 ] && same "$ref_odd" "$p"
   && grep -q "1 store entries made by matchapack's extractor differed from npm's extraction and were replaced (first: .*run.sh: mode 644, the tarball gives 755)" "$work/out" \
   && ok "a path listed twice: the classic engine's entry is replaced by pacote's before use, tree identical" || bad "odd-tarballs inject: cloned $(cloned)"
 
-# 4f. #41: a store under another group than the project. npm's extraction
+# 4f. A store under another group than the project. npm's extraction
 #     gives every path the project's group (macOS: the directory's; Linux:
 #     the process's, or a setgid directory's); placements moved in from the
 #     store's tmp/ (merges, checked entries) kept the store's. `diff --meta`
@@ -316,7 +316,7 @@ MATCHAPACK_ENGINE=bogus wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
 [ $rc = 0 ] && grep -q 'running plain npm instead (MATCHAPACK_ENGINE=bogus' "$work/out" && [ -d "$p/node_modules/lodash" ] \
   && ok "an unknown engine name through the shell function: plain npm" || bad "unknown engine wrapper: rc=$rc"
 
-# 9. The classic engine and its options are gone (PR C2): asking for them is
+# 9. The classic engine and its options are gone: asking for them is
 #    an error before anything changes, and the shell function runs plain npm
 #    with the reason. The owner's shell exports MATCHAPACK_ENGINE=inject.
 p=$(project flags small)
@@ -327,10 +327,10 @@ done
 "$bin" plan "$p" > "$work/out" 2>&1; rc=$?
 [ $rc = 2 ] && grep -q "unrecognized subcommand 'plan'" "$work/out" && ok "matchapack plan (the classic engine's) is gone" || bad "plan: rc=$rc"
 MATCHAPACK_ENGINE=classic "$bin" install "$p" -- --no-audit --no-fund > "$work/out" 2>&1; rc=$?
-[ $rc != 0 ] && grep -q 'MATCHAPACK_ENGINE=classic: the classic engine was removed in PR C2' "$work/out" && [ ! -e "$p/node_modules" ] \
+[ $rc != 0 ] && grep -q 'MATCHAPACK_ENGINE=classic: the classic engine was removed before 0.1.0' "$work/out" && [ ! -e "$p/node_modules" ] \
   && ok "MATCHAPACK_ENGINE=classic: an error naming the removal, nothing changed" || bad "MATCHAPACK_ENGINE=classic: rc=$rc"
 MATCHAPACK_ENGINE=classic wrapped "$p" "npm ci --no-audit --no-fund"; rc=$?
-[ $rc = 0 ] && grep -q 'running plain npm instead (MATCHAPACK_ENGINE=classic: the classic engine was removed in PR C2' "$work/out" && ! grep -q 'matchapack: added' "$work/out" \
+[ $rc = 0 ] && grep -q 'running plain npm instead (MATCHAPACK_ENGINE=classic: the classic engine was removed before 0.1.0' "$work/out" && ! grep -q 'matchapack: added' "$work/out" \
   && [ "$(last_log "r['outcome'], r['engine']")" = "declined inject" ] && same "$ref_small" "$p" \
   && ok "MATCHAPACK_ENGINE=classic through the shell function: plain npm with the reason, tree identical" || bad "classic wrapper: rc=$rc"
 p=$(project explicit small)
@@ -709,7 +709,7 @@ wrapped "$p" "npm ci --omit=dev --no-audit --no-fund"; rc=$?
   && [ "$(last_log "r['outcome'], r['engine'], r['inject']['cloned'] > 0, r['inject']['cloned'] < $n_small, '--omit=dev' in r['args'], r['inject']['installed'] == r['inject']['cloned'], r['inject']['unseen']")" = "installed inject True True True True 0" ] \
   && ok "npm ci --omit=dev through the shell function: cloned, dev dependencies absent, logged with the counts" || bad "omit wrapper: rc=$rc"
 
-# 11a. The install root is npm's own (#36): with --prefix npm installs into
+# 11a. The install root is npm's own: with --prefix npm installs into
 #      that directory, and matchapack clones there.
 mkdir -p "$work/elsewhere"; cp "$FX/bundled/package.json" "$FX/bundled/package-lock.json" "$work/elsewhere/"
 wrapped "$p" "npm ci --prefix '$work/elsewhere' --no-audit --no-fund"; rc=$?
@@ -862,7 +862,7 @@ install "$p"; rc=$?
 
 # 11b. `npm ci` inside a workspace of a monorepo: npm installs into the
 #      root's node_modules (the workspace's subset). npm reports that root,
-#      and matchapack clones there (#36; until 2026-11-15 it declined).
+#      and matchapack clones there (until 2026-11-15 it declined).
 ws=$work/ws-src; rm -rf "${ws:?}"; mkdir -p "$ws/packages/a"
 printf '{"name":"ws-root","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"lc-r":"'"$FX_URL"'/lc-r-1.0.0.tgz"}}\n' > "$ws/package.json"
 printf '{"name":"a","version":"1.0.0","dependencies":{"lc-s":"'"$FX_URL"'/lc-s-1.0.0.tgz"}}\n' > "$ws/packages/a/package.json"
@@ -1225,8 +1225,8 @@ else
 fi
 # After a broken npm ci matchapack removes only what it cloned in that run
 # outside the root's node_modules, then runs plain npm ci: the result must
-# be plain npm ci's on an identical copy, in each case below (after the
-# independent review's round 8). Each case is built twice by plain npm
+# be plain npm ci's on an identical copy, in each case below. Each case
+# is built twice by plain npm
 # (`plain`, `mp`); every real node_modules not inside another gets an
 # extended attribute and a tool's cache (`.keep-cache/data`); then plain
 # `npm ci` in one, a broken `npm ci` through matchapack (MATCHAPACK_TEST_BROKE)
@@ -1311,7 +1311,7 @@ cl_case out-of-sync cl_sync cl_sync_after -- --no-audit --no-fund
 # A member package npm must replace (another version on disk) holding a
 # nested package npm keeps and moves back under it: matchapack removes what
 # its clone brought, never the nested package (a marker in it stays, as
-# with plain npm ci). Registry packages, as in the independent review.
+# with plain npm ci). Registry packages.
 cl_nested() {
   cl_pj "$1/proj/package.json" '{"name":"cl","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"is-number":"7.0.0","is-odd":"2.0.0"}}'
   cl_pj "$1/proj/packages/b/package.json" '{"name":"ws-b","version":"1.0.0","dependencies":{"is-number":"5.0.0","is-odd":"3.0.1"}}'

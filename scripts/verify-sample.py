@@ -21,7 +21,7 @@ real runs"). Two kinds of run are replayed:
   while they still have the hashes the run logged, else its git HEAD's
   when those have them.
 
-The rule (review rounds 1 and 2): a sample says IDENTICAL only when (a)
+The rule: a sample says IDENTICAL only when (a)
 the replay's inputs equal what the logged run recorded (the files it
 hashed, the project's rc files among them, their bytes, the words it
 logged, the environment's npm or Yarn settings by their hash; the user's
@@ -560,7 +560,7 @@ def yarn_result(rc, out, v, here, node_version, race_possible=True):
         extra["differing"] = ["%s %s" % c for c in own[:20]]
         extra["differing_count"] = len(own)
         if race_possible and race_shaped(own, os.path.join(v, "engine"), node_version):
-            return "RACE-SHAPED", "mtimes of non-empty package files only, as plain Yarn's own probe race (#57) can leave them", extra
+            return "RACE-SHAPED", "mtimes of non-empty package files only, as plain Yarn's own probe race can leave them", extra
         return "DIFFERENT", "the engine's tree differs from plain Yarn's where two plain runs do not", extra
     lines = [l for l in out.strip().splitlines() if l.strip()]
     extra["detail"] = lines[-12:]
@@ -654,7 +654,7 @@ def yarn_one(plan, here, work):
             # where plain does there. Every difference the engine had in the
             # first run must also be where plain varies with one thread: one
             # that is not there may have been the engine's, shown only with
-            # several threads (CodeRabbit, review round 4).
+            # several threads.
             plain_again = diff_classes(here, v, "plain1", "plain2")
             missing = sorted(first_engine - plain_again) if first_engine is not None and plain_again is not None else None
             if first == "PLAIN-VARIES" and (missing is None or missing):

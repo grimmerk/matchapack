@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The benchmark behind the README's disk, time and CPU numbers (issue grimmerk/matchapack-private#7).
+"""The benchmark behind the README's disk, time and CPU numbers.
 Started by scripts/bench.sh, which keeps the Mac awake; see that file for
 the usage. Plain npm / Yarn 1 against matchapack on public projects pinned
 to a commit, in interleaved rounds, with every run recorded.
@@ -1241,7 +1241,7 @@ def isolation_text(sent):
 # --- main ------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="matchapack benchmark (issue grimmerk/matchapack-private#7); run through scripts/bench.sh")
+    ap = argparse.ArgumentParser(description="matchapack benchmark; run through scripts/bench.sh")
     ap.add_argument("--work", required=True,
                     help=f"work directory: new or empty (then marked with {MARKER}), or marked before; never under ~/git")
     ap.add_argument("--projects", default="small,medium,large,yarn", help="comma list of " + ",".join(PROJECTS))

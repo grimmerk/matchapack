@@ -8,8 +8,8 @@ built by `make-tarballs.py`:
   contents. npm (node-tar) writes the second entry into the file the first one
   made: `run.sh` ends up 0755 with the second contents. matchapack's own
   extractor (the classic engine's) gives 0644, so the classic engine's
-  harness run on this fixture reports a difference; it gets no fixes
-  (grimmerk/matchapack-private#33). The inject engine fills the store through pacote:
+  harness run on this fixture reports a difference; it gets no fixes.
+  The inject engine fills the store through pacote:
   identical.
 - `lc-ignore` has `.gitignore` before `.npmignore`, and a lone
   `sub/.gitignore`. pacote renames a `.gitignore` to `.npmignore` unless a

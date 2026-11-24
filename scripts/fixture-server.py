@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The fixtures' tarball server for one test run (#66).
+"""The fixtures' tarball server for one test run.
 
     fixture-server.py <fixtures> <copy> <ready-file>
     fixture-server.py --self-test

@@ -14,7 +14,7 @@ set -uo pipefail
 work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matchapack
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 2; }
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
-# Projects in a directory of the user's own group (#41; as test-inject.sh).
+# Projects in a directory of the user's own group (as test-inject.sh).
 chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs MATCHAPACK_PATHS=$work
 unset MATCHAPACK_ENGINE MATCHAPACK_INJECT_HOOK MATCHAPACK

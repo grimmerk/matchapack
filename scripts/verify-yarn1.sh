@@ -101,7 +101,7 @@
 # Every comparison uses --normalize-roots: each tree's own path, where an
 # install script wrote it into a file name (node-gyp's .deps/<absolute
 # path>/...), is written <root>, so plain1, plain2 and the engine have the
-# same path there (issue grimmerk/matchapack-private#48).
+# same path there.
 # Yarn always gets a scratch --cache-folder, YARN_DISABLE_SELF_UPDATE_CHECK
 # (so it never writes ~/.yarnrc) and no GITHUB_TOKEN; matchapack a scratch
 # store, log and config directory.

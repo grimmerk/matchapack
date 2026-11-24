@@ -2,8 +2,8 @@
 //! npm's own pacote extracts from its tarball (docs/architecture.md,
 //! "Store maintenance").
 //!
-//! The inject engine, the default since PR C1, places store entries in
-//! place of pacote's extraction, and checks entries against that extraction
+//! The inject engine places store entries in place of pacote's
+//! extraction, and checks entries against that extraction
 //! before it uses them (serve.rs). So the store is judged by pacote here too,
 //! with the same rules as the inject check:
 //! - pacote is the running npm's (the npm on PATH), driven by
@@ -27,7 +27,7 @@
 //!   does in an install.
 //!
 //! The classic engine's Rust extractor is not used: an entry it made (the
-//! engine was removed in PR C2; older stores keep its entries) is judged by
+//! engine was removed before 0.1.0; older stores keep its entries) is judged by
 //! pacote like any other (it has an empty record, so it shows as `extractor`
 //! when it differs).
 

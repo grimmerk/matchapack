@@ -289,11 +289,12 @@ impl Store {
     }
 
     /// The keys of the extraction code (serve.rs `code_key`, one per line;
-    /// `pacote@… tar@…` in records written before PR C1 of #39) under which
+    /// `pacote@… tar@…` in records written before the key named the
+    /// extraction code) under which
     /// this entry is known to be what pacote extracts: the one that made it,
     /// and every one that later extracted its tarball to the same tree.
     /// Empty: made by matchapack's own extractor (the classic engine,
-    /// removed in PR C2), or before this was recorded.
+    /// removed before 0.1.0), or before this was recorded.
     pub fn made_by(&self, i: &Integrity) -> Vec<String> {
         fs::read_to_string(self.made_by_file(i))
             .unwrap_or_default()
@@ -601,7 +602,7 @@ impl Store {
 
     /// Tests only: the entry for `i`, extracted by matchapack's own
     /// extractor (`extract`) from the tarball in npm's cache when missing,
-    /// with no made-by record: what the classic engine (removed in PR C2)
+    /// with no made-by record: what the classic engine (removed before 0.1.0)
     /// put in the store, and a quick way to fill a test store. Installs fill
     /// it through pacote (serve.rs). The tarball's digest is checked against
     /// `i` before anything is extracted.
@@ -901,7 +902,7 @@ pub fn entry_dir(root: &Path, i: &Integrity) -> PathBuf {
     root.join(LAYOUT).join(&i.algo).join(&i.hex[0..2]).join(&i.hex[2..])
 }
 
-/// Tests only (the classic engine's extractor, removed in PR C2; installs
+/// Tests only (the classic engine's extractor, removed before 0.1.0; installs
 /// and `store verify` extract with npm's own pacote). Extract like pacote (npm/node_modules/pacote/lib/fetcher.js `#tarxOptions`):
 /// strip the first path component; keep FILE entries only (links and directory
 /// entries are filtered out, so empty directories never appear; directories

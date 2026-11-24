@@ -3,7 +3,8 @@
 fixtures/optional-upward/tarballs (where the local tarball server serves
 from). `npm pack` cannot make them: they are what a hand-made or odd
 publisher's tarball can hold, and where an extractor other than pacote's can
-give another result (found by the Codex review of grimmerk/matchapack-private#34).
+give another result (found by the Codex review of the change that added the
+inject engine).
 
   lc-dup     lists package/run.sh twice: first mode 0755, then 0644 with other
              contents. node-tar writes the second into the file the first

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The benchmark behind the README's disk, time and CPU numbers (issue grimmerk/matchapack-private#7):
+# The benchmark behind the README's disk, time and CPU numbers:
 # plain npm / Yarn 1 against matchapack on public projects pinned to a
 # commit, in interleaved rounds. macOS (APFS) only.
 #

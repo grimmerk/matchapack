@@ -42,8 +42,8 @@ The tarballs are made by `make-tarballs.py` (deterministic).
   pattern would otherwise be asked of the registry).
 - `yarn1-rootpath` (Yarn 1 engine): `y1-many` and `y1-rootpath`, whose
   install script writes `built/<its own absolute directory>/marker`, so each
-  tree has another path there, as node-gyp's `build/Release/.deps/` (issue
-  #48; `matchapack diff --normalize-roots`). The npm fixture `rootpath` uses
+  tree has another path there, as node-gyp's `build/Release/.deps/`
+  (`matchapack diff --normalize-roots`). The npm fixture `rootpath` uses
   the same tarball.
 
 - `yarn1-upgrade` (Yarn 1 commands): dependencies by name and range

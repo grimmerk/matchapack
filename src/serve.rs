@@ -4,7 +4,7 @@
 //! package's store entry instead. Node has no call for a directory clone, so
 //! the clone and the mtime touch happen here.
 //!
-//! The project root is npm's own (grimmerk/matchapack-private#36): when npm
+//! The project root is npm's own: when npm
 //! starts its command, the helper reports `npm.prefix` (the `root` message),
 //! and this server runs the gates on it (`accept_root`) and pins it. Until
 //! then every request is refused (`no-root`); a refused root makes the helper
@@ -68,8 +68,9 @@
 //! it, and each one that later extracted it to the same tree. An entry is
 //! compared before use **once per key**: whenever the code that is running is
 //! not in the record yet (matchapack's own extractor, the classic engine's
-//! until PR C2, recorded nothing; records written before PR C1 of #39 hold
-//! `pacote@… tar@…` keys, which no code key matches), and then added to it;
+//! until it was removed, recorded nothing; records written before the store
+//! key named the extraction code hold `pacote@… tar@…` keys, which no code
+//! key matches), and then added to it;
 //! an entry whose record has this key is compared one time in
 //! MATCHAPACK_INJECT_CHECK (default 50), at random, to catch an entry changed
 //! since. pacote or tar extract differently across versions for odd tarballs
@@ -149,7 +150,7 @@ pub enum Outcome {
         /// Paths touched.
         paths: usize,
         /// Paths given the group npm's extraction would have given them
-        /// (#41: a placement moved in from the store's tmp/ keeps the
+        /// (a placement moved in from the store's tmp/ keeps the
         /// store's group).
         regrouped: usize,
         /// The package directory placed (the request's destination).
@@ -741,7 +742,7 @@ impl<'a> Server<'a> {
         // The destination holds node_modules (nested packages, placed by
         // their own requests at the same time): clone aside, move entries in.
         // What is moved in keeps the group of the store's tmp/, and is given
-        // the destination's afterwards (#41, `finish`): not possible for a
+        // the destination's afterwards (`finish`): not possible for a
         // group this user is not in, and then npm extracts the package.
         match npm_gid(dst) {
             Ok(w) if clone::can_give_group(w.gid) => {}
@@ -1024,7 +1025,7 @@ impl<'a> Server<'a> {
                     }
                 }
                 // The candidate was cloned into the store's tmp/ and has its
-                // group; npm's extraction gives the destination's (#41). A
+                // group; npm's extraction gives the destination's. A
                 // group this user cannot give (a project under a directory
                 // of a group the user is not in, such as /tmp's wheel on
                 // macOS): pacote's extraction is cloned at the destination
@@ -1262,7 +1263,7 @@ impl<'a> Server<'a> {
         // runs an install script, whose files must keep their later times.
         // In the same walk, each path gets the group npm's extraction would
         // give it: a merge placement moved its paths in from the store's
-        // tmp/, whose group they kept (#41). A fresh extraction needs no
+        // tmp/, whose group they kept. A fresh extraction needs no
         // touch; it is walked for the group only after a merge, or when the
         // placed directory shows another group (a clone made at the
         // destination gets the destination's group from the kernel).
@@ -1962,7 +1963,7 @@ mod tests {
         groups.into_iter().map(|g| g as u32).find(|g| *g != not)
     }
 
-    /// #41. npm's extraction gives every path the group the kernel gives a
+    /// npm's extraction gives every path the group the kernel gives a
     /// new file in the destination (clone::new_path_gid); a placement moved
     /// in from the store's tmp/ (a merge, a checked candidate, a merged
     /// fill) kept the store's group. Each kind of placement, with the store
@@ -2085,7 +2086,7 @@ mod tests {
     }
 
     /// The other way round: the store's tmp/ is setgid (a store under a
-    /// shared group, #41), the project's directory is not. On Linux the
+    /// shared group), the project's directory is not. On Linux the
     /// directories made in tmp/ get the bit there; npm's extraction in the
     /// project gives none, so a directory moved in must lose it.
     #[test]

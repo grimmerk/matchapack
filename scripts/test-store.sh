@@ -10,7 +10,7 @@ work=$1; here=$(cd "$(dirname "$0")/.." && pwd); bin=$here/target/release/matcha
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 # Projects in a directory of the user's own group: under one of a group the
 # user is not in (macOS /tmp: wheel), the inject engine leaves merge
-# placements to npm (#41), and the entry counts below would differ.
+# placements to npm, and the entry counts below would differ.
 chgrp "$(id -g)" "$work"
 export MATCHAPACK_NPM_VERSIONS=any MATCHAPACK_STORE=$work/store MATCHAPACK_LOG_DIR=$work/logs
 unset MATCHAPACK_ENGINE MATCHAPACK_INJECT_HOOK MATCHAPACK
@@ -32,9 +32,9 @@ project() { local d=$work/$1; rm -rf "${d:?}"; mkdir -p "$d"; cp "$FX/small/pack
 install() { "$bin" install "$1" --ignore-scripts -- --no-audit --no-fund > "$work/out" 2>&1; }
 full_install() { "$bin" install "$1" -- --no-audit --no-fund > "$work/out" 2>&1; }
 # classic_entries <store>: make the store's entries what the classic engine
-# (removed in PR C2) left in stores it filled: no made-by record, and lc-dup's
+# (removed before 0.1.0) left in stores it filled: no made-by record, and lc-dup's
 # run.sh (listed twice in its tarball) with mode 644 where npm's extraction
-# gives 755. Stores filled before PR C2 still hold such entries.
+# gives 755. Stores it filled still hold such entries.
 classic_entries() {
   rm -rf "${1:?}/made-by"
   local f; f=$(find "$1/v2" -path '*/run.sh' -type f | head -1)
@@ -126,7 +126,7 @@ verify --fix && grep -q 'replaced 1 entries with npm' "$work/out" && [ "$(entrie
 verify && grep -q "$n match, 0 differ" "$work/out" && ok "verify: after --fix, every entry matches" || bad "verify: after --fix"
 
 # 8b. Entries made by the classic engine's extractor (no record; in stores
-#     filled before PR C2) are judged by npm's extraction too: odd-tarballs'
+#     the classic engine filled) are judged by npm's extraction too: odd-tarballs'
 #     lc-dup (a path listed twice) differs and is replaced; the matching one
 #     is recorded as known to this extraction code, under the key an
 #     install uses: the next install compares nothing.
@@ -201,7 +201,7 @@ copies=$(grep -l "\"$vw/" "$store"/projects/*.json 2>/dev/null | wc -l | tr -d '
 [ $rc = 0 ] && grep -q 'RESULT: IDENTICAL' "$work/out" && [ "$copies" = 0 ] && [ "$(ls "$store/projects" | sort)" = "$before" ] \
   && ok "verify.sh: no project record left for its copies; the other records kept" || bad "verify.sh records: rc=$rc, $copies left for its copies, records $(ls "$store/projects" | wc -l | tr -d ' ') (before $(echo "$before" | wc -l | tr -d ' '))"
 
-# 14. `store adopt` (#30), on a store of its own: projects installed before
+# 14. `store adopt`, on a store of its own: projects installed before
 #     records existed. A (odd-tarballs, 2 entries) is under the scanned
 #     directory; B (fixtures/small) is outside it, reached only through
 #     symlinks, a symlinked node_modules and a copy of its hidden lockfile
