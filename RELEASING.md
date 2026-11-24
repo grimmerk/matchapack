@@ -8,7 +8,7 @@ A release is a signed version tag. Pushing it runs `.github/workflows/release.ym
 | Shell installer | `curl … matchapack-installer.sh \| sh` (puts the binary in `~/.matchapack/bin`) | the GitHub Release |
 | Homebrew | `brew install grimmerk/tap/matchapack` | release.yml (`publish-homebrew-formula`), a commit to `grimmerk/homebrew-tap` |
 | crates.io | `cargo install matchapack --locked` | `publish-crates.yml`, called by release.yml |
-| npm | `npm i -g matchapack` | `publish-npm.yml`, called by release.yml |
+| npm | not yet: npm refused the name `matchapack` at 0.1.0 ([#18](https://github.com/grimmerk/matchapack/issues/18)) | `publish-npm.yml`, called by release.yml |
 
 Platforms: macOS on Apple silicon and Intel (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux on x86_64 and arm64 as static musl binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), which run on any Linux distribution whatever its C library.
 

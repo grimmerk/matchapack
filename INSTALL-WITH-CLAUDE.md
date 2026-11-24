@@ -75,7 +75,7 @@ Ask first, and explain the choices:
   ```
 
   Tell the user that this runs an install script from matchapack's GitHub releases page, and what it changes to put `~/.matchapack/bin` on the `PATH`: it appends a line, `. "$HOME/.config/matchapack/env.sh"`, to each shell startup file it finds (`~/.profile`, which it creates if missing, and those of `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.zshrc` that exist), and writes a fish file in `~/.config/fish/conf.d/`. In this session, call the binary as `~/.matchapack/bin/matchapack` until a new terminal is open.
-- **npm**: `npm i -g matchapack`. Tell the user that with nvm, fnm or another Node version manager, a global npm package belongs to one Node version: after switching versions, matchapack is gone until it is installed there too, and npm then runs plain without a message. Recommend Homebrew or the install script in that case. If the install fails with `EACCES` (a global folder owned by root, as with a system Node on Linux), do not use `sudo`: suggest Homebrew or the install script instead.
+- **npm**: there is no npm package yet (npm refused the name `matchapack`, https://github.com/grimmerk/matchapack/issues/18). Do not run `npm i -g matchapack`: it fails. If the user asks for npm, say so and offer Homebrew or the install script.
 - **cargo**, when Rust is installed: `cargo install matchapack --locked` (builds from source).
 
 Check with `matchapack --version` (or the full path).
@@ -164,7 +164,6 @@ Ask first. Then, by how matchapack was installed (`command -v matchapack` shows 
 
 - Homebrew (under `brew --prefix`): `brew upgrade matchapack`;
 - the install script (`~/.matchapack/bin/matchapack`): run the install script of step 3 again;
-- npm: `npm i -g matchapack@latest` (with a Node version manager, in each Node version that has it);
 - cargo: `cargo install matchapack --locked --force`.
 
 Show `matchapack --version` afterwards. The shell line needs no change: it prints the shell code of the binary that is installed. Open shells use the new binary at once; new shells also get its shell code.
@@ -175,7 +174,7 @@ Ask before each part, and let the user choose:
 
 1. Run `matchapack uninstall` first, without `--yes`: it changes nothing and lists what it would remove (the store, the run log, the settings directory), the space that frees, the lines of the startup files that mention matchapack, and the command that removes the binary. Show the user its output. Then, if they agree, `matchapack uninstall --yes`. Installed `node_modules` keep working without the store: clones are independent files.
 2. Remove every line uninstall listed, from each file it named (show each line, ask): the matchapack init line and, for an install-script install, the line `. "$HOME/.config/matchapack/env.sh"`, which is usually in several files (`~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshrc`). Only after the last of those lines is gone, remove the files uninstall listed (`~/.config/matchapack/env.sh`, `env.fish`, the receipt, `~/.config/fish/conf.d/matchapack.env.fish`): removing a file a startup file still loads prints an error at every shell start.
-3. Remove the binary with the command uninstall printed: `brew uninstall matchapack`, `npm uninstall -g matchapack`, `cargo uninstall matchapack`, or `rm ~/.matchapack/bin/matchapack` for the install script.
+3. Remove the binary with the command uninstall printed: `brew uninstall matchapack`, `cargo uninstall matchapack`, or `rm ~/.matchapack/bin/matchapack` for the install script.
 
 ---
 

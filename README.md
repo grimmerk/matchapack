@@ -110,16 +110,15 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
 
 4. **Optional, to use it only in some projects:** list their directories, one per line, in `~/.config/matchapack/paths`. A line also covers directories whose path starts the same way, so `~/git/app` covers worktrees such as `~/git/app-feature`. Outside them, npm and Yarn run as usual.
 
-Other ways to install: `npm i -g matchapack` (one package with every binary, no install script), or `cargo install matchapack --locked` (builds from source).
+Other ways to install: `cargo install matchapack --locked` (builds from source). There is no npm package yet: npm refused the name `matchapack` as too similar to another package ([#18](https://github.com/grimmerk/matchapack/issues/18)).
 
 Notes:
 
-- **nvm, fnm and other Node version managers:** a global npm package belongs to the Node version that was active. After you switch versions, `matchapack` is not on PATH, and npm runs plain without a message, until you install it there too. Homebrew and the install script do not depend on the Node version. Run by hand, `matchapack init` warns when your matchapack is a global npm package of one Node version.
 - **`mp`:** the line also defines `mp` as a short name for `matchapack`, but only when nothing named `mp` exists when the line runs (no alias, function, builtin or command on PATH; checked at every shell start). `matchapack init --alias NAME` picks another name, `--no-alias` none.
 
 ### Updating
 
-`brew upgrade matchapack`; or run the install script again; or `npm i -g matchapack@latest` (in each Node version that has it); or `cargo install matchapack --locked --force`. The line in your startup file needs no change: new terminals get the new version's shell code.
+`brew upgrade matchapack`; or run the install script again; or `cargo install matchapack --locked --force`. The line in your startup file needs no change: new terminals get the new version's shell code.
 
 ## Use
 
@@ -178,7 +177,6 @@ Existing `node_modules` keep their full copies until they are installed again: r
 | Installed with | Remove the binary with |
 |---|---|
 | Homebrew | `brew uninstall matchapack` |
-| npm | `npm uninstall -g matchapack` (with nvm or fnm, in each Node version; uninstall prints it with the right `--prefix`) |
 | the install script | `rm ~/.matchapack/bin/matchapack`; then remove the PATH line from your startup files, and only after that the files uninstall lists |
 | cargo | `cargo uninstall matchapack` |
 
