@@ -120,7 +120,7 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
    echo 'type -q matchapack; and matchapack init | source' >> $__fish_config_dir/config.fish
    ```
 
-   The line must stay below every line that puts matchapack or Node on PATH (the install script's `. "$HOME/.config/matchapack/env.sh"`, Homebrew's `brew shellenv`, a Node version manager's); if something added later goes below it, move the line back to the end. bash login shells (Terminal on macOS, an SSH session) read `~/.bash_profile` or `~/.profile`; make sure that file loads `~/.bashrc`, or put the line there.
+   The line must stay below every line that puts matchapack or Node on PATH (the install script's `. "$HOME/.config/matchapack/env.sh"`, Homebrew's `brew shellenv`, a Node version manager's); if something added later goes below it, move the line back to the end. bash login shells (Terminal on macOS, an SSH session) read `~/.bash_profile` or `~/.profile`; make sure that file loads `~/.bashrc`, or put the line there. Not sure which shell or file? Run `matchapack init` in a terminal: after the shell code, it prints the line to add and the file it goes in, or the file that already has it. It never edits the file.
 
 3. **Open a new terminal and check:** `type npm` says that `npm` is a shell function.
 
