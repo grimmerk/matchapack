@@ -395,6 +395,31 @@ none" ]
   printf '%s\n' "$out" | grep -q 'builtin or reserved word of fish' && printf '%s\n' "$out" | grep -q '^pipestatus 2 0$' && [ "$(printf '%s\n' "$out" | tail -1)" = function ]
   rcheck "init --alias string: refused (status 2), the npm function still defined" $? "[$out]"
 
+  # `matchapack init <shell> --yes` with the real binary, in a scratch HOME
+  # (ZDOTDIR for zsh and XDG_CONFIG_HOME for fish, both inside it and not
+  # made yet): it prints no shell code, appends the line to that shell's
+  # file, a new interactive shell then has the npm function, and a second
+  # --yes adds no second line. Never the real HOME.
+  for s in bash zsh fish; do
+    yh=$t/yes-home-$s; mkdir -p "$yh"
+    yenv=(env -u ZDOTDIR -u XDG_CONFIG_HOME HOME="$yh" PATH="$rb:$PATH")
+    case $s in
+      zsh) yenv+=(ZDOTDIR="$yh/zdot"); yrc=$yh/zdot/.zshrc ;;
+      fish) yenv+=(XDG_CONFIG_HOME="$yh/xdg"); yrc=$yh/xdg/fish/config.fish ;;
+      bash) yrc=$yh/.bashrc ;;
+    esac
+    y1=$("${yenv[@]}" matchapack init "$s" --yes 2>/dev/null </dev/null); y1rc=$?
+    y2=$("${yenv[@]}" matchapack init "$s" --yes 2>&1 >/dev/null </dev/null)
+    out=$("${yenv[@]}" "$s" -i -c 'type npm' 2>/dev/null </dev/null | head -1)
+    n=$(grep -c 'matchapack init' "$yrc" 2>/dev/null)
+    if [ "$y1rc" = 0 ] && [ -z "$y1" ] && [ "$n" = 1 ] && printf '%s\n' "$y2" | grep -q 'already runs matchapack init' \
+      && printf '%s\n' "$out" | grep -Eq '^npm is a (shell )?function'; then
+      pass=$((pass+1)); echo "PASS real init $s --yes: the line in $s's own file, npm a function in a new $s -i, one line after two runs"
+    else
+      fail=$((fail+1)); echo "FAIL real init $s --yes: status $y1rc, stdout [$y1], lines $n, type npm [$out], second run [$y2]"; [ -f "$yrc" ] && sed 's/^/    /' "$yrc"
+    fi
+  done
+
   d=$(rproj ci npm); n0=$(logn)
   rfish "$d" 'npm ci --no-audit --no-fund; echo "status $status"'
   [ "$(printf '%s\n' "$out" | tail -1)" = "status 0" ] && [ "$(logn)" = $((n0+1)) ] && [ "$(lastrec 'r["outcome"], r["args"]')" = "('installed', ['ci', '--no-audit', '--no-fund'])" ] \

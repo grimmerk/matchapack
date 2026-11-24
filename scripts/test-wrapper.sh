@@ -513,8 +513,12 @@ done
 # 25. The by-hand report on the short name. From an rc line (stdout a pipe)
 # nothing on stderr; by hand (stdout a terminal, a pty here) one line on
 # whether the name will be defined: `ls` is on PATH, so it will not (and the
-# guarded line is printed); a free `mp` will; --no-alias says so.
-tty_init() { env PATH="$1" python3 -c 'import pty, sys; pty.spawn(sys.argv[1:])' matchapack init zsh "${@:2}" 2>&1; }
+# guarded line is printed); a free `mp` will; --no-alias says so. By hand,
+# init offers to add its line to the startup file: --print prints the code
+# and only says what to add (it never asks), and HOME is a scratch one (no
+# ZDOTDIR or XDG_CONFIG_HOME), so the user's own files are never read.
+mkdir -p "$work/init-home"
+tty_init() { env -u ZDOTDIR -u XDG_CONFIG_HOME HOME="$work/init-home" PATH="$1" python3 -c 'import pty, sys; pty.spawn(sys.argv[1:])' matchapack init zsh --print "${@:2}" 2>&1; }
 mkdir -p "$work/mp-on-path"; printf '#!/bin/sh\necho MP-ON-PATH "$@"\n' > "$work/mp-on-path/mp"; chmod +x "$work/mp-on-path/mp"
 # PATH without any `mp` but python3's directory and the system's.
 free_path=$bin_dir:$(dirname "$(command -v python3)"):/usr/bin:/bin

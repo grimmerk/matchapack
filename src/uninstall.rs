@@ -663,7 +663,7 @@ fn is_installer_file(name: &str) -> bool {
 
 /// Whether a startup file's line is the one the install script appends:
 /// `. "<its directory>/env.sh"` (sh, bash, zsh) or `source "…/env.fish"`.
-fn is_installer_line(line: &str) -> bool {
+pub(crate) fn is_installer_line(line: &str) -> bool {
     let l = line.trim();
     let Some(p) = l.strip_prefix(". \"").or_else(|| l.strip_prefix("source \"")).and_then(|r| r.strip_suffix('"')) else { return false };
     p.ends_with("matchapack/env.sh") || p.ends_with("matchapack/env.fish")

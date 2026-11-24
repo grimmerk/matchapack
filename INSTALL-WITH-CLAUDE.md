@@ -100,7 +100,21 @@ The line for fish:
 type -q matchapack; and matchapack init | source
 ```
 
-First, without asking, look at the file:
+**The short way: let `matchapack init` find the file and add the line.** First, without asking (it writes nothing and asks nothing), run it with the user's shell named, since your own shell may be another one:
+
+```sh
+matchapack init zsh --dry-run
+```
+
+(`bash` or `fish` in place of `zsh`; use the full path to `matchapack` if it is not on your `PATH` yet). It prints the file and the exact line it would add, or the line that already runs matchapack init, with a warning when a line after it puts matchapack on the `PATH`. It may also say that it will not write the file (when run as root, or for bash on macOS when the login profile does not load `~/.bashrc`) and why: then tell the user, and do the step by hand as below. Otherwise, show the file and the line to the user and ask. Only after a yes, run:
+
+```sh
+matchapack init zsh --yes
+```
+
+It appends the line at the end of the file, after a blank line, and never rewrites or reorders the file. Then read the end of the file and show it to the user. If the dry run said that a file already runs matchapack init and warned about lines after it, follow the first point below: `matchapack init` never moves a line. If the command fails, or this `matchapack` does not know `--dry-run`, do the step by hand as below.
+
+**By hand.** First, without asking, look at the file:
 
 ```sh
 grep -n -e matchapack -e nvm -e fnm -e mise -e volta -e asdf -e 'brew shellenv' -e cargo ~/.zshrc
@@ -125,7 +139,7 @@ tail -n 5 ~/.zshrc
 
 The line must be the last line that matters: it does nothing if it runs before matchapack is on the `PATH`. Read the end of the file again afterwards and show it to the user.
 
-Tell the user that the line also defines `mp` as a short name for `matchapack`, only when nothing named `mp` exists; `matchapack init` run by hand says whether it would. If the user does not want it, the line takes `--no-alias`: `command -v matchapack >/dev/null && eval "$(matchapack init --no-alias)"` (fish: `type -q matchapack; and matchapack init --no-alias | source`).
+Tell the user that the line also defines `mp` as a short name for `matchapack`, only when nothing named `mp` exists; `matchapack init` run by hand says whether it would. If the user does not want it, the line takes `--no-alias`: `command -v matchapack >/dev/null && eval "$(matchapack init --no-alias)"` (fish: `type -q matchapack; and matchapack init --no-alias | source`). With the short way, add `--no-alias` to both commands (`matchapack init zsh --no-alias --dry-run`, then `--yes`), and the line it adds carries it.
 
 ### Step 5 (optional): limit it to some folders
 
