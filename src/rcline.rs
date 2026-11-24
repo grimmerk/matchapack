@@ -278,6 +278,12 @@ fn show_with_target(dirs: &Dirs, file: &Path) -> String {
     format!("{shown} (a symbolic link to {t})")
 }
 
+/// Whether an answer to `setup`'s question is yes: `y` or `yes`, in any
+/// case. Anything else, an empty line or EOF included, is no.
+pub fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 /// How `setup` gets its answer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -504,6 +510,16 @@ mod tests {
         fs::create_dir_all(h.join(".config/fish/conf.d")).unwrap();
         fs::write(h.join(".config/fish/conf.d/mp.fish"), "type -q matchapack; and matchapack init | source\n").unwrap();
         assert!(hint(&dirs(&h), "fish", false, &Alias::Default, false).contains("~/.config/fish/conf.d/mp.fish:1 already"));
+    }
+
+    #[test]
+    fn only_y_or_yes_is_yes() {
+        for a in ["y\n", "Y\n", "yes\n", " YES \n", "Yes"] {
+            assert!(is_yes(a), "{a:?}");
+        }
+        for a in ["", "\n", "n\n", "no\n", "yy\n", "ye\n", "sure\n", "y es\n"] {
+            assert!(!is_yes(a), "{a:?}");
+        }
     }
 
     #[test]

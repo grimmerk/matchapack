@@ -621,7 +621,7 @@ fn main() -> Result<()> {
                 if !answer.ends_with('\n') {
                     eprintln!();
                 }
-                read.is_ok() && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+                read.is_ok() && rcline::is_yes(&answer)
             };
             let dirs = rcline::Dirs::from_env();
             let code = init(&shell, &flags, term, root, dirs.as_ref(), &mut ask, &mut std::io::stdout(), &mut std::io::stderr());
