@@ -83,24 +83,37 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
 
 **With Claude Code:** paste the prompt in [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md); Claude does the steps below, asking before each step that changes your machine. By hand:
 
-1. **Install the binary**, with Homebrew or with the install script (it puts the binary in `~/.matchapack/bin` and adds that directory to PATH):
+1. **Install the binary**, with one of these (run one, not both):
+
+   Homebrew:
 
    ```sh
    brew install grimmerk/tap/matchapack
-   # or
-   curl --proto '=https' --tlsv1.2 -LsSf \
-     https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
-     | sh
    ```
 
-2. **Add matchapack's line at the end of your shell's startup file.** Run the command for your shell (`echo $SHELL` tells you which):
+   The install script (it puts the binary in `~/.matchapack/bin` and adds that directory to PATH):
 
    ```sh
-   # zsh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | sh
+   ```
+
+2. **Add matchapack's line at the end of your shell's startup file.** Run only the command for your shell (`echo $SHELL` tells you which):
+
+   zsh:
+
+   ```sh
    echo 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.zshrc
-   # bash
+   ```
+
+   bash:
+
+   ```sh
    echo 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.bashrc
-   # fish (its configuration directory, even when XDG_CONFIG_HOME moves it)
+   ```
+
+   fish (in fish's own configuration directory, even when XDG_CONFIG_HOME moves it):
+
+   ```fish
    mkdir -p $__fish_config_dir; and echo 'type -q matchapack; and matchapack init | source' >> $__fish_config_dir/config.fish
    ```
 

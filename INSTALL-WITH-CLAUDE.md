@@ -69,9 +69,7 @@ Ask first, and explain the choices:
 - **The install script**, which downloads the prebuilt binary into `~/.matchapack/bin`:
 
   ```sh
-  curl --proto '=https' --tlsv1.2 -LsSf \
-    https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
-    | sh
+  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | sh
   ```
 
   Tell the user that this runs an install script from matchapack's GitHub releases page, and what it changes to put `~/.matchapack/bin` on the `PATH`: it appends a line, `. "$HOME/.config/matchapack/env.sh"`, to each shell startup file it finds (`~/.profile`, which it creates if missing, and those of `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.zshrc` that exist), and writes a fish file in `~/.config/fish/conf.d/`. In this session, call the binary as `~/.matchapack/bin/matchapack` until a new terminal is open.
@@ -110,7 +108,7 @@ tail -n 5 ~/.zshrc
 (with the user's file in place of `~/.zshrc`). Then:
 
 - **If the file already has a matchapack init line**, do not add a second one. If any line that sets up the `PATH` or the Node version comes after it (the install script's `. "$HOME/.config/matchapack/env.sh"`, `brew shellenv`, rustup's, or a Node version manager's), the init line must move below them: show the user both lines and ask before moving it.
-- **Otherwise**, show the line and ask, then append it at the end of the file, after a blank line. For zsh (bash: the same with `~/.bashrc`):
+- **Otherwise**, show the line and ask, then append it at the end of the file, after a blank line. For zsh (with the file picked above in place of `~/.zshrc` when `ZDOTDIR` is set; bash: the same with `~/.bashrc`):
 
   ```sh
   printf '\n%s\n' 'command -v matchapack >/dev/null && eval "$(matchapack init)"' >> ~/.zshrc
@@ -125,7 +123,7 @@ tail -n 5 ~/.zshrc
 
 The line must be the last line that matters: it does nothing if it runs before matchapack is on the `PATH`. Read the end of the file again afterwards and show it to the user.
 
-Tell the user that the line also defines `mp` as a short name for `matchapack`, only when nothing named `mp` exists; `matchapack init` run by hand says whether it would. If the user does not want it, the line takes `--no-alias` (`eval "$(matchapack init --no-alias)"`; fish: `matchapack init --no-alias | source`).
+Tell the user that the line also defines `mp` as a short name for `matchapack`, only when nothing named `mp` exists; `matchapack init` run by hand says whether it would. If the user does not want it, the line takes `--no-alias`: `command -v matchapack >/dev/null && eval "$(matchapack init --no-alias)"` (fish: `type -q matchapack; and matchapack init --no-alias | source`).
 
 ### Step 5 (optional): limit it to some folders
 
@@ -133,7 +131,7 @@ Ask whether matchapack should handle every project, or only projects under some 
 
 ### Step 6: check, and finish
 
-Check that a new shell of the user's kind has the function:
+Check that a new shell of the user's kind has the function. Run only the line for the user's shell:
 
 ```sh
 zsh -i -c 'type npm'                                  # zsh
@@ -141,7 +139,7 @@ bash -i -c 'type npm'                                 # bash (on macOS also: bas
 fish -c 'functions -q npm; and echo npm is a function'  # fish
 ```
 
-It should say that `npm` is a shell function. Then check that a routed command reaches matchapack, without changing anything: in one of the user's npm projects with a `package-lock.json` (ask which one), a dry run is handed to plain npm with matchapack's reason, and npm's own dry run installs nothing (`--ignore-scripts`, so that no script of the project, such as a root `prepare` or `postinstall`, can run and change its files):
+It should say that `npm` is a shell function. Then check that a routed command reaches matchapack, without changing anything: in one of the user's npm projects with a `package-lock.json` (ask which one), a dry run is handed to plain npm with matchapack's reason, and npm's own dry run installs nothing (`--ignore-scripts`, so that no script of the project, such as a root `prepare` or `postinstall`, can run and change its files). Again, only the line for the user's shell:
 
 ```sh
 zsh -i -c 'cd "<project>" && npm ci --dry-run --ignore-scripts'      # zsh
