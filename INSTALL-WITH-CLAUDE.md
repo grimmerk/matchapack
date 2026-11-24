@@ -69,7 +69,9 @@ Ask first, and explain the choices:
 - **The install script**, which downloads the prebuilt binary into `~/.matchapack/bin`:
 
   ```sh
-  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh | sh
+  curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
+    | sh
   ```
 
   Tell the user that this runs an install script from matchapack's GitHub releases page, and what it changes to put `~/.matchapack/bin` on the `PATH`: it appends a line, `. "$HOME/.config/matchapack/env.sh"`, to each shell startup file it finds (`~/.profile`, which it creates if missing, and those of `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.zshrc` that exist), and writes a fish file in `~/.config/fish/conf.d/`. In this session, call the binary as `~/.matchapack/bin/matchapack` until a new terminal is open.
