@@ -106,7 +106,7 @@ type -q matchapack; and matchapack init | source
 matchapack init zsh --dry-run
 ```
 
-(`bash` or `fish` in place of `zsh`; use the full path to `matchapack` if it is not on your `PATH` yet). It prints the file and the exact line it would add, or the line that already runs matchapack init, with a warning when a line after it puts matchapack on the `PATH`. It may also say that it will not write the file (when run as root, or for bash on macOS when the login profile does not load `~/.bashrc`) and why: then tell the user, and do the step by hand as below. Otherwise, show the file and the line to the user and ask. Only after a yes, run:
+(`bash` or `fish` in place of `zsh`; use the full path to `matchapack` if it is not on your `PATH` yet). It prints the file and the exact line it would add, or the line that already runs matchapack init, with a warning when a line after it puts matchapack on the `PATH`. It may also say that it will not write the file (when run as root in another user's home, as under `sudo`, or for bash on macOS when no login profile loads `~/.bashrc`) and why: then tell the user, and do the step by hand as below. Otherwise, show the file and the line to the user and ask. Only after a yes, run:
 
 ```sh
 matchapack init zsh --yes

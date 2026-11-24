@@ -106,9 +106,9 @@ enum Cmd {
     /// asks (default no); on y it appends the line at the end of the file,
     /// after a blank line, and changes nothing else in the file. It prints
     /// the command to paste instead when it cannot ask (stdin is not a
-    /// terminal), as root, and for bash on macOS when the login profile
-    /// does not load ~/.bashrc. --alias, --no-alias and SHELL, when given,
-    /// go into the line.
+    /// terminal), as root in another user's home (sudo), and for bash on
+    /// macOS when no login profile loads ~/.bashrc. --alias, --no-alias and
+    /// SHELL, when given, go into the line.
     #[command(verbatim_doc_comment)]
     Init {
         #[arg(value_parser = INIT_SHELLS)]
@@ -480,7 +480,7 @@ struct Term {
 /// By hand (stdout a terminal), and with --yes or --dry-run, it prints no
 /// code (unless --print) and runs `rcline::setup`, its messages to `err`.
 #[allow(clippy::too_many_arguments)]
-fn init(shell: &str, f: &InitFlags, term: Term, root: bool, dirs: Option<&rcline::Dirs>, ask: &mut dyn FnMut(&str) -> bool, out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32 {
+fn init(shell: &str, f: &InitFlags, term: Term, euid: u32, dirs: Option<&rcline::Dirs>, ask: &mut dyn FnMut(&str) -> bool, out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32 {
     // A refused name still prints the integration, without the alias:
     // the rc line's eval / source runs whatever is printed, and the
     // npm and yarn functions must not go missing over a bad name.
@@ -531,7 +531,7 @@ fn init(shell: &str, f: &InitFlags, term: Term, root: bool, dirs: Option<&rcline
         let _ = writeln!(err);
     }
     let a = rcline::Alias::from_args(f.no_alias, f.alias);
-    let setup = rcline::Setup { mode, named: f.named, short, root };
+    let setup = rcline::Setup { mode, named: f.named, short, root_in_other_home: rcline::root_in_other_home(euid, &dirs.home) };
     match rcline::setup(dirs, shell, &a, macos, &setup, ask, err) {
         // --yes asked for a write that did not happen: a script must see it.
         Ok(rcline::Outcome::Refused) if f.yes => 1,
@@ -611,7 +611,7 @@ fn main() -> Result<()> {
             let flags = InitFlags { named, alias: alias.as_deref(), no_alias, yes, dry_run, print };
             let term = Term { stdout: std::io::stdout().is_terminal(), stdin: std::io::stdin().is_terminal() };
             // SAFETY: geteuid has no preconditions and cannot fail.
-            let root = unsafe { libc::geteuid() } == 0;
+            let euid = unsafe { libc::geteuid() };
             let mut ask = |q: &str| {
                 eprint!("{q}");
                 let _ = std::io::stderr().flush();
@@ -624,7 +624,7 @@ fn main() -> Result<()> {
                 read.is_ok() && rcline::is_yes(&answer)
             };
             let dirs = rcline::Dirs::from_env();
-            let code = init(&shell, &flags, term, root, dirs.as_ref(), &mut ask, &mut std::io::stdout(), &mut std::io::stderr());
+            let code = init(&shell, &flags, term, euid, dirs.as_ref(), &mut ask, &mut std::io::stdout(), &mut std::io::stderr());
             if code != 0 {
                 std::process::exit(code);
             }
@@ -916,7 +916,8 @@ mod tests {
             answer.expect("asked, but this run must not ask")
         };
         let (mut out, mut err) = (vec![], vec![]);
-        let code = init(shell, f, term, false, Some(&dirs), &mut ask, &mut out, &mut err);
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let code = init(shell, f, term, unsafe { libc::geteuid() }, Some(&dirs), &mut ask, &mut out, &mut err);
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap(), asked)
     }
 
@@ -954,6 +955,8 @@ mod tests {
         let (code, out, err, _) = run_init(&h, "zsh", &InitFlags { yes: true, ..NONE }, PIPE, None);
         assert_eq!((code, out.as_str()), (0, ""));
         assert!(err.contains("added line 2 at the end of ~/.zshrc"), "{err}");
+        // A login profile that loads ~/.bashrc: macOS writes ~/.bashrc too.
+        std::fs::write(h.join(".bash_profile"), "[ -f ~/.bashrc ] && . ~/.bashrc\n").unwrap();
         // By hand, and stdin a terminal: it asks; a no writes nothing.
         let (code, out, err, asked) = run_init(&h, "bash", &NONE, Term { stdout: true, stdin: true }, Some(false));
         assert_eq!((code, out.as_str(), asked.len()), (0, "", 1));

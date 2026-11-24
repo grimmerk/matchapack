@@ -239,17 +239,28 @@ fn path_lines_after(file: &Path, n: usize) -> Vec<(usize, String)> {
     String::from_utf8_lossy(&text).lines().enumerate().skip(n).filter(|(_, l)| puts_matchapack_on_path(l)).map(|(i, l)| (i + 1, l.to_string())).collect()
 }
 
-/// Why `setup` must not write the file, even after a yes: run as root (under
-/// sudo, HOME may still be the user's, and the file would be written by
-/// root), or bash on macOS whose login profile never loads ~/.bashrc (so a
-/// line there would not run in Terminal).
-fn no_write_reason(dirs: &Dirs, shell: &str, macos: bool, root: bool) -> Option<String> {
-    if root {
-        return Some("matchapack init: running as root, so it does not write the file: under sudo, HOME can still be your own, and a startup file written by root is the wrong thing to leave there. Run `matchapack init` as yourself, or add the line by hand.".to_string());
+/// Whether the process runs as root (effective user id `euid` 0) in a home
+/// directory that belongs to another user: `sudo matchapack init` on macOS
+/// keeps the user's HOME. Root in its own home (`/root` in a container)
+/// is not this case, nor a home whose owner cannot be read.
+pub fn root_in_other_home(euid: u32, home: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    euid == 0 && std::fs::metadata(home).is_ok_and(|m| m.uid() != 0)
+}
+
+/// Why `setup` must not write the file, even after a yes: root in another
+/// user's home (`root_in_other_home`: the file would be written by root),
+/// or bash on macOS whose login bash never reads ~/.bashrc (no profile, or
+/// one that does not load it), so a line there would not run in Terminal.
+fn no_write_reason(dirs: &Dirs, shell: &str, macos: bool, root_in_other_home: bool) -> Option<String> {
+    if root_in_other_home {
+        return Some(format!("matchapack init: running as root in {}, a home directory that belongs to another user (as under sudo), so it does not write the file: a startup file written by root does not belong there. Run `matchapack init` as that user, or add the line by hand.", dirs.home.display()));
     }
     if shell == "bash" && macos {
         // A login bash reads only the first of its profiles that exists.
-        let profile = dirs.login_files("bash").into_iter().next()?;
+        let Some(profile) = dirs.login_files("bash").into_iter().next() else {
+            return Some("matchapack init: Terminal on macOS opens login shells, and a login bash reads ~/.bash_profile, ~/.bash_login or ~/.profile, none of which exists here: it would never read ~/.bashrc, so it does not write it. Create ~/.bash_profile containing `[ -f ~/.bashrc ] && . ~/.bashrc` and run `matchapack init` again, or add matchapack's line to ~/.bash_profile yourself.".to_string());
+        };
         let text = std::fs::read(&profile).ok()?;
         let loads = String::from_utf8_lossy(&text).lines().any(|l| code(l).is_some_and(|c| c.contains(".bashrc")));
         if !loads {
@@ -305,8 +316,8 @@ pub struct Setup<'a> {
     pub named: bool,
     /// The short name the line will define, for the next step's `type`.
     pub short: Option<&'a str>,
-    /// Running as root (effective user id 0).
-    pub root: bool,
+    /// Running as root in another user's home (`root_in_other_home`).
+    pub root_in_other_home: bool,
 }
 
 /// What `setup` did.
@@ -362,7 +373,7 @@ pub fn setup(dirs: &Dirs, shell: &str, alias: &Alias, macos: bool, s: &Setup, as
     let file = dirs.startup_file(shell);
     let shown = dirs.show(&file);
     let the_line = line(shell, s.named, alias);
-    if let Some(why) = no_write_reason(dirs, shell, macos, s.root) {
+    if let Some(why) = no_write_reason(dirs, shell, macos, s.root_in_other_home) {
         say(&format!("{why}\n\n{}", hint(dirs, shell, s.named, alias, macos)));
         return Ok(Outcome::Refused);
     }
@@ -530,11 +541,11 @@ mod tests {
 
     const ZSH_LINE: &str = r#"command -v matchapack >/dev/null && eval "$(matchapack init)""#;
 
-    /// `setup` in `mode` (not root, the shell not named, short name `mp`)
+    /// `setup` in `mode` (not root elsewhere, the shell not named, short name `mp`)
     /// with an answer of `answer` (None: asking is a failure), and what it
     /// said: (outcome, messages, the questions asked).
     fn run(d: &Dirs, shell: &str, alias: &Alias, macos: bool, mode: Mode, answer: Option<bool>) -> (anyhow::Result<Outcome>, String, Vec<String>) {
-        run_as(d, shell, alias, macos, &Setup { mode, named: false, short: Some("mp"), root: false }, answer)
+        run_as(d, shell, alias, macos, &Setup { mode, named: false, short: Some("mp"), root_in_other_home: false }, answer)
     }
 
     fn run_as(d: &Dirs, shell: &str, alias: &Alias, macos: bool, s: &Setup, answer: Option<bool>) -> (anyhow::Result<Outcome>, String, Vec<String>) {
@@ -699,19 +710,37 @@ mod tests {
         assert!(!h.join(".bashrc").exists());
         // Linux: a terminal starts a non-login bash, which reads ~/.bashrc.
         assert_eq!(run(&dirs(&h), "bash", &Alias::Default, false, Mode::Yes, None).0.unwrap(), Outcome::Written(h.join(".bashrc"), 2));
-        // A profile that loads ~/.bashrc, or none at all: written.
+        // No profile at all: a login bash reads none, so not ~/.bashrc either.
+        let h = scratch("setup-mac-no-profile");
+        for mode in [Mode::Ask, Mode::Yes, Mode::DryRun] {
+            let (r, out, _) = run(&dirs(&h), "bash", &Alias::Default, true, mode, None);
+            assert_eq!(r.unwrap(), Outcome::Refused, "{mode:?}");
+            assert!(out.contains("none of which exists here") && out.contains("Create ~/.bash_profile containing `[ -f ~/.bashrc ] && . ~/.bashrc`") && out.contains(">> ~/.bashrc"), "{out}");
+        }
+        assert_eq!(fs::read_dir(&h).unwrap().count(), 0, "nothing written");
+        // A profile that loads ~/.bashrc: written.
         let h = scratch("setup-mac-profile-loads");
         fs::write(h.join(".bash_profile"), "[ -f ~/.bashrc ] && . ~/.bashrc\n").unwrap();
         assert_eq!(run(&dirs(&h), "bash", &Alias::Default, true, Mode::Yes, None).0.unwrap(), Outcome::Written(h.join(".bashrc"), 2));
     }
 
     #[test]
-    fn root_is_not_written_for() {
+    fn root_in_another_users_home_is_not_written_for() {
+        use std::os::unix::fs::MetadataExt;
         let h = scratch("setup-root");
-        let s = Setup { mode: Mode::Yes, named: false, short: None, root: true };
+        let me = fs::metadata(&h).unwrap().uid();
+        assert_ne!(me, 0, "run the tests as a normal user");
+        // Root in a home that is not root's (sudo keeps the user's HOME): refused.
+        assert!(root_in_other_home(0, &h));
+        // Root in its own home (`/` is root's on macOS and Linux, as /root is): written.
+        assert!(!root_in_other_home(0, Path::new("/")));
+        // Not root; or a home whose owner cannot be read.
+        assert!(!root_in_other_home(me, &h));
+        assert!(!root_in_other_home(0, &h.join("missing")));
+        let s = Setup { mode: Mode::Yes, named: false, short: None, root_in_other_home: root_in_other_home(0, &h) };
         let (r, out, _) = run_as(&dirs(&h), "zsh", &Alias::Default, false, &s, None);
         assert_eq!(r.unwrap(), Outcome::Refused);
-        assert!(out.contains("running as root") && out.contains(&format!("echo '{ZSH_LINE}' >> ~/.zshrc")), "{out}");
+        assert!(out.contains("running as root in") && out.contains("belongs to another user") && out.contains(&format!("echo '{ZSH_LINE}' >> ~/.zshrc")), "{out}");
         assert!(!h.join(".zshrc").exists());
     }
 
@@ -720,7 +749,7 @@ mod tests {
         let h = scratch("setup-alias");
         run(&dirs(&h), "zsh", &Alias::Named("mpk"), false, Mode::Yes, None).0.unwrap();
         assert_eq!(fs::read_to_string(h.join(".zshrc")).unwrap(), "\ncommand -v matchapack >/dev/null && eval \"$(matchapack init --alias mpk)\"\n");
-        let s = Setup { mode: Mode::Yes, named: true, short: None, root: false };
+        let s = Setup { mode: Mode::Yes, named: true, short: None, root_in_other_home: false };
         let (_, out, _) = run_as(&dirs(&h), "fish", &Alias::None, false, &s, None);
         assert_eq!(fs::read_to_string(h.join(".config/fish/config.fish")).unwrap(), "\ntype -q matchapack; and matchapack init fish --no-alias | source\n");
         // Without a short name, the next step names npm only.
