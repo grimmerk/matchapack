@@ -3,6 +3,7 @@ mod clone;
 mod diff;
 mod gc;
 mod inject;
+mod rcline;
 mod replay;
 mod serve;
 mod signals;
@@ -95,7 +96,8 @@ enum Cmd {
     /// when nothing of that name exists yet (an alias, function, builtin or
     /// command on PATH), checked at every shell start. --alias NAME picks
     /// another name, --no-alias none. Run by hand on a terminal, it says
-    /// whether the name would be defined.
+    /// whether the name would be defined, and which line to add to which
+    /// startup file (or where the line already is); it never edits the file.
     #[command(verbatim_doc_comment)]
     Init {
         #[arg(value_parser = INIT_SHELLS)]
@@ -497,7 +499,7 @@ fn main() -> Result<()> {
             // A refused name still prints the integration, without the alias:
             // the rc line's eval / source runs whatever is printed, and the
             // npm and yarn functions must not go missing over a bad name.
-            let name = if no_alias { None } else { Some(alias.unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
+            let name = if no_alias { None } else { Some(alias.clone().unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
             let refused = name.as_deref().and_then(|n| check_alias(n, &shell).err());
             use std::io::IsTerminal;
             let tty = std::io::stdout().is_terminal();
@@ -512,6 +514,16 @@ fn main() -> Result<()> {
                 eprintln!("{n}");
             }
             print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { name.as_deref() }));
+            // By hand only: what to add to which file, after the code (the
+            // last thing on the screen). From the rc line stdout is a pipe.
+            if tty && refused.is_none() {
+                if let Some(dirs) = rcline::Dirs::from_env() {
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    let a = rcline::Alias::from_args(no_alias, alias.as_deref());
+                    eprintln!("\n{}", rcline::hint(&dirs, &shell, &a, cfg!(target_os = "macos")));
+                }
+            }
             if let Some(e) = refused {
                 eprintln!("matchapack init: error: {e}; the shell integration was printed without it");
                 std::process::exit(2);
