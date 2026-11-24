@@ -183,8 +183,8 @@ pub struct Settled {
 /// - `want`: the group (and setgid bit of directories) npm's extraction
 ///   would have given them (`new_paths` of the destination's parent). A
 ///   clone made directly at the destination already has it, but a placement
-///   moved in from the store's `tmp/` keeps what it got there, the store's
-///   (#41). Each path is `lstat`ed, and `lchown`ed (a directory: `chmod`ed)
+///   moved in from the store's `tmp/` keeps what it got there, the store's.
+///   Each path is `lstat`ed, and `lchown`ed (a directory: `chmod`ed)
 ///   only when it differs.
 ///
 /// The walk is over `src`, which nothing changes, so paths other packages

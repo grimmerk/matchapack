@@ -20,7 +20,7 @@ their own in a copy (scripts/fixture-server.py).
                   `node "$npm_execpath" --version` (execpath.txt)
   y1-rootpath 1.0.0  an install script that writes built/<its own absolute
                   directory>/marker: a path named after the tree, as
-                  node-gyp's .deps/ (issue grimmerk/matchapack-private#48)
+                  node-gyp's .deps/
   y1-many 1.0.0/2.0.0  300 files and a bin: more than the 128 first copies
                   of Yarn's link step, which the Yarn 1 engine leaves to Node
 
@@ -120,7 +120,7 @@ require('fs').writeFileSync('execpath.txt', p + '\\n' + v)
 
 
 # Names a file after its own directory, as node-gyp's make build does under
-# build/Release/.deps/<absolute path>/ (issue grimmerk/matchapack-private#48): its install script writes
+# build/Release/.deps/<absolute path>/: its install script writes
 # built/<cwd without the leading />/marker, so every tree has another path.
 # Used by yarn1-rootpath and by the npm fixture rootpath.
 tarball("y1-rootpath-1.0.0.tgz", [

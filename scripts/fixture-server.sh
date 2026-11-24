@@ -1,5 +1,5 @@
 # Sourced by the suites (needs $here, the checkout): the fixtures' tarball
-# server for this run (#66).
+# server for this run.
 #   fixtures_serve <dir>
 # sets FX (the fixtures to use: a copy under <dir> whose tarball URLs name
 # this run's port), FX_URL (http://127.0.0.1:<port>), FX_PORT and FX_PID

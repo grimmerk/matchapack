@@ -1,4 +1,4 @@
-//! Stopping matchapack stops what it started (grimmerk/matchapack-private#64).
+//! Stopping matchapack stops what it started.
 //!
 //! npm (src/inject.rs) and Yarn (src/yarn1.rs) run in a node child that
 //! stays in matchapack's process group, so a signal sent to the whole group
@@ -172,9 +172,9 @@ pub fn arm() -> Armed {
 
 /// `arm` with the pipe to `relay_stop`, or without one (`pipe` failed: no
 /// descriptor left). Without it nothing is caught: a signal ends this
-/// process at once, as before #64, and the hook stops npm when the socket
-/// closes; a handler with nowhere to say the signal would leave npm running
-/// while matchapack waited for it.
+/// process at once, as before signal forwarding was added, and the hook
+/// stops npm when the socket closes; a handler with nowhere to say the
+/// signal would leave npm running while matchapack waited for it.
 fn arm_with(fds: Option<[libc::c_int; 2]>) -> Armed {
     FIRST.store(0, Ordering::SeqCst);
     DIE_SIG.store(0, Ordering::SeqCst);
@@ -233,8 +233,9 @@ pub fn child_defaults() {
 impl Armed {
     /// After the child's run (it has exited and the server has returned).
     /// Without a signal the earlier handlers come back (a signal now ends
-    /// this process at once, as before #64). After one, the handler stays: a
-    /// second signal ends the process at once while the run is logged.
+    /// this process at once, as before signal forwarding was added). After
+    /// one, the handler stays: a second signal ends the process at once
+    /// while the run is logged.
     /// The three are blocked on this thread meanwhile (the serving threads
     /// are gone: none can run the handler), so that none falls between the
     /// check and the restore; one that came on another thread all the same
@@ -389,7 +390,8 @@ mod tests {
     }
 
     /// Without the pipe (`pipe` failed), nothing is caught: the handlers stay
-    /// as they were (a signal ends the process, as before #64).
+    /// as they were (a signal ends the process, as before signal forwarding
+    /// was added).
     #[test]
     fn without_the_pipe_nothing_is_caught() {
         let before: Vec<_> = CAUGHT.iter().map(|&s| handler_of(s)).collect();

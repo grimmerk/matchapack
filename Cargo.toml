@@ -40,7 +40,7 @@ sha2 = "0.11.1"
 walkdir = "2.5.0"
 
 # Tests only: the store tests' tarballs and their extractor (the classic
-# engine's, removed in PR C2; installs extract with npm's pacote).
+# engine's, removed before 0.1.0; installs extract with npm's pacote).
 [dev-dependencies]
 flate2 = "1.1.10"
 tar = "0.4.46"

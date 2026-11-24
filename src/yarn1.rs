@@ -421,7 +421,7 @@ fn yarn_bin(p: &Path) -> std::result::Result<YarnBin, String> {
 /// Whether the project at `cwd` is a Yarn 2+ one, decided from files only:
 /// a few `stat` calls and small reads, no node and no yarn.js lookup (the
 /// owner runs `yarn install` in Yarn 4 worktrees far more often than in Yarn
-/// 1 ones; design review 2026-11-13 §4 item 8). Yarn 2+: a `.yarnrc.yml`
+/// 1 ones). Yarn 2+: a `.yarnrc.yml`
 /// between `cwd` and the lockfile folder (not above it: a user's
 /// `~/.yarnrc.yml` does not make a Yarn 1 project a Yarn 4 one; Yarn 1.22
 /// runs a `yarnPath` from it itself), a `packageManager` of `yarn@` other
@@ -1608,7 +1608,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     eprintln!("matchapack: yarn with clones of Yarn's cache (MATCHAPACK=0 yarn for plain Yarn)");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&cwd, &root, &yarn, &args)));
     util::remove_run_dir();
-    // Stopped by a signal while Yarn ran (src/signals.rs, #64): Yarn was
+    // Stopped by a signal while Yarn ran (src/signals.rs): Yarn was
     // told to stop, or got the signal itself, and has exited; never run it
     // again (a decline would run plain Yarn). Logged as interrupted; the
     // status is Yarn's (main.rs ends by its signal when it died of one).

@@ -339,7 +339,7 @@ fn report_yarn1(runs: &[Value]) {
         count("declined"),
         count("yarn_failed"),
         count("broke"),
-        // Stopped by SIGTERM, SIGHUP or SIGINT (src/signals.rs, #64).
+        // Stopped by SIGTERM, SIGHUP or SIGINT (src/signals.rs).
         if count("interrupted") > 0 { format!(", interrupted {}", count("interrupted")) } else { String::new() }
     );
     // Which commands (src/yarn1.rs `engine_command`; a record from before
@@ -462,17 +462,17 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
         // npm itself ran and exited non-zero (the inject engine).
         if count("npm_failed") > 0 { format!(", npm failed {}", count("npm_failed")) } else { String::new() },
         // A root or dependency script failed in the classic engine's own
-        // post-install step: older logs only (removed in PR C2).
+        // post-install step: older logs only (removed before 0.1.0).
         if count("script_failed") > 0 { format!(", script failed (classic engine) {}", count("script_failed")) } else { String::new() },
-        // Stopped by SIGTERM, SIGHUP or SIGINT while npm ran (src/signals.rs, #64).
+        // Stopped by SIGTERM, SIGHUP or SIGINT while npm ran (src/signals.rs).
         if count("interrupted") > 0 { format!(", interrupted {}", count("interrupted")) } else { String::new() }
     );
     // Which engine each run went to: the inject engine logs `"engine":
     // "inject"`; runs without an engine are the classic engine's (the
-    // default before PR C1, removed in PR C2), from older logs.
+    // default before the inject engine, removed before 0.1.0), from older logs.
     if !runs.is_empty() {
         let n_inject = runs.iter().filter(|r| r["engine"] == "inject").count();
-        println!("engines: inject {n_inject}, classic (removed in PR C2; older runs) {}", runs.len() - n_inject);
+        println!("engines: inject {n_inject}, classic (removed before 0.1.0; older runs) {}", runs.len() - n_inject);
         // npm's command; records without one are npm ci's (before the
         // install family was routed).
         let mut by_cmd: std::collections::BTreeMap<&str, usize> = Default::default();
@@ -810,8 +810,8 @@ pub fn report(days: Option<f64>, store: &crate::store::Store) -> Result<()> {
 /// npm's and Yarn's side by side, each with its counts by result and its
 /// five most recent samples (`at` formats a time), each naming the command
 /// replayed and its kind: a full install (`npm ci`, `yarn install`) or a
-/// command that started with no node_modules ("started empty", #77 part
-/// 1b). Yarn's part shows when it has samples, or when the log has
+/// command that started with no node_modules ("started empty", #16).
+/// Yarn's part shows when it has samples, or when the log has
 /// `matchapack yarn` runs to sample.
 fn verify_lines(ver: &[Value], yarn_runs: bool, at: &dyn Fn(f64) -> String) -> Vec<String> {
     let (yarn, npm): (Vec<&Value>, Vec<&Value>) = ver.iter().partition(|v| v["engine"] == "yarn1");

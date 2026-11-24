@@ -11,7 +11,7 @@
 //! global or install nothing, a start directory outside the trial scope).
 //! The gates that depend on where npm installs (the trial scope, a symlinked
 //! node_modules, a global install set in an npmrc) run on npm's own install
-//! root when npm reports it (serve.rs `accept_root`; #36).
+//! root when npm reports it (serve.rs `accept_root`).
 
 use crate::{trial, util, InstallError};
 use serde_json::{json, Value};
@@ -86,9 +86,9 @@ pub fn run(args: Vec<String>) -> i32 {
         trial::append(rec);
     };
     // MATCHAPACK_ENGINE: unset, empty or `inject`; anything else (`classic`,
-    // removed in PR C2, included) is plain npm with the reason. Logged as
+    // removed before 0.1.0, included) is plain npm with the reason. Logged as
     // the inject engine's run: `report` counts runs without an engine as
-    // the classic engine's, from logs written before PR C2.
+    // the classic engine's, from logs written before it was removed.
     if let Err(reason) = crate::inject::engine() {
         log("declined", json!({ "engine": "inject", "reason": reason }));
         return decline(&args, command, &reason);
@@ -379,7 +379,7 @@ fn write_removal_list_in(dir: &std::path::Path, paths: &[std::path::PathBuf]) ->
 }
 
 /// What to tell a user after a run of the install family that broke, so
-/// that they can check and rebuild (the owner's notes, Q5 §18): one or two
+/// that they can check and rebuild: one or two
 /// sentences, then each command on a line of its own. By default `npm ci`
 /// with the command's own arguments, which rebuilds from the lockfile npm
 /// wrote (npm ci takes an install command's flags and ignores package
@@ -388,12 +388,11 @@ fn write_removal_list_in(dir: &std::path::Path, paths: &[std::path::PathBuf]) ->
 ///   root), or `package-lock` false: npm ci would refuse, or rebuild from a
 ///   lockfile this run did not update;
 /// - `save` false (`--no-save`; `npm update` does not save package.json by
-///   default, so not for it): the lockfile does not have what the run added
-///   (§18.3 s-no-save);
+///   default, so not for it): the lockfile does not have what the run added;
 ///   for both: remove the root's node_modules and run the same command with
 ///   plain npm;
 /// - a command filtered to some workspaces: `npm ci -w x` removes the
-///   packages of the other workspaces (§18.3 w-add-w, w-add-member), so npm
+///   packages of the other workspaces, so npm
 ///   ci of the whole project rebuilds it;
 /// - both: remove the root's node_modules, reinstall the whole project,
 ///   then the command again (the filtered command alone would bring back
@@ -567,7 +566,7 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
         let list = (placed.dirs.len() > LIST_IN_FILE).then(|| write_removal_list(&placed.dirs.iter().flat_map(|d| removal_targets(d)).collect::<Vec<_>>())).flatten();
         eprintln!("matchapack: {}; {what}. {}", one_line(e), repair_advice(args, command, root.as_deref(), &settings, &env, &placed, list.as_deref()));
     };
-    // Stopped by a signal while npm ran (src/signals.rs, #64): npm was told
+    // Stopped by a signal while npm ran (src/signals.rs): npm was told
     // to stop, or got the signal itself, and has exited. Nothing runs npm
     // again (no plain npm ci after a broken run, no plain npm after a
     // decline): the user asked for the install to stop. Logged as
@@ -660,7 +659,8 @@ fn run_inject(args: &[String], command: &str, log: &dyn Fn(&str, Value)) -> i32 
                 eprintln!("{}", rebuild_line(&error, removed));
                 return exec_npm(args);
             }
-            // pacote's extraction not what the clones reproduce (C1's check):
+            // pacote's extraction not what the clones reproduce (serve.rs
+            // `halt_on_extraction`):
             // npm finished, but its files may not be what it alone wrote.
             let what = if inject.as_ref().is_some_and(|i| i["extraction_unexpected"].is_string()) {
                 "node_modules may not be what npm alone would have written"

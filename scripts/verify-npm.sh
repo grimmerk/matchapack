@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The npm upgrade routine (#11): run the harness on the npm on PATH.
+# The npm upgrade routine: run the harness on the npm on PATH.
 #   verify-npm.sh [--no-record] <work-dir> [extra project dir...]
 # Cases: the fixtures (hidden lockfile byte-identical; rootpath writes a file
 # named after its own directory), script-env through the shell function,
@@ -9,12 +9,12 @@
 # repository is worth adding: the fixtures are small). Every case must have
 # cloned something (a run in which the hook never fired would pass without
 # testing it). Then the sampled verification of real runs
-# (scripts/verify-sample.sh, #77) on a scratch run log. Nothing is recorded: the version gate is by npm major
+# (scripts/verify-sample.sh, #16) on a scratch run log. Nothing is recorded: the version gate is by npm major
 # (INJECT_NPM_MAJORS in src/wrapper.rs), and inside a major by the pacote
 # fingerprint (src/npm-fingerprints.json; the cases run on any, and the
 # first line says whether this npm's is listed). --no-record is accepted and ignored
 # (it turned off recording into npm-verified, the classic engine's gate,
-# removed in PR C2).
+# removed before 0.1.0).
 set -uo pipefail
 if [ "${1-}" = --no-record ]; then shift; fi
 work=${1:?usage: verify-npm.sh [--no-record] <work-dir> [extra project dir...]}; shift
@@ -84,7 +84,7 @@ case_() { # name env-assignments... -- source [matchapack install args...]
 }
 # rootpath: an install script names a file after its own directory, so A and
 # B have another path there; verify.sh's --normalize-roots must make them the
-# same (issue grimmerk/matchapack-private#48). workspaces: `npm ci` at the root of an npm workspaces
+# same. workspaces: `npm ci` at the root of an npm workspaces
 # project (links, a workspace's own nested node_modules and .bin, an install
 # script), also compared with --meta (times outside the runs, uid, gid,
 # xattr names).
@@ -147,7 +147,7 @@ echo 'dangerously-allow-all-scripts=true' > "$nsrc/.npmrc"
 noscripts_ noscripts-control all "$nsrc" -- ci
 noscripts_ noscripts-ci none "$nsrc" -- ci --ignore-scripts
 noscripts_ noscripts-ci-env none "$nsrc" npm_config_ignore_scripts=true -- ci
-# npm install from no node_modules (the install family, A2).
+# npm install from no node_modules (the install family).
 noscripts_ noscripts-install none "$nsrc" -- install --ignore-scripts
 # The project's own .npmrc.
 echo 'ignore-scripts=true' >> "$nsrc/.npmrc"
@@ -339,7 +339,7 @@ if [ "${npm_version%%.*}" -ge 12 ]; then
   steps_ npm12-patch "$FX/npm12-patch" --start ci --pre "sed -i.bak 's/patched by gl-patch-fixture/patched again by gl-patch-fixture/' patches/is-number@7.0.0.patch && rm patches/is-number@7.0.0.patch.bak" -- install
 fi
 
-# Sampled verification of real runs (scripts/verify-sample.sh, #77): a
+# Sampled verification of real runs (scripts/verify-sample.sh, #16): a
 # scratch run log filled by `matchapack npm` on a copy of a small fixture
 # (the logged runs), then the sampler on it. npm ci replayed with its logged
 # words as a full install; an `npm install <pkg>` that started with no

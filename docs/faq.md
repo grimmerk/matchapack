@@ -39,7 +39,7 @@ Sources: npm [cache](https://docs.npmjs.com/cli/v12/commands/npm-cache/) and [co
 
 ## Why not hard links?
 
-A hard link is one file in many places. An edit in one checkout (a patched package, a build that writes into `node_modules`) would change every checkout and the shared copy, and all places share one set of file times and modes, so a tree could not have the times npm gives it. A copy-on-write clone is an independent file: an edit copies only the changed blocks, into that checkout. The price is a file system that clones: APFS on macOS, Btrfs or XFS on Linux.
+A hard link is one file in many places. An edit in one checkout (a patched package, a build that writes into `node_modules`) would change every checkout and the shared copy, and all places share one set of file times and modes, so a tree could not have the times npm gives it. A copy-on-write clone is an independent file: an edit copies only the changed blocks, into that checkout. The price is a file system that clones: APFS on macOS, Btrfs or XFS (made with reflink support) on Linux.
 
 ## Does `du` show the saving?
 

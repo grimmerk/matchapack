@@ -12,8 +12,8 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 bin_dir=$here/target/release
 mkdir -p "$work"; work=$(cd "$work" && pwd -P)
 # Projects in a directory of the user's own group (macOS /tmp is wheel, a
-# group the user is not in: some packages would then be npm's own extraction,
-# #41; nothing here counts them, but the work dir stays like test-inject's).
+# group the user is not in: some packages would then be npm's own extraction;
+# nothing here counts them, but the work dir stays like test-inject's).
 chgrp "$(id -g)" "$work"
 # Test runs log to the work dir and use a store of their own, never the real
 # ones.
@@ -95,7 +95,7 @@ d=$(new_project inscope); CMD="npm ci"; rc=$(run "$d" MATCHAPACK_PATHS="/nonexis
 [ "$rc" = 0 ] && by_matchapack "$d" && r=ok || r=bad
 check scope-in "project inside the trial scope → matchapack" $r "$d"
 
-# 29. A hand-over happens before matchapack changes anything (#27). With
+# 29. A hand-over happens before matchapack changes anything. With
 # MATCHAPACK_NO_FALLBACK=1 matchapack exits 3 instead of running npm, so the
 # project shows exactly what matchapack did: an existing node_modules (a
 # sentinel, a 2020 mtime) must be untouched, mtimes included. Two hand-overs
@@ -155,7 +155,7 @@ else
   check npm-u "npm u on npm $(npm -v): routed, npm's update" $r "$d"
 fi
 
-# 32. Stopped by a signal (#64; src/signals.rs). npm stays in matchapack's
+# 32. Stopped by a signal (src/signals.rs). npm stays in matchapack's
 #     process group; its hook stops it when matchapack goes away or says a
 #     signal stopped it. Each case is compared with plain npm given the same
 #     signal at the same point: the exit status, what is left in

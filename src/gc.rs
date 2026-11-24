@@ -12,7 +12,7 @@
 //! run's `root`, or its `dir` in logs from before npm reported its root),
 //! with the entries their hidden lockfile
 //! (`node_modules/.package-lock.json`) lists, or recorded by `store adopt`
-//! (`adopt` below, #30), which finds them by walking directories.
+//! (`adopt` below), which finds them by walking directories.
 
 use crate::store::{Integrity, Store, GRACE_SECS};
 use anyhow::{Context, Result};
@@ -207,7 +207,7 @@ pub struct AdoptReport {
 
 /// `store adopt`: record the projects under `dirs` that have npm's hidden
 /// lockfile, with the store entries it lists, so that `gc` keeps them. For
-/// projects installed before installs wrote records (#30).
+/// projects installed before installs wrote records.
 ///
 /// Errs on the side of keeping: a project installed by plain npm has a
 /// hidden lockfile too, and its entries are kept as well (nothing can tell

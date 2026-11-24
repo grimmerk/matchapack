@@ -23,7 +23,7 @@
 # which Yarn 1 does not read: every script runs, as in plain Yarn); its gates, the start-up probe, the report,
 # two volumes (a disk image); Homebrew's yarn launcher, and (MATCHAPACK_FISH=
 # <fish>) the yarn function under fish; the sampled verification of logged
-# runs (verify-sample.sh --yarn, #77). Needs the release binary, node and Yarn 1
+# runs (verify-sample.sh --yarn, #16). Needs the release binary, node and Yarn 1
 # (MATCHAPACK_YARN_NODE / MATCHAPACK_YARN_JS as in verify-yarn1.sh).
 # Installs from the local tarball server only; never touches the real Yarn
 # cache or ~/.yarnrc (checked).
@@ -133,14 +133,14 @@ groups_other() { # a group the user is in, other than the one of $1
 # TEST_YARN1_PART=commands only the Yarn commands that change dependencies
 # (add, upgrade, remove, upgrade-interactive, workspace);
 # TEST_YARN1_PART=sample only the sampled verification (verify-sample.sh --yarn).
-# --- Sampled verification of real runs (verify-sample.sh --yarn, #77) ---------
+# --- Sampled verification of real runs (verify-sample.sh --yarn, #16) ---------
 # TEST_YARN1_PART=sample: only these. A scratch run log, filled by
 # `matchapack yarn` run on fixtures (the logged runs), then
 # verify-sample.sh --yarn on it: a replay identical to plain Yarn (a root
 # with --frozen-lockfile, a workspace directory without it); a damaged engine
 # tree reported as DIFFERENT, or RACE-SHAPED where plain Yarn's own probe race
-# (#57) could have made it; a `yarn add` that started with no node_modules
-# (part 1b), replayed from the files before it (git HEAD), and damaged; the
+# could have made it; a `yarn add` that started with no node_modules,
+# replayed from the files before it (git HEAD), and damaged; the
 # skips (directory gone, yarn.lock changed, the run changed the files and
 # they are not in git, a hidden argument, an older record, another Yarn, an
 # rc file above the project, a relative --use-yarnrc, an unusable cache,
@@ -332,7 +332,7 @@ if [ "$(vrec '(r["result"], r.get("first_result"), r.get("rerun_result"))')" = "
 else bad "sample: plain varies always ($(vrec 'r.get("result"), r.get("first_result"), r.get("rerun_result"), r.get("reason")'))"; fi
 # Plain varying at two paths with several threads, at one of them only with
 # one thread: the engine's first difference at the other is not proven
-# plain's (CodeRabbit, review round 4): RACE-SHAPED, not IDENTICAL.
+# plain's: RACE-SHAPED, not IDENTICAL.
 pv3=$(pv_project pvtwo "process.env.UV_THREADPOOL_SIZE !== '1'" "true")
 sp_install "$pv3" --frozen-lockfile
 sp_sample -- "$pv3"
@@ -415,7 +415,7 @@ skip() { # skip <label> <expected reason text> [verify-sample.sh args]
   local got; got=$(vrec 'r["result"] + ": " + r.get("reason", "")')
   case $got in "SKIPPED: "*"$want"*) ok "sample: skipped, $label ($got)" ;; *) bad "sample: $label: got '$got', exit $rc" ;; esac
 }
-# 3b. A command that started with no node_modules (#77 part 1b): `yarn add`
+# 3b. A command that started with no node_modules (#16): `yarn add`
 # in a fresh copy, which changes package.json and yarn.lock; replayed from
 # the files before it, which are the project's git HEAD.
 pg=$(sp_project gitadd yarn1-small); pg=$(cd "$pg" && pwd -P)
@@ -825,7 +825,7 @@ if [ $rc = 0 ] && same && [ -z "$got" ] && [ "${n:-0}" -ge 150 ] && first128 nos
 else bad "yarn add --ignore-scripts (exit $rc, cloned ${n:-?}, outputs:${got:- none})"; fi
 
 # An install script that names a file after its own directory, as node-gyp's
-# .deps/<absolute path>/... (issue grimmerk/matchapack-private#48): each tree gets another path, so two
+# .deps/<absolute path>/...: each tree gets another path, so two
 # plain runs differ by path when compared as they are. verify-yarn1.sh
 # compares with --normalize-roots, so those paths match in all three trees.
 # What remains is content: Yarn lists the script's outputs (with the tree's
@@ -1116,7 +1116,7 @@ else bad "install in a workspace directory (exit $rc, cloned ${n:-?}, from the r
 # through its cache: the tarball into an entry keyed by its sha1, the
 # directory into a new entry on every install. One pool thread: with
 # empty and non-empty files among Yarn's first copies, plain Yarn's own
-# probe race (#57) makes even two plain runs differ now and then at the
+# probe race makes even two plain runs differ now and then at the
 # default pool (measured: 5 of 14 runs of the tarball case, the mtime of
 # one non-empty file; 0 of 16 with one thread). The tarball case is
 # strict; the directory case also accepts plain Yarn's own variation
@@ -1605,7 +1605,7 @@ if grep -q "Yarn linked node_modules but the hook never saw its link step" "$wor
   ok "matchapack report: yarn lines (outcomes, clones, the unseen link step), none in the npm counts"
 else bad "matchapack report"; fi
 
-# Stopped by a signal (#64; src/signals.rs): Yarn stops when matchapack goes
+# Stopped by a signal (src/signals.rs): Yarn stops when matchapack goes
 # away or says a signal stopped it (the hook signals its own process), and
 # a workspace command's Yarn stops when the Yarn relaying its requests goes.
 # Nothing left running or written once Yarn is done; the run is logged as
@@ -2087,7 +2087,7 @@ if [ "$(uname)" = Darwin ]; then
     && [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; then
     ok "convert-existing --apply interrupted during the install: previous node_modules put back, exit 130"
   else bad "convert-existing interrupted (started $started, exit $rc)"; fi
-  # Review round 2. croot <name>: a fresh root of its own for one conv run.
+  # croot <name>: a fresh root of its own for one conv run.
   croot() { local r=$work/conv-$1; rm -rf "${r:?}"; mkdir -p "$r"; echo "$r"; }
   nobackups() { [ -z "$(ls -A "$work/convhome/.cache/matchapack/backup" 2>/dev/null)" ]; }
   # (1) Workspace planning reads Yarn's JSON from stdout only, and a plan that
@@ -2129,7 +2129,7 @@ if [ "$(uname)" = Darwin ]; then
   if grep -q "^FAILED (rc=7) *$w4 .*NOT fully restored" "$work/out" && [ -n "$kept" ] && [ -f "$kept/y1-a/SENTINEL" ] && [ ! -e "$w4/node_modules/0" ]; then
     ok "convert-existing: a tree that cannot be removed keeps the backup in place (said where), not moved inside it"
   else bad "convert-existing: unremovable tree (exit $rc)"; fi
-  # (round 3) The next run neither removes nor reuses a backup an earlier run
+  # The next run neither removes nor reuses a backup an earlier run
   # kept: the project is skipped, pointing at it.
   conv "$r" --apply; rc=$?
   if [ -n "$kept" ] && grep -q "^SKIP old backup *$w4 .*$(dirname "$kept");" "$work/out" && [ -f "$kept/y1-a/SENTINEL" ]; then
@@ -2161,7 +2161,7 @@ if [ "$(uname)" = Darwin ]; then
       ok "convert-existing: the backup keeps each file's group (a clone takes its folder's); restored with it"
     else bad "convert-existing: group in the backup (exit $rc, group $(stat -f %g "$w5/node_modules/y1-a/package.json"), want $g)"; fi
   fi
-  # (round 3) A workspace without node_modules at planning time: the failed
+  # A workspace without node_modules at planning time: the failed
   # install made one; the rollback removes it (it was not there before).
   r=$(croot newnm); w7=$(cproj ws yarn1-workspaces "$r"); rootfail "$w7"; echo keep > "$w7/node_modules/y1-b/SENTINEL"
   rm -rf "${w7:?}/packages/w1/node_modules"
@@ -2169,7 +2169,7 @@ if [ "$(uname)" = Darwin ]; then
   if grep -q "^FAILED (rc=7) *$w7 .*previous node_modules restored" "$work/out" && [ -f "$w7/node_modules/y1-b/SENTINEL" ] && [ ! -e "$w7/packages/w1/node_modules" ] && nobackups; then
     ok "convert-existing: a rollback removes a workspace node_modules the install made where there was none"
   else bad "convert-existing: new workspace node_modules on rollback (exit $rc)"; fi
-  # (round 3) npm: "added N" is the number of clones (src/wrapper.rs), and
+  # npm: "added N" is the number of clones (src/wrapper.rs), and
   # only N = 0 is nothing cloned. A stand-in `matchapack` prints the inject
   # engine's summary line (its format checked against the source).
   if grep -qF '"matchapack: added {} packages from the store in {:.1}s (inject engine; npm extracted {by_npm})"' "$here/src/wrapper.rs"; then
@@ -2184,7 +2184,7 @@ if [ "$(uname)" = Darwin ]; then
       ok "convert-existing (npm, inject summary): 2 cloned and 3 extracted is a conversion; 0 cloned is not, and is rolled back"
     else bad "convert-existing: npm clone count ($(printf '%s' "$o1$o2" | grep -E 'CONVERTED|FAILED|SKIP' | tr '\n' '|'))"; fi
   else bad "convert-existing: the inject engine's summary line in src/wrapper.rs changed; update this test and the script"; fi
-  # (round 4) Planning skips what it cannot back up or check as planned: a
+  # Planning skips what it cannot back up or check as planned: a
   # workspace node_modules that is a symlink; a nested linked package; a
   # nested package not in yarn.lock.
   r=$(croot odd); w8=$(cproj ws yarn1-workspaces "$r"); mkdir -p "$work/odd-target"
@@ -2196,7 +2196,7 @@ if [ "$(uname)" = Darwin ]; then
     && grep -q "^SKIP not in lock $n10 .*node_modules/y1-a/node_modules/not-in-lock" "$work/out"; then
     ok "convert-existing: a symlinked workspace node_modules, and a linked or unlisted package in a nested node_modules, skip the project"
   else bad "convert-existing: odd and nested node_modules (exit $rc)"; fi
-  # (round 4) Interrupted while a process that ignores SIGINT stays in the
+  # Interrupted while a process that ignores SIGINT stays in the
   # project: no restore under it; the backup is kept and its place said.
   # (Its output goes elsewhere: a process that keeps the install's output
   # pipe open holds the script until it exits: a known residual risk.)
@@ -2212,7 +2212,7 @@ if [ "$(uname)" = Darwin ]; then
   else bad "convert-existing: interrupt with a process staying (exit $rc)"; fi
   [ -n "$stayer" ] && kill "$stayer" 2>/dev/null
   rm -rf "${work:?}/convhome/.cache/matchapack/backup"
-  # (round 4) A root given through a symlink: the in-use check still matches
+  # A root given through a symlink: the in-use check still matches
   # lsof's physical working directories.
   r=$(croot viasym); w12=$(cproj p yarn1-many "$r"); ln -sfn "$r" "$work/conv-viasym-link"
   (cd "$w12" && exec sleep 60) & sp=$!

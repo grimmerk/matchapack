@@ -13,13 +13,14 @@
 #      install script wrote it into a file name, is written <root>)
 #   2. npm ls --all in B must exit 0
 # B is the inject engine (npm's own `npm ci` with the extraction replaced by
-# clones; the only engine since PR C2). MATCHAPACK_VERIFY_CLONES=some fails
+# clones; the only engine since the classic engine was removed).
+# MATCHAPACK_VERIFY_CLONES=some fails
 # the run when B cloned nothing (the hook did not fire: the trees are then
 # identical without testing anything), =none when it cloned anything.
 # MATCHAPACK_VERIFY_META=1 also compares mtimes outside the two runs, uid,
 # gid and xattr names (diff --meta).
-# MATCHAPACK_VERIFY_ARGS_FILE=<file> (scripts/verify-sample.sh, #77 part
-# 1b): the npm command to run instead of npm ci, its arguments in the file,
+# MATCHAPACK_VERIFY_ARGS_FILE=<file> (scripts/verify-sample.sh, #16): the
+# npm command to run instead of npm ci, its arguments in the file,
 # each ended by a NUL byte (`ci`, `install`, `left-pad@1.3.0`, …; NUL, so an
 # argument may hold a line break): A (and A2) run plain `npm <args>`,
 # B `matchapack npm <args>` (the shell function's path), both with

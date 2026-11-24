@@ -17,7 +17,7 @@
 //      only). npm calls it once its config is loaded, with the command; the
 //      wrapper reports npm's own install root (npm.prefix, npm.global) and
 //      the command to matchapack, which runs its gates on that root and pins
-//      it (#36). A refusal is exit 90 before the command ran;
+//      it. A refusal is exit 90 before the command ran;
 //   4. when npm has loaded the pacote hashed in 1 (which loads tar): tell
 //      matchapack the store key of this extraction code (`extractionKey`),
 //      check pacote's shape and replace extract; then the watcher removes
@@ -67,7 +67,7 @@ const crypto = require('crypto')
 // HELPER_DECLINED).
 const DECLINED = 90
 
-// npm stops when matchapack goes away (grimmerk/matchapack-private#64; src/signals.rs).
+// npm stops when matchapack goes away (src/signals.rs).
 // When the socket to matchapack closes while npm runs (matchapack was
 // killed, crashed, or ended by a second signal), or matchapack says a
 // signal stopped it (`{"stop":"SIGINT"}`), this process signals itself
@@ -211,7 +211,7 @@ function fetcherBase (pacote) {
 // private methods it calls (#extract, #tarxOptions, #entryMode, #mkdir,
 // #empty), which no code outside the class can reach. They are all in
 // pacote's lib/fetcher.js, read as bytes from disk before npm starts, so
-// nothing of npm has to be loaded to decide (#59): its SHA-256 is the
+// nothing of npm has to be loaded to decide: its SHA-256 is the
 // fingerprint. The hook is installed only on a fingerprint the harness has
 // run on (src/npm-fingerprints.json).
 // Until 2026-11 it was the text of the loaded class alone; the file holds
@@ -687,7 +687,7 @@ function main () {
   }
   rawFd = fd
 
-  // 1. Nothing of npm is loaded here (#59): pacote's files are found and
+  // 1. Nothing of npm is loaded here: pacote's files are found and
   // read, and npm's lib/npm.js is found.
   let paths
   try {
@@ -888,7 +888,7 @@ function main () {
       (key, expected) => send({ result_read: key, expected }))
   }
 
-  // Step 3: npm's own install root, when npm starts the command (#36).
+  // Step 3: npm's own install root, when npm starts the command.
   const wrapExec = (Npm) => {
     const origExec = Npm && Npm.prototype && Npm.prototype.exec
     if (typeof origExec !== 'function') {

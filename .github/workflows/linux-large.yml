@@ -1,4 +1,4 @@
-# A large real repository on Linux (#17, #52): plain `npm ci` against
+# A large real repository on Linux (#13, #16): plain `npm ci` against
 # matchapack on btrfs and on XFS (reflink=1), each on a loop-mounted image
 # as large as the runner's free disk allows. scripts/large-repo.sh runs
 # scripts/verify.sh twice (an empty store, then the warm store into fresh
@@ -21,10 +21,10 @@
 # compares their wall and CPU time (the order cancels a runner that speeds
 # up or slows down during the job).
 #
-# Minutes: several per filesystem (Linux only; never macOS, which bills 10x
-# on this private repository), about four times that for the comparison. So
-# it runs by hand, and on a pull request only when this file, the script or
-# the helpers it relies on change.
+# Minutes: several per filesystem (Linux only; never macOS, whose minutes
+# were billed 10x while the repository was private), about four times that
+# for the comparison. So it runs by hand, and on a pull request only when
+# this file, the script or the helpers it relies on change.
 name: linux-large
 on:
   workflow_dispatch:

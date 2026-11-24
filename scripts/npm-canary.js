@@ -587,8 +587,7 @@ async function watchPoll (state, opts, npmAll, supported, date) {
 
 // --- inspect ---------------------------------------------------------------
 
-// arborist's methods around the call and the life of the destination
-// (review of 2026-11-14, section 3: diagram 1 and the "A2" surface).
+// arborist's methods around the call and the life of the destination.
 const CHAIN = ['extractOrLink', 'reifyNode', 'handleOptionalFailure', 'unpackNewModules', 'loadBundlesAndUpdateTrees', 'loadShrinkwrapsAndUpdateTrees', 'createSparseTree', 'rollbackCreateSparseTree', 'moveBackRetiredUnchanged', 'moveContents', 'validateNodeModules', 'reifyPackages', 'removeTrash', 'applyPatch', 'renamePath']
 const DEPS = ['pacote', 'tar', 'cacache', '@npmcli/arborist', 'bin-links', '@npmcli/installed-package-contents']
 

@@ -1,5 +1,5 @@
 //! What a later sample needs to replay a run (scripts/verify-sample.sh, issue
-//! #77): whether `node_modules` was there before the run, and a SHA-256 of
+//! #16): whether `node_modules` was there before the run, and a SHA-256 of
 //! the lockfile and of each manifest before and after it. A run that started
 //! with no `node_modules` has a known before-state (the manifests and the
 //! lockfile), so it can be replayed on copies, plain and through matchapack,

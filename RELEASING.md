@@ -16,15 +16,21 @@ On a pull request, release.yml runs only its `plan` job (`dist plan` on one Linu
 
 ## One-time setup
 
-Done once, by the repository owner, in the public repository `grimmerk/matchapack`. Publishing to crates.io or npm through trusted publishing (OIDC, no stored token) needs the package to exist first, so the first release publishes with short-lived tokens, and trusted publishing takes over from the second release.
+Done once, by the repository owner, in the public repository `grimmerk/matchapack`. Publishing to crates.io or npm through trusted publishing (OpenID Connect, OIDC: no stored token) needs the package to exist first, so the first release publishes with short-lived tokens, and trusted publishing takes over from the second release.
 
-1. **Homebrew tap token.** Add the repository secret `HOMEBREW_TAP_TOKEN`: a fine-grained personal access token with read and write access to the contents of `grimmerk/homebrew-tap` only.
+1. **Homebrew tap token.** Add the repository secret `HOMEBREW_TAP_TOKEN`: a fine-grained personal access token with read and write access to the contents of `grimmerk/homebrew-tap` only. Note its expiry date and renew it before then: once it expires, the Homebrew job of the next release fails.
 2. **Tokens for the first release.**
-   - crates.io: the repository secret `CARGO_REGISTRY_TOKEN`, a crates.io API token with the `publish-new` and `publish-update` scopes, limited to the crate name `matchapack`, expiring in a few days. Or publish 0.1.0 by hand from the tagged commit (`cargo publish --locked`) before pushing the tag; the workflow then sees 0.1.0 on crates.io and skips it.
+   - crates.io: the repository secret `CARGO_REGISTRY_TOKEN`, a crates.io API token with the `publish-new` and `publish-update` scopes, limited to the crate name `matchapack`, expiring in a few days. Or publish 0.1.0 by hand from the commit you will tag (tag it locally, run `cargo publish --locked`, then push the tag); the workflow then sees 0.1.0 on crates.io and skips it.
    - npm: the repository secret `NPM_TOKEN`, a granular access token that can publish (read and write; "all packages", since `matchapack` does not exist yet), expiring in a few days. Two-factor authentication must be on for the npm account; allow the token to bypass it if npm requires that for publishing from CI.
-   - `publish-npm.yml` publishes with `--provenance`, which npm supports only from a public repository (the private one cannot publish at all).
-3. **Check the plan** before the first tag: `dist plan` (dist 0.34.0) must list the four archives, the installer and the formula, and `dist plan --output-format=json` the runners: `macos-15` for Apple silicon (dist 0.32 still picked the retired `macos-14`, whose job is cancelled, so nothing was released), `macos-15-intel`, `ubuntu-22.04` and `ubuntu-22.04-arm` with musl-tools.
-4. **Know what is proven only by the first tag.** dist 0.33+ calls the publish workflows with GitHub's self-repository syntax, `uses: $/.github/workflows/publish-crates.yml` (and `publish-npm.yml`). A pull request's run shows that GitHub accepts the file (the `plan` job runs, and the two calls are listed as skipped), but the calls themselves, like the macOS and musl builds and the publish steps, first run on a tag. Watch the first tag's run job by job.
+   - `publish-npm.yml` publishes with `--provenance`, which npm supports only from a public repository: from a private repository, this workflow cannot publish at all.
+3. **Install dist 0.34.0**, the version `cargo-dist-version` in `dist-workspace.toml` names (`dist plan` refuses to run with any other version):
+
+   ```sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.34.0/cargo-dist-installer.sh | sh
+   ```
+
+4. **Check the plan** before the first tag: `dist plan` must list the four archives, the installer and the formula, and `dist plan --output-format=json` the runners: `macos-15` for Apple silicon (dist 0.32 still picked the retired `macos-14`, whose job is cancelled, so nothing was released), `macos-15-intel`, `ubuntu-22.04` and `ubuntu-22.04-arm` with musl-tools.
+5. **Know what is proven only by the first tag.** dist 0.33+ calls the publish workflows with GitHub's self-repository syntax, `uses: $/.github/workflows/publish-crates.yml` (and `publish-npm.yml`). A pull request's run shows that GitHub accepts the file (the `plan` job runs, and the two calls are listed as skipped), but the calls themselves, like the macOS and musl builds and the publish steps, first run on a tag. Watch the first tag's run job by job.
 
 ## After the first release: trusted publishing
 
@@ -33,11 +39,18 @@ Once 0.1.0 is on crates.io and npm, switch both to trusted publishing. npm drops
 - **crates.io:** matchapack → Settings → Trusted Publishing → add a GitHub publisher: owner `grimmerk`, repository `matchapack`, workflow `release.yml` (the calling workflow, not `publish-crates.yml`), no environment. Then delete the `CARGO_REGISTRY_TOKEN` secret and revoke the token.
 - **npm** (within 2 days before the next release): on npmjs.com, open the package's settings, find the **Trusted Publisher** section, choose **GitHub Actions** under "Select your publisher", and fill in: organization or user `grimmerk`, repository `matchapack`, workflow filename `release.yml` (npm checks the calling workflow, not `publish-npm.yml`), no environment. Under **Allowed actions**, also allow direct publishing with `npm publish`: a trusted publisher created after 2026-09-03 allows only `npm stage publish` unless you choose more, and `publish-npm.yml` runs `npm publish`, which would then fail once the token is gone. The command-line equivalent (npm 11.15.0 or later) is `npm trust github matchapack --repo grimmerk/matchapack --file release.yml --allow-publish`, where `--allow-publish` is that same choice. Check that the configuration shows `npm publish` as allowed before you delete the `NPM_TOKEN` secret and revoke the token. Optionally set the package to require two-factor authentication and disallow tokens. (Staged publishing instead, where every CI publish waits for a maintainer's approval with two-factor authentication on npmjs.com, would need `npm stage publish` in `publish-npm.yml`.)
 
-The publish jobs work either way: they use a token secret while one is set, and OIDC once it is gone.
+The publish jobs work either way. The crates.io job uses the token while the secret is set, and OIDC once it is gone; the npm job uses OIDC once a trusted publisher exists (npm 11.5.1 and later try it first), and the token otherwise.
 
 ## Releasing a version
 
-1. **Version pull request.** On a branch: set `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, note the changes for the release notes, and run `dist plan`. If you changed `dist-workspace.toml` or upgraded dist, run `dist generate` and commit the regenerated `release.yml`. Open the pull request; its `plan` job must pass. Merge it.
+1. **Version pull request.** On a branch:
+   - set `version` in `Cargo.toml`, and run `cargo build` so `Cargo.lock` follows;
+   - update the Status line at the top of `README.md`;
+   - add a section for the version to `CHANGELOG.md` (`## 0.2.0`, say): dist puts it in the GitHub Release's description, which otherwise has only the install instructions;
+   - check the npm canary's tracking issue: every npm release it verified since the last matchapack release must have its fingerprint in `src/npm-fingerprints.json`, or users of that npm get plain npm until the next matchapack release;
+   - run `dist plan`; if you changed `dist-workspace.toml` or upgraded dist, run `dist generate` and commit the regenerated `release.yml`.
+
+   Open the pull request; its `plan` job must pass. Merge it.
 2. **Signed tag** on the merge commit:
 
    ```sh
@@ -47,13 +60,13 @@ The publish jobs work either way: they use a token secret while one is set, and 
    ```
 
    The tag must be `v` plus the version in `Cargo.toml`. A version with a prerelease suffix (`v0.2.0-rc.1`) makes a prerelease on GitHub and skips Homebrew, crates.io and npm.
-3. **Watch the run** (Actions → Release): plan → build (4 runners) → GitHub Release → Homebrew, crates.io, npm → announce. The npm job installs the package from its tarball and runs `matchapack --version` before it publishes that same tarball. If a publishing job fails, fix the cause and re-run the failed jobs: the crates.io and npm jobs skip a version the registry already has (HTTP 200) and publish a missing one (404), and stop on any other answer.
+3. **Watch the run** (Actions → Release): plan → build (4 runners) → GitHub Release → Homebrew, crates.io, npm → announce. The npm job installs the package from its tarball and runs `matchapack --version` before it publishes that same tarball. If a publishing job fails, fix the cause and re-run the failed jobs: the crates.io and npm jobs skip a version the registry already has (HTTP 200) and publish a missing one (404), and stop on any other answer. A re-run uses the workflow files of the tagged commit. So a fix outside the repository (a secret, a registry setting, a trusted publisher) can be re-run, but a fix to `release.yml` or a publish workflow needs a new commit and a new version (v0.1.1, say) once crates.io or npm has the old one: neither registry accepts the same version twice.
 
 ## Checking each channel after a release
 
 Every binary must print the tag's version and its commit: `matchapack 0.1.0 (<short sha>)`, without `-dirty`. A build from the crates.io package prints `(unknown)` instead of a commit.
 
-- **GitHub Release:** four `matchapack-<target>.tar.xz` archives with `.sha256` files, `matchapack-installer.sh`, `matchapack.rb`, `sha256.sum`, `source.tar.gz`.
+- **GitHub Release:** four `matchapack-<target>.tar.xz` archives with `.sha256` files, `matchapack-installer.sh`, `matchapack.rb`, `sha256.sum`, `source.tar.gz`, `dist-manifest.json`; the description has the version's `CHANGELOG.md` section.
 - **Shell installer,** into a scratch directory, without touching `PATH`, the shell files or `~/.config/matchapack`:
 
   ```sh
@@ -74,6 +87,7 @@ Every binary must print the tag's version and its commit: `matchapack 0.1.0 (<sh
   ```
 
   On Linux too, for example `docker run --rm node:24 sh -c 'npm i -g matchapack --ignore-scripts && matchapack --version'`, and `node:24-alpine` for a musl system.
+- **Install with Claude Code:** after a release that changes how matchapack is installed (and after the first one), paste the prompt from `INSTALL-WITH-CLAUDE.md` into Claude Code on a machine or account without matchapack, and follow it to the end. Then update the sentence about the last end-to-end run under "What to expect from permission prompts" in that file.
 
 ## How the npm package works, and why not dist's npm installer
 

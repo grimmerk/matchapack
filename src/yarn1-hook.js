@@ -61,7 +61,7 @@ let yarnStarted = false
 // process, when the hook declines before Yarn has started.
 let plainFallback = null
 
-// Yarn stops when matchapack goes away (grimmerk/matchapack-private#64; src/signals.rs),
+// Yarn stops when matchapack goes away (src/signals.rs),
 // as src/inject.js stops npm: when the socket closes while Yarn runs, or
 // matchapack says a signal stopped it (`{"stop":"SIGINT"}`), this process
 // signals itself (`stopSelf`), so that Yarn's own handling runs as for plain

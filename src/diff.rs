@@ -213,7 +213,7 @@ pub const ROOT: &str = "<root>";
 /// `…/.deps/<…>/plain1/node_modules/pprof/…` and in tree `engine`
 /// `…/.deps/<…>/engine/node_modules/pprof/…`: two plain runs already differ
 /// there, and an exact-path match of "what plain also varies on" can never
-/// pair them with the engine's (issue grimmerk/matchapack-private#48). With the root replaced, all three
+/// pair them with the engine's. With the root replaced, all three
 /// trees have `…/.deps/<root>/node_modules/pprof/…`.
 ///
 /// The forms: the root as given, made absolute, and its realpath when that
