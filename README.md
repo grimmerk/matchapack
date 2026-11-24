@@ -166,7 +166,6 @@ Existing `node_modules` keep their full copies until they are installed again: r
 - **`running plain npm instead (…)`:** the reason says why and what to do; [docs/architecture.md](docs/architecture.md#when-it-runs-plain-npm-instead) lists every one.
 - **Nothing saved:** the project and the store must be on the same file system (two volumes of one disk count as two); `du` shows full sizes anyway (above).
 - **After an npm or Node upgrade:** the first install can be slower (Numbers, above); `matchapack store verify` does that work ahead of time.
-- **After switching Node with nvm or fnm:** see Notes under [Install](#install).
 - **Changed how you installed it:** the install script appends its PATH line at the end of your startup files; if matchapack's line from an earlier install is above it, move matchapack's line below it.
 - **A broken `npm install`, `update` or `uninstall`:** matchapack stops with an error and prints the commands to repair the project; run them. (`npm ci` is rebuilt with plain npm by itself.)
 

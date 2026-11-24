@@ -15,6 +15,11 @@
 #
 # A version npm already has is skipped (200) and a missing one published
 # (404), so a re-run after a failure is safe; any other answer stops the job.
+#
+# Skipped unless the repository variable NPM_PUBLISH is `on`: npm refused the
+# name `matchapack` at 0.1.0 as too similar to another package (issue #18), so
+# every release would fail here until npm allows it. release.yml's announce
+# job accepts a skipped publish job.
 name: Publish to npm
 
 on:
@@ -26,6 +31,7 @@ on:
 
 jobs:
   publish:
+    if: ${{ vars.NPM_PUBLISH == 'on' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
