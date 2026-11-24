@@ -10,4 +10,4 @@ The first public release.
 - `yarn` and its install commands with Yarn 1.10 or later, on macOS, clone each file from Yarn's own cache.
 - The tree is the one plain npm or Yarn builds; [TESTING.md](https://github.com/grimmerk/matchapack/blob/main/TESTING.md) says how that is checked.
 - `matchapack init` for zsh, bash and fish; `report`, `store` (`gc`, `adopt`, `verify`) and `uninstall`.
-- Install with Homebrew, the install script, npm or cargo.
+- Install with Homebrew, the install script or cargo. The npm package is not published yet: npm refused the name ([#18](https://github.com/grimmerk/matchapack/issues/18)).
