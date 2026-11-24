@@ -4,7 +4,7 @@
 
 ## Unreleased
 
-- `matchapack init` run by hand now asks, and on `y` adds the line at the end of your shell's startup file; it shows the file and the line first, and changes nothing else in the file. When a file your shell reads already runs `matchapack init`, it says which file and line instead. When it cannot ask (stdin is not a terminal) or the answer is no, it prints the command that adds the line. Run by hand it no longer prints the shell code (`--print` does). `--yes` adds the line without asking, `--dry-run` only says what it would add ([#20](https://github.com/grimmerk/matchapack/issues/20), [#22](https://github.com/grimmerk/matchapack/pull/22)).
+- `matchapack init` run by hand now asks, and on `y` adds the line at the end of your shell's startup file; it shows the file and the line first, and changes nothing else in the file. When a file your shell reads already runs `matchapack init`, it says which file and line instead. When it cannot ask (stdin is not a terminal) or the answer is no, it prints the command that adds the line. Run by hand it no longer prints the shell code (`--print` does). `--yes` adds the line without asking; when it will not write (as root in another user's home, for bash on macOS when the login profile does not load `~/.bashrc`, or with HOME unset), it says why and exits 1. `--dry-run` only says what it would add ([#20](https://github.com/grimmerk/matchapack/issues/20), [#22](https://github.com/grimmerk/matchapack/pull/22)).
 
 ## 0.1.0
 
