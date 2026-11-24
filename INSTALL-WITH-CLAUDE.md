@@ -131,21 +131,45 @@ Ask whether matchapack should handle every project, or only projects under some 
 
 ### Step 6: check, and finish
 
-Check that a new shell of the user's kind has the function. Run only the line for the user's shell:
+Check that a new shell of the user's kind has the function. Run only the command for the user's shell:
 
-```sh
-zsh -i -c 'type npm'                                  # zsh
-bash -i -c 'type npm'                                 # bash (on macOS also: bash -l -i -c 'type npm')
-fish -c 'functions -q npm; and echo npm is a function'  # fish
-```
+- zsh:
 
-It should say that `npm` is a shell function. Then check that a routed command reaches matchapack, without changing anything: in one of the user's npm projects with a `package-lock.json` (ask which one), a dry run is handed to plain npm with matchapack's reason, and npm's own dry run installs nothing (`--ignore-scripts`, so that no script of the project, such as a root `prepare` or `postinstall`, can run and change its files). Again, only the line for the user's shell:
+  ```sh
+  zsh -i -c 'type npm'
+  ```
 
-```sh
-zsh -i -c 'cd "<project>" && npm ci --dry-run --ignore-scripts'      # zsh
-bash -i -c 'cd "<project>" && npm ci --dry-run --ignore-scripts'     # bash
-fish -c 'cd "<project>"; and npm ci --dry-run --ignore-scripts'      # fish
-```
+- bash (on macOS, also `bash -l -i -c 'type npm'`, the login shell Terminal opens):
+
+  ```sh
+  bash -i -c 'type npm'
+  ```
+
+- fish:
+
+  ```sh
+  fish -c 'functions -q npm; and echo npm is a function'
+  ```
+
+It should say that `npm` is a shell function. Then check that a routed command reaches matchapack, without changing anything: in one of the user's npm projects with a `package-lock.json` (ask which one), a dry run is handed to plain npm with matchapack's reason, and npm's own dry run installs nothing (`--ignore-scripts`, so that no script of the project, such as a root `prepare` or `postinstall`, can run and change its files). Again, only the command for the user's shell:
+
+- zsh:
+
+  ```sh
+  zsh -i -c 'cd "<project>" && npm ci --dry-run --ignore-scripts'
+  ```
+
+- bash:
+
+  ```sh
+  bash -i -c 'cd "<project>" && npm ci --dry-run --ignore-scripts'
+  ```
+
+- fish:
+
+  ```sh
+  fish -c 'cd "<project>"; and npm ci --dry-run --ignore-scripts'
+  ```
 
 The first line should be `matchapack: running plain npm instead (option --dry-run installs nothing)`. Then tell the user, in a few lines:
 
