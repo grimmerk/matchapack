@@ -202,6 +202,7 @@ Ask first. Then, by how matchapack was installed (`command -v matchapack` shows 
 
 - Homebrew (under `brew --prefix`): `brew upgrade matchapack`;
 - the install script (`~/.matchapack/bin/matchapack`): run the install script of step 3 again;
+- npm (under a Node version's `lib/node_modules/@grimmerk/matchapack`): `npm i -g @grimmerk/matchapack`, again in each Node version that has it;
 - cargo: `cargo install matchapack --locked --force`.
 
 Show `matchapack --version` afterwards. The shell line needs no change: it prints the shell code of the binary that is installed. Open shells use the new binary at once; new shells also get its shell code.

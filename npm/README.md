@@ -38,3 +38,5 @@ In the startup file, matchapack's line must come after the version manager's own
 ```sh
 npm uninstall -g @grimmerk/matchapack
 ```
+
+Installed with mise's npm backend (`mise use -g npm:@grimmerk/matchapack`), it is not in any Node version's global packages: run `mise uninstall --all npm:@grimmerk/matchapack`, and delete `npm:@grimmerk/matchapack` from the mise config that names it (`mise use -g` writes `~/.config/mise/config.toml`). `matchapack uninstall` prints the command for the install it finds.
