@@ -75,7 +75,7 @@ Ask first, and explain the choices:
   ```
 
   Tell the user that this runs an install script from matchapack's GitHub releases page, and what it changes to put `~/.matchapack/bin` on the `PATH`: it appends a line, `. "$HOME/.config/matchapack/env.sh"`, to each shell startup file it finds (`~/.profile`, which it creates if missing, and those of `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.zshrc` that exist), and writes a fish file in `~/.config/fish/conf.d/`. In this session, call the binary as `~/.matchapack/bin/matchapack` until a new terminal is open.
-- **npm**: there is no npm package yet (npm refused the name `matchapack`, https://github.com/grimmerk/matchapack/issues/18). Do not run `npm i -g matchapack`: it fails. If the user asks for npm, say so and offer Homebrew or the install script.
+- **npm**: `npm i -g @grimmerk/matchapack`. The package is scoped because npm refused the name `matchapack` (https://github.com/grimmerk/matchapack/issues/18); the command is still `matchapack`. Do not run `npm i -g matchapack`: matchapack is not published under that name. Tell the user that a global npm package belongs to one Node version: with nvm, fnm, asdf or mise, after they switch to another Node version, matchapack must be installed again in that version, or installed with Homebrew or the install script instead, which do not depend on the Node version.
 - **cargo**, when Rust is installed: `cargo install matchapack --locked` (builds from source).
 
 Check with `matchapack --version` (or the full path).
