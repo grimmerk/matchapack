@@ -4,7 +4,7 @@ matchapack saves disk space when you keep several checkouts of a JavaScript proj
 
 Works with npm 10, 11 and 12 on macOS (APFS, the Mac's file system) and on Linux with Btrfs or XFS (with reflink, on by default since xfsprogs 5.1), and with Yarn 1.10 or later on macOS.
 
-**Status:** 0.1.0, new. In its author's daily use on macOS since November 2026. Tested: macOS on Apple silicon (daily use and continuous integration, CI) and Linux x86_64 with Btrfs and XFS (CI only; its install time has not been benchmarked there). Built but not tested: Intel Macs and Linux on arm64.
+**Status:** 0.1.1, new. In its author's daily use on macOS since November 2026. Tested: macOS on Apple silicon (daily use and continuous integration, CI) and Linux x86_64 with Btrfs and XFS (CI only; its install time has not been benchmarked there). Built but not tested: Intel Macs and Linux on arm64.
 
 [Install](#install) · [Use](#use) · [Do you need it?](#do-you-need-matchapack) · [Limits](#limits) · [FAQ](docs/faq.md) · [How it works](docs/architecture.md) · [How it is tested](TESTING.md) · [Install with Claude Code](INSTALL-WITH-CLAUDE.md)
 
