@@ -202,7 +202,7 @@ Ask first. Then, by how matchapack was installed (`command -v matchapack` shows 
 
 - Homebrew (under `brew --prefix`): `brew upgrade matchapack`;
 - the install script (`~/.matchapack/bin/matchapack`): run the install script of step 3 again;
-- npm (under a Node version's `lib/node_modules/@grimmerk/matchapack`): `npm i -g @grimmerk/matchapack`, again in each Node version that has it;
+- npm (under a Node version's `lib/node_modules/@grimmerk/matchapack`): `npm i -g @grimmerk/matchapack`, again in each Node version that has it; mise's npm backend (under mise's `installs/npm-grimmerk-matchapack`): `mise upgrade --bump npm:@grimmerk/matchapack`;
 - cargo: `cargo install matchapack --locked --force`.
 
 Show `matchapack --version` afterwards. The shell line needs no change: it prints the shell code of the binary that is installed. Open shells use the new binary at once; new shells also get its shell code.
@@ -213,7 +213,7 @@ Ask before each part, and let the user choose:
 
 1. Run `matchapack uninstall` first, without `--yes`: it changes nothing and lists what it would remove (the store, the run log, the settings directory), the space that frees, the lines of the startup files that mention matchapack, and the command that removes the binary. Show the user its output. Then, if they agree, `matchapack uninstall --yes`. Installed `node_modules` keep working without the store: clones are independent files.
 2. Remove every line uninstall listed, from each file it named (show each line, ask): the matchapack init line and, for an install-script install, the line `. "$HOME/.config/matchapack/env.sh"`, which is usually in several files (`~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshrc`). Only after the last of those lines is gone, remove the files uninstall listed (`~/.config/matchapack/env.sh`, `env.fish`, the receipt, `~/.config/fish/conf.d/matchapack.env.fish`): removing a file a startup file still loads prints an error at every shell start.
-3. Remove the binary with the command uninstall printed: `brew uninstall matchapack`, `cargo uninstall matchapack`, or `rm ~/.matchapack/bin/matchapack` for the install script.
+3. Remove the binary with the command uninstall printed: `brew uninstall matchapack`, `cargo uninstall matchapack`, `rm ~/.matchapack/bin/matchapack` for the install script, `npm uninstall -g @grimmerk/matchapack` for npm (in each Node version that has it), or for mise's npm backend `mise uninstall --all npm:@grimmerk/matchapack` and the line `npm:@grimmerk/matchapack` deleted from the mise config that names it.
 
 ---
 

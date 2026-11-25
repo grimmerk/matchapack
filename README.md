@@ -160,7 +160,7 @@ Then go on with step 2 above.
 
 ### Updating
 
-`brew upgrade matchapack`; or run the install script again; or `npm i -g @grimmerk/matchapack` again (in each Node version that has it); or `cargo install matchapack --locked --force` (for a `--git` install, the same `--git` line with `--force`); or, for an archive from the Releases page, replace the binary with the new release's and, on macOS, clear its quarantine mark again. The line in your startup file needs no change: new terminals get the new version's shell code.
+`brew upgrade matchapack`; or run the install script again; or `npm i -g @grimmerk/matchapack` again (in each Node version that has it), or `mise upgrade --bump npm:@grimmerk/matchapack` for mise's npm backend; or `cargo install matchapack --locked --force` (for a `--git` install, the same `--git` line with `--force`); or, for an archive from the Releases page, replace the binary with the new release's and, on macOS, clear its quarantine mark again. The line in your startup file needs no change: new terminals get the new version's shell code.
 
 ## Use
 

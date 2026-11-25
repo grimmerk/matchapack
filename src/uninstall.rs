@@ -688,14 +688,15 @@ fn binary_advice(real: &Path, ch: &Channel, cargo_home: &Path) -> String {
     match ch {
         Channel::Homebrew => format!("Last, the binary: {at} is Homebrew's: brew uninstall matchapack"),
         Channel::NpmGlobal { prefix, manager, package } => {
-            // Whether lib/node_modules, the directory named below, can be
-            // written: `top` is the package's entry in it (for a scoped
-            // name, the scope's directory).
-            let top = package.split('/').next().unwrap_or(package);
-            let owner = if parent_writable(&prefix.join("lib/node_modules").join(top)) {
+            // Whether the directory npm removes the package from can be
+            // written: lib/node_modules, or for a scoped name the scope's
+            // directory in it (lib/node_modules/@grimmerk).
+            let dir = prefix.join("lib/node_modules").join(package);
+            let from = dir.parent().unwrap_or(&dir);
+            let owner = if parent_writable(&dir) {
                 String::new()
             } else {
-                format!(" (as the user who can write {}, which you cannot)", prefix.join("lib/node_modules").display())
+                format!(" (as the user who can write {}, which you cannot)", from.display())
             };
             // With the prefix the binary is in: a plain `npm uninstall -g`
             // acts on the global directory of the npm on PATH now, which
@@ -2189,6 +2190,30 @@ mod tests {
         assert!(code == 1 && dry.contains("REFUSED: it is in a directory you cannot write"), "{dry}");
         assert!(code2 == 1 && out.contains("nothing was removed"), "{out}");
         assert_eq!(after, before, "nothing removed");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// npm's removal command says who must run it when the directory the
+    /// package leaves cannot be written: for a scoped name, the scope's
+    /// directory, not lib/node_modules.
+    #[test]
+    fn npm_removal_checks_the_directory_the_package_leaves() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes anywhere
+        }
+        let d = scratch("uninstall-npm-owner");
+        let scope = d.join("lib/node_modules/@grimmerk");
+        fs::create_dir_all(scope.join("matchapack/native/darwin-arm64")).unwrap();
+        let real = scope.join("matchapack/native/darwin-arm64/matchapack");
+        let ch = Channel::NpmGlobal { prefix: d.clone(), manager: None, package: channel::NPM_PACKAGE };
+        let ok = binary_advice(&real, &ch, &d);
+        assert!(ok.contains("npm uninstall -g --prefix") && ok.contains("@grimmerk/matchapack") && !ok.contains("as the user who can write"), "{ok}");
+        // lib/node_modules writable, the scope's directory not.
+        fs::set_permissions(&scope, fs::Permissions::from_mode(0o555)).unwrap();
+        let ro = binary_advice(&real, &ch, &d);
+        fs::set_permissions(&scope, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ro.contains(&format!("(as the user who can write {}, which you cannot)", scope.display())), "{ro}");
         let _ = fs::remove_dir_all(&d);
     }
 
