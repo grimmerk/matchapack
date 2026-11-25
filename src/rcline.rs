@@ -337,8 +337,10 @@ fn loads_bashrc(dirs: &Dirs, line: &str) -> bool {
 /// removed, and `;`, `&`, `|`, `(`, `)`, `<` and `>` outside quotes as
 /// separators (`None`). Of bash's expansions it does only the ones a path
 /// to ~/.bashrc uses: `~` that starts an unquoted word (before `/` or at
-/// its end), and `$HOME` or `${HOME}` outside single quotes; any other
-/// stays as written. An unquoted `#` that starts a word ends the line.
+/// its end), and `$HOME` or `${HOME}` outside single quotes (unquoted, a
+/// value with a space or `*?[`, which bash would split or expand, gives a
+/// word that matches no path); any other stays as written. An unquoted
+/// `#` that starts a word ends the line.
 fn shell_words(line: &str, home: &str) -> Vec<Option<String>> {
     let mut out = vec![];
     let mut word: Option<String> = None;
@@ -383,7 +385,16 @@ fn shell_words(line: &str, home: &str) -> Vec<Option<String>> {
                 }
             }
             '~' if word.is_none() && cs.peek().is_none_or(|n| *n == '/' || n.is_whitespace() || ";&|()<>".contains(*n)) => word = Some(home.to_string()),
-            '$' if home_var(&mut cs) => word.get_or_insert_default().push_str(home),
+            '$' if home_var(&mut cs) => {
+                let w = word.get_or_insert_default();
+                // Unquoted, bash splits the value at spaces and expands
+                // `*?[` in it: then the word is not the path. A NUL, which
+                // no path holds, keeps it from matching.
+                if home.contains(|c: char| c.is_whitespace() || "*?[".contains(c)) {
+                    w.push('\0');
+                }
+                w.push_str(home);
+            }
             _ => word.get_or_insert_default().push(c),
         }
     }
@@ -898,7 +909,10 @@ mod tests {
         for l in ["source \"/Users/Jane Doe/.bashrc\"", ". \"$HOME/.bashrc\"", ". ~/.bashrc", "source /Users/Jane\\ Doe/.bashrc"] {
             assert!(loads_bashrc(&d, l), "{l}");
         }
-        assert!(!loads_bashrc(&d, "source /Users/Jane Doe/.bashrc"));
+        // Unquoted, bash splits the path at the space: not loaded.
+        for l in ["source /Users/Jane Doe/.bashrc", "source $HOME/.bashrc", ". ${HOME}/.bashrc"] {
+            assert!(!loads_bashrc(&d, l), "{l}");
+        }
     }
 
     #[test]
