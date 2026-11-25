@@ -312,22 +312,83 @@ fn login_bash_skips_bashrc(dirs: &Dirs) -> Option<BashSkip> {
 }
 
 /// Whether a profile's line loads ~/.bashrc: a `.` or `source` command
-/// whose file is ~/.bashrc itself (`~/.bashrc`, `$HOME/.bashrc`,
-/// `${HOME}/.bashrc` or the home directory spelled out, quoted or not).
-/// A mention (`echo ~/.bashrc`) or another file (`~/.bashrc.local`) does
-/// not count.
+/// whose file, as bash expands it, is ~/.bashrc itself. The words come
+/// from `shell_words`, so `~/.bashrc`, `"$HOME/.bashrc"`, `${HOME}/.bashrc`
+/// and the home directory spelled out count, and `"~/.bashrc"` or
+/// `'$HOME/.bashrc'`, which bash does not expand, do not. A mention
+/// (`echo ~/.bashrc`) or another file (`~/.bashrc.local`) does not count.
+/// A form it does not recognize (a variable holding the path, a loop)
+/// counts as not loading it, the safe side: `setup` then writes nothing
+/// and says what to do. As `existing` does, it reads one line's text
+/// only: a line in a function or a branch that never runs, or inside a
+/// string or here-document that spans lines, still counts.
 fn loads_bashrc(dirs: &Dirs, line: &str) -> bool {
-    let Some(c) = code(line) else { return false };
-    let spelled = dirs.home.join(".bashrc").to_string_lossy().into_owned();
-    let is_bashrc = |w: &str| {
-        let w = w.replace(['"', '\''], "");
-        ["~/.bashrc", "$HOME/.bashrc", "${HOME}/.bashrc", spelled.as_str()].contains(&w.as_str())
-    };
-    // Each command of the line: split at `;`, `&&`, `||` and `|`.
-    c.split([';', '&', '|']).any(|cmd| {
-        let mut words = cmd.split_whitespace().skip_while(|w| ["then", "do", "else", "{"].contains(w));
-        matches!(words.next(), Some("." | "\\." | "source")) && words.next().is_some_and(is_bashrc)
+    let bashrc = dirs.home.join(".bashrc");
+    let words = shell_words(line, &dirs.home.to_string_lossy());
+    // Each command of the line: the words between separators.
+    words.split(Option::is_none).any(|cmd| {
+        let mut w = cmd.iter().flatten().map(String::as_str).skip_while(|w| ["then", "do", "else", "{"].contains(w));
+        matches!(w.next(), Some("." | "source")) && w.next().is_some_and(|f| Path::new(f) == bashrc)
     })
+}
+
+/// A line of a bash startup file split as bash splits it, for
+/// `loads_bashrc`: each word (`Some`) with its quotes and backslashes
+/// removed, and `;`, `&`, `|`, `(`, `)`, `<` and `>` outside quotes as
+/// separators (`None`). Of bash's expansions it does only the ones a path
+/// to ~/.bashrc uses: `~` that starts an unquoted word (before `/` or at
+/// its end), and `$HOME` or `${HOME}` outside single quotes; any other
+/// stays as written. An unquoted `#` that starts a word ends the line.
+fn shell_words(line: &str, home: &str) -> Vec<Option<String>> {
+    let mut out = vec![];
+    let mut word: Option<String> = None;
+    let mut cs = line.chars().peekable();
+    // `$HOME` or `${HOME}` at the `$` just read: consumes it and returns true.
+    fn home_var(cs: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+        let rest: String = cs.clone().take(7).collect();
+        let n = if rest.starts_with("{HOME}") {
+            6
+        } else if rest.starts_with("HOME") && !rest[4..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+            4
+        } else {
+            return false;
+        };
+        for _ in 0..n {
+            cs.next();
+        }
+        true
+    }
+    while let Some(c) = cs.next() {
+        match c {
+            ' ' | '\t' | '\n' => out.extend(word.take().map(Some)),
+            ';' | '&' | '|' | '(' | ')' | '<' | '>' => {
+                out.extend(word.take().map(Some));
+                out.push(None);
+            }
+            '#' if word.is_none() => break,
+            '\\' => word.get_or_insert_default().extend(cs.next()),
+            '\'' => {
+                let w = word.get_or_insert_default();
+                w.extend(cs.by_ref().take_while(|c| *c != '\''));
+            }
+            '"' => {
+                let w = word.get_or_insert_default();
+                while let Some(c) = cs.next() {
+                    match c {
+                        '"' => break,
+                        '\\' if cs.peek().is_some_and(|n| "\"\\$`".contains(*n)) => w.extend(cs.next()),
+                        '$' if home_var(&mut cs) => w.push_str(home),
+                        _ => w.push(c),
+                    }
+                }
+            }
+            '~' if word.is_none() && cs.peek().is_none_or(|n| *n == '/' || n.is_whitespace() || ";&|()<>".contains(*n)) => word = Some(home.to_string()),
+            '$' if home_var(&mut cs) => word.get_or_insert_default().push_str(home),
+            _ => word.get_or_insert_default().push(c),
+        }
+    }
+    out.extend(word.take().map(Some));
+    out
 }
 
 /// On macOS, why a new terminal's bash does not read `file`, when it is
@@ -805,12 +866,39 @@ mod tests {
             "source \"$HOME\"/.bashrc",
             "[ -s ~/.bashrc ] && \\. ~/.bashrc",
             ". /Users/u/.bashrc",
+            ". ~/.bashrc>/dev/null 2>&1",
+            "{ . ~/.bashrc; }",
         ] {
             assert!(loads_bashrc(&d, l), "{l}");
         }
-        for l in ["echo ~/.bashrc", "source ~/.bashrc.local", ". ~/.bashrc_extra", "# . ~/.bashrc", "export A=1 # . ~/.bashrc", "[ -f ~/.bashrc ]", "cp ~/.bashrc /tmp", ". /Users/other/.bashrc"] {
+        for l in [
+            "echo ~/.bashrc",
+            "source ~/.bashrc.local",
+            ". ~/.bashrc_extra",
+            "# . ~/.bashrc",
+            "export A=1 # . ~/.bashrc",
+            ": # ; . ~/.bashrc",
+            "[ -f ~/.bashrc ]",
+            "cp ~/.bashrc /tmp",
+            ". /Users/other/.bashrc",
+            // Forms bash does not expand to the home directory.
+            "source \"~/.bashrc\"",
+            "source '$HOME/.bashrc'",
+            "source \"\\$HOME/.bashrc\"",
+            ". \\~/.bashrc",
+            ". ~u/.bashrc",
+            "source $HOMEDIR/.bashrc",
+            // Quoted, the separator is part of the word.
+            "echo \"; . ~/.bashrc\"",
+        ] {
             assert!(!loads_bashrc(&d, l), "{l}");
         }
+        // A home directory with a space: one word when quoted.
+        let d = dirs(Path::new("/Users/Jane Doe"));
+        for l in ["source \"/Users/Jane Doe/.bashrc\"", ". \"$HOME/.bashrc\"", ". ~/.bashrc", "source /Users/Jane\\ Doe/.bashrc"] {
+            assert!(loads_bashrc(&d, l), "{l}");
+        }
+        assert!(!loads_bashrc(&d, "source /Users/Jane Doe/.bashrc"));
     }
 
     #[test]
