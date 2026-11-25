@@ -218,4 +218,4 @@ Ask before each part, and let the user choose:
 
 ## What to expect from permission prompts
 
-This file was written before matchapack's first public release, and has not yet been run end to end against a published release. Expect a permission prompt, or a denial in auto mode, at the step that edits the shell startup file (step 4), since that edit affects every future shell; the rules above say what to do then.
+Last run end to end on 2026-11-25, against matchapack 0.1.1: macOS on Apple silicon with zsh, matchapack removed first, Claude Code in auto mode, installing with Homebrew. Nothing was denied. Claude asked before each step that changes the machine; it asked the step 5 and step 6 choices as questions to pick from. In step 4 it ran `matchapack init zsh --dry-run`, then `--yes` after the user's yes. Another setup may still show a permission prompt, or a denial in auto mode, at step 4, since that edit affects every future shell; the rules above say what to do then.
