@@ -81,7 +81,17 @@ Conditions: an Apple M4 MacBook Air (10 cores, 32 GiB), macOS 27, APFS, with an 
 
 You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) with Btrfs or XFS (`reflink=1`); Node with npm 10, 11 or 12 (and Yarn 1.10 or later for Yarn projects on macOS); zsh, bash or fish.
 
-**With Claude Code:** paste the prompt in [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md); Claude does the steps below, asking before each step that changes your machine. By hand:
+**With Claude Code:** start Claude Code in any folder and paste this prompt:
+
+```text
+Install matchapack for me. Read all of
+https://raw.githubusercontent.com/grimmerk/matchapack/main/INSTALL-WITH-CLAUDE.md
+word for word, follow it, and ask me before each step that changes my machine.
+```
+
+Claude checks what you have, then does the steps below and asks before each one that changes your machine. [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md) is the file it follows; the same prompt there, starting with "Update" or "Uninstall", updates or removes matchapack.
+
+**By hand:**
 
 1. **Install the binary**, with one of these (run only one; [other ways](#other-ways-to-install) are below):
 
