@@ -295,6 +295,10 @@ mod tests {
             // mise's and Volta's own packages: not a Node version's.
             assert_eq!(det(&npm(&format!("home/.local/share/mise/installs/{mise}/0.1.0"))), Channel::MiseNpm { package }, "{package}");
             assert_eq!(det(&npm(&format!("home/.volta/tools/image/packages/{package}"))), Channel::Volta { package }, "{package}");
+            // Inside another Volta package (a dependency of it): not ours to
+            // `volta uninstall`.
+            let dep = format!("home/.volta/tools/image/packages/other-tool/lib/node_modules/other-tool/node_modules/{package}");
+            assert_eq!(det(&file(&d, &format!("{dep}/native/darwin-arm64/matchapack"))), Channel::OtherPackage { dir: d.join(&dep), package }, "{package}");
             // Other node_modules: a project's, pnpm's and Yarn's global ones.
             for rel in [
                 format!("work/app/node_modules/{package}/native/linux-x64/matchapack"),
