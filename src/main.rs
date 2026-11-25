@@ -95,9 +95,20 @@ enum Cmd {
     /// function: `mp npm ci`, `mp store gc`), but only
     /// when nothing of that name exists yet (an alias, function, builtin or
     /// command on PATH), checked at every shell start. --alias NAME picks
-    /// another name, --no-alias none. Run by hand on a terminal, it says
-    /// whether the name would be defined, and which line to add to which
-    /// startup file (or where the line already is); it never edits the file.
+    /// another name, --no-alias none.
+    ///
+    /// Run by hand (stdout is a terminal), it prints no shell code. It says
+    /// whether the short name would be defined, then whether a file your
+    /// shell reads at start already runs matchapack init. If one does, it
+    /// says which line, and warns when a line after it puts matchapack on
+    /// PATH (the install script's env.sh, `brew shellenv`, cargo's env); it
+    /// never moves a line. If none does, it shows the file and the line and
+    /// asks (default no); on y it appends the line at the end of the file,
+    /// after a blank line, and changes nothing else in the file. It prints
+    /// the command to paste instead when it cannot ask (stdin is not a
+    /// terminal), as root in another user's home (sudo), and for bash on
+    /// macOS when no login profile loads ~/.bashrc. --alias, --no-alias and
+    /// SHELL, when given, go into the line.
     #[command(verbatim_doc_comment)]
     Init {
         #[arg(value_parser = INIT_SHELLS)]
@@ -110,6 +121,18 @@ enum Cmd {
         /// Define no short name for matchapack.
         #[arg(long, conflicts_with = "alias")]
         no_alias: bool,
+        /// Add the line without asking (for scripts), on a terminal or not;
+        /// prints no shell code, and its messages go to stderr.
+        #[arg(long, conflicts_with_all = ["dry_run", "print"])]
+        yes: bool,
+        /// Say which file and line it would add, on a terminal or not; write
+        /// nothing, ask nothing, print no shell code.
+        #[arg(long, conflicts_with = "print")]
+        dry_run: bool,
+        /// Print the shell code even on a terminal (then it does not ask;
+        /// it prints the command to paste).
+        #[arg(long)]
+        print: bool,
     },
     /// Remove matchapack's own state: the store, the run log, the settings directory
     ///
@@ -433,6 +456,105 @@ fn shell_from_comm(comm: &str) -> Option<&'static str> {
     INIT_SHELLS.iter().copied().find(|s| *s == name)
 }
 
+/// `matchapack init`'s options, after clap.
+struct InitFlags<'a> {
+    /// SHELL was given (it then goes into the line `init` adds).
+    named: bool,
+    alias: Option<&'a str>,
+    no_alias: bool,
+    yes: bool,
+    dry_run: bool,
+    print: bool,
+}
+
+/// Which of stdout and stdin are terminals.
+#[derive(Clone, Copy)]
+struct Term {
+    stdout: bool,
+    stdin: bool,
+}
+
+/// `matchapack init` once the shell is known; returns the exit status. From
+/// the startup line (stdout a pipe, no --yes or --dry-run) it prints the
+/// shell code to `out` and nothing to `err`, byte for byte as before #20.
+/// By hand (stdout a terminal), and with --yes or --dry-run, it prints no
+/// code (unless --print) and runs `rcline::setup`, its messages to `err`.
+#[allow(clippy::too_many_arguments)]
+fn init(shell: &str, f: &InitFlags, term: Term, euid: u32, dirs: Option<&rcline::Dirs>, ask: &mut dyn FnMut(&str) -> bool, out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32 {
+    // A refused name still prints the integration, without the alias:
+    // the rc line's eval / source runs whatever is printed, and the
+    // npm and yarn functions must not go missing over a bad name.
+    let name = if f.no_alias { None } else { Some(f.alias.unwrap_or(DEFAULT_ALIAS)) };
+    let refused = name.and_then(|n| check_alias(n, shell).err());
+    // By hand, or asked for by --yes / --dry-run: the messages and the setup.
+    let human = term.stdout || f.yes || f.dry_run;
+    let macos = cfg!(target_os = "macos");
+    if refused.is_none() {
+        if let Some(r) = alias_report(name, human) {
+            let _ = writeln!(err, "{r}");
+        }
+    }
+    // By hand only, as the report above: a global npm package of one
+    // Node version is lost when the version changes.
+    if let Some(n) = channel::init_note(std::env::current_exe().ok().as_deref(), human) {
+        let _ = writeln!(err, "{n}");
+    }
+    // The code is for eval / source; by hand it only fills the screen. With
+    // --yes or --dry-run stdout stays empty (clap: they conflict with
+    // --print), so a mistaken `eval "$(matchapack init --yes)"` runs nothing.
+    let code = f.print || !human;
+    if code {
+        let _ = write!(out, "{}", init_script(shell, macos, if refused.is_some() { None } else { name }));
+        let _ = out.flush();
+    }
+    if let Some(e) = refused {
+        let _ = if code {
+            writeln!(err, "matchapack init: error: {e}; the shell integration was printed without it")
+        } else {
+            writeln!(err, "matchapack init: error: {e}; nothing was written")
+        };
+        return 2;
+    }
+    if !human {
+        return 0;
+    }
+    // --yes asked for a write that did not happen: a script must see it.
+    let refused = if f.yes { 1 } else { 0 };
+    let Some(dirs) = dirs else {
+        // No HOME, so no startup file to name. --print showed the code,
+        // which is all it asked for; otherwise say so, as a refusal.
+        if f.print {
+            return 0;
+        }
+        let _ = writeln!(err, "matchapack init: HOME is not set, so it cannot tell which startup file your shell reads; nothing was written. Set HOME and run it again, or add the line yourself (README, Install, step 2).");
+        return refused;
+    };
+    let mode = if f.yes {
+        rcline::Mode::Yes
+    } else if f.dry_run {
+        rcline::Mode::DryRun
+    } else if f.print || !term.stdin {
+        rcline::Mode::Hint
+    } else {
+        rcline::Mode::Ask
+    };
+    // The name the line will define, for the next step's `type`.
+    let short = name.filter(|n| on_path(n).is_none());
+    if code {
+        let _ = writeln!(err);
+    }
+    let a = rcline::Alias::from_args(f.no_alias, f.alias);
+    let setup = rcline::Setup { mode, named: f.named, short, root_in_other_home: rcline::root_in_other_home(euid, &dirs.home) };
+    match rcline::setup(dirs, shell, &a, macos, &setup, ask, err) {
+        Ok(rcline::Outcome::Refused) => refused,
+        Ok(_) => 0,
+        Err(e) => {
+            let _ = writeln!(err, "matchapack init: error: {e:#}");
+            1
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -484,7 +606,8 @@ fn main() -> Result<()> {
             let code = yarn1::cli(args);
             signals::finish(code);
         }
-        Cmd::Init { shell, alias, no_alias } => {
+        Cmd::Init { shell, alias, no_alias, yes, dry_run, print } => {
+            let named = shell.is_some();
             let shell = match shell {
                 Some(s) => s,
                 None => parent_shell().map(String::from).with_context(|| {
@@ -496,37 +619,26 @@ fn main() -> Result<()> {
                     )
                 })?,
             };
-            // A refused name still prints the integration, without the alias:
-            // the rc line's eval / source runs whatever is printed, and the
-            // npm and yarn functions must not go missing over a bad name.
-            let name = if no_alias { None } else { Some(alias.clone().unwrap_or_else(|| DEFAULT_ALIAS.to_string())) };
-            let refused = name.as_deref().and_then(|n| check_alias(n, &shell).err());
-            use std::io::IsTerminal;
-            let tty = std::io::stdout().is_terminal();
-            if refused.is_none() {
-                if let Some(r) = alias_report(name.as_deref(), tty) {
-                    eprintln!("{r}");
+            use std::io::{IsTerminal, Write};
+            let flags = InitFlags { named, alias: alias.as_deref(), no_alias, yes, dry_run, print };
+            let term = Term { stdout: std::io::stdout().is_terminal(), stdin: std::io::stdin().is_terminal() };
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let euid = unsafe { libc::geteuid() };
+            let mut ask = |q: &str| {
+                eprint!("{q}");
+                let _ = std::io::stderr().flush();
+                let mut answer = String::new();
+                let read = std::io::stdin().read_line(&mut answer);
+                // At EOF the terminal shows no newline after the prompt.
+                if !answer.ends_with('\n') {
+                    eprintln!();
                 }
-            }
-            // By hand only, as the report above: a global npm package of one
-            // Node version is lost when the version changes.
-            if let Some(n) = channel::init_note(std::env::current_exe().ok().as_deref(), tty) {
-                eprintln!("{n}");
-            }
-            print!("{}", init_script(&shell, cfg!(target_os = "macos"), if refused.is_some() { None } else { name.as_deref() }));
-            // By hand only: what to add to which file, after the code (the
-            // last thing on the screen). From the rc line stdout is a pipe.
-            if tty && refused.is_none() {
-                if let Some(dirs) = rcline::Dirs::from_env() {
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    let a = rcline::Alias::from_args(no_alias, alias.as_deref());
-                    eprintln!("\n{}", rcline::hint(&dirs, &shell, &a, cfg!(target_os = "macos")));
-                }
-            }
-            if let Some(e) = refused {
-                eprintln!("matchapack init: error: {e}; the shell integration was printed without it");
-                std::process::exit(2);
+                read.is_ok() && rcline::is_yes(&answer)
+            };
+            let dirs = rcline::Dirs::from_env();
+            let code = init(&shell, &flags, term, euid, dirs.as_ref(), &mut ask, &mut std::io::stdout(), &mut std::io::stderr());
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Cmd::Uninstall { yes } => {
@@ -724,7 +836,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alias_report, check_alias, init_script, shell_from_comm, DEFAULT_ALIAS};
+    use super::{alias_report, check_alias, init, init_script, shell_from_comm, InitFlags, Term, DEFAULT_ALIAS};
 
     /// The by-hand report: only when stdout is a terminal; a name on PATH
     /// (`ls`) is reported as not defined, a free one as defined unless the
@@ -805,5 +917,111 @@ mod tests {
             assert!(mac.contains("matchapack yarn"));
             assert_eq!(has(&init_script(sh, cfg!(target_os = "macos"), None), "yarn"), cfg!(target_os = "macos"));
         }
+    }
+
+    /// `init` in a scratch HOME: (status, stdout, stderr, the questions asked).
+    fn run_init(home: &std::path::Path, shell: &str, f: &InitFlags, term: Term, answer: Option<bool>) -> (i32, String, String, Vec<String>) {
+        let dirs = crate::rcline::Dirs { home: home.to_path_buf(), zdotdir: None, xdg_config_home: None };
+        let mut asked = vec![];
+        let mut ask = |q: &str| {
+            asked.push(q.to_string());
+            answer.expect("asked, but this run must not ask")
+        };
+        let (mut out, mut err) = (vec![], vec![]);
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let code = init(shell, f, term, unsafe { libc::geteuid() }, Some(&dirs), &mut ask, &mut out, &mut err);
+        (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap(), asked)
+    }
+
+    const NONE: InitFlags = InitFlags { named: false, alias: None, no_alias: false, yes: false, dry_run: false, print: false };
+    const PIPE: Term = Term { stdout: false, stdin: false };
+
+    /// From the startup line (stdout a pipe, no flag): exactly the shell code,
+    /// nothing on stderr, nothing written, in every shell and alias form.
+    #[test]
+    fn init_from_the_startup_line_prints_only_the_code() {
+        let h = crate::store::tests::scratch("init-piped");
+        let mac = cfg!(target_os = "macos");
+        for sh in ["zsh", "bash", "fish"] {
+            for (f, alias) in [(NONE, Some("mp")), (InitFlags { alias: Some("mpk"), ..NONE }, Some("mpk")), (InitFlags { no_alias: true, ..NONE }, None)] {
+                let (code, out, err, asked) = run_init(&h, sh, &f, PIPE, None);
+                assert_eq!((code, err.as_str(), asked.len()), (0, "", 0), "{sh}");
+                assert_eq!(out, init_script(sh, mac, alias), "{sh} {alias:?}");
+            }
+            // A refused name: the code without it, status 2, as before.
+            let (code, out, err, _) = run_init(&h, sh, &InitFlags { alias: Some("cd"), ..NONE }, PIPE, None);
+            assert_eq!((code, out), (2, init_script(sh, mac, None)));
+            assert!(err.contains("the shell integration was printed without it"), "{err}");
+        }
+        assert_eq!(std::fs::read_dir(&h).unwrap().count(), 0, "nothing written");
+    }
+
+    /// Without HOME there is no file to name: --yes says so and fails, by
+    /// hand it says so, --print and the startup line print only the code.
+    #[test]
+    fn init_without_home_says_so() {
+        let run = |f: &InitFlags, term: Term| {
+            let mut ask = |_: &str| -> bool { panic!("asked without HOME") };
+            let (mut out, mut err) = (vec![], vec![]);
+            let code = init("zsh", f, term, 501, None, &mut ask, &mut out, &mut err);
+            (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+        };
+        let tty = Term { stdout: true, stdin: true };
+        for (f, term, status) in [(InitFlags { yes: true, ..NONE }, PIPE, 1), (InitFlags { dry_run: true, ..NONE }, PIPE, 0), (NONE, tty, 0)] {
+            let (code, out, err) = run(&f, term);
+            assert_eq!((code, out.as_str()), (status, ""));
+            assert!(err.contains("HOME is not set") && err.contains("nothing was written"), "{err}");
+        }
+        let (code, out, err) = run(&InitFlags { print: true, ..NONE }, tty);
+        assert!(code == 0 && !out.is_empty() && !err.contains("HOME"), "{err}");
+        let (code, out, err) = run(&NONE, PIPE);
+        assert_eq!((code, out, err), (0, init_script("zsh", cfg!(target_os = "macos"), Some("mp")), String::new()));
+    }
+
+    /// A refused write fails --yes (status 1), and only --yes: root in
+    /// another user's home, as under sudo.
+    #[test]
+    fn init_yes_that_is_refused_exits_1() {
+        let h = crate::store::tests::scratch("init-refused");
+        let dirs = crate::rcline::Dirs { home: h.clone(), zdotdir: None, xdg_config_home: None };
+        for (f, status) in [(InitFlags { yes: true, ..NONE }, 1), (InitFlags { dry_run: true, ..NONE }, 0)] {
+            let mut ask = |_: &str| -> bool { panic!("asked") };
+            let (mut out, mut err) = (vec![], vec![]);
+            let code = init("zsh", &f, PIPE, 0, Some(&dirs), &mut ask, &mut out, &mut err);
+            let err = String::from_utf8(err).unwrap();
+            assert_eq!(code, status, "{err}");
+            assert!(err.contains("running as root in"), "{err}");
+        }
+        assert!(!h.join(".zshrc").exists());
+    }
+
+    /// --yes and --dry-run leave stdout empty, so a mistaken
+    /// `eval "$(matchapack init --yes)"` runs nothing; by hand, no code either.
+    #[test]
+    fn init_by_hand_or_with_yes_prints_no_code() {
+        let h = crate::store::tests::scratch("init-yes");
+        let (code, out, err, _) = run_init(&h, "zsh", &InitFlags { dry_run: true, ..NONE }, PIPE, None);
+        assert_eq!((code, out.as_str()), (0, ""));
+        assert!(err.contains("dry run: ~/.zshrc was not changed") && !h.join(".zshrc").exists(), "{err}");
+        let (code, out, err, _) = run_init(&h, "zsh", &InitFlags { yes: true, ..NONE }, PIPE, None);
+        assert_eq!((code, out.as_str()), (0, ""));
+        assert!(err.contains("added line 2 at the end of ~/.zshrc"), "{err}");
+        // A login profile that loads ~/.bashrc: macOS writes ~/.bashrc too.
+        std::fs::write(h.join(".bash_profile"), "[ -f ~/.bashrc ] && . ~/.bashrc\n").unwrap();
+        // By hand, and stdin a terminal: it asks; a no writes nothing.
+        let (code, out, err, asked) = run_init(&h, "bash", &NONE, Term { stdout: true, stdin: true }, Some(false));
+        assert_eq!((code, out.as_str(), asked.len()), (0, "", 1));
+        assert!(err.contains("nothing was written") && !h.join(".bashrc").exists(), "{err}");
+        // By hand, stdin not a terminal: the command to paste, no question.
+        let (code, out, err, _) = run_init(&h, "bash", &NONE, Term { stdout: true, stdin: false }, None);
+        assert_eq!((code, out.as_str()), (0, ""));
+        assert!(err.contains(">> ~/.bashrc") && !h.join(".bashrc").exists(), "{err}");
+        // --print on a terminal: the code, then the command to paste.
+        let (_, out, err, _) = run_init(&h, "bash", &InitFlags { print: true, ..NONE }, Term { stdout: true, stdin: true }, None);
+        assert_eq!(out, init_script("bash", cfg!(target_os = "macos"), Some("mp")));
+        assert!(err.contains(">> ~/.bashrc"), "{err}");
+        // A named shell goes into the line.
+        let (_, _, err, _) = run_init(&h, "fish", &InitFlags { named: true, yes: true, ..NONE }, PIPE, None);
+        assert!(err.contains("matchapack init fish | source"), "{err}");
     }
 }

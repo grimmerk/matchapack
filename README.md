@@ -99,7 +99,9 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
      | sh
    ```
 
-2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` (and, on macOS, `yarn`) go through matchapack, and defines `mp` as a short name for `matchapack` when that name is free (see Notes below). Run only the command for your shell (`echo $SHELL` tells you which):
+2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` (and, on macOS, `yarn`) go through matchapack, and defines `mp` as a short name for `matchapack` when that name is free (see Notes below). Run `matchapack init` in a terminal and answer `y`: it adds the line to the end of your shell's startup file (it shows the line and the file first). If a file your shell reads already runs `matchapack init`, it says which line and changes nothing. When it will not write the file (bash on macOS when no login profile loads `~/.bashrc`, or under `sudo` in another user's home), it says why and what to do instead. `matchapack init --dry-run` only shows the file and the line.
+
+   Or add it yourself. Run only the command for your shell (`echo $SHELL` tells you which):
 
    zsh:
 
@@ -120,7 +122,7 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
    echo 'type -q matchapack; and matchapack init | source' >> $__fish_config_dir/config.fish
    ```
 
-   The line must stay below every line that puts matchapack or Node on PATH (the install script's `. "$HOME/.config/matchapack/env.sh"`, Homebrew's `brew shellenv`, a Node version manager's); if something added later goes below it, move the line back to the end. bash login shells (Terminal on macOS, an SSH session) read `~/.bash_profile` or `~/.profile`; make sure that file loads `~/.bashrc`, or put the line there. Not sure which shell or file? Run `matchapack init` in a terminal: after the shell code, it prints the line to add and the file it goes in, or the file that already has it. It never edits the file.
+   The line must stay below every line that puts matchapack or Node on PATH (the install script's `. "$HOME/.config/matchapack/env.sh"`, Homebrew's `brew shellenv`, a Node version manager's); if something added later goes below it, move the line back to the end. bash login shells (Terminal on macOS, an SSH session) read `~/.bash_profile` or `~/.profile`; make sure that file loads `~/.bashrc`, or put the line there. `matchapack init` warns when a line after its own puts matchapack on PATH (the install script's, `brew shellenv`, cargo's env), but it never moves a line: move it yourself.
 
 3. **Open a new terminal and check:** `type npm` says that `npm` is a shell function.
 
