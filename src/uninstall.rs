@@ -687,8 +687,12 @@ fn binary_advice(real: &Path, ch: &Channel, cargo_home: &Path) -> String {
     let at = real.display();
     match ch {
         Channel::Homebrew => format!("Last, the binary: {at} is Homebrew's: brew uninstall matchapack"),
-        Channel::NpmGlobal { prefix, manager } => {
-            let owner = if parent_writable(&prefix.join("lib/node_modules/matchapack")) {
+        Channel::NpmGlobal { prefix, manager, package } => {
+            // Whether lib/node_modules, the directory named below, can be
+            // written: `top` is the package's entry in it (for a scoped
+            // name, the scope's directory).
+            let top = package.split('/').next().unwrap_or(package);
+            let owner = if parent_writable(&prefix.join("lib/node_modules").join(top)) {
                 String::new()
             } else {
                 format!(" (as the user who can write {}, which you cannot)", prefix.join("lib/node_modules").display())
@@ -697,23 +701,23 @@ fn binary_advice(real: &Path, ch: &Channel, cargo_home: &Path) -> String {
             // acts on the global directory of the npm on PATH now, which
             // is another one after `npm i -g --prefix …` or with another
             // Node version active.
-            let npm = format!("npm uninstall -g --prefix {} matchapack{owner}", quoted(prefix));
+            let npm = format!("npm uninstall -g --prefix {} {package}{owner}", quoted(prefix));
             match manager {
                 None => format!("Last, the binary: {at} is in the npm package installed globally in {}: {npm}", prefix.display()),
                 Some((m, v)) => format!(
-                    "Last, the binary: {at} is in the npm package installed globally in Node {v} of {} ({}): {npm}; a global package belongs to one Node version, so also remove it from each other Node version you installed it in (`npm uninstall -g matchapack` with that version active){}",
+                    "Last, the binary: {at} is in the npm package installed globally in Node {v} of {} ({}): {npm}; a global package belongs to one Node version, so also remove it from each other Node version you installed it in (`npm uninstall -g {package}` with that version active){}",
                     m.name(),
                     prefix.display(),
-                    if *m == NodeManager::Nvm { "; and delete matchapack from $NVM_DIR/default-packages if you added it there" } else { "" }
+                    if *m == NodeManager::Nvm { format!("; and delete {package} from $NVM_DIR/default-packages if you added it there") } else { String::new() }
                 ),
             }
         }
-        Channel::MiseNpm => format!(
-            "Last, the binary: {at} was installed by mise (npm:matchapack): mise uninstall --all npm:matchapack, and delete npm:matchapack from the mise config that names it (`mise use -g` writes ~/.config/mise/config.toml)"
+        Channel::MiseNpm { package } => format!(
+            "Last, the binary: {at} was installed by mise (npm:{package}): mise uninstall --all npm:{package}, and delete npm:{package} from the mise config that names it (`mise use -g` writes ~/.config/mise/config.toml)"
         ),
-        Channel::Volta => format!("Last, the binary: {at} is a Volta package: volta uninstall matchapack"),
-        Channel::OtherPackage { dir } => format!(
-            "Last, the binary: {at} is inside the package {}, which a package manager installed there (not a global npm install): remove it with that package manager (in a project: `npm uninstall matchapack` there; a global pnpm, Yarn or Bun install: its own global remove), not by deleting files in node_modules",
+        Channel::Volta { package } => format!("Last, the binary: {at} is a Volta package: volta uninstall {package}"),
+        Channel::OtherPackage { dir, package } => format!(
+            "Last, the binary: {at} is inside the package {}, which a package manager installed there (not a global npm install): remove it with that package manager (in a project: `npm uninstall {package}` there; a global pnpm, Yarn or Bun install: its own global remove), not by deleting files in node_modules",
             dir.display()
         ),
         Channel::Cargo { root } if root == cargo_home => format!("Last, the binary: {at} was installed by cargo install: cargo uninstall matchapack"),
@@ -1683,6 +1687,26 @@ mod tests {
         assert!(last(&env).contains("mise uninstall --all npm:matchapack"), "{}", last(&env));
         place(&mut env, ".volta/tools/image/packages/matchapack/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
         assert!(last(&env).ends_with("is a Volta package: volta uninstall matchapack"), "{}", last(&env));
+        // The published scoped name: each command names it, as installed.
+        place(&mut env, "home/.nvm/versions/node/v22.11.0/lib/node_modules/@grimmerk/matchapack/native/darwin-arm64/matchapack");
+        let l = last(&env);
+        assert!(
+            l.contains(&format!("npm uninstall -g --prefix {} @grimmerk/matchapack; a global package", quoted(&nvm)))
+                && l.contains("(`npm uninstall -g @grimmerk/matchapack` with that version active)")
+                && l.contains("delete @grimmerk/matchapack from $NVM_DIR/default-packages")
+                && !l.contains("(as the user"),
+            "{l}"
+        );
+        place(&mut env, "usr/local/lib/node_modules/@grimmerk/matchapack/native/darwin-arm64/matchapack");
+        let l = last(&env);
+        assert!(l.ends_with(&format!("installed globally in {}: npm uninstall -g --prefix {} @grimmerk/matchapack", d.join("usr/local").display(), quoted(&d.join("usr/local")))), "{l}");
+        place(&mut env, "app/node_modules/@grimmerk/matchapack/native/darwin-arm64/matchapack");
+        let l = last(&env);
+        assert!(l.contains(&format!("inside the package {},", d.join("app/node_modules/@grimmerk/matchapack").display())) && l.contains("`npm uninstall @grimmerk/matchapack` there"), "{l}");
+        place(&mut env, "mise/installs/npm-grimmerk-matchapack/0.1.0/lib/node_modules/@grimmerk/matchapack/native/darwin-arm64/matchapack");
+        assert!(last(&env).contains("mise uninstall --all npm:@grimmerk/matchapack, and delete npm:@grimmerk/matchapack from"), "{}", last(&env));
+        place(&mut env, ".volta/tools/image/packages/@grimmerk/matchapack/lib/node_modules/@grimmerk/matchapack/native/darwin-arm64/matchapack");
+        assert!(last(&env).ends_with("is a Volta package: volta uninstall @grimmerk/matchapack"), "{}", last(&env));
         // The install script's: the binary and its receipt, then its two
         // directories, which nothing else is in.
         install_script(&mut env, &[]);

@@ -18,21 +18,32 @@ pub const ENV_SCRIPTS: &[&str] = &["env.sh", "env.fish"];
 /// The file the install script writes for fish, under `~/.config/fish`
 /// whatever XDG_CONFIG_HOME says (it holds only the line loading env.fish).
 pub const FISH_CONF_D: &str = ".config/fish/conf.d/matchapack.env.fish";
+/// The npm package's name, which install hints name: npm refused the
+/// unscoped `matchapack` ([#18](https://github.com/grimmerk/matchapack/issues/18)),
+/// so it is published in its owner's scope. Its command is `matchapack`.
+pub const NPM_PACKAGE: &str = "@grimmerk/matchapack";
+/// Every name the npm package is recognised by in an install: the published
+/// one, and the unscoped one, which the package moves back to if npm allows
+/// it. Removal commands name the one found.
+pub const NPM_NAMES: &[&str] = &[NPM_PACKAGE, "matchapack"];
 
 #[derive(Debug, PartialEq)]
 pub enum Channel {
     /// In `<prefix>/Cellar/matchapack/<version>/`.
     Homebrew,
-    /// In `<prefix>/lib/node_modules/matchapack/` (`npm i -g`); `manager`:
-    /// the Node version manager whose Node version `prefix` is, if any.
-    NpmGlobal { prefix: PathBuf, manager: Option<(NodeManager, String)> },
-    /// mise's npm backend (`mise use -g npm:matchapack`): `…/installs/npm-matchapack/<version>/`.
-    MiseNpm,
-    /// A Volta package (`volta install matchapack`): `…/image/packages/matchapack/`.
-    Volta,
-    /// Any other `node_modules/matchapack/` (a project's, another package
-    /// manager's global directory): `dir` is that package directory.
-    OtherPackage { dir: PathBuf },
+    /// In `<prefix>/lib/node_modules/<package>/` (`npm i -g`); `manager`:
+    /// the Node version manager whose Node version `prefix` is, if any. In
+    /// this and the next three, `package` is the name of the npm package
+    /// found, one of NPM_NAMES.
+    NpmGlobal { prefix: PathBuf, manager: Option<(NodeManager, String)>, package: &'static str },
+    /// mise's npm backend (`mise use -g npm:<package>`): `…/installs/<mise_dir(package)>/<version>/`.
+    MiseNpm { package: &'static str },
+    /// A Volta package (`volta install <package>`): `…/image/packages/<package>/`.
+    Volta { package: &'static str },
+    /// Any other `node_modules/<package>/` (a project's, another package
+    /// manager's global directory, pnpm's `.pnpm/<name>@<version>/node_modules/<package>/`):
+    /// `dir` is that package directory.
+    OtherPackage { dir: PathBuf, package: &'static str },
     /// Listed in cargo's install records of `root` (`<root>/bin/matchapack`).
     Cargo { root: PathBuf },
     /// The install script's: its receipt names the binary's directory.
@@ -102,35 +113,45 @@ pub fn node_manager(prefix: &Path) -> Option<(NodeManager, String)> {
     Some((m, version(Some(prefix))?))
 }
 
+/// `dir` without its last components `package` (`@grimmerk/matchapack` is
+/// two), when it ends with them.
+fn strip_package<'a>(dir: &'a Path, package: &str) -> Option<&'a Path> {
+    let n = Path::new(package).components().count();
+    if dir.ends_with(package) { dir.ancestors().nth(n) } else { None }
+}
+
+/// The directory mise's npm backend installs `package` in, under its
+/// `installs/`: `npm-` and the name in kebab case (mise's
+/// `backend::tool_directory_name`, whose test has `npm:@antfu/ni` →
+/// `npm-antfu-ni`), so `npm-matchapack` and `npm-grimmerk-matchapack`.
+fn mise_dir(package: &str) -> String {
+    format!("npm-{}", package.trim_start_matches('@').replace('/', "-"))
+}
+
 /// What the binary's resolved path alone says: Homebrew's Cellar or an npm
-/// package (the package directory nearest to the binary decides).
+/// package, `node_modules/<one of NPM_NAMES>` (the package directory
+/// nearest to the binary decides).
 pub fn by_path(real: &Path) -> Option<Channel> {
     for a in real.ancestors().skip(1) {
-        let parent = a.parent();
-        if !is(Some(a), "matchapack") {
-            continue;
-        }
-        if is(parent, "Cellar") {
+        if is(Some(a), "matchapack") && is(a.parent(), "Cellar") {
             return Some(Channel::Homebrew);
         }
-        if !is(parent, "node_modules") {
-            continue;
-        }
+        let found = NPM_NAMES.iter().find_map(|&n| strip_package(a, n).filter(|nm| is(Some(nm), "node_modules")).map(|nm| (n, nm)));
+        let Some((package, nm)) = found else { continue };
         // The package directory: who put it there.
-        let above: Vec<&Path> = a.ancestors().skip(2).collect();
-        if above.iter().any(|d| is(Some(d), "npm-matchapack") && is(d.parent(), "installs")) {
-            return Some(Channel::MiseNpm);
+        let above: Vec<&Path> = nm.ancestors().skip(1).collect();
+        if above.iter().any(|d| is(Some(d), &mise_dir(package)) && is(d.parent(), "installs")) {
+            return Some(Channel::MiseNpm { package });
         }
-        if above.iter().any(|d| is(Some(d), "matchapack") && is(d.parent(), "packages") && is(d.parent().and_then(Path::parent), "image")) {
-            return Some(Channel::Volta);
+        if above.iter().any(|d| strip_package(d, package).is_some_and(|p| is(Some(p), "packages") && is(p.parent(), "image"))) {
+            return Some(Channel::Volta { package });
         }
-        let nm = parent.unwrap();
         if is(nm.parent(), "lib") {
             let prefix = nm.parent().and_then(Path::parent).unwrap_or(nm).to_path_buf();
             let manager = node_manager(&prefix);
-            return Some(Channel::NpmGlobal { prefix, manager });
+            return Some(Channel::NpmGlobal { prefix, manager, package });
         }
-        return Some(Channel::OtherPackage { dir: a.to_path_buf() });
+        return Some(Channel::OtherPackage { dir: a.to_path_buf(), package });
     }
     None
 }
@@ -205,11 +226,11 @@ pub fn init_note(exe: Option<&Path>, tty: bool) -> Option<String> {
     if !tty {
         return None;
     }
-    let Some(Channel::NpmGlobal { prefix, manager: Some((m, version)) }) = by_path(&canon(exe?)) else { return None };
+    let Some(Channel::NpmGlobal { prefix, manager: Some((m, version)), .. }) = by_path(&canon(exe?)) else { return None };
     let keep = match m {
-        NodeManager::Nvm => "; or add matchapack to $NVM_DIR/default-packages, which nvm installs in each new Node version",
-        NodeManager::Mise => "; or `mise use -g npm:matchapack`, kept apart from any Node version",
-        _ => "; or install it in each Node version you use",
+        NodeManager::Nvm => format!("; or add {NPM_PACKAGE} to $NVM_DIR/default-packages, which nvm installs in each new Node version"),
+        NodeManager::Mise => format!("; or `mise use -g npm:{NPM_PACKAGE}`, kept apart from any Node version"),
+        _ => "; or install it in each Node version you use".to_string(),
     };
     Some(format!(
         "matchapack init: this matchapack is a global npm package of Node {version} ({}, in {}): after you switch to another Node version, `matchapack` is not on PATH and this line skips it without a word (npm and Yarn then run plain). To keep it, install it with Homebrew or the install script, which do not depend on the Node version{keep}.",
@@ -247,36 +268,45 @@ mod tests {
         symlink("../Cellar/matchapack/0.1.0/bin/matchapack", d.join("opt/homebrew/bin/matchapack")).unwrap();
         let (real, c) = detect(&d.join("opt/homebrew/bin/matchapack"), &cargo_home, &receipts);
         assert_eq!((real, c), (cellar.clone(), Channel::Homebrew), "the link is resolved");
-        // npm global, plain and under each version manager.
-        let npm = |prefix: &str| file(&d, &format!("{prefix}/lib/node_modules/matchapack/native/darwin-arm64/matchapack"));
-        assert_eq!(det(&npm("usr/local")), Channel::NpmGlobal { prefix: d.join("usr/local"), manager: None });
-        for (prefix, m, v) in [
-            ("home/.nvm/versions/node/v22.11.0", NodeManager::Nvm, "v22.11.0"),
-            ("home/.local/share/fnm/node-versions/v20.18.0/installation", NodeManager::Fnm, "v20.18.0"),
-            ("home/.local/share/mise/installs/node/22.11.0", NodeManager::Mise, "22.11.0"),
-            ("home/.asdf/installs/nodejs/22.11.0", NodeManager::Asdf, "22.11.0"),
-            ("home/.nodenv/versions/22.11.0", NodeManager::Nodenv, "22.11.0"),
-            ("home/.volta/tools/image/node/22.11.0", NodeManager::Volta, "22.11.0"),
-        ] {
-            assert_eq!(det(&npm(prefix)), Channel::NpmGlobal { prefix: d.join(prefix), manager: Some((m, v.to_string())) }, "{prefix}");
-        }
+        // npm packages, by the published scoped name and by the unscoped
+        // one: `pnpm` is the name's directory in pnpm's .pnpm/ (`/` as `+`),
+        // `mise` its directory in mise's installs/ (written out here, not
+        // computed by the code under test).
         // fnm runs it through a per-shell link to the version's directory.
         fs::create_dir_all(d.join("home/.local/state/fnm_multishells")).unwrap();
         symlink(d.join("home/.local/share/fnm/node-versions/v20.18.0/installation"), d.join("home/.local/state/fnm_multishells/123_456")).unwrap();
-        let via = d.join("home/.local/state/fnm_multishells/123_456/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
-        assert!(matches!(det(&via), Channel::NpmGlobal { manager: Some((NodeManager::Fnm, _)), .. }), "{:?}", det(&via));
-        // mise's and Volta's own packages: not a Node version's.
-        assert_eq!(det(&npm("home/.local/share/mise/installs/npm-matchapack/0.1.0")), Channel::MiseNpm);
-        assert_eq!(det(&npm("home/.volta/tools/image/packages/matchapack")), Channel::Volta);
-        // Other node_modules: a project's, pnpm's and Yarn's global ones.
-        for rel in [
-            "work/app/node_modules/matchapack/native/linux-x64/matchapack",
-            "home/Library/pnpm/global/5/node_modules/.pnpm/matchapack@0.1.0/node_modules/matchapack/native/darwin-arm64/matchapack",
-            "home/.config/yarn/global/node_modules/matchapack/native/darwin-arm64/matchapack",
-        ] {
-            let c = det(&file(&d, rel));
-            assert!(matches!(&c, Channel::OtherPackage { dir } if dir.ends_with("node_modules/matchapack")), "{rel}: {c:?}");
+        for (package, pnpm, mise) in [("@grimmerk/matchapack", "@grimmerk+matchapack", "npm-grimmerk-matchapack"), ("matchapack", "matchapack", "npm-matchapack")] {
+            assert!(NPM_NAMES.contains(&package), "{package}");
+            // npm global, plain and under each version manager.
+            let npm = |prefix: &str| file(&d, &format!("{prefix}/lib/node_modules/{package}/native/darwin-arm64/matchapack"));
+            assert_eq!(det(&npm("usr/local")), Channel::NpmGlobal { prefix: d.join("usr/local"), manager: None, package }, "{package}");
+            for (prefix, m, v) in [
+                ("home/.nvm/versions/node/v22.11.0", NodeManager::Nvm, "v22.11.0"),
+                ("home/.local/share/fnm/node-versions/v20.18.0/installation", NodeManager::Fnm, "v20.18.0"),
+                ("home/.local/share/mise/installs/node/22.11.0", NodeManager::Mise, "22.11.0"),
+                ("home/.asdf/installs/nodejs/22.11.0", NodeManager::Asdf, "22.11.0"),
+                ("home/.nodenv/versions/22.11.0", NodeManager::Nodenv, "22.11.0"),
+                ("home/.volta/tools/image/node/22.11.0", NodeManager::Volta, "22.11.0"),
+            ] {
+                assert_eq!(det(&npm(prefix)), Channel::NpmGlobal { prefix: d.join(prefix), manager: Some((m, v.to_string())), package }, "{prefix}");
+            }
+            let via = d.join(format!("home/.local/state/fnm_multishells/123_456/lib/node_modules/{package}/native/darwin-arm64/matchapack"));
+            assert!(matches!(det(&via), Channel::NpmGlobal { manager: Some((NodeManager::Fnm, _)), package: p, .. } if p == package), "{:?}", det(&via));
+            // mise's and Volta's own packages: not a Node version's.
+            assert_eq!(det(&npm(&format!("home/.local/share/mise/installs/{mise}/0.1.0"))), Channel::MiseNpm { package }, "{package}");
+            assert_eq!(det(&npm(&format!("home/.volta/tools/image/packages/{package}"))), Channel::Volta { package }, "{package}");
+            // Other node_modules: a project's, pnpm's and Yarn's global ones.
+            for rel in [
+                format!("work/app/node_modules/{package}/native/linux-x64/matchapack"),
+                format!("home/Library/pnpm/global/5/node_modules/.pnpm/{pnpm}@0.1.0/node_modules/{package}/native/darwin-arm64/matchapack"),
+                format!("home/.config/yarn/global/node_modules/{package}/native/darwin-arm64/matchapack"),
+            ] {
+                let c = det(&file(&d, &rel));
+                assert!(matches!(&c, Channel::OtherPackage { dir, package: p } if dir.ends_with(format!("node_modules/{package}")) && *p == package), "{rel}: {c:?}");
+            }
         }
+        // Another scope's package of that name is not matchapack's.
+        assert_eq!(det(&file(&d, "usr/local/lib/node_modules/@someone/matchapack/native/darwin-arm64/matchapack")), Channel::Plain);
         // cargo: by its records, at CARGO_HOME or another root; a binary in
         // ~/.cargo/bin that cargo did not record is a plain file.
         let in_cargo = file(&cargo_home, "bin/matchapack");
@@ -318,15 +348,20 @@ mod tests {
     #[test]
     fn init_note_only_for_a_node_versions_package_on_a_terminal() {
         let d = std::fs::canonicalize(scratch("channel-init")).unwrap();
-        let nvm = file(&d, ".nvm/versions/node/v22.11.0/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
-        let note = init_note(Some(&nvm), true).unwrap();
-        assert!(note.contains("global npm package of Node v22.11.0 (nvm") && note.contains("switch to another Node version") && note.contains("Homebrew or the install script") && note.contains("default-packages"), "{note}");
-        assert_eq!(init_note(Some(&nvm), false), None, "never from the startup file's line");
-        let mise = file(&d, "mise/installs/node/22.11.0/lib/node_modules/matchapack/native/darwin-arm64/matchapack");
-        assert!(init_note(Some(&mise), true).unwrap().contains("mise use -g npm:matchapack"));
+        // An install by either name; the hints name the published one.
+        for package in ["@grimmerk/matchapack", "matchapack"] {
+            let nvm = file(&d, &format!(".nvm/versions/node/v22.11.0/lib/node_modules/{package}/native/darwin-arm64/matchapack"));
+            let note = init_note(Some(&nvm), true).unwrap();
+            assert!(note.contains("global npm package of Node v22.11.0 (nvm") && note.contains("switch to another Node version") && note.contains("Homebrew or the install script") && note.contains("add @grimmerk/matchapack to $NVM_DIR/default-packages"), "{note}");
+            assert_eq!(init_note(Some(&nvm), false), None, "never from the startup file's line");
+            let mise = file(&d, &format!("mise/installs/node/22.11.0/lib/node_modules/{package}/native/darwin-arm64/matchapack"));
+            assert!(init_note(Some(&mise), true).unwrap().contains("`mise use -g npm:@grimmerk/matchapack`"), "{package}");
+        }
         for rel in [
             "usr/local/lib/node_modules/matchapack/native/darwin-arm64/matchapack",
+            "usr/local/lib/node_modules/@grimmerk/matchapack/native/darwin-arm64/matchapack",
             "mise/installs/npm-matchapack/0.1.0/lib/node_modules/matchapack/native/darwin-arm64/matchapack",
+            "mise/installs/npm-grimmerk-matchapack/0.1.0/lib/node_modules/@grimmerk/matchapack/native/darwin-arm64/matchapack",
             "opt/homebrew/Cellar/matchapack/0.1.0/bin/matchapack",
             "home/.matchapack/bin/matchapack",
         ] {
