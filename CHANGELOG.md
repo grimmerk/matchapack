@@ -2,7 +2,7 @@
 
 <!-- dist copies each version's section into the GitHub Release's description, so links here are absolute. -->
 
-## Unreleased
+## 0.1.2
 
 - The npm package is published as `@grimmerk/matchapack`, since npm refused the name `matchapack` ([#18](https://github.com/grimmerk/matchapack/issues/18)): `npm i -g @grimmerk/matchapack`. Its command is still `matchapack`. `matchapack uninstall` and `matchapack init` recognise an install under either name.
 
