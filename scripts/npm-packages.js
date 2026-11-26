@@ -8,12 +8,13 @@
 // <out>/matchapack, ready for `npm pack` / `npm publish`; the script prints
 // its path.
 //
-// One package, `matchapack`, with all four binaries in it:
+// One package, `@grimmerk/matchapack` (NAME), with all four binaries in it:
 // native/<os>-<cpu>/matchapack, and bin/matchapack, a POSIX sh launcher
-// (npm/launcher.sh) that execs the one for this machine. Nothing runs at
-// install time and nothing is downloaded after it; every install carries all
-// four binaries, so the package is about four times the size of one.
-// Global install (`npm i -g matchapack`) is the supported way to use it.
+// (npm/launcher.sh) that execs the one for this machine; its command is
+// `matchapack`. Nothing runs at install time and nothing is downloaded after
+// it; every install carries all four binaries, so the package is about four
+// times the size of one. Global install (`npm i -g @grimmerk/matchapack`) is
+// the supported way to use it.
 'use strict'
 const fs = require('fs')
 const path = require('path')
@@ -21,6 +22,10 @@ const crypto = require('crypto')
 const { execFileSync } = require('child_process')
 
 const REPO = 'https://github.com/grimmerk/matchapack'
+// The package's name. npm refused the unscoped `matchapack` as too similar to
+// another package (issue #18), so it is published in its owner's scope. The
+// launcher (npm/launcher.sh) and src/channel.rs recognise both names.
+const NAME = '@grimmerk/matchapack'
 // Rust target → directory under native/ (Node's process.platform-process.arch,
 // as the launcher names them), and the binary format it must be.
 const TARGETS = {
@@ -120,7 +125,7 @@ function main() {
     path.join(pkg, 'package.json'),
     JSON.stringify(
       {
-        name: 'matchapack',
+        name: NAME,
         version: a.version,
         description: meta.description,
         keywords: meta.keywords,
@@ -136,6 +141,8 @@ function main() {
         os: ['darwin', 'linux'],
         cpu: ['arm64', 'x64'],
         files: ['bin/matchapack', 'native/', 'README.md', ...licenses],
+        // A scoped package is private unless published as public.
+        publishConfig: { access: 'public' },
       },
       null,
       2,

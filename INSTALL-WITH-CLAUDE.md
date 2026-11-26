@@ -75,7 +75,7 @@ Ask first, and explain the choices:
   ```
 
   Tell the user that this runs an install script from matchapack's GitHub releases page, and what it changes to put `~/.matchapack/bin` on the `PATH`: it appends a line, `. "$HOME/.config/matchapack/env.sh"`, to each shell startup file it finds (`~/.profile`, which it creates if missing, and those of `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.zshrc` that exist), and writes a fish file in `~/.config/fish/conf.d/`. In this session, call the binary as `~/.matchapack/bin/matchapack` until a new terminal is open.
-- **npm**: there is no npm package yet (npm refused the name `matchapack`, https://github.com/grimmerk/matchapack/issues/18). Do not run `npm i -g matchapack`: it fails. If the user asks for npm, say so and offer Homebrew or the install script.
+- **npm**: `npm i -g @grimmerk/matchapack`. The package is scoped because npm refused the name `matchapack` (https://github.com/grimmerk/matchapack/issues/18); the command is still `matchapack`. Do not run `npm i -g matchapack`: matchapack is not published under that name. Tell the user that a global npm package belongs to one Node version: with nvm, fnm, asdf or mise, after they switch to another Node version, matchapack must be installed again in that version, or installed with Homebrew or the install script instead, which do not depend on the Node version.
 - **cargo**, when Rust is installed: `cargo install matchapack --locked` (builds from source).
 
 Check with `matchapack --version` (or the full path).
@@ -202,6 +202,7 @@ Ask first. Then, by how matchapack was installed (`command -v matchapack` shows 
 
 - Homebrew (under `brew --prefix`): `brew upgrade matchapack`;
 - the install script (`~/.matchapack/bin/matchapack`): run the install script of step 3 again;
+- npm (under a Node version's `lib/node_modules/@grimmerk/matchapack`): `npm i -g @grimmerk/matchapack`, again in each Node version that has it; mise's npm backend (under mise's `installs/npm-grimmerk-matchapack`): `mise upgrade --bump npm:@grimmerk/matchapack`;
 - cargo: `cargo install matchapack --locked --force`.
 
 Show `matchapack --version` afterwards. The shell line needs no change: it prints the shell code of the binary that is installed. Open shells use the new binary at once; new shells also get its shell code.
@@ -212,10 +213,10 @@ Ask before each part, and let the user choose:
 
 1. Run `matchapack uninstall` first, without `--yes`: it changes nothing and lists what it would remove (the store, the run log, the settings directory), the space that frees, the lines of the startup files that mention matchapack, and the command that removes the binary. Show the user its output. Then, if they agree, `matchapack uninstall --yes`. Installed `node_modules` keep working without the store: clones are independent files.
 2. Remove every line uninstall listed, from each file it named (show each line, ask): the matchapack init line and, for an install-script install, the line `. "$HOME/.config/matchapack/env.sh"`, which is usually in several files (`~/.profile`, `~/.bashrc`, `~/.bash_profile`, `~/.zshrc`). Only after the last of those lines is gone, remove the files uninstall listed (`~/.config/matchapack/env.sh`, `env.fish`, the receipt, `~/.config/fish/conf.d/matchapack.env.fish`): removing a file a startup file still loads prints an error at every shell start.
-3. Remove the binary with the command uninstall printed: `brew uninstall matchapack`, `cargo uninstall matchapack`, or `rm ~/.matchapack/bin/matchapack` for the install script.
+3. Remove the binary with the command uninstall printed: `brew uninstall matchapack`, `cargo uninstall matchapack`, `rm ~/.matchapack/bin/matchapack` for the install script, `npm uninstall -g @grimmerk/matchapack` for npm (in each Node version that has it), or for mise's npm backend `mise uninstall --all npm:@grimmerk/matchapack` and the line `npm:@grimmerk/matchapack` deleted from the mise config that names it.
 
 ---
 
 ## What to expect from permission prompts
 
-This file was written before matchapack's first public release, and has not yet been run end to end against a published release. Expect a permission prompt, or a denial in auto mode, at the step that edits the shell startup file (step 4), since that edit affects every future shell; the rules above say what to do then.
+Last run end to end on 2026-11-25, against matchapack 0.1.1: macOS on Apple silicon with zsh, matchapack removed first, Claude Code in auto mode, installing with Homebrew. Nothing was denied. Claude asked before each step that changes the machine; it asked the step 5 and step 6 choices as questions to pick from. In step 4 it ran `matchapack init zsh --dry-run`, then `--yes` after the user's yes. Another setup may still show a permission prompt, or a denial in auto mode, at step 4, since that edit affects every future shell; the rules above say what to do then.

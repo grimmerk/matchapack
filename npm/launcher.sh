@@ -1,6 +1,6 @@
 #!/bin/sh
-# The `matchapack` command of the npm package (`npm i -g matchapack`). The
-# package holds the four native binaries, native/<os>-<cpu>/matchapack; this
+# The `matchapack` command of the npm package (`npm i -g @grimmerk/matchapack`).
+# The package holds the four native binaries, native/<os>-<cpu>/matchapack; this
 # script picks the one for this machine and execs it. No install script and
 # no download: it works under --ignore-scripts and offline, and exec leaves
 # the signals and the exit status to the binary. Built into the package by
@@ -41,23 +41,33 @@ esac
 
 # The package: this file is <package>/bin/matchapack. npm runs it through a
 # link it made in a bin directory: <prefix>/bin for a global install (to
-# ../lib/node_modules/matchapack/bin/matchapack), node_modules/.bin for a
-# local one or npx (to ../matchapack/bin/matchapack). Those two layouts are
-# tried as fixed paths, each only when the link really leads to that
-# package's launcher (`-ef`: the same file, in the test builtin of bash, dash
-# and busybox), so a link to another install, a newer one elsewhere, never
-# runs a package that merely sits next to it. Any other link is followed
-# with readlink.
+# ../lib/node_modules/<name>/bin/matchapack), node_modules/.bin for a local
+# one or npx (to ../<name>/bin/matchapack). <name> is the package's name:
+# @grimmerk/matchapack, as npm refused the unscoped name (issue #18), or
+# matchapack, so that this file keeps working if the package moves back to
+# it. Those layouts are tried as fixed paths, each only when the link really
+# leads to that package's launcher (`-ef`: the same file, in the test builtin
+# of bash, dash and busybox), so a link to another install, a newer one
+# elsewhere, never runs a package that merely sits next to it. Any other
+# link is followed with readlink.
+name=@grimmerk/matchapack
 self=$0
 case $self in */*) ;; *) self=./$self ;; esac
 bin=native/$plat/matchapack
+pkg=
 if [ ! -L "$self" ]; then
   pkg=${self%/*}/..
-elif [ "$self" -ef "${self%/*}/../lib/node_modules/matchapack/bin/matchapack" ]; then
-  pkg=${self%/*}/../lib/node_modules/matchapack
-elif [ "$self" -ef "${self%/*}/../matchapack/bin/matchapack" ]; then
-  pkg=${self%/*}/../matchapack
 else
+  for n in "$name" matchapack; do
+    for p in "${self%/*}/../lib/node_modules/$n" "${self%/*}/../$n"; do
+      if [ "$self" -ef "$p/bin/matchapack" ]; then
+        pkg=$p
+        break 2
+      fi
+    done
+  done
+fi
+if [ -z "$pkg" ]; then
   # At most 40 links, as the kernel allows, so that a loop cannot hang.
   hops=0
   while [ -L "$self" ] && [ "$hops" -lt 40 ]; do
@@ -73,7 +83,7 @@ fi
 
 if [ ! -x "$pkg/$bin" ]; then
   echo "matchapack: no $bin next to $0 (looked in $pkg)." >&2
-  echo "matchapack: reinstall it (npm i -g matchapack); a global install is the supported way to use the npm package." >&2
+  echo "matchapack: reinstall it (npm i -g $name); a global install is the supported way to use the npm package." >&2
   exit 1
 fi
 exec "$pkg/$bin" "$@"

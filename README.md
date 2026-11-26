@@ -81,9 +81,19 @@ Conditions: an Apple M4 MacBook Air (10 cores, 32 GiB), macOS 27, APFS, with an 
 
 You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) with Btrfs or XFS (`reflink=1`); Node with npm 10, 11 or 12 (and Yarn 1.10 or later for Yarn projects on macOS); zsh, bash or fish.
 
-**With Claude Code:** paste the prompt in [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md); Claude does the steps below, asking before each step that changes your machine. By hand:
+**With Claude Code:** start Claude Code in any folder and paste this prompt:
 
-1. **Install the binary**, with one of these (run one, not both; [other ways](#other-ways-to-install) are below):
+```text
+Install matchapack for me. Read all of
+https://raw.githubusercontent.com/grimmerk/matchapack/main/INSTALL-WITH-CLAUDE.md
+word for word, follow it, and ask me before each step that changes my machine.
+```
+
+Claude checks what you have, then does the steps below and asks before each one that changes your machine. [INSTALL-WITH-CLAUDE.md](INSTALL-WITH-CLAUDE.md) is the file it follows; the same prompt there, starting with "Update" or "Uninstall", updates or removes matchapack.
+
+**By hand:**
+
+1. **Install the binary**, with one of these (run only one; [other ways](#other-ways-to-install) are below):
 
    Homebrew:
 
@@ -98,6 +108,14 @@ You need: macOS (Apple silicon or Intel) with APFS, or Linux (x86_64 or arm64) w
      https://github.com/grimmerk/matchapack/releases/latest/download/matchapack-installer.sh \
      | sh
    ```
+
+   npm (the package is `@grimmerk/matchapack`, since npm refused the name `matchapack` ([#18](https://github.com/grimmerk/matchapack/issues/18)); the command is still `matchapack`):
+
+   ```sh
+   npm i -g @grimmerk/matchapack
+   ```
+
+   With nvm, fnm, asdf or mise, each Node version has its own global packages: after you switch to another Node version, install matchapack again in that version, or install it with Homebrew or the install script instead, which do not depend on the Node version. The [npm package's README](npm/README.md#with-nvm-fnm-mise-or-another-node-version-manager) has the details for each version manager.
 
 2. **Add matchapack's line at the end of your shell's startup file.** It makes `npm` (and, on macOS, `yarn`) go through matchapack, and defines `mp` as a short name for `matchapack` when that name is free (see Notes below). Run `matchapack init` in a terminal and answer `y`: it adds the line to the end of your shell's startup file (it shows the line and the file first). If a file your shell reads already runs `matchapack init`, it says which line and changes nothing. When it will not write the file (bash on macOS when no login profile loads `~/.bashrc`, or under `sudo` in another user's home), it says why and what to do instead. `matchapack init --dry-run` only shows the file and the line.
 
@@ -136,13 +154,13 @@ Notes:
 
 - **From source**, with Rust's `cargo` (Rust 1.88 or later): `cargo install matchapack --locked` from crates.io, or `cargo install --git https://github.com/grimmerk/matchapack matchapack --locked` for the latest `main`. A build from crates.io prints `(unknown)` for its commit in `matchapack --version`.
 - **Without piping a script into `sh`:** download the archive for your platform (`matchapack-<target>.tar.xz`) from the [Releases page](https://github.com/grimmerk/matchapack/releases/latest), check it against its `.sha256` file (`shasum -a 256 -c matchapack-<target>.tar.xz.sha256` in the same folder), extract it (`tar -xf matchapack-<target>.tar.xz`), and put the `matchapack` file from the `matchapack-<target>` folder in a directory on your `PATH`. On macOS a browser marks the download as quarantined, and the binary is not notarized, so clear the mark on the binary where you put it: `xattr -d com.apple.quarantine <that directory>/matchapack`.
-- **npm:** there is no npm package yet: npm refused the name `matchapack` as too similar to another package ([#18](https://github.com/grimmerk/matchapack/issues/18)).
+- **npm, with mise:** `mise use -g npm:@grimmerk/matchapack` installs the npm package in mise's own directory, apart from the global packages of any Node version.
 
 Then go on with step 2 above.
 
 ### Updating
 
-`brew upgrade matchapack`; or run the install script again; or `cargo install matchapack --locked --force` (for a `--git` install, the same `--git` line with `--force`); or, for an archive from the Releases page, replace the binary with the new release's and, on macOS, clear its quarantine mark again. The line in your startup file needs no change: new terminals get the new version's shell code.
+`brew upgrade matchapack`; or run the install script again; or `npm i -g @grimmerk/matchapack` again (in each Node version that has it), or `mise upgrade --bump npm:@grimmerk/matchapack` for mise's npm backend; or `cargo install matchapack --locked --force` (for a `--git` install, the same `--git` line with `--force`); or, for an archive from the Releases page, replace the binary with the new release's and, on macOS, clear its quarantine mark again. The line in your startup file needs no change: new terminals get the new version's shell code.
 
 ## Use
 
@@ -202,6 +220,7 @@ Existing `node_modules` keep their full copies until they are installed again: r
 |---|---|
 | Homebrew | `brew uninstall matchapack` |
 | the install script | `rm ~/.matchapack/bin/matchapack`; then remove the PATH line from your startup files, and only after that the files uninstall lists |
+| npm | `npm uninstall -g @grimmerk/matchapack`, in each Node version you installed it in |
 | an archive from the Releases page | delete the binary from where you put it |
 | cargo | `cargo uninstall matchapack` |
 

@@ -4,9 +4,11 @@
 #   scripts/test-npm-launcher.sh [launcher]
 # - the package lookup, under each of /bin/sh, dash and bash found: npm's
 #   global link and a project's node_modules/.bin link run with no readlink
-#   (a fake readlink on PATH counts the calls); a link to an install
+#   (a fake readlink on PATH counts the calls), for the published scoped
+#   name (@grimmerk/matchapack) and the unscoped one; a link to an install
 #   elsewhere runs that install, not an older package that sits next to the
-#   link; the launcher's own path; a chain of other links;
+#   link; with both names installed in one prefix, the one the link leads
+#   to; the launcher's own path; a chain of other links;
 # - the platform choice, under dash with a fake uname (dash sets no OSTYPE
 #   or HOSTTYPE): each supported `uname -sm`, an unsupported one (exit 1);
 # - a missing binary (exit 1).
@@ -46,6 +48,18 @@ mkpkg "$T/old/lib/node_modules/matchapack" older
 ln -s "$T/new/lib/node_modules/matchapack/bin/matchapack" "$T/old/bin/matchapack"
 ln -s "$T/new/bin/matchapack" "$T/links/a/one"
 ln -s ../a/one "$T/links/b/two"
+# The same with the published scoped name, and a prefix with both names
+# whose link leads to the unscoped one (the scoped one is tried first).
+mkpkg "$T/snew/lib/node_modules/@grimmerk/matchapack" scoped
+mkdir -p "$T/snew/bin" "$T/sproj/node_modules/.bin" "$T/sold/bin" "$T/both/bin"
+ln -s ../lib/node_modules/@grimmerk/matchapack/bin/matchapack "$T/snew/bin/matchapack"
+mkpkg "$T/sproj/node_modules/@grimmerk/matchapack" scoped-project
+ln -s ../@grimmerk/matchapack/bin/matchapack "$T/sproj/node_modules/.bin/matchapack"
+mkpkg "$T/sold/lib/node_modules/@grimmerk/matchapack" scoped-older
+ln -s "$T/snew/lib/node_modules/@grimmerk/matchapack/bin/matchapack" "$T/sold/bin/matchapack"
+mkpkg "$T/both/lib/node_modules/@grimmerk/matchapack" both-scoped
+mkpkg "$T/both/lib/node_modules/matchapack" both-unscoped
+ln -s ../lib/node_modules/matchapack/bin/matchapack "$T/both/bin/matchapack"
 mkdir -p "$T/fake" "$T/uname"
 real_readlink=$(command -v readlink)
 printf '#!/bin/sh\necho called >> "%s/readlink.calls"\nexec "%s" "$@"\n' "$T" "$real_readlink" > "$T/fake/readlink"
@@ -77,6 +91,11 @@ for sh in /bin/sh /bin/dash /bin/bash; do
   check "$sh: a link to an install elsewhere, an older package next to it" "newer $plat" 0 any "$sh" "$T/old/bin/matchapack"
   check "$sh: the launcher itself" "newer $plat" 0 0 "$sh" "$T/new/lib/node_modules/matchapack/bin/matchapack"
   check "$sh: a chain of other links" "newer $plat" 0 any "$sh" "$T/links/b/two"
+  check "$sh: npm's global link, scoped name" "scoped $plat a b" 0 0 "$sh" "$T/snew/bin/matchapack" a b
+  check "$sh: a project's .bin link, scoped name" "scoped-project $plat a" 0 0 "$sh" "$T/sproj/node_modules/.bin/matchapack" a
+  check "$sh: a link to a scoped install elsewhere, an older one next to it" "scoped $plat" 0 any "$sh" "$T/sold/bin/matchapack"
+  check "$sh: both names in one prefix, the link to the unscoped one" "both-unscoped $plat" 0 0 "$sh" "$T/both/bin/matchapack"
+  check "$sh: the scoped launcher itself" "scoped $plat" 0 0 "$sh" "$T/snew/lib/node_modules/@grimmerk/matchapack/bin/matchapack"
 done
 
 # The platform choice. dash only: bash sets OSTYPE and HOSTTYPE itself, so
@@ -93,6 +112,9 @@ fi
 
 rm "$T/new/lib/node_modules/matchapack/native/$plat/matchapack"
 check "a missing binary" "matchapack: no native/$plat/matchapack" 1 0 /bin/sh "$T/new/bin/matchapack"
+rm "$T/snew/lib/node_modules/@grimmerk/matchapack/native/$plat/matchapack"
+check "a missing binary, scoped name: reinstall by that name" "matchapack: no native/$plat/matchapack next to $T/snew/bin/matchapack (looked in $T/snew/bin/../lib/node_modules/@grimmerk/matchapack).
+matchapack: reinstall it (npm i -g @grimmerk/matchapack)" 1 0 /bin/sh "$T/snew/bin/matchapack"
 
 [ $fail = 0 ] && echo PASS || echo FAIL
 exit $fail

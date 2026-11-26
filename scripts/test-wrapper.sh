@@ -574,14 +574,14 @@ file"; fi
 done
 
 # 27. `init` by hand from a global npm package of an nvm Node version (the
-# binary copied to where `npm i -g matchapack` puts it, run through npm's
-# link in the version's bin/): one more stderr line, that switching Node
-# loses matchapack. Nothing from an rc line (stdout a pipe), nothing for the
-# binary in target/release (case 25's runs).
+# binary copied to where `npm i -g @grimmerk/matchapack` puts it, run through
+# npm's link in the version's bin/): one more stderr line, that switching
+# Node loses matchapack. Nothing from an rc line (stdout a pipe), nothing for
+# the binary in target/release (case 25's runs).
 nvm_prefix=$work/nvm-home/.nvm/versions/node/v22.11.0
-mkdir -p "$nvm_prefix/lib/node_modules/matchapack/native/this" "$nvm_prefix/bin"
-cp "$bin_dir/matchapack" "$nvm_prefix/lib/node_modules/matchapack/native/this/matchapack"
-ln -sf ../lib/node_modules/matchapack/native/this/matchapack "$nvm_prefix/bin/matchapack"
+mkdir -p "$nvm_prefix/lib/node_modules/@grimmerk/matchapack/native/this" "$nvm_prefix/bin"
+cp "$bin_dir/matchapack" "$nvm_prefix/lib/node_modules/@grimmerk/matchapack/native/this/matchapack"
+ln -sf ../lib/node_modules/@grimmerk/matchapack/native/this/matchapack "$nvm_prefix/bin/matchapack"
 nvm_tty=$(tty_init "$nvm_prefix/bin:$free_path")
 nvm_piped=$(env PATH="$nvm_prefix/bin:$free_path" matchapack init zsh 2>&1 >/dev/null)
 [ -z "$nvm_piped" ] && printf '%s\n' "$nvm_tty" | grep -q 'global npm package of Node v22.11.0 (nvm, in .*): after you switch to another Node version' \
@@ -622,7 +622,7 @@ script=$(last_line "$uh" "$uh/.matchapack/bin/matchapack"); script_all=$(cat "$w
 plain=$(last_line "$uh" "$uh/bin/matchapack")
 after=$(snap)
 [ "$brew" = "Last, the binary: $uh/brew/Cellar/matchapack/0.1.0/bin/matchapack is Homebrew's: brew uninstall matchapack" ] \
-  && printf '%s\n' "$npm_nvm" | grep -qF "installed globally in Node v22.11.0 of nvm ($nvm_prefix): npm uninstall -g --prefix $nvm_prefix matchapack; a global package belongs to one Node version" \
+  && printf '%s\n' "$npm_nvm" | grep -qF "installed globally in Node v22.11.0 of nvm ($nvm_prefix): npm uninstall -g --prefix $nvm_prefix @grimmerk/matchapack; a global package belongs to one Node version" \
   && [ "$cargo" = "Last, the binary: $uh/.cargo/bin/matchapack was installed by cargo install: cargo uninstall matchapack" ] \
   && [ "$script" = "Last, the binary: $uh/.matchapack/bin/matchapack was put there by the install script: rm $uh/.matchapack/bin/matchapack $uh/.config/matchapack/matchapack-receipt.json (the binary, and the script's receipt)" ] \
   && printf '%s\n' "$script_all" | grep -qF "$uh/.zshrc:2: . \"\$HOME/.config/matchapack/env.sh\"   <- the install script's PATH line" \

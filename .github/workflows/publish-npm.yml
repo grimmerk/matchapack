@@ -1,7 +1,8 @@
-# Publishes the npm package `matchapack` after a release: one package with
-# the four binaries and a sh launcher, built by scripts/npm-packages.js from
-# this run's archives, installed once from its tarball as a smoke test, then
-# published from that same tarball.
+# Publishes the npm package `@grimmerk/matchapack` (command `matchapack`)
+# after a release: one package with the four binaries and a sh launcher,
+# built by scripts/npm-packages.js from this run's archives, installed once
+# from its tarball as a smoke test, then published from that same tarball.
+# The package's name is read from the package.json that script writes.
 #
 # Called by release.yml (a dist "custom publish job", see dist-workspace.toml),
 # never on its own; a pull request runs only release.yml's plan step.
@@ -16,10 +17,10 @@
 # A version npm already has is skipped (200) and a missing one published
 # (404), so a re-run after a failure is safe; any other answer stops the job.
 #
-# Skipped unless the repository variable NPM_PUBLISH is `on`: npm refused the
-# name `matchapack` at 0.1.0 as too similar to another package (issue #18), so
-# every release would fail here until npm allows it. release.yml's announce
-# job accepts a skipped publish job.
+# Skipped unless the repository variable NPM_PUBLISH is `on`. It stayed off
+# while npm refused the unscoped name `matchapack` as too similar to another
+# package (issue #18); with the scoped name, setting it to `on` publishes
+# the next release. release.yml's announce job accepts a skipped publish job.
 name: Publish to npm
 
 on:
@@ -60,13 +61,20 @@ jobs:
           version=$(echo "$PLAN" | jq -r '.releases[] | select(.app_name == "matchapack") | .app_version')
           echo "VERSION=$version" >> "$GITHUB_ENV"
           node scripts/npm-packages.js --version "$version" --archives archives --out out
+          # The name the script wrote, and the tarball npm names after it:
+          # @grimmerk/matchapack -> grimmerk-matchapack-<version>.tgz.
+          name=$(jq -r .name out/matchapack/package.json)
+          tgz=$(echo "$name" | sed 's/^@//; s#/#-#')-$version.tgz
+          echo "PACKAGE=$name" >> "$GITHUB_ENV"
+          echo "TGZ=$tgz" >> "$GITHUB_ENV"
           npm pack ./out/matchapack --pack-destination .
-          ls -l "matchapack-$version.tgz"
+          ls -l "$tgz"
       - name: Smoke test (a global install from the tarball, scripts off)
         run: |
           set -euo pipefail
           prefix=$RUNNER_TEMP/smoke
-          npm i -g "./matchapack-$VERSION.tgz" --ignore-scripts --prefix "$prefix" --cache "$RUNNER_TEMP/smoke-cache"
+          npm i -g "./$TGZ" --ignore-scripts --prefix "$prefix" --cache "$RUNNER_TEMP/smoke-cache"
+          ls -l "$prefix/bin/matchapack" "$prefix/lib/node_modules/$PACKAGE/bin/matchapack"
           out=$("$prefix/bin/matchapack" --version)
           echo "$out"
           case $out in "matchapack $VERSION ("*) ;; *) echo "expected matchapack $VERSION"; exit 1 ;; esac
@@ -79,10 +87,14 @@ jobs:
           # A prerelease must not become `latest` (dist skips this job for
           # prereleases unless publish-prereleases is set).
           case $VERSION in *-*) tag=next ;; *) tag=latest ;; esac
-          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/matchapack/$VERSION")
+          # In the registry's address the scope's `/` is encoded:
+          # https://registry.npmjs.org/@grimmerk%2Fmatchapack/<version>.
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${PACKAGE/\//%2F}/$VERSION")
           case "$status" in
-            200) echo "matchapack $VERSION is already on npm; skipped"; exit 0 ;;
+            200) echo "$PACKAGE $VERSION is already on npm; skipped"; exit 0 ;;
             404) ;;
-            *) echo "npm answered HTTP $status for matchapack $VERSION; not publishing" >&2; exit 1 ;;
+            *) echo "npm answered HTTP $status for $PACKAGE $VERSION; not publishing" >&2; exit 1 ;;
           esac
-          npm publish "./matchapack-$VERSION.tgz" --access public --provenance --tag "$tag"
+          # --access public: a scoped package is private unless published
+          # as public (its package.json says so too).
+          npm publish "./$TGZ" --access public --provenance --tag "$tag"
