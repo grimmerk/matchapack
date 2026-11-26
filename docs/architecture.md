@@ -66,7 +66,7 @@ flowchart LR
   MP --> LOG["LOG run log"]
 ```
 
-The table names every node of D1, D1a and D1b.
+The table names every node of D1a and D1b. D1's `IJ + NPM` and `YH + YARN` each combine two of its rows.
 
 | ID | Name | What it is | Section |
 |---|---|---|---|
@@ -160,7 +160,7 @@ What it is for: to see every part of the npm path and every connection between t
 
 ```mermaid
 flowchart LR
-  MP["MP matchapack binary"] -->|"declined; or a broken npm ci, run again plain"| PLAIN["PLAIN plain npm"]
+  MP["MP matchapack binary"] -->|"declined; or a routed npm ci that broke (not stopped by a signal): run again plain"| PLAIN["PLAIN plain npm"]
   MP -->|starts| IJ
   subgraph npmproc ["node process: npm"]
     IJ["IJ inject hook (src/inject.js)"] -->|"starts; replaces pacote's extract"| NPM["NPM npm's own code"]
@@ -429,7 +429,7 @@ flowchart LR
   YH <-->|socket, JSON lines| YS["YS Yarn clone server (in MP)"]
   YC["YC Yarn's cache"] --> YS
   YS -->|clone| NM["NM project node_modules"]
-  YARN -->|"everything else: its first 128 copies, copies YS does not clone, bin links, scripts, .yarn-integrity"| NM
+  YARN -->|"everything else: its first N copies (N = 128 in the Yarn 1 releases tested), copies YS does not clone, bin links, scripts, .yarn-integrity"| NM
   MP --> LOG["LOG run log"]
 ```
 
