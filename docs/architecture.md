@@ -10,6 +10,7 @@ This document explains how matchapack works inside: the shell integration, the t
 - [The shell integration](#the-shell-integration)
 - [Finding npm and Yarn](#finding-npm-and-yarn)
 - [The inject engine (npm)](#the-inject-engine-npm)
+  - Diagram D1a: [the npm engine's parts](#d1a-the-npm-engines-parts)
   - Diagram D2: [one `npm ci`, step by step](#d2-one-npm-ci-step-by-step)
   - [Start-up: the lazy hook and npm's install root](#start-up-the-lazy-hook-and-npms-install-root)
   - [How the hook enters npm's process](#how-the-hook-enters-npms-process)
@@ -23,6 +24,7 @@ This document explains how matchapack works inside: the shell integration, the t
 - [The install family: npm install, update and uninstall](#the-install-family-npm-install-update-and-uninstall)
   - [The repair advice](#the-repair-advice)
 - [The Yarn 1 engine (macOS)](#the-yarn-1-engine-macos)
+  - Diagram D1b: [the Yarn 1 engine's parts](#d1b-the-yarn-1-engines-parts)
   - Diagram D3: [one Yarn 1 install, step by step](#d3-one-yarn-1-install-step-by-step)
   - [Yarn commands](#yarn-commands)
   - [When it runs plain Yarn instead](#when-it-runs-plain-yarn-instead)
@@ -34,7 +36,7 @@ This document explains how matchapack works inside: the shell integration, the t
 - [Environment variables](#environment-variables)
 - [Design decisions](#design-decisions)
 
-Diagrams: D1 shows the parts and how a command reaches them. D2 zooms into the npm path of D1 (the nodes `MP`, `IJ`, `NPM`, `CS`, `ST`, `NC`, `NM`, `PLAIN` and `LOG`). D3 zooms into the Yarn path of D1 (the nodes `MP`, `YH`, `YARN`, `YS`, `YC`, `NM`, `PLAIN` and `LOG`).
+Diagrams: D1 shows the whole system at a glance: how a command reaches matchapack, and what each package manager does with it. D1a and D1b show each engine's parts and every connection between them: D1a the npm engine (the nodes `MP`, `IJ`, `NPM`, `CS`, `ST`, `NC`, `NM`, `PLAIN` and `LOG`), D1b the Yarn 1 engine (`MP`, `YH`, `YARN`, `YS`, `YC`, `NM`, `PLAIN` and `LOG`). D2 follows one `npm ci` through D1a's nodes, step by step, and D3 one Yarn 1 install through D1b's. All of them use the node names in the table under D1.
 
 ## Overview
 
@@ -47,35 +49,24 @@ There are two engines:
 
 ### D1: the whole system
 
-What it is for: to see the parts of matchapack and the path a command takes. D2 and D3 show the npm path and the Yarn path in detail.
+What it is for: to see, at a glance, how a command reaches matchapack and what each package manager does with it. `IJ + NPM` and `YH + YARN` each stand for one node process: D1a and D1b show what is inside, with every connection.
 
 ```mermaid
 flowchart LR
   SH["SH shell function (npm, yarn)"] -->|routed command| MP["MP matchapack binary"]
   SH -->|any other command| PLAIN["PLAIN plain npm or Yarn"]
-  MP -->|"declined; or a broken npm ci, run again plain"| PLAIN
-  subgraph npmproc ["node process: npm"]
-    IJ["IJ inject hook (src/inject.js)"] -->|"starts; replaces pacote's extract"| NPM["NPM npm's own code"]
-  end
-  subgraph yarnproc ["node process: Yarn 1"]
-    YH["YH Yarn hook (src/yarn1-hook.js)"] -->|"starts; answers its copyFile"| YARN["YARN Yarn 1's own code"]
-  end
-  MP -->|starts| IJ
-  MP -->|starts| YH
-  IJ -.->|"declines: exit 90"| MP
-  YH -.->|"declines: exit 90"| MP
-  IJ <-->|socket, JSON lines| CS["CS clone server (in MP)"]
-  YH <-->|socket, JSON lines| YS["YS Yarn clone server (in MP)"]
-  NC["NC npm's cache"] -->|pacote extracts a missing package| ST["ST store"]
-  CS -->|clone| NM["NM project node_modules"]
-  ST --> CS
-  MP -->|"lock for the run; project record"| ST
-  YC["YC Yarn's cache"] --> YS
-  YS -->|clone| NM
-  NPM -->|"everything else: packages it extracts itself, bin links, scripts, the hidden lockfile"| NM
-  YARN -->|"everything else: its first 128 copies, copies YS does not clone, bin links, scripts, .yarn-integrity"| NM
+  MP -->|declined| PLAIN
+  MP <-->|"starts it with a hook, which asks: clone this package? (D1a)"| NPMP["IJ + NPM: npm, with the inject hook"]
+  MP <-->|"starts it with a hook, which asks: clone this file? (D1b)"| YARNP["YH + YARN: Yarn 1, with the Yarn hook"]
+  ST["ST store"] -->|for npm| MP
+  YC["YC Yarn's cache"] -->|for Yarn| MP
+  MP -->|clones| NM["NM project node_modules"]
+  NPMP -->|everything else| NM
+  YARNP -->|everything else| NM
   MP --> LOG["LOG run log"]
 ```
+
+The table names every node of D1, D1a and D1b.
 
 | ID | Name | What it is | Section |
 |---|---|---|---|
@@ -163,9 +154,30 @@ matchapack install . -- --no-audit   # the engine directly; after `--`: npm's ow
 matchapack npm ci --no-audit         # what the shell function runs
 ```
 
+### D1a: the npm engine's parts
+
+What it is for: to see every part of the npm path and every connection between them. D2 then follows one `npm ci` through them. The node names are the ones in the table under D1.
+
+```mermaid
+flowchart LR
+  MP["MP matchapack binary"] -->|"declined; or a broken npm ci, run again plain"| PLAIN["PLAIN plain npm"]
+  MP -->|starts| IJ
+  subgraph npmproc ["node process: npm"]
+    IJ["IJ inject hook (src/inject.js)"] -->|"starts; replaces pacote's extract"| NPM["NPM npm's own code"]
+  end
+  IJ -.->|"declines: exit 90"| MP
+  IJ <-->|socket, JSON lines| CS["CS clone server (in MP)"]
+  NC["NC npm's cache"] -->|pacote extracts a missing package| ST["ST store"]
+  MP -->|"lock for the run; project record"| ST
+  ST --> CS
+  CS -->|clone| NM["NM project node_modules"]
+  NPM -->|"everything else: packages it extracts itself, bin links, scripts, the hidden lockfile"| NM
+  MP --> LOG["LOG run log"]
+```
+
 ### D2: one `npm ci`, step by step
 
-What it is for: to follow one install through the npm path of D1. The node names (`MP`, `IJ`, `NPM`, `CS`, `ST`, `NC`, `NM`, `PLAIN`, `LOG`) are the ones in D1.
+What it is for: to follow one install through D1a. The node names (`MP`, `IJ`, `NPM`, `CS`, `ST`, `NC`, `NM`, `PLAIN`, `LOG`) are the ones in D1a and the table under D1.
 
 ```text
  MP matchapack binary (src/wrapper.rs, src/inject.rs)
@@ -402,9 +414,28 @@ In a Yarn 1 project, `yarn` runs your own Yarn 1, as it always did, with one cha
 
 During its link step, Yarn 1 copies each file with `fs.copyFile(src, dest, COPYFILE_FICLONE)`. On macOS, in the Node releases tested, Node's copy with that flag writes a full copy; matchapack answers each such call with a `clonefile(2)` of the cache file.
 
+### D1b: the Yarn 1 engine's parts
+
+What it is for: to see every part of the Yarn 1 path and every connection between them. D3 then follows one install through them. The node names are the ones in the table under D1.
+
+```mermaid
+flowchart LR
+  MP["MP matchapack binary"] -->|declined| PLAIN["PLAIN plain Yarn"]
+  MP -->|starts| YH
+  subgraph yarnproc ["node process: Yarn 1"]
+    YH["YH Yarn hook (src/yarn1-hook.js)"] -->|"starts; answers its copyFile"| YARN["YARN Yarn 1's own code"]
+  end
+  YH -.->|"declines: exit 90"| MP
+  YH <-->|socket, JSON lines| YS["YS Yarn clone server (in MP)"]
+  YC["YC Yarn's cache"] --> YS
+  YS -->|clone| NM["NM project node_modules"]
+  YARN -->|"everything else: its first 128 copies, copies YS does not clone, bin links, scripts, .yarn-integrity"| NM
+  MP --> LOG["LOG run log"]
+```
+
 ### D3: one Yarn 1 install, step by step
 
-What it is for: to follow one install through the Yarn path of D1. The node names (`MP`, `YH`, `YARN`, `YS`, `YC`, `NM`, `PLAIN`, `LOG`) are the ones in D1.
+What it is for: to follow one install through D1b. The node names (`MP`, `YH`, `YARN`, `YS`, `YC`, `NM`, `PLAIN`, `LOG`) are the ones in D1b and the table under D1.
 
 ```text
  MP matchapack binary (src/yarn1.rs)
